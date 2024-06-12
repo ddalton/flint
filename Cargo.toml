@@ -1,0 +1,13 @@
+[package]
+name = "flint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.34.0", features = ["full"] }
+tonic = { version = "0.11.0", features = ["tls", "tls-roots", "transport"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.11.0"
