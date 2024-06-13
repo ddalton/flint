@@ -1,5 +1,6 @@
-pub mod identityservice;
-pub mod nodeservice;
+pub mod identity;
+pub mod node;
+pub mod controller;
 pub(crate) mod spdkdriver;
 
 pub mod csi {

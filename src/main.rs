@@ -5,8 +5,10 @@ use tracing_subscriber::EnvFilter;
 use clap::Parser;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
-use flint::identityservice::IdentityService;
-use flint::nodeservice::NodeService;
+use flint::controller::ControllerService;
+use flint::identity::IdentityService;
+use flint::node::NodeService;
+use flint::csi::controller_server::ControllerServer;
 use flint::csi::node_server::NodeServer;
 use flint::csi::identity_server::IdentityServer;
 
@@ -37,13 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = UnixListener::bind(Path::new(endpoint.as_str()))?;
     let stream = UnixListenerStream::new(listener);
 
-    let node_service = NodeService::new(node_id);
-    let node_server = NodeServer::new(node_service);
+    let node_server = NodeServer::new(NodeService::new(node_id));
     let identity_server = IdentityServer::new(IdentityService);
+    let controller_server = ControllerServer::new(ControllerService);
 
     Server::builder()
-        .add_service(node_server)
+        .add_service(controller_server)
         .add_service(identity_server)
+        .add_service(node_server)
         .serve_with_incoming(stream)
         .await;
 

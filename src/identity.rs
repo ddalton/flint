@@ -1,11 +1,14 @@
 use crate::csi::{
-    GetPluginCapabilitiesRequest, GetPluginCapabilitiesResponse, GetPluginInfoRequest,
-    GetPluginInfoResponse, ProbeRequest, ProbeResponse,
+    self, GetPluginCapabilitiesRequest, GetPluginCapabilitiesResponse, GetPluginInfoRequest,
+    GetPluginInfoResponse, PluginCapability, ProbeRequest, ProbeResponse,
 };
 use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 
 use crate::csi::identity_server::Identity;
+use crate::csi::plugin_capability::service::Type::ControllerService;
+use crate::csi::plugin_capability::Type;
+use crate::csi::plugin_capability::Type::Service;
 
 pub struct IdentityService;
 
@@ -32,9 +35,14 @@ impl Identity for IdentityService {
         request: Request<GetPluginCapabilitiesRequest>,
     ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
         info!("GetPluginCapabilities");
-        let get_plugin_capabilities_response = GetPluginCapabilitiesResponse {
-            capabilities: vec![],
-        };
+
+        let mut c: Vec<PluginCapability> = Vec::new();
+        c.push(PluginCapability {
+            r#type: Some(Service(crate::csi::plugin_capability::Service {
+                r#type: i32::from(ControllerService),
+            })),
+        });
+        let get_plugin_capabilities_response = GetPluginCapabilitiesResponse { capabilities: c };
 
         Ok(Response::new(get_plugin_capabilities_response))
     }
@@ -43,7 +51,6 @@ impl Identity for IdentityService {
         &self,
         request: Request<ProbeRequest>,
     ) -> Result<Response<ProbeResponse>, Status> {
-        debug!("Probe");
         Ok(Response::new(Default::default()))
     }
 }
