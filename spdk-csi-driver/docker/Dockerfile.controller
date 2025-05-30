@@ -1,0 +1,19 @@
+FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY build.rs ./
+
+RUN cargo build --release --bin controller
+
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/controller /usr/local/bin/
+
+ENTRYPOINT ["/usr/local/bin/controller"]

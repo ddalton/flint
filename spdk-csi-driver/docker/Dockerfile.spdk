@@ -1,0 +1,36 @@
+FROM ubuntu:22.04
+
+# Install SPDK dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libaio-dev \
+    libncurses5-dev \
+    python3 \
+    python3-pip \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build SPDK
+WORKDIR /spdk
+RUN git clone https://github.com/spdk/spdk.git . && \
+    git checkout v25.05 && \
+    git submodule update --init && \
+    ./configure --with-vhost --with-virtio --enable-debug && \
+    make -j$(nproc)
+
+# Setup runtime environment
+RUN mkdir -p /var/tmp && \
+    mkdir -p /etc/spdk
+
+COPY scripts/spdk-setup.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/spdk-setup.sh
+
+EXPOSE 5260
+ENTRYPOINT ["/usr/local/bin/spdk-setup.sh"]

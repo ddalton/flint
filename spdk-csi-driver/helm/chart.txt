@@ -1,0 +1,954 @@
+# Chart.yaml
+apiVersion: v2
+name: spdk-csi-driver
+description: A Helm chart for deploying a Rust-based CSI driver with SPDK blobstore for NVMe RAID-1 mirroring, including CRDs, health controller, and write ordering
+version: 0.4.0
+appVersion: "0.4.0"
+
+---
+# values.yaml
+spdk:
+  image:
+    repository: spdk/spdk
+    tag: latest
+    pullPolicy: IfNotPresent
+  hugepages:
+    enabled: true
+    size: 2Mi
+    count: 1024
+  blobstore:
+    enabled: true
+    clusterSize: 65536  # 64KB clusters
+    cacheSize: 512      # MB
+  rpc:
+    enabled: true
+    port: 5260
+    bindAddress: "0.0.0.0"
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+
+csiDriver:
+  image:
+    repository: spdk-csi-driver
+    tag: latest
+    pullPolicy: IfNotPresent
+  provisionerImage:
+    repository: k8s.gcr.io/sig-storage/csi-provisioner
+    tag: v3.5.0
+  resizerImage:
+    repository: k8s.gcr.io/sig-storage/csi-resizer
+    tag: v1.8.0
+  snapshotterImage:
+    repository: k8s.gcr.io/sig-storage/csi-snapshotter
+    tag: v6.2.1
+  nodeID: ""
+  endpoint: "unix:///var/lib/csi/sockets/pluginproxy/csi.sock"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+controller:
+  image:
+    repository: spdk-csi-controller
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  healthCheck:
+    enabled: true
+    interval: 30s
+    timeout: 10s
+  rebuild:
+    enabled: true
+    maxRetries: 3
+    snapshotRetention: 1h
+    timeoutSeconds: 300
+    writeBarrierTimeout: 30s
+  writeOrdering:
+    enabled: true
+    syncMode: "barrier"  # "barrier" or "flush"
+    timeoutMs: 5000
+  diskDiscovery:
+    enabled: true
+    interval: 300s  # Check for new disks every 5 minutes
+    autoInitializeBlobstore: true
+    nodeSelector: {}  # Optional: limit discovery to specific nodes
+  nodeAgent:
+    image:
+      repository: spdk-csi-node-agent
+      tag: latest
+      pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+storageClass:
+  name: spdk-raid1
+  numReplicas: 2
+  replicaNodes:
+    - node-a
+    - node-b
+    - node-c
+  protocol: tcp
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  writeOrdering: true
+  ioTimeout: 30
+  parameters:
+    fsType: "ext4"
+    mountOptions: "rw,relatime"
+
+crd:
+  enabled: true
+
+rbac:
+  enabled: true
+  serviceAccountName: spdk-csi-sa
+
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    port: 8080
+  metrics:
+    - health_checks_total
+    - rebuild_operations_total
+    - io_operations_total
+    - write_latency_seconds
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+testResources:
+  enabled: false
+  pvc:
+    name: test-pvc
+    storage: 10Gi
+  pod:
+    name: test-pod
+    image: nginx:latest
+
+---
+# templates/spdkvolume-crd.yaml
+{{- if .Values.crd.enabled }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdkvolumes.csi.spdk.io
+spec:
+  group: csi.spdk.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              volumeId:
+                type: string
+              sizeBytes:
+                type: integer
+                format: int64
+              numReplicas:
+                type: integer
+              replicas:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    node:
+                      type: string
+                    type:
+                      type: string
+                      enum: ["nvme", "nvmf"]
+                    pcieAddr:
+                      type: string
+                    nqn:
+                      type: string
+                    ip:
+                      type: string
+                    port:
+                      type: string
+                    localPodScheduled:
+                      type: boolean
+                    podName:
+                      type: string
+                    diskRef:
+                      type: string
+                    blobId:
+                      type: string
+                    healthStatus:
+                      type: string
+                      enum: ["Healthy", "Degraded", "Failed", "Rebuilding", "Syncing"]
+                    lastIoTimestamp:
+                      type: string
+                      format: date-time
+                    writeSequence:
+                      type: integer
+                      format: int64
+              blobId:
+                type: string
+              rebuildInProgress:
+                type: object
+                properties:
+                  targetReplicaIndex:
+                    type: integer
+                  sourceReplicaIndex:
+                    type: integer
+                  snapshotId:
+                    type: string
+                  copyProgress:
+                    type: number
+                    format: float
+                  phase:
+                    type: string
+                    enum: ["pause", "snapshot", "provision", "integrate", "unpause", "inflate", "finalize"]
+                  startedAt:
+                    type: string
+                    format: date-time
+                  writeBarrierActive:
+                    type: boolean
+              writeOrderingEnabled:
+                type: boolean
+          status:
+            type: object
+            properties:
+              state:
+                type: string
+                enum: ["Healthy", "Degraded", "Failed"]
+              degraded:
+                type: boolean
+              lastChecked:
+                type: string
+                format: date-time
+              activeReplicas:
+                type: array
+                items:
+                  type: integer
+              failedReplicas:
+                type: array
+                items:
+                  type: integer
+              writeSequence:
+                type: integer
+                format: int64
+              lastSuccessfulWrite:
+                type: string
+                format: date-time
+    additionalPrinterColumns:
+    - name: State
+      type: string
+      jsonPath: .status.state
+    - name: Replicas
+      type: string
+      jsonPath: .spec.numReplicas
+    - name: Size
+      type: string
+      jsonPath: .spec.sizeBytes
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: spdkvolumes
+    singular: spdkvolume
+    kind: SpdkVolume
+{{- end }}
+
+---
+# templates/spdkdisk-crd.yaml
+{{- if .Values.crd.enabled }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdkdisks.csi.spdk.io
+spec:
+  group: csi.spdk.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              node:
+                type: string
+              pcieAddr:
+                type: string
+              capacity:
+                type: integer
+                format: int64
+              blobstoreUuid:
+                type: string
+              nvmeControllerId:
+                type: string
+          status:
+            type: object
+            properties:
+              freeSpace:
+                type: integer
+                format: int64
+              healthy:
+                type: boolean
+              lastChecked:
+                type: string
+                format: date-time
+              blobCount:
+                type: integer
+                format: int32
+              blobstoreInitialized:
+                type: boolean
+              ioStats:
+                type: object
+                properties:
+                  readIops:
+                    type: integer
+                    format: int64
+                  writeIops:
+                    type: integer
+                    format: int64
+                  readLatencyUs:
+                    type: integer
+                    format: int64
+                  writeLatencyUs:
+                    type: integer
+                    format: int64
+                  errorCount:
+                    type: integer
+                    format: int64
+    additionalPrinterColumns:
+    - name: Node
+      type: string
+      jsonPath: .spec.node
+    - name: Capacity
+      type: string
+      jsonPath: .spec.capacity
+    - name: Free
+      type: string
+      jsonPath: .status.freeSpace
+    - name: Healthy
+      type: boolean
+      jsonPath: .status.healthy
+    - name: Blobs
+      type: integer
+      jsonPath: .status.blobCount
+  scope: Namespaced
+  names:
+    plural: spdkdisks
+    singular: spdkdisk
+    kind: SpdkDisk
+{{- end }}
+
+---
+# templates/controller-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-controller
+  labels:
+    {{- include "spdk-csi-driver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spdk-csi-driver.selectorLabels" . | nindent 6 }}
+      app: spdk-csi-controller
+  template:
+    metadata:
+      labels:
+        {{- include "spdk-csi-driver.selectorLabels" . | nindent 8 }}
+        app: spdk-csi-controller
+      annotations:
+        prometheus.io/scrape: "{{ .Values.monitoring.prometheus.enabled }}"
+        prometheus.io/port: "{{ .Values.monitoring.prometheus.port }}"
+    spec:
+      serviceAccountName: {{ .Values.rbac.serviceAccountName }}
+      containers:
+      - name: controller
+        image: {{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}
+        imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+        env:
+        - name: SPDK_RPC_URL
+          value: "http://localhost:{{ .Values.spdk.rpc.port }}"
+        - name: HEALTH_CHECK_INTERVAL
+          value: {{ .Values.controller.healthCheck.interval | quote }}
+        - name: REBUILD_ENABLED
+          value: {{ .Values.controller.rebuild.enabled | quote }}
+        - name: REBUILD_MAX_RETRIES
+          value: {{ .Values.controller.rebuild.maxRetries | quote }}
+        - name: SNAPSHOT_RETENTION
+          value: {{ .Values.controller.rebuild.snapshotRetention }}
+        - name: WRITE_BARRIER_TIMEOUT
+          value: {{ .Values.controller.rebuild.writeBarrierTimeout | quote }}
+        - name: WRITE_ORDERING_ENABLED
+          value: {{ .Values.controller.writeOrdering.enabled | quote }}
+        - name: WRITE_ORDERING_SYNC_MODE
+          value: {{ .Values.controller.writeOrdering.syncMode }}
+        - name: WRITE_ORDERING_TIMEOUT_MS
+          value: {{ .Values.controller.writeOrdering.timeoutMs | quote }}
+        - name: DISK_DISCOVERY_ENABLED
+          value: {{ .Values.controller.diskDiscovery.enabled | quote }}
+        - name: DISK_DISCOVERY_INTERVAL
+          value: {{ .Values.controller.diskDiscovery.interval | trimSuffix "s" | quote }}
+        - name: AUTO_INITIALIZE_BLOBSTORE
+          value: {{ .Values.controller.diskDiscovery.autoInitializeBlobstore | quote }}
+        ports:
+        {{- if .Values.monitoring.prometheus.enabled }}
+        - name: metrics
+          containerPort: {{ .Values.monitoring.prometheus.port }}
+          protocol: TCP
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: {{ .Values.monitoring.prometheus.port }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: {{ .Values.monitoring.prometheus.port }}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.controller.resources | nindent 10 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+---
+# templates/rbac.yaml
+{{- if .Values.rbac.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Chart.Name }}-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "persistentvolumes", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["csi.spdk.io"]
+  resources: ["spdkvolumes", "spdkdisks"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["csi.spdk.io"]
+  resources: ["spdkvolumes/status", "spdkdisks/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses", "volumeattachments"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Chart.Name }}-binding
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.rbac.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Chart.Name }}-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.rbac.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+
+---
+# templates/spdk-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-spdk
+  labels:
+    {{- include "spdk-csi-driver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spdk-csi-driver.selectorLabels" . | nindent 6 }}
+      app: spdk-target
+  template:
+    metadata:
+      labels:
+        {{- include "spdk-csi-driver.selectorLabels" . | nindent 8 }}
+        app: spdk-target
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: spdk-target
+        image: {{ .Values.spdk.image.repository }}:{{ .Values.spdk.image.tag }}
+        imagePullPolicy: {{ .Values.spdk.image.pullPolicy }}
+        command: ["/spdk/build/bin/spdk_tgt"]
+        args:
+        - "-r"
+        - "/var/tmp/spdk.sock"
+        {{- if .Values.spdk.rpc.enabled }}
+        - "-s"
+        - "{{ .Values.spdk.rpc.port }}"
+        {{- end }}
+        securityContext:
+          privileged: true
+        env:
+        - name: HUGEPAGE_SIZE
+          value: {{ .Values.spdk.hugepages.size | quote }}
+        - name: HUGEPAGE_COUNT
+          value: {{ .Values.spdk.hugepages.count | quote }}
+        {{- if .Values.spdk.blobstore.enabled }}
+        - name: SPDK_BLOBSTORE_CLUSTER_SIZE
+          value: {{ .Values.spdk.blobstore.clusterSize | quote }}
+        - name: SPDK_BLOBSTORE_CACHE_SIZE
+          value: {{ .Values.spdk.blobstore.cacheSize | quote }}
+        {{- end }}
+        ports:
+        {{- if .Values.spdk.rpc.enabled }}
+        - name: rpc
+          containerPort: {{ .Values.spdk.rpc.port }}
+          protocol: TCP
+        {{- end }}
+        - name: nvmf-tcp
+          containerPort: 4420
+          protocol: TCP
+        volumeMounts:
+        - name: hugepages
+          mountPath: /dev/hugepages
+        - name: dev
+          mountPath: /dev
+        - name: sys
+          mountPath: /sys
+        - name: spdk-sock
+          mountPath: /var/tmp
+        resources:
+          {{- toYaml .Values.spdk.resources | nindent 10 }}
+      volumes:
+      - name: hugepages
+        emptyDir:
+          medium: HugePages-{{ .Values.spdk.hugepages.size }}
+          sizeLimit: {{ mul .Values.spdk.hugepages.count (regexFind "[0-9]+" .Values.spdk.hugepages.size | int) }}Mi
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: spdk-sock
+        hostPath:
+          path: /var/tmp
+      {{- if .Values.spdk.hugepages.enabled }}
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+      {{- end }}
+
+---
+# templates/csi-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-node
+  labels:
+    {{- include "spdk-csi-driver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spdk-csi-driver.selectorLabels" . | nindent 6 }}
+      app: spdk-csi-node
+  template:
+    metadata:
+      labels:
+        {{- include "spdk-csi-driver.selectorLabels" . | nindent 8 }}
+        app: spdk-csi-node
+    spec:
+      serviceAccountName: {{ .Values.rbac.serviceAccountName }}
+      hostNetwork: true
+      containers:
+      - name: csi-driver
+        image: {{ .Values.csiDriver.image.repository }}:{{ .Values.csiDriver.image.tag }}
+        imagePullPolicy: {{ .Values.csiDriver.image.pullPolicy }}
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CSI_ENDPOINT
+          value: {{ .Values.csiDriver.endpoint }}
+        - name: SPDK_RPC_URL
+          value: "http://localhost:{{ .Values.spdk.rpc.port }}"
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["SYS_ADMIN"]
+          allowPrivilegeEscalation: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: plugin-dir
+          mountPath: /var/lib/kubelet/plugins
+          mountPropagation: Bidirectional
+        - name: pods-mount-dir
+          mountPath: /var/lib/kubelet/pods
+          mountPropagation: Bidirectional
+        - name: device-dir
+          mountPath: /dev
+        - name: sys-dir
+          mountPath: /sys
+        resources:
+          {{- toYaml .Values.csiDriver.resources | nindent 10 }}
+      {{- if .Values.controller.diskDiscovery.enabled }}
+      - name: node-agent
+        image: {{ .Values.controller.nodeAgent.image.repository }}:{{ .Values.controller.nodeAgent.image.tag }}
+        imagePullPolicy: {{ .Values.controller.nodeAgent.image.pullPolicy }}
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: SPDK_RPC_URL
+          value: "http://localhost:{{ .Values.spdk.rpc.port }}"
+        - name: DISK_DISCOVERY_INTERVAL
+          value: {{ .Values.controller.diskDiscovery.interval | trimSuffix "s" | quote }}
+        - name: AUTO_INITIALIZE_BLOBSTORE
+          value: {{ .Values.controller.diskDiscovery.autoInitializeBlobstore | quote }}
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: sys-dir
+          mountPath: /sys
+          readOnly: true
+        - name: device-dir
+          mountPath: /dev
+          readOnly: true
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+      {{- end }}
+      - name: csi-node-driver-registrar
+        image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.8.0
+        args:
+        - "--csi-address=$(ADDRESS)"
+        - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+        - "--v=2"
+        env:
+        - name: ADDRESS
+          value: {{ .Values.csiDriver.endpoint }}
+        - name: DRIVER_REG_SOCK_PATH
+          value: /var/lib/kubelet/plugins/csi.spdk.io/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: registration-dir
+          mountPath: /registration
+      volumes:
+      - name: socket-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins/csi.spdk.io
+          type: DirectoryOrCreate
+      - name: plugin-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins
+          type: Directory
+      - name: pods-mount-dir
+        hostPath:
+          path: /var/lib/kubelet/pods
+          type: Directory
+      - name: registration-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry
+          type: Directory
+      - name: device-dir
+        hostPath:
+          path: /dev
+      - name: sys-dir
+        hostPath:
+          path: /sys
+
+---
+# templates/csi-controller-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Chart.Name }}-csi-controller
+  labels:
+    {{- include "spdk-csi-driver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spdk-csi-driver.selectorLabels" . | nindent 6 }}
+      app: spdk-csi-controller
+  serviceName: {{ .Chart.Name }}-csi-controller
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        {{- include "spdk-csi-driver.selectorLabels" . | nindent 8 }}
+        app: spdk-csi-controller
+    spec:
+      serviceAccountName: {{ .Values.rbac.serviceAccountName }}
+      containers:
+      - name: csi-provisioner
+        image: {{ .Values.csiDriver.provisionerImage.repository }}:{{ .Values.csiDriver.provisionerImage.tag }}
+        args:
+        - "--csi-address=$(ADDRESS)"
+        - "--v=2"
+        - "--feature-gates=Topology=true"
+        - "--enable-leader-election"
+        - "--leader-election-type=leases"
+        - "--timeout=300s"
+        env:
+        - name: ADDRESS
+          value: {{ .Values.csiDriver.endpoint }}
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+      - name: csi-resizer
+        image: {{ .Values.csiDriver.resizerImage.repository }}:{{ .Values.csiDriver.resizerImage.tag }}
+        args:
+        - "--csi-address=$(ADDRESS)"
+        - "--v=2"
+        - "--timeout=300s"
+        - "--handle-volume-inuse-error=false"
+        env:
+        - name: ADDRESS
+          value: {{ .Values.csiDriver.endpoint }}
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+      - name: csi-snapshotter
+        image: {{ .Values.csiDriver.snapshotterImage.repository }}:{{ .Values.csiDriver.snapshotterImage.tag }}
+        args:
+        - "--csi-address=$(ADDRESS)"
+        - "--v=2"
+        - "--timeout=300s"
+        - "--enable-distributed-snapshotting=false"
+        env:
+        - name: ADDRESS
+          value: {{ .Values.csiDriver.endpoint }}
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+      - name: csi-driver
+        image: {{ .Values.csiDriver.image.repository }}:{{ .Values.csiDriver.image.tag }}
+        imagePullPolicy: {{ .Values.csiDriver.image.pullPolicy }}
+        env:
+        - name: NODE_ID
+          value: "controller"
+        - name: CSI_ENDPOINT
+          value: {{ .Values.csiDriver.endpoint }}
+        - name: SPDK_RPC_URL
+          value: "http://spdk-csi-driver-spdk:{{ .Values.spdk.rpc.port }}"
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy
+      volumes:
+      - name: socket-dir
+        emptyDir: {}
+
+---
+# templates/storageclass.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: csi.spdk.io
+parameters:
+  numReplicas: {{ .Values.storageClass.numReplicas | quote }}
+  replicaNodes: {{ join "," .Values.storageClass.replicaNodes | quote }}
+  protocol: {{ .Values.storageClass.protocol }}
+  mirrorType: "raid1"
+  writeOrdering: {{ .Values.storageClass.writeOrdering | quote }}
+  ioTimeout: {{ .Values.storageClass.ioTimeout | quote }}
+  fsType: {{ .Values.storageClass.parameters.fsType }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+allowVolumeExpansion: true
+mountOptions:
+  {{- range (split "," .Values.storageClass.parameters.mountOptions) }}
+  - {{ . }}
+  {{- end }}
+allowedTopologies:
+- matchLabelExpressions:
+  - key: kubernetes.io/hostname
+    values:
+    {{- range .Values.storageClass.replicaNodes }}
+    - {{ . }}
+    {{- end }}
+
+---
+# templates/csi-driver.yaml
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.spdk.io
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  volumeLifecycleModes:
+  - Persistent
+  - Ephemeral
+  fsGroupPolicy: File
+  requiresRepublish: false
+
+---
+# templates/monitoring-service.yaml
+{{- if .Values.monitoring.prometheus.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-metrics
+  labels:
+    {{- include "spdk-csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "{{ .Values.monitoring.prometheus.port }}"
+spec:
+  selector:
+    {{- include "spdk-csi-driver.selectorLabels" . | nindent 4 }}
+    app: spdk-csi-controller
+  ports:
+  - name: metrics
+    port: {{ .Values.monitoring.prometheus.port }}
+    targetPort: {{ .Values.monitoring.prometheus.port }}
+    protocol: TCP
+{{- end }}
+
+---
+# templates/test-pvc.yaml
+{{- if .Values.testResources.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.testResources.pvc.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.testResources.pvc.storage }}
+  storageClassName: {{ .Values.storageClass.name }}
+{{- end }}
+
+---
+# templates/test-pod.yaml
+{{- if .Values.testResources.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Values.testResources.pod.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  containers:
+  - name: test-container
+    image: {{ .Values.testResources.pod.image }}
+    command:
+    - sleep
+    - "3600"
+    volumeMounts:
+    - mountPath: /data
+      name: test-volume
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: {{ .Values.testResources.pvc.name }}
+  restartPolicy: Always
+{{- end }}
+
+---
+# templates/_helpers.tpl
+{{/*
+Common labels
+*/}}
+{{- define "spdk-csi-driver.labels" -}}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/version: {{ .Chart.AppVersion }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: csi-driver
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "spdk-csi-driver.selectorLabels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "spdk-csi-driver.serviceAccountName" -}}
+{{- if .Values.rbac.enabled }}
+{{- default .Chart.Name .Values.rbac.serviceAccountName }}
+{{- else }}
+{{- default "default" .Values.rbac.serviceAccountName }}
+{{- end }}
+{{- end }}

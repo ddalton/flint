@@ -1,0 +1,32 @@
+[package]
+name = "spdk-csi-driver"
+version = "0.4.0"
+edition = "2021"
+
+[[bin]]
+name = "csi-driver"
+path = "src/main.rs"
+
+[[bin]]
+name = "controller"
+path = "src/controller.rs"
+
+[[bin]]
+name = "node-agent"
+path = "src/node_agent.rs"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tonic = "0.10"
+prost = "0.12"
+kube = { version = "0.87", features = ["client", "derive", "runtime"] }
+k8s-openapi = { version = "0.20", features = ["v1_28"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+clap = { version = "4.0", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "0.10"

@@ -1,0 +1,112 @@
+= Node Preparation
+
+// Enable hugepages (required for SPDK)
+[source,bash]
+----
+echo 'vm.nr_hugepages=1024' >> /etc/sysctl.conf
+sysctl -p
+----
+
+// Load required kernel modules
+[source,bash]
+----
+modprobe vfio-pci
+modprobe uio_pci_generic
+----
+
+// Ensure NVMe devices are available
+[source,bash]
+----
+lspci | grep -i nvme
+----
+
+= Component Responsibilities
+== Controller (Deployment)
+
+┌─────────────────────────────────────┐
+│            Controller               │
+│  ┌─────────────────────────────────┐│
+│  │     Volume Management           ││
+│  │  • CreateVolume/DeleteVolume    ││
+│  │  • RAID configuration           ││
+│  │  • Replica scheduling           ││
+│  └─────────────────────────────────┘│
+│  ┌─────────────────────────────────┐│
+│  │     Health & Rebuild            ││
+│  │  • Replica health monitoring    ││
+│  │  • Rebuild orchestration        ││
+│  │  • Failure detection            ││
+│  └─────────────────────────────────┘│
+└─────────────────────────────────────┘
+
+== Node Agent (DaemonSet)
+
+┌─────────────────────────────────────┐
+│           Node Agent                │
+│  ┌─────────────────────────────────┐│
+│  │     Device Discovery            ││
+│  │  • NVMe device detection        ││
+│  │  • SPDK attachment              ││
+│  │  • Capacity reporting           ││
+│  └─────────────────────────────────┘│
+│  ┌─────────────────────────────────┐│
+│  │     Local Management            ││
+│  │  • Blobstore initialization     ││
+│  │  • Health monitoring            ││
+│  │  • I/O statistics               ││
+│  └─────────────────────────────────┘│
+└─────────────────────────────────────┘
+
+Communication Flow
+Discovery Process
+Node Agent → Local SPDK → SpdkDisk CRD → Controller
+     ↓
+1. Discover NVMe devices via lspci/SPDK RPC
+2. Create/update SpdkDisk resources in Kubernetes
+3. Controller watches SpdkDisk changes
+4. Controller uses discovered disks for volume operations
+Volume Operations
+CSI Request → Controller → SpdkDisk CRDs → Volume Creation
+                ↓
+1. Controller receives CSI volume request
+2. Queries available SpdkDisk resources
+3. Selects optimal disks based on criteria
+4. Creates RAID configuration using selected disks
+Implementation Details
+Node Agent Capabilities
+
+Hardware Discovery: Direct access to PCI devices and sysfs
+SPDK Integration: Local RPC communication with SPDK daemon
+Resource Management: Creates/updates Kubernetes CRDs
+Health Monitoring: Real-time device health and performance metrics
+
+Controller Capabilities
+
+Volume Orchestration: Manages volume lifecycle across nodes
+Replica Management: Handles RAID configuration and rebuilds
+Policy Enforcement: Applies placement and redundancy policies
+Global Monitoring: Cluster-wide health and performance tracking
+
+Deployment Topology
+
+┌─────────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                       │
+│                                                             │
+│  ┌─────────────────┐     ┌─────────────────────────────────┐│
+│  │   Controller    │────▶│         SpdkDisk CRDs           ││
+│  │  (Deployment)   │     │     (Cluster Resource)          ││
+│  └─────────────────┘     └─────────────────────────────────┘│
+│           │                              ▲                  │
+│           │                              │                  │
+│           ▼                              │                  │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                Node Agent DaemonSet                     ││
+│  │                                                         ││
+│  │  Node 1          Node 2          Node 3                 ││
+│  │ ┌─────────┐     ┌─────────┐     ┌─────────┐             ││
+│  │ │Agent+CSI│     │Agent+CSI│     │Agent+CSI│             ││
+│  │ │  SPDK   │     │  SPDK   │     │  SPDK   │             ││
+│  │ │ NVMe    │     │ NVMe    │     │ NVMe    │             ││
+│  │ └─────────┘     └─────────┘     └─────────┘             ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
