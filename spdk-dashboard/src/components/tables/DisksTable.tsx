@@ -1,5 +1,6 @@
 import React from 'react';
-import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+import { X, HardDrive } from 'lucide-react';
+import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 
 interface DisksTableProps {
   disks: Disk[];
@@ -10,38 +11,60 @@ interface DisksTableProps {
     formattedDisks: number;
   };
   volumeFilter?: VolumeFilter;
+  volumeReplicaFilter?: VolumeReplicaFilter;
   onDiskClick?: (diskId: string) => void;
+  onClearVolumeReplicaFilter?: () => void;
 }
 
-export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, volumeFilter, onDiskClick }) => {
-  // Filter disks based on volume filter
+export const DisksTable: React.FC<DisksTableProps> = ({ 
+  disks, 
+  volumes, 
+  stats, 
+  volumeFilter, 
+  volumeReplicaFilter,
+  onDiskClick,
+  onClearVolumeReplicaFilter 
+}) => {
+  // Filter disks based on volume filter and volume replica filter
   const getFilteredDisks = () => {
-    if (!volumeFilter || volumeFilter === 'all') {
-      return disks;
+    let result = disks;
+
+    // Apply volume replica filter first (most specific)
+    if (volumeReplicaFilter) {
+      result = result.filter(disk => {
+        return disk.provisioned_volumes.some(diskVolume => 
+          diskVolume.volume_id === volumeReplicaFilter
+        );
+      });
+    }
+    // Then apply general volume filter if no specific volume replica filter
+    else if (volumeFilter && volumeFilter !== 'all') {
+      result = result.filter(disk => {
+        // Check if disk has any volumes matching the volume filter by cross-referencing with actual volume data
+        return disk.provisioned_volumes.some(diskVolume => {
+          // Find the actual volume data
+          const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
+          if (!actualVolume) return false;
+          
+          switch (volumeFilter) {
+            case 'faulted':
+              return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
+            case 'rebuilding':
+              return actualVolume.state === 'Rebuilding';
+            case 'local-nvme':
+              return actualVolume.local_nvme;
+            default:
+              return true;
+          }
+        });
+      });
     }
 
-    return disks.filter(disk => {
-      // Check if disk has any volumes matching the volume filter by cross-referencing with actual volume data
-      return disk.provisioned_volumes.some(diskVolume => {
-        // Find the actual volume data
-        const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
-        if (!actualVolume) return false;
-        
-        switch (volumeFilter) {
-          case 'faulted':
-            return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
-          case 'rebuilding':
-            return actualVolume.state === 'Rebuilding';
-          case 'local-nvme':
-            return actualVolume.local_nvme;
-          default:
-            return true;
-        }
-      });
-    });
+    return result;
   };
 
   const filteredDisks = getFilteredDisks();
+  const targetVolume = volumeReplicaFilter ? volumes.find(v => v.id === volumeReplicaFilter) : null;
 
   const getFilterDisplayName = (filter: VolumeFilter) => {
     switch (filter) {
@@ -54,7 +77,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, v
 
   return (
     <div>
-      {volumeFilter && volumeFilter !== 'all' && (
+      {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
           <div className="text-sm font-medium text-blue-900">
             Showing disks with {getFilterDisplayName(volumeFilter)}
@@ -65,16 +88,40 @@ export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, v
         </div>
       )}
 
+      {volumeReplicaFilter && targetVolume && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <HardDrive className="w-4 h-4 text-green-600" />
+            <span className="text-sm font-medium text-green-900">
+              Showing disks with replicas for volume: {targetVolume.name}
+            </span>
+            <span className="text-sm text-green-700">
+              ({filteredDisks.length} disk{filteredDisks.length !== 1 ? 's' : ''} contain{filteredDisks.length === 1 ? 's' : ''} replicas)
+            </span>
+          </div>
+          {onClearVolumeReplicaFilter && (
+            <button
+              onClick={onClearVolumeReplicaFilter}
+              className="text-green-600 hover:text-green-800 text-sm font-medium flex items-center gap-1"
+            >
+              <X className="w-3 h-3" />
+              Clear Volume Filter
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-gray-50 rounded-lg p-4">
           <h3 className="text-lg font-semibold">
-            {volumeFilter && volumeFilter !== 'all' ? 'Filtered Disks' : 'Total Disks'}
+            {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter ? 'Filtered Disks' : 
+             volumeReplicaFilter ? 'Replica Disks' : 'Total Disks'}
           </h3>
           <p className="text-3xl font-bold text-blue-600">
             {filteredDisks.length}
-            {volumeFilter && volumeFilter !== 'all' && (
+            {(volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter) || volumeReplicaFilter ? (
               <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
-            )}
+            ) : null}
           </p>
         </div>
         <div className="bg-gray-50 rounded-lg p-4">
@@ -110,7 +157,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, v
             {filteredDisks.length === 0 ? (
               <tr>
                 <td colSpan={9} className="px-6 py-8 text-center text-gray-500">
-                  {volumeFilter && volumeFilter !== 'all' 
+                  {volumeReplicaFilter && targetVolume
+                    ? `No disks contain replicas for volume "${targetVolume.name}".`
+                    : volumeFilter && volumeFilter !== 'all' 
                     ? `No disks have ${getFilterDisplayName(volumeFilter)}.`
                     : 'No disks found.'
                   }
@@ -118,24 +167,33 @@ export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, v
               </tr>
             ) : (
               filteredDisks.map((disk) => {
-                const filteredVolumes = volumeFilter && volumeFilter !== 'all'
-                  ? disk.provisioned_volumes.filter(diskVolume => {
-                      // Find the actual volume data to check its state
-                      const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
-                      if (!actualVolume) return false;
-                      
-                      switch (volumeFilter) {
-                        case 'faulted':
-                          return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
-                        case 'rebuilding':
-                          return actualVolume.state === 'Rebuilding';
-                        case 'local-nvme':
-                          return actualVolume.local_nvme;
-                        default:
-                          return true;
-                      }
-                    })
-                  : disk.provisioned_volumes;
+                let filteredVolumes = disk.provisioned_volumes;
+                
+                // Apply volume replica filter
+                if (volumeReplicaFilter) {
+                  filteredVolumes = disk.provisioned_volumes.filter(diskVolume => 
+                    diskVolume.volume_id === volumeReplicaFilter
+                  );
+                }
+                // Apply general volume filter if no specific volume replica filter
+                else if (volumeFilter && volumeFilter !== 'all') {
+                  filteredVolumes = disk.provisioned_volumes.filter(diskVolume => {
+                    // Find the actual volume data to check its state
+                    const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
+                    if (!actualVolume) return false;
+                    
+                    switch (volumeFilter) {
+                      case 'faulted':
+                        return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
+                      case 'rebuilding':
+                        return actualVolume.state === 'Rebuilding';
+                      case 'local-nvme':
+                        return actualVolume.local_nvme;
+                      default:
+                        return true;
+                    }
+                  });
+                }
 
                 return (
                   <tr key={disk.id} className="hover:bg-gray-50">
@@ -177,8 +235,14 @@ export const DisksTable: React.FC<DisksTableProps> = ({ disks, volumes, stats, v
                         className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
                       >
                         {filteredVolumes.length} volume{filteredVolumes.length !== 1 ? 's' : ''}
-                        {volumeFilter && volumeFilter !== 'all' && filteredVolumes.length !== disk.provisioned_volumes.length && (
+                        {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
+                         filteredVolumes.length !== disk.provisioned_volumes.length && (
                           <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
+                        )}
+                        {volumeReplicaFilter && targetVolume && (
+                          <span className="block text-xs text-green-600 mt-1">
+                            {targetVolume.name} replicas
+                          </span>
                         )}
                       </button>
                     </td>

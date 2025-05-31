@@ -8,6 +8,7 @@ interface VolumesTableProps {
   diskFilter?: DiskFilter;
   onClearFilter?: () => void;
   onClearDiskFilter?: () => void;
+  onReplicaClick?: (volumeId: string, volumeName: string) => void;
 }
 
 export const VolumesTable: React.FC<VolumesTableProps> = ({ 
@@ -15,7 +16,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   activeFilter, 
   diskFilter,
   onClearFilter,
-  onClearDiskFilter 
+  onClearDiskFilter,
+  onReplicaClick
 }) => {
   const filteredVolumes = React.useMemo(() => {
     let result = volumes;
@@ -153,7 +155,15 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       {volume.state}
                     </span>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{volume.active_replicas}/{volume.replicas}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    <button
+                      onClick={() => onReplicaClick?.(volume.id, volume.name)}
+                      className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                      title={`Click to see disks with replicas for ${volume.name}`}
+                    >
+                      {volume.active_replicas}/{volume.replicas}
+                    </button>
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     {volume.local_nvme ? (
                       <CheckCircle className="w-5 h-5 text-green-500" />

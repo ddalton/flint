@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { DashboardData, VolumeFilter, DiskFilter } from '../hooks/useDashboardData';
+import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
@@ -40,6 +40,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [activeTab, setActiveTab] = useState('overview');
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
   const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
+  const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -60,8 +61,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setActiveTab('volumes');
       }
     }
-    // Clear disk filter when changing volume filter
+    // Clear other filters when changing volume filter
     setDiskFilter(null);
+    setVolumeReplicaFilter(null);
   };
 
   const handleClearFilter = () => {
@@ -72,10 +74,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
     setDiskFilter(null);
   };
 
+  const handleClearVolumeReplicaFilter = () => {
+    setVolumeReplicaFilter(null);
+  };
+
   const handleDiskClick = (diskId: string) => {
     // Set disk filter and switch to volumes tab
     setDiskFilter(diskId);
     setActiveTab('volumes');
+    // Clear volume replica filter when clicking on disk
+    setVolumeReplicaFilter(null);
+  };
+
+  const handleReplicaClick = (volumeId: string, volumeName: string) => {
+    // Set volume replica filter and switch to disks tab
+    setVolumeReplicaFilter(volumeId);
+    setActiveTab('disks');
+    // Clear other filters when showing volume replicas
+    setDiskFilter(null);
   };
 
   // Don't reset filter when changing tabs - keep it persistent across all tabs
@@ -115,6 +131,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             diskFilter={diskFilter}
             onClearFilter={handleClearFilter}
             onClearDiskFilter={handleClearDiskFilter}
+            onReplicaClick={handleReplicaClick}
           />
         );
 
@@ -129,7 +146,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
               formattedDisks: stats.formattedDisks
             }}
             volumeFilter={volumeFilter}
+            volumeReplicaFilter={volumeReplicaFilter}
             onDiskClick={handleDiskClick}
+            onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
           />
         );
 

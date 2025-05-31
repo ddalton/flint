@@ -8,6 +8,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
 // Types - Export all interfaces that will be used by components
 export type VolumeFilter = 'all' | 'faulted' | 'rebuilding' | 'local-nvme';
 export type DiskFilter = string | null; // disk ID or null
+export type VolumeReplicaFilter = string | null; // volume ID or null
 
 export interface NvmfTarget {
   nqn: string;
