@@ -42,7 +42,7 @@ struct SpdkVolumeSpec {
     size_bytes: i64,
     num_replicas: i32,
     replicas: Vec<Replica>,
-    blob_id: Option<String>,
+    primary_lvol_uuid: Option<String>, // Primary logical volume UUID
     rebuild_in_progress: Option<ReplicationState>,
     write_ordering_enabled: bool,
 }
@@ -59,7 +59,7 @@ struct Replica {
     local_pod_scheduled: bool,
     pod_name: Option<String>,
     disk_ref: String,
-    blob_id: Option<String>,
+    lvol_uuid: Option<String>, // Logical volume UUID for this replica
     health_status: ReplicaHealth,
     last_io_timestamp: Option<String>,
     write_sequence: u64,
@@ -127,12 +127,15 @@ struct SpdkDiskSpec {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct SpdkDiskStatus {
+    total_capacity: i64,
     free_space: i64,
+    used_space: i64,
     healthy: bool,
     last_checked: String,
-    blob_count: u32,
+    lvol_count: u32,
     blobstore_initialized: bool,
     io_stats: IoStatistics,
+    lvs_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -150,7 +153,7 @@ struct SpdkCsiDriver {
     kube_client: Client,
     spdk_rpc_url: String,
     write_sequence_counter: Arc<Mutex<u64>>,
-    local_blobstore_cache: Arc<Mutex<HashMap<String, String>>>, // volume_id -> blob_id
+    local_lvol_cache: Arc<Mutex<HashMap<String, String>>>, // volume_id -> lvol_uuid
 }
 
 impl SpdkCsiDriver {
@@ -160,7 +163,7 @@ impl SpdkCsiDriver {
         *counter
     }
 
-    async fn create_volume_blob(
+    async fn create_volume_lvol(
         &self,
         disk: &SpdkDisk,
         size_bytes: i64,
@@ -169,7 +172,7 @@ impl SpdkCsiDriver {
         let http_client = HttpClient::new();
         let lvs_name = self.ensure_lvol_store_initialized(disk).await?;
 
-        // Create logical volume instead of blob for better management
+        // Create logical volume
         let lvol_name = format!("vol_{}", volume_id);
         let lvol_response = http_client
             .post(&self.spdk_rpc_url)
@@ -179,12 +182,17 @@ impl SpdkCsiDriver {
                     "lvs_name": lvs_name,
                     "lvol_name": lvol_name,
                     "size": size_bytes,
-                    "thin_provision": false, // Use thick provisioning for primary volumes
+                    "thin_provision": false,
                     "clear_method": "write_zeroes"
                 }
             }))
             .send()
             .await?;
+
+        if !lvol_response.status().is_success() {
+            let error_text = lvol_response.text().await?;
+            return Err(format!("Failed to create lvol: {}", error_text).into());
+        }
 
         let lvol_info: serde_json::Value = lvol_response.json().await?;
         let lvol_uuid = lvol_info["result"]["uuid"]
@@ -193,13 +201,12 @@ impl SpdkCsiDriver {
             .to_string();
 
         // Cache the lvol UUID locally
-        self.local_blobstore_cache
+        self.local_lvol_cache
             .lock()
             .await
             .insert(volume_id.to_string(), lvol_uuid.clone());
 
-        // Return the full bdev name for RAID creation
-        Ok(format!("{}/{}", lvs_name, lvol_name))
+        Ok(lvol_uuid)
     }
 
     async fn ensure_lvol_store_initialized(
@@ -227,18 +234,23 @@ impl SpdkCsiDriver {
 
         if !store_exists {
             // Create new lvol store on the disk
-            http_client
+            let create_response = http_client
                 .post(&self.spdk_rpc_url)
                 .json(&json!({
                     "method": "bdev_lvol_create_lvstore",
                     "params": {
-                        "bdev_name": disk.spec.pcie_addr,
+                        "bdev_name": format!("{}n1", disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string())),
                         "lvs_name": lvs_name,
-                        "cluster_sz": 65536 // 64KB clusters for better performance
+                        "cluster_sz": 65536
                     }
                 }))
                 .send()
                 .await?;
+
+            if !create_response.status().is_success() {
+                let error_text = create_response.text().await?;
+                return Err(format!("Failed to create lvol store: {}", error_text).into());
+            }
         }
 
         Ok(lvs_name)
@@ -247,7 +259,7 @@ impl SpdkCsiDriver {
     async fn setup_write_ordering(
         &self,
         volume_id: &str,
-        lvol_bdev_names: &[String],
+        _lvol_bdev_names: &[String],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let http_client = HttpClient::new();
 
@@ -258,16 +270,20 @@ impl SpdkCsiDriver {
                 "method": "bdev_raid_configure_write_ordering",
                 "params": {
                     "name": volume_id,
-                    "ordering_mode": "strict", // Ensure write ordering across replicas
-                    "sync_mode": "barrier", // Use write barriers for consistency
+                    "ordering_mode": "strict",
+                    "sync_mode": "barrier",
                     "timeout_ms": 5000,
-                    "enable_snapshot_consistency": true // Enable for rebuild support
+                    "enable_snapshot_consistency": true
                 }
             }))
             .send()
             .await?;
 
         Ok(())
+    }
+
+    fn get_lvol_bdev_name(&self, lvs_name: &str, lvol_uuid: &str) -> String {
+        format!("{}/{}", lvs_name, lvol_uuid)
     }
 }
 
@@ -295,7 +311,7 @@ impl Controller for SpdkCsiDriver {
             .get("replicaNodes")
             .map(|s| s.split(',').map(String::from).collect())
             .unwrap_or_default();
-        let protocol = params.get("protocol").cloned().unwrap_or("tcp".to_string());
+        let _protocol = params.get("protocol").cloned().unwrap_or("tcp".to_string());
         let write_ordering = params
             .get("writeOrdering")
             .map(|s| s.parse::<bool>().unwrap_or(true))
@@ -314,12 +330,15 @@ impl Controller for SpdkCsiDriver {
             .items
             .into_iter()
             .filter(|d| {
-                d.status
-                    .as_ref()
-                    .map(|s| s.healthy && s.free_space >= capacity && s.blobstore_initialized)
-                    .unwrap_or(false)
+                if let Some(status) = &d.status {
+                    status.healthy 
+                        && status.blobstore_initialized 
+                        && status.free_space >= capacity
+                        && replica_nodes.contains(&d.spec.node)
+                } else {
+                    false
+                }
             })
-            .filter(|d| replica_nodes.contains(&d.spec.node))
             .collect::<Vec<_>>();
 
         if available_disks.len() < num_replicas as usize {
@@ -328,7 +347,7 @@ impl Controller for SpdkCsiDriver {
             ));
         }
 
-        // Sort by free space and I/O performance metrics
+        // Sort by available space and I/O performance
         let mut selected_disks = available_disks;
         selected_disks.sort_by(|a, b| {
             let a_score = a.status.as_ref().unwrap().free_space as f64
@@ -348,20 +367,22 @@ impl Controller for SpdkCsiDriver {
         let volume_id = format!("raid1-{}", Uuid::new_v4());
 
         // Create lvols on each selected disk
-        let mut lvol_bdev_names = Vec::new();
+        let mut lvol_uuids = Vec::new();
         let mut replicas = Vec::new();
         let mut volume_context = HashMap::new();
 
         for (i, disk) in selected_disks.iter().enumerate() {
-            let lvol_bdev_name = self
-                .create_volume_blob(disk, capacity, &volume_id)
+            let lvol_uuid = self
+                .create_volume_lvol(disk, capacity, &volume_id)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
 
-            lvol_bdev_names.push(lvol_bdev_name.clone());
+            lvol_uuids.push(lvol_uuid.clone());
 
             let node = &disk.spec.node;
             let is_local = node == &self.node_id;
+            let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
+            let lvol_bdev_name = self.get_lvol_bdev_name(&lvs_name, &lvol_uuid);
 
             // Configure replica based on location
             if is_local {
@@ -374,7 +395,7 @@ impl Controller for SpdkCsiDriver {
                     replica_type: "lvol".to_string(),
                     pcie_addr: Some(pcie_addr.clone()),
                     disk_ref: disk.metadata.name.clone().unwrap_or_default(),
-                    blob_id: Some(lvol_bdev_name.split('/').last().unwrap_or("").to_string()),
+                    lvol_uuid: Some(lvol_uuid.clone()),
                     health_status: ReplicaHealth::Healthy,
                     last_io_timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     write_sequence: 0,
@@ -407,7 +428,7 @@ impl Controller for SpdkCsiDriver {
                     ip: Some(ip),
                     port: Some("4420".to_string()),
                     disk_ref: disk.metadata.name.clone().unwrap_or_default(),
-                    blob_id: Some(lvol_bdev_name.split('/').last().unwrap_or("").to_string()),
+                    lvol_uuid: Some(lvol_uuid.clone()),
                     health_status: ReplicaHealth::Healthy,
                     last_io_timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     write_sequence: 0,
@@ -418,6 +439,14 @@ impl Controller for SpdkCsiDriver {
         }
 
         // Create RAID-1 configuration with lvol-based bdevs
+        let lvol_bdev_names: Vec<String> = selected_disks.iter()
+            .zip(lvol_uuids.iter())
+            .map(|(disk, uuid)| {
+                let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
+                self.get_lvol_bdev_name(&lvs_name, uuid)
+            })
+            .collect();
+
         self.create_lvol_raid(&volume_id, &lvol_bdev_names)
             .await
             .map_err(|e| Status::internal(format!("Failed to create RAID: {}", e)))?;
@@ -437,7 +466,7 @@ impl Controller for SpdkCsiDriver {
                 size_bytes: capacity,
                 num_replicas,
                 replicas,
-                blob_id: Some(blob_ids[0].clone()), // Primary blob ID
+                primary_lvol_uuid: Some(lvol_uuids[0].clone()),
                 rebuild_in_progress: None,
                 write_ordering_enabled: write_ordering,
             },
@@ -450,11 +479,14 @@ impl Controller for SpdkCsiDriver {
             .map_err(|e| Status::internal(format!("Failed to create SpdkVolume: {}", e)))?;
 
         // Update SpdkDisk status
-        for disk in selected_disks {
+        for (disk, lvol_uuid) in selected_disks.iter().zip(lvol_uuids.iter()) {
             let disk_name = disk.metadata.name.clone().unwrap_or_default();
-            let mut disk_status = disk.status.unwrap_or_default();
+            let mut disk_status = disk.status.clone().unwrap_or_default();
+            
             disk_status.free_space -= capacity;
-            disk_status.blob_count += 1;
+            disk_status.used_space += capacity;
+            disk_status.lvol_count += 1;
+            disk_status.last_checked = chrono::Utc::now().to_rfc3339();
 
             disks
                 .patch_status(
@@ -472,7 +504,7 @@ impl Controller for SpdkCsiDriver {
         volume_context.insert("replicaNodes".to_string(), replica_nodes.join(","));
         volume_context.insert("numReplicas".to_string(), num_replicas.to_string());
         volume_context.insert("writeOrdering".to_string(), write_ordering.to_string());
-        volume_context.insert("primaryLvolBdev".to_string(), lvol_bdev_names[0].clone());
+        volume_context.insert("primaryLvolUuid".to_string(), lvol_uuids[0].clone());
         volume_context.insert("storageType".to_string(), "lvol".to_string());
 
         Ok(Response::new(CreateVolumeResponse {
@@ -509,10 +541,10 @@ impl Controller for SpdkCsiDriver {
 
         // Delete lvols from each replica
         for replica in &spdk_volume.spec.replicas {
-            if let Some(blob_id) = &replica.blob_id {
+            if let Some(lvol_uuid) = &replica.lvol_uuid {
                 let lvs_name = format!("lvs_{}", replica.disk_ref);
-                let lvol_name = format!("{}/{}", lvs_name, blob_id);
-                self.delete_lvol(&lvol_name, &replica.disk_ref).await.ok();
+                let lvol_bdev_name = self.get_lvol_bdev_name(&lvs_name, lvol_uuid);
+                self.delete_lvol(&lvol_bdev_name).await.ok();
 
                 // Remove NVMe-oF export if applicable
                 if replica.replica_type == "nvmf" {
@@ -526,17 +558,19 @@ impl Controller for SpdkCsiDriver {
         // Update SpdkDisk status
         let disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), "default");
         for replica in &spdk_volume.spec.replicas {
-            if let Ok(mut disk) = disks.get(&replica.disk_ref).await {
-                if let Some(ref mut status) = disk.status {
-                    status.free_space += spdk_volume.spec.size_bytes;
-                    status.blob_count = status.blob_count.saturating_sub(1);
-                }
+            if let Ok(disk) = disks.get(&replica.disk_ref).await {
+                let mut disk_status = disk.status.unwrap_or_default();
+                disk_status.free_space += spdk_volume.spec.size_bytes;
+                disk_status.used_space -= spdk_volume.spec.size_bytes;
+                disk_status.lvol_count = disk_status.lvol_count.saturating_sub(1);
+                disk_status.last_checked = chrono::Utc::now().to_rfc3339();
+
                 disks
                     .patch_status(
                         &replica.disk_ref,
                         &PatchParams::default(),
                         &Patch::Merge(json!({
-                            "status": disk.status
+                            "status": disk_status
                         })),
                     )
                     .await
@@ -548,7 +582,7 @@ impl Controller for SpdkCsiDriver {
         crd_api.delete(&volume_id, &Default::default()).await.ok();
 
         // Remove from local cache
-        self.local_blobstore_cache.lock().await.remove(&volume_id);
+        self.local_lvol_cache.lock().await.remove(&volume_id);
 
         Ok(Response::new(DeleteVolumeResponse {}))
     }
@@ -656,8 +690,8 @@ impl SpdkCsiDriver {
                     "raid_level": 1,
                     "base_bdevs": lvol_bdev_names,
                     "write_ordering": true,
-                    "read_policy": "primary_first", // Prefer reading from primary replica
-                    "rebuild_support": true // Enable automatic rebuild support
+                    "read_policy": "primary_first",
+                    "rebuild_support": true
                 }
             }))
             .send()
@@ -684,7 +718,6 @@ impl SpdkCsiDriver {
     async fn delete_lvol(
         &self,
         lvol_bdev_name: &str,
-        disk_ref: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let http_client = HttpClient::new();
 
@@ -695,197 +728,6 @@ impl SpdkCsiDriver {
                 "method": "bdev_lvol_delete",
                 "params": {
                     "name": lvol_bdev_name
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn export_blob_as_nvmf(
-        &self,
-        blob_id: &str,
-        nqn: &str,
-        ip: &str,
-        port: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        // Create NVMe-oF subsystem
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_create_subsystem",
-                "params": {
-                    "nqn": nqn,
-                    "serial_number": format!("SPDK{}", blob_id),
-                    "allow_any_host": true
-                }
-            }))
-            .send()
-            .await?;
-
-        // Add blob as namespace
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_ns",
-                "params": {
-                    "nqn": nqn,
-                    "bdev_name": format!("blob_{}", blob_id),
-                    "nsid": 1
-                }
-            }))
-            .send()
-            .await?;
-
-        // Add listener
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_listener",
-                "params": {
-                    "nqn": nqn,
-                    "trtype": "tcp",
-                    "traddr": ip,
-                    "trsvcid": port
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn create_blob_raid(
-        &self,
-        volume_id: &str,
-        blob_ids: &[String],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        // Create bdevs from blobs
-        let mut base_bdevs = Vec::new();
-        for (i, blob_id) in blob_ids.iter().enumerate() {
-            let bdev_name = format!("blob_bdev_{}", i);
-            http_client
-                .post(&self.spdk_rpc_url)
-                .json(&json!({
-                    "method": "bdev_blob_create",
-                    "params": {
-                        "blob_id": blob_id,
-                        "bdev_name": bdev_name
-                    }
-                }))
-                .send()
-                .await?;
-            base_bdevs.push(bdev_name);
-        }
-
-        // Create RAID-1 with write ordering
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_create",
-                "params": {
-                    "name": volume_id,
-                    "block_size": 4096,
-                    "raid_level": 1,
-                    "base_bdevs": base_bdevs,
-                    "write_ordering": true,
-                    "read_policy": "primary_first" // Prefer reading from primary replica
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_blob_raid(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_delete",
-                "params": { "name": volume_id }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_blob(
-        &self,
-        blob_id: &str,
-        disk_ref: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-        let blobstore_name = format!("bs_{}", disk_ref);
-
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "blob_delete",
-                "params": {
-                    "blobstore_name": blobstore_name,
-                    "blob_id": blob_id
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn unexport_nvmf_target(&self, nqn: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_delete_subsystem",
-                "params": { "nqn": nqn }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_blob_raid(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_delete",
-                "params": { "name": volume_id }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn delete_blob(
-        &self,
-        blob_id: &str,
-        disk_ref: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-        let blobstore_name = format!("bs_{}", disk_ref);
-
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "blob_delete",
-                "params": {
-                    "blobstore_name": blobstore_name,
-                    "blob_id": blob_id
                 }
             }))
             .send()
@@ -929,10 +771,6 @@ impl Node for SpdkCsiDriver {
 
         // Parse volume context
         let context = req.volume_context;
-        let replica_nodes: Vec<String> = context
-            .get("replicaNodes")
-            .map(|s| s.split(',').map(String::from).collect())
-            .unwrap_or_default();
         let write_ordering_enabled = context
             .get("writeOrdering")
             .and_then(|s| s.parse::<bool>().ok())
@@ -1163,48 +1001,7 @@ impl SpdkCsiDriver {
         pod_node: &str,
         context: &HashMap<String, String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        // Check for local replica first (best performance)
-        for i in 0..10 {
-            // Support up to 10 replicas
-            if let Some(nvme_addr) = context.get(&format!("nvmeAddr{}", i)) {
-                if let Some(blob_id) = context.get(&format!("blobId{}", i)) {
-                    // Check if this replica is on the current node
-                    if self.is_replica_local(volume_id, i, pod_node).await? {
-                        // Bind NVMe device to kernel driver for direct access
-                        rebind_nvme_to_kernel(nvme_addr)?;
-                        let device_path = find_nvme_device(nvme_addr)?;
-
-                        // Create blob device access
-                        self.setup_blob_device_access(&device_path, blob_id).await?;
-                        return Ok(device_path);
-                    }
-                }
-            }
-        }
-
-        // Fall back to NVMe-oF access
-        for i in 0..10 {
-            if let (Some(nqn), Some(ip), Some(port)) = (
-                context.get(&format!("nvmfNQN{}", i)),
-                context.get(&format!("nvmfIP{}", i)),
-                context.get(&format!("nvmfPort{}", i)),
-            ) {
-                connect_nvmf(nqn, ip, port)?;
-                return find_nvmf_device(nqn);
-            }
-        }
-
-        // Last resort: Use RAID device directly
-        Ok(format!("/dev/spdk/{}", volume_id))
-    }
-
-    async fn get_optimal_device_path(
-        &self,
-        volume_id: &str,
-        pod_node: &str,
-        context: &HashMap<String, String>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let storage_type = context.get("storageType").unwrap_or(&"blob".to_string());
+        let storage_type = context.get("storageType").unwrap_or(&"lvol".to_string());
 
         // Check for local replica first (best performance)
         for i in 0..10 {
@@ -1213,23 +1010,8 @@ impl SpdkCsiDriver {
                 if let Some(bdev_identifier) = context.get(&format!("{}Bdev{}", storage_type, i)) {
                     // Check if this replica is on the current node
                     if self.is_replica_local(volume_id, i, pod_node).await? {
-                        // Bind NVMe device to kernel driver for direct access
-                        rebind_nvme_to_kernel(nvme_addr)?;
-                        let device_path = find_nvme_device(nvme_addr)?;
-
-                        // Create device access for the specific storage type
-                        match storage_type.as_str() {
-                            "lvol" => {
-                                self.setup_lvol_device_access(&device_path, bdev_identifier)
-                                    .await?
-                            }
-                            "blob" => {
-                                self.setup_blob_device_access(&device_path, bdev_identifier)
-                                    .await?
-                            }
-                            _ => return Err("Unknown storage type".into()),
-                        }
-                        return Ok(device_path);
+                        // For local access, use the RAID device directly
+                        return Ok(format!("/dev/spdk/{}", volume_id));
                     }
                 }
             }
@@ -1251,52 +1033,20 @@ impl SpdkCsiDriver {
         Ok(format!("/dev/spdk/{}", volume_id))
     }
 
-    async fn setup_lvol_device_access(
+    async fn is_replica_local(
         &self,
-        device_path: &str,
-        lvol_bdev_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        // Configure lvol for direct device access
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_lvol_set_device_access",
-                "params": {
-                    "lvol_name": lvol_bdev_name,
-                    "device_path": device_path,
-                    "access_mode": "direct"
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn setup_blob_device_access(
-        &self,
-        device_path: &str,
-        blob_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-
-        // Configure blob for direct device access
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "blob_set_device_access",
-                "params": {
-                    "blob_id": blob_id,
-                    "device_path": device_path,
-                    "access_mode": "direct"
-                }
-            }))
-            .send()
-            .await?;
-
-        Ok(())
+        volume_id: &str,
+        replica_index: usize,
+        pod_node: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let spdk_volume = crd_api.get(volume_id).await?;
+        
+        if let Some(replica) = spdk_volume.spec.replicas.get(replica_index) {
+            Ok(replica.node == pod_node)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn configure_ordered_io(
@@ -1322,18 +1072,18 @@ impl SpdkCsiDriver {
             .await?;
 
         // Configure device queue depth for optimal performance
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "echo 32 > /sys/block/{}/queue/nr_requests",
-                std::path::Path::new(device_path)
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            ))
-            .status()
-            .ok();
+        if let Some(device_name) = std::path::Path::new(device_path).file_name() {
+            if let Some(device_str) = device_name.to_str() {
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "echo 32 > /sys/block/{}/queue/nr_requests",
+                        device_str
+                    ))
+                    .status()
+                    .ok();
+            }
+        }
 
         Ok(())
     }
@@ -1420,36 +1170,6 @@ async fn get_node_ip(node: &str) -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
-fn rebind_nvme_to_kernel(pcie_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Unbind from SPDK (if bound)
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "echo {} > /sys/bus/pci/drivers/uio_pci_generic/unbind 2>/dev/null || true",
-            pcie_addr
-        ))
-        .status()?;
-
-    // Bind to kernel nvme driver
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "echo {} > /sys/bus/pci/drivers/nvme/bind",
-            pcie_addr
-        ))
-        .status()?;
-
-    // Wait for device to appear
-    for _ in 0..10 {
-        if std::path::Path::new(&format!("/sys/bus/pci/drivers/nvme/{}", pcie_addr)).exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    Ok(())
-}
-
 fn connect_nvmf(nqn: &str, ip: &str, port: &str) -> Result<(), Box<dyn std::error::Error>> {
     Command::new("nvme")
         .args(["connect", "-t", "tcp", "-n", nqn, "-a", ip, "-s", port])
@@ -1465,28 +1185,6 @@ fn disconnect_nvmf(nqn: &str) -> Result<(), Box<dyn std::error::Error>> {
         .args(["disconnect", "-n", nqn])
         .status()?;
     Ok(())
-}
-
-fn find_nvme_device(pcie_addr: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // Look for the NVMe device by PCI address
-    let sys_path = format!("/sys/bus/pci/drivers/nvme/{}/nvme", pcie_addr);
-
-    for entry in std::fs::read_dir("/dev")? {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("nvme") && name.ends_with("n1") {
-                // Check if this device corresponds to our PCI address
-                let device_num = name.trim_start_matches("nvme").trim_end_matches("n1");
-                let expected_sys_path = format!("/sys/class/block/nvme{}n1/device", device_num);
-                if std::path::Path::new(&expected_sys_path).exists() {
-                    return Ok(path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-
-    Err("NVMe device not found".into())
 }
 
 fn find_nvmf_device(nqn: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -1513,7 +1211,6 @@ fn find_nvmf_device(nqn: &str) -> Result<String, Box<dyn std::error::Error>> {
 
 fn is_device_formatted(device: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let output = Command::new("blkid").arg(device).output()?;
-
     Ok(output.status.success() && !output.stdout.is_empty())
 }
 
@@ -1564,7 +1261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         kube_client,
         spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
         write_sequence_counter: Arc::new(Mutex::new(0)),
-        local_blobstore_cache: Arc::new(Mutex::new(HashMap::new())),
+        local_lvol_cache: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let addr = std::env::var("CSI_ENDPOINT")

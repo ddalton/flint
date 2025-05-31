@@ -2,21 +2,25 @@ import React, { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, LineChart, Line, ScatterChart, Scatter } from 'recharts';
 import { RefreshCw, LogOut, Database, HardDrive, Server, AlertTriangle, CheckCircle, X, Settings, Zap, Activity, Monitor, ChevronDown, ChevronRight, Info, Network, Eye, EyeOff } from 'lucide-react';
 
-// Mock authentication service
+// Mock authentication service (FIXED VERSION for local development)
 const authService = {
-  login: async (username, password) => {
+  token: '', // Store in memory instead of localStorage
+  
+  login: async (username: string, password: string) => {
     await new Promise(resolve => setTimeout(resolve, 1000));
     if (username === 'admin' && password === 'spdk-admin-2025') {
-      localStorage.setItem('token', 'mock-token');
+      authService.token = 'mock-token';
       return { success: true };
     }
     throw new Error('Invalid credentials');
   },
+  
   logout: () => {
-    localStorage.removeItem('token');
+    authService.token = '';
   },
+  
   isAuthenticated: () => {
-    return !!localStorage.getItem('token');
+    return !!authService.token;
   }
 };
 
@@ -1205,22 +1209,22 @@ const Dashboard = ({ onLogout }) => {
   );
 };
 
-// Main App Component
+// Main App Component (at the very end)
 const App = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(authService.isAuthenticated());
-
+  
   const handleLogin = () => {
     setIsAuthenticated(true);
   };
-
+  
   const handleLogout = () => {
     setIsAuthenticated(false);
   };
-
+  
   if (!isAuthenticated) {
     return <LoginPage onLogin={handleLogin} />;
   }
-
+  
   return <Dashboard onLogout={handleLogout} />;
 };
 

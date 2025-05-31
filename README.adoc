@@ -110,3 +110,28 @@ Deployment Topology
 │  │ └─────────┘     └─────────┘     └─────────┘             ││
 │  └─────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────┘
+
+= UI application
+
+npm create vite@latest spdk-dashboard -- --template react-ts
+
+cd spdk-dashboard
+
+# Install the base dependencies
+npm install
+
+# Install the additional libraries your dashboard needs
+npm install recharts lucide-react
+
+# Install Tailwind CSS
+npm install -D tailwindcss postcss autoprefixer
+
+npm uninstall tailwindcss
+npm install -D tailwindcss@^3.4.0
+
+
+~/Documents/spdk-dashboard/src/App.tsx
+
+npm run dev
+
+

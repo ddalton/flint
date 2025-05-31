@@ -27,8 +27,9 @@ mod spdk_csi_driver {
         pub size_bytes: i64,
         pub num_replicas: i32,
         pub replicas: Vec<Replica>,
-        pub blob_id: Option<String>, // SPDK blobstore blob ID
+        pub primary_lvol_uuid: Option<String>, // Primary logical volume UUID
         pub rebuild_in_progress: Option<ReplicationState>,
+        pub write_ordering_enabled: bool,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -43,10 +44,10 @@ mod spdk_csi_driver {
         pub local_pod_scheduled: bool,
         pub pod_name: Option<String>,
         pub disk_ref: String,
-        pub blob_id: Option<String>, // Individual replica blob ID
+        pub lvol_uuid: Option<String>, // Logical volume UUID for this replica
         pub health_status: ReplicaHealth,
         pub last_io_timestamp: Option<String>,
-        pub write_sequence: u64, // For write ordering
+        pub write_sequence: u64,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -55,7 +56,7 @@ mod spdk_csi_driver {
         pub source_replica_index: usize,
         pub snapshot_id: String,
         pub copy_progress: f64,
-        pub phase: String, // "snapshot", "copy", "sync", "finalize"
+        pub phase: String,
         pub started_at: String,
         pub catch_write_log: Vec<WriteOperation>,
         pub write_barrier_active: bool,
@@ -99,15 +100,29 @@ mod spdk_csi_driver {
         pub pcie_addr: String,
         pub capacity: i64,
         pub blobstore_uuid: Option<String>,
+        pub nvme_controller_id: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
     pub struct SpdkDiskStatus {
+        pub total_capacity: i64,
         pub free_space: i64,
+        pub used_space: i64,
         pub healthy: bool,
         pub last_checked: String,
-        pub blob_count: u32,
+        pub lvol_count: u32,
         pub blobstore_initialized: bool,
+        pub io_stats: IoStatistics,
+        pub lvs_name: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct IoStatistics {
+        pub read_iops: u64,
+        pub write_iops: u64,
+        pub read_latency_us: u64,
+        pub write_latency_us: u64,
+        pub error_count: u64,
     }
 }
 
@@ -119,10 +134,18 @@ struct Context {
     max_retries: u32,
     snapshot_retention: String,
     write_barrier_timeout: u64,
-    disk_discovery_enabled: bool,
-    disk_discovery_interval: u64,
     active_rebuilds: Arc<RwLock<HashMap<String, ReplicationState>>>,
     write_sequence_counter: Arc<Mutex<u64>>,
+}
+
+#[derive(Debug, Clone)]
+struct NvmeDevice {
+    controller_id: String,
+    pcie_addr: String,
+    capacity: i64,
+    model: String,
+    serial: String,
+    firmware_version: String,
 }
 
 #[tokio::main]
@@ -138,8 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_retries: env::var("REBUILD_MAX_RETRIES").unwrap_or("3".to_string()).parse().unwrap_or(3),
         snapshot_retention: env::var("SNAPSHOT_RETENTION").unwrap_or("1h".to_string()),
         write_barrier_timeout: env::var("WRITE_BARRIER_TIMEOUT").unwrap_or("30".to_string()).parse().unwrap_or(30),
-        disk_discovery_enabled: env::var("DISK_DISCOVERY_ENABLED").unwrap_or("true".to_string()).parse().unwrap_or(true),
-        disk_discovery_interval: env::var("DISK_DISCOVERY_INTERVAL").unwrap_or("300".to_string()).parse().unwrap_or(300),
         active_rebuilds: Arc::new(RwLock::new(HashMap::new())),
         write_sequence_counter: Arc::new(Mutex::new(0)),
     });
@@ -149,10 +170,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         health_monitor_task(health_ctx).await;
     });
-
-    // Note: Disk discovery is now handled by the node DaemonSet
-    // Each node agent discovers local disks and creates/updates SpdkDisk resources
-    // The controller only manages volume operations and rebuilds
 
     Controller::new(spdk_volumes, watcher::Config::default())
         .run(reconcile, error_policy, ctx)
@@ -238,18 +255,20 @@ async fn check_replica_health(
     let http_client = HttpClient::new();
     let mut health_results = Vec::new();
 
-    for (i, replica) in spdk_volume.spec.replicas.iter().enumerate() {
-        // Check blobstore health via SPDK RPC
-        let blob_id = replica.blob_id.as_ref()
-            .ok_or("Missing blob ID for replica")?;
+    for replica in spdk_volume.spec.replicas.iter() {
+        // Check lvol health via SPDK RPC
+        let lvol_uuid = replica.lvol_uuid.as_ref()
+            .ok_or("Missing lvol UUID for replica")?;
+        
+        let lvs_name = format!("lvs_{}", replica.disk_ref);
+        let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
         
         let response = http_client
             .post(&ctx.spdk_rpc_url)
             .json(&json!({
-                "method": "blob_get_info",
+                "method": "bdev_get_bdevs",
                 "params": {
-                    "blobstore_name": format!("bs_{}", replica.disk_ref),
-                    "blob_id": blob_id
+                    "name": lvol_bdev_name
                 }
             }))
             .send()
@@ -259,7 +278,7 @@ async fn check_replica_health(
             Ok(resp) => {
                 if resp.status().is_success() {
                     // Additional I/O health check
-                    if perform_io_health_check(&http_client, &ctx.spdk_rpc_url, blob_id).await? {
+                    if perform_io_health_check(&http_client, &ctx.spdk_rpc_url, &lvol_bdev_name).await? {
                         ReplicaHealth::Healthy
                     } else {
                         ReplicaHealth::Degraded
@@ -280,19 +299,15 @@ async fn check_replica_health(
 async fn perform_io_health_check(
     http_client: &HttpClient,
     spdk_rpc_url: &str,
-    blob_id: &str,
+    lvol_bdev_name: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Perform a small test read to verify I/O functionality
-    let test_data = vec![0u8; 4096]; // 4KB test
-    
     let response = http_client
         .post(spdk_rpc_url)
         .json(&json!({
-            "method": "blob_io_read",
+            "method": "bdev_get_iostat",
             "params": {
-                "blob_id": blob_id,
-                "offset": 0,
-                "length": 4096
+                "name": lvol_bdev_name
             }
         }))
         .send()
@@ -320,8 +335,8 @@ async fn initiate_replica_rebuild(
         spdk_disks,
     ).await?;
 
-    // Create blobstore snapshot
-    let snapshot_id = create_blobstore_snapshot(
+    // Create lvol snapshot for rebuild
+    let snapshot_id = create_lvol_snapshot(
         ctx,
         &spdk_volume.spec.replicas[source_replica_index],
     ).await?;
@@ -363,7 +378,7 @@ async fn initiate_replica_rebuild(
     Ok(())
 }
 
-async fn create_blobstore_snapshot(
+async fn create_lvol_snapshot(
     ctx: &Context,
     source_replica: &Replica,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -373,14 +388,11 @@ async fn create_blobstore_snapshot(
         Utc::now().timestamp()
     );
     
-    // Get the source bdev name for the replica
-    let source_bdev_name = if let Some(blob_id) = &source_replica.blob_id {
-        format!("lvol_{}", blob_id)
-    } else if let Some(pcie_addr) = &source_replica.pcie_addr {
-        format!("Nvme_{}n1", pcie_addr.replace(":", "_"))
-    } else {
-        return Err("No valid bdev identifier found for source replica".into());
-    };
+    // Get the source lvol bdev name
+    let lvol_uuid = source_replica.lvol_uuid.as_ref()
+        .ok_or("Missing lvol UUID for source replica")?;
+    let lvs_name = format!("lvs_{}", source_replica.disk_ref);
+    let source_lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
     // Create snapshot using SPDK lvol snapshot functionality
     http_client
@@ -388,7 +400,7 @@ async fn create_blobstore_snapshot(
         .json(&json!({
             "method": "bdev_lvol_snapshot",
             "params": {
-                "lvol_name": source_bdev_name,
+                "lvol_name": source_lvol_name,
                 "snapshot_name": snapshot_name
             }
         }))
@@ -411,25 +423,25 @@ async fn execute_replica_rebuild(
     update_rebuild_phase(&ctx, volume_id, "pause").await?;
     pause_raid_writes(&ctx, volume_id).await?;
     
-    // Phase 2: Create snapshot of healthy replica bdev
+    // Phase 2: Create snapshot of healthy replica lvol
     update_rebuild_phase(&ctx, volume_id, "snapshot").await?;
-    let source_bdev_name = get_replica_bdev_name(&spdk_volume, rebuild_state.source_replica_index)?;
-    let snapshot_name = create_bdev_snapshot(&ctx, &source_bdev_name, volume_id).await?;
+    let source_replica = &spdk_volume.spec.replicas[rebuild_state.source_replica_index];
+    let snapshot_name = create_lvol_snapshot(&ctx, source_replica).await?;
     
     // Phase 3: Initialize target lvol store and create thin provisioned lvol
     update_rebuild_phase(&ctx, volume_id, "provision").await?;
     let target_lvs_name = initialize_target_lvol_store(&ctx, &replacement_disk).await?;
     let target_lvol_name = create_thin_provisioned_lvol(&ctx, &target_lvs_name, &snapshot_name, volume_id).await?;
     
-    // Phase 4: Add new lvol bdev to RAID-1 configuration (while writes still paused)
+    // Phase 4: Add new lvol bdev to RAID-1 configuration
     update_rebuild_phase(&ctx, volume_id, "integrate").await?;
-    add_bdev_to_raid(&ctx, volume_id, &target_lvol_name, rebuild_state.target_replica_index).await?;
+    add_lvol_to_raid(&ctx, volume_id, &target_lvol_name, rebuild_state.target_replica_index).await?;
     
     // Phase 5: Unpause writes - RAID will handle synchronization automatically
     update_rebuild_phase(&ctx, volume_id, "unpause").await?;
     unpause_raid_writes(&ctx, volume_id).await?;
     
-    // Phase 6: Inflate the thin provisioned lvol (make it independent) - background operation
+    // Phase 6: Inflate the thin provisioned lvol (make it independent)
     update_rebuild_phase(&ctx, volume_id, "inflate").await?;
     inflate_thin_provisioned_lvol(&ctx, &target_lvol_name).await?;
     
@@ -487,49 +499,6 @@ async fn unpause_raid_writes(
     Ok(())
 }
 
-fn get_replica_bdev_name(
-    spdk_volume: &SpdkVolume,
-    replica_index: usize,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let replica = spdk_volume.spec.replicas.get(replica_index)
-        .ok_or("Invalid replica index")?;
-    
-    // Construct bdev name based on replica type
-    let bdev_name = if let Some(blob_id) = &replica.blob_id {
-        format!("lvol_{}", blob_id)
-    } else if let Some(pcie_addr) = &replica.pcie_addr {
-        format!("Nvme_{}n1", pcie_addr.replace(":", "_"))
-    } else {
-        return Err("No valid bdev identifier found for replica".into());
-    };
-    
-    Ok(bdev_name)
-}
-
-async fn create_bdev_snapshot(
-    ctx: &Context,
-    source_bdev_name: &str,
-    volume_id: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    let snapshot_name = format!("snap_{}_{}", volume_id, Utc::now().timestamp());
-    
-    // Create a snapshot of the source bdev
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_lvol_snapshot",
-            "params": {
-                "lvol_name": source_bdev_name,
-                "snapshot_name": snapshot_name
-            }
-        }))
-        .send()
-        .await?;
-
-    Ok(snapshot_name)
-}
-
 async fn initialize_target_lvol_store(
     ctx: &Context,
     replacement_disk: &SpdkDisk,
@@ -555,14 +524,15 @@ async fn initialize_target_lvol_store(
 
     if !store_exists {
         // Create new lvol store on the replacement disk
+        let bdev_name = format!("{}n1", replacement_disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string()));
         http_client
             .post(&ctx.spdk_rpc_url)
             .json(&json!({
                 "method": "bdev_lvol_create_lvstore",
                 "params": {
-                    "bdev_name": replacement_disk.spec.pcie_addr,
+                    "bdev_name": bdev_name,
                     "lvs_name": lvs_name,
-                    "cluster_sz": 65536 // 64KB clusters for good performance
+                    "cluster_sz": 65536
                 }
             }))
             .send()
@@ -579,7 +549,7 @@ async fn create_thin_provisioned_lvol(
     volume_id: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let http_client = HttpClient::new();
-    let lvol_name = format!("lvol_{}_{}", volume_id, Utc::now().timestamp());
+    let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
     
     // Create thin provisioned logical volume using snapshot as base
     http_client
@@ -601,7 +571,7 @@ async fn create_thin_provisioned_lvol(
     Ok(format!("{}/{}", lvs_name, lvol_name))
 }
 
-async fn add_bdev_to_raid(
+async fn add_lvol_to_raid(
     ctx: &Context,
     volume_id: &str,
     target_lvol_name: &str,
@@ -666,6 +636,99 @@ async fn add_bdev_to_raid(
     Ok(())
 }
 
+async fn inflate_thin_provisioned_lvol(
+    ctx: &Context,
+    target_lvol_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let http_client = HttpClient::new();
+    
+    // Inflate the thin provisioned lvol to make it independent from the snapshot
+    http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_lvol_inflate",
+            "params": {
+                "name": target_lvol_name
+            }
+        }))
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+async fn finalize_rebuild_with_lvol(
+    ctx: &Context,
+    spdk_volume: &SpdkVolume,
+    rebuild_state: &ReplicationState,
+    replacement_disk: SpdkDisk,
+    target_lvol_name: String,
+    snapshot_name: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let volume_id = &spdk_volume.spec.volume_id;
+    
+    // Extract the lvol UUID for CRD update
+    let lvol_uuid = get_lvol_uuid(&ctx, &target_lvol_name).await?;
+    
+    // Update volume spec - replace failed replica
+    let mut new_spec = spdk_volume.spec.clone();
+    new_spec.replicas[rebuild_state.target_replica_index] = Replica {
+        node: replacement_disk.spec.node.clone(),
+        replica_type: "lvol".to_string(),
+        pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
+        disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
+        lvol_uuid: Some(lvol_uuid),
+        nqn: Some(format!("nqn.2025-05.io.spdk:lvol-{}", target_lvol_name.replace('/', "-"))),
+        health_status: ReplicaHealth::Healthy,
+        last_io_timestamp: Some(Utc::now().to_rfc3339()),
+        write_sequence: 0,
+        local_pod_scheduled: false,
+        ..Default::default()
+    };
+    new_spec.rebuild_in_progress = None;
+    
+    // Update Kubernetes resources
+    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
+    spdk_volumes
+        .patch(volume_id, &PatchParams::default(), &Patch::Merge(json!({
+            "spec": new_spec,
+            "status": {
+                "state": "Healthy",
+                "degraded": false,
+                "last_checked": Utc::now().to_rfc3339(),
+                "active_replicas": (0..spdk_volume.spec.num_replicas).collect::<Vec<_>>(),
+                "failed_replicas": []
+            }
+        })))
+        .await?;
+    
+    // Update SpdkDisk status to reflect actual usage after inflation
+    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
+    let disk_name = replacement_disk.metadata.name.clone().unwrap_or_default();
+    let mut disk_status = replacement_disk.status.unwrap_or_default();
+    
+    // After inflation, the lvol now uses the full space
+    disk_status.free_space -= spdk_volume.spec.size_bytes;
+    disk_status.used_space += spdk_volume.spec.size_bytes;
+    disk_status.lvol_count += 1;
+    
+    disks
+        .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
+            "status": disk_status
+        })))
+        .await?;
+    
+    // Cleanup snapshot after successful rebuild
+    cleanup_snapshot(&ctx, &snapshot_name).await?;
+    
+    // Remove from active rebuilds tracking
+    ctx.active_rebuilds.write().await.remove(volume_id);
+    
+    println!("Successfully completed rebuild for volume {} with inflated lvol replica", volume_id);
+    
+    Ok(())
+}
+
 async fn get_lvol_uuid(
     ctx: &Context,
     lvol_name: &str,
@@ -713,77 +776,6 @@ async fn cleanup_snapshot(
     Ok(())
 }
 
-async fn finalize_rebuild_with_lvol(
-    ctx: &Context,
-    spdk_volume: &SpdkVolume,
-    rebuild_state: &ReplicationState,
-    replacement_disk: SpdkDisk,
-    target_lvol_name: String,
-    snapshot_name: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let volume_id = &spdk_volume.spec.volume_id;
-    
-    // Extract the lvol UUID for CRD update
-    let lvol_uuid = get_lvol_uuid(&ctx, &target_lvol_name).await?;
-    
-    // Update volume spec - replace failed replica
-    let mut new_spec = spdk_volume.spec.clone();
-    new_spec.replicas[rebuild_state.target_replica_index] = Replica {
-        node: replacement_disk.spec.node.clone(),
-        replica_type: "lvol".to_string(),
-        pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
-        disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
-        blob_id: Some(lvol_uuid),
-        nqn: Some(format!("nqn.2025-05.io.spdk:lvol-{}", target_lvol_name.replace('/', "-"))),
-        health_status: ReplicaHealth::Healthy,
-        last_io_timestamp: Some(Utc::now().to_rfc3339()),
-        write_sequence: 0, // Reset write sequence for new replica
-        local_pod_scheduled: false,
-        ..Default::default()
-    };
-    new_spec.rebuild_in_progress = None;
-    
-    // Update Kubernetes resources
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    spdk_volumes
-        .patch(volume_id, &PatchParams::default(), &Patch::Merge(json!({
-            "spec": new_spec,
-            "status": {
-                "state": "Healthy",
-                "degraded": false,
-                "last_checked": Utc::now().to_rfc3339(),
-                "active_replicas": (0..spdk_volume.spec.num_replicas).collect::<Vec<_>>(),
-                "failed_replicas": []
-            }
-        })))
-        .await?;
-    
-    // Update SpdkDisk status to reflect actual usage after inflation
-    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_name = replacement_disk.metadata.name.clone().unwrap_or_default();
-    let mut disk_status = replacement_disk.status.unwrap_or_default();
-    
-    // After inflation, the lvol now uses the full space
-    disk_status.free_space -= spdk_volume.spec.size_bytes;
-    disk_status.blob_count += 1;
-    
-    disks
-        .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
-            "status": disk_status
-        })))
-        .await?;
-    
-    // Cleanup snapshot after successful rebuild
-    cleanup_snapshot(&ctx, &snapshot_name).await?;
-    
-    // Remove from active rebuilds tracking
-    ctx.active_rebuilds.write().await.remove(volume_id);
-    
-    println!("Successfully completed rebuild for volume {} with inflated lvol replica", volume_id);
-    
-    Ok(())
-}
-
 // Helper functions
 async fn select_best_source_replica(
     spdk_volume: &SpdkVolume,
@@ -814,8 +806,16 @@ async fn find_replacement_disk(
     let available_disks = spdk_disks.list(&ListParams::default()).await?
         .items
         .into_iter()
-        .filter(|d| d.status.as_ref().map(|s| s.healthy && s.free_space >= required_capacity).unwrap_or(false))
-        .filter(|d| !used_nodes.contains(&d.spec.node))
+        .filter(|d| {
+            if let Some(status) = &d.status {
+                status.healthy 
+                    && status.blobstore_initialized 
+                    && status.free_space >= required_capacity 
+                    && !used_nodes.contains(&d.spec.node)
+            } else {
+                false
+            }
+        })
         .collect::<Vec<_>>();
     
     available_disks
@@ -865,307 +865,24 @@ async fn health_monitor_task(ctx: Arc<Context>) {
     }
 }
 
-async fn disk_discovery_task(ctx: Arc<Context>) {
-    let mut interval = interval(Duration::from_secs(ctx.disk_discovery_interval));
-    
-    loop {
-        interval.tick().await;
-        
-        if let Err(e) = discover_and_update_disks(&ctx).await {
-            eprintln!("Disk discovery failed: {}", e);
-        }
-    }
-}
-
-async fn discover_and_update_disks(ctx: &Context) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting automatic disk discovery...");
-    
-    // Get all Kubernetes nodes
-    let nodes: Api<k8s_openapi::api::core::v1::Node> = Api::all(ctx.client.clone());
-    let node_list = nodes.list(&ListParams::default()).await?;
-    
-    for node in node_list.items {
-        let node_name = node.metadata.name.as_ref()
-            .ok_or("Node missing name")?;
-        
-        // Skip if node is not ready
-        if !is_node_ready(&node) {
-            continue;
-        }
-        
-        // Discover NVMe devices on this node
-        if let Err(e) = discover_node_nvme_devices(ctx, node_name).await {
-            eprintln!("Failed to discover devices on node {}: {}", node_name, e);
-        }
-    }
-    
-    // Clean up stale disk resources
-    cleanup_stale_disks(ctx).await?;
-    
-    println!("Disk discovery completed");
-    Ok(())
-}
-
-fn is_node_ready(node: &k8s_openapi::api::core::v1::Node) -> bool {
-    if let Some(status) = &node.status {
-        if let Some(conditions) = &status.conditions {
-            return conditions.iter().any(|condition| {
-                condition.type_ == "Ready" && condition.status == "True"
-            });
-        }
-    }
-    false
-}
-
-async fn discover_node_nvme_devices(ctx: &Context, node_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Query the node for NVMe devices through a DaemonSet or node agent
-    let discovered_devices = query_node_nvme_devices(ctx, node_name).await?;
-    
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    
-    for device in discovered_devices {
-        let disk_name = format!("{}-{}", node_name, device.controller_id);
-        
-        // Check if SpdkDisk already exists
-        match spdk_disks.get(&disk_name).await {
-            Ok(mut existing_disk) => {
-                // Update existing disk if needed
-                if should_update_disk(&existing_disk, &device) {
-                    update_existing_disk(ctx, &mut existing_disk, &device).await?;
-                }
-            }
-            Err(_) => {
-                // Create new SpdkDisk resource
-                create_new_disk_resource(ctx, node_name, &device).await?;
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-async fn query_node_nvme_devices(ctx: &Context, node_name: &str) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error>> {
-    // In a real implementation, this would query the SPDK daemon running on the node
-    // For now, simulate discovery via SPDK RPC calls to the node's SPDK instance
-    
-    let node_spdk_url = format!("http://{}:5260", get_node_ip_internal(node_name).await?);
-    let http_client = HttpClient::new();
-    
-    // Get all NVMe controllers
-    let response = http_client
-        .post(&node_spdk_url)
-        .json(&json!({
-            "method": "bdev_nvme_get_controllers"
-        }))
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        return Ok(Vec::new()); // Node might not have SPDK running yet
-    }
-    
-    let controllers: serde_json::Value = response.json().await?;
-    let mut devices = Vec::new();
-    
-    if let Some(controller_list) = controllers["result"].as_array() {
-        for controller in controller_list {
-            if let Some(device) = parse_nvme_controller(controller) {
-                devices.push(device);
-            }
-        }
-    }
-    
-    Ok(devices)
-}
-
-fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
-    let name = controller["name"].as_str()?;
-    let pcie_addr = controller["trid"]["traddr"].as_str()?;
-    
-    // Get capacity from the first namespace
-    let namespaces = controller["namespaces"].as_array()?;
-    let capacity = if let Some(ns) = namespaces.first() {
-        ns["size"].as_u64().unwrap_or(0) as i64
-    } else {
-        0
-    };
-    
-    Some(NvmeDevice {
-        controller_id: name.to_string(),
-        pcie_addr: pcie_addr.to_string(),
-        capacity,
-        model: controller["model"].as_str().unwrap_or("Unknown").to_string(),
-        serial: controller["serial"].as_str().unwrap_or("Unknown").to_string(),
-        firmware_version: controller["fw_rev"].as_str().unwrap_or("Unknown").to_string(),
-    })
-}
-
-async fn create_new_disk_resource(ctx: &Context, node_name: &str, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error>> {
-    let disk_name = format!("{}-{}", node_name, device.controller_id);
-    
-    let spdk_disk = SpdkDisk::new(&disk_name, SpdkDiskSpec {
-        node: node_name.to_string(),
-        pcie_addr: device.pcie_addr.clone(),
-        capacity: device.capacity,
-        blobstore_uuid: None,
-        nvme_controller_id: Some(device.controller_id.clone()),
-    });
-    
-    // Initialize status
-    let mut spdk_disk_with_status = spdk_disk;
-    spdk_disk_with_status.status = Some(SpdkDiskStatus {
-        free_space: device.capacity,
-        healthy: true,
-        last_checked: Utc::now().to_rfc3339(),
-        blob_count: 0,
-        blobstore_initialized: false,
-        io_stats: IoStatistics::default(),
-    });
-    
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    spdk_disks.create(&PostParams::default(), &spdk_disk_with_status).await?;
-    
-    println!("Created SpdkDisk resource: {} for device {} on node {}", 
-             disk_name, device.pcie_addr, node_name);
-    
-    // Initialize blobstore on the device
-    initialize_blobstore_on_device(ctx, &spdk_disk_with_status).await?;
-    
-    Ok(())
-}
-
-async fn initialize_blobstore_on_device(ctx: &Context, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
-    let node_spdk_url = format!("http://{}:5260", get_node_ip_internal(&disk.spec.node).await?);
-    let http_client = HttpClient::new();
-    
-    let blobstore_name = format!("bs_{}", disk.metadata.name.as_ref().unwrap());
-    
-    // Create blobstore
-    let response = http_client
-        .post(&node_spdk_url)
-        .json(&json!({
-            "method": "bdev_lvol_create_lvstore",
-            "params": {
-                "bdev_name": disk.spec.pcie_addr,
-                "lvs_name": blobstore_name,
-                "cluster_sz": 65536
-            }
-        }))
-        .send()
-        .await;
-    
-    match response {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                // Update disk status to mark blobstore as initialized
-                update_disk_blobstore_status(ctx, disk, true).await?;
-                println!("Initialized blobstore on disk: {}", disk.metadata.name.as_ref().unwrap());
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to initialize blobstore on {}: {}", disk.spec.pcie_addr, e);
-        }
-    }
-    
-    Ok(())
-}
-
-async fn update_disk_blobstore_status(ctx: &Context, disk: &SpdkDisk, initialized: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    
-    let mut status = disk.status.clone().unwrap_or_default();
-    status.blobstore_initialized = initialized;
-    status.last_checked = Utc::now().to_rfc3339();
-    
-    spdk_disks
-        .patch_status(disk_name, &PatchParams::default(), &Patch::Merge(json!({
-            "status": status
-        })))
-        .await?;
-    
-    Ok(())
-}
-
-fn should_update_disk(existing: &SpdkDisk, discovered: &NvmeDevice) -> bool {
-    // Update if capacity changed or if blobstore not initialized
-    existing.spec.capacity != discovered.capacity ||
-    existing.status.as_ref().map(|s| !s.blobstore_initialized).unwrap_or(true)
-}
-
-async fn update_existing_disk(ctx: &Context, disk: &mut SpdkDisk, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error>> {
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    
-    // Update spec if needed
-    if disk.spec.capacity != device.capacity {
-        disk.spec.capacity = device.capacity;
-        
-        spdk_disks
-            .patch(disk_name, &PatchParams::default(), &Patch::Merge(json!({
-                "spec": disk.spec
-            })))
-            .await?;
-    }
-    
-    // Initialize blobstore if not done
-    if disk.status.as_ref().map(|s| !s.blobstore_initialized).unwrap_or(true) {
-        initialize_blobstore_on_device(ctx, disk).await?;
-    }
-    
-    Ok(())
-}
-
-async fn cleanup_stale_disks(ctx: &Context) -> Result<(), Box<dyn std::error::Error>> {
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_list = spdk_disks.list(&ListParams::default()).await?;
-    
-    for disk in disk_list.items {
-        // Check if the node still exists and is ready
-        let nodes: Api<k8s_openapi::api::core::v1::Node> = Api::all(ctx.client.clone());
-        match nodes.get(&disk.spec.node).await {
-            Ok(node) => {
-                if !is_node_ready(&node) {
-                    // Node exists but not ready - update disk status
-                    update_disk_health_status(ctx, &disk, false).await?;
-                }
-            }
-            Err(_) => {
-                // Node no longer exists - mark disk as unhealthy
-                update_disk_health_status(ctx, &disk, false).await?;
-                println!("Marked disk {} as unhealthy due to missing node {}", 
-                        disk.metadata.name.as_ref().unwrap_or("unknown"), disk.spec.node);
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-async fn update_disk_health_status(ctx: &Context, disk: &SpdkDisk, healthy: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    
-    let mut status = disk.status.clone().unwrap_or_default();
-    status.healthy = healthy;
-    status.last_checked = Utc::now().to_rfc3339();
-    
-    spdk_disks
-        .patch_status(disk_name, &PatchParams::default(), &Patch::Merge(json!({
-            "status": status
-        })))
-        .await?;
-    
-    Ok(())
-}
-
 async fn perform_periodic_health_check(ctx: &Context) -> Result<(), Box<dyn std::error::Error>> {
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
     let volumes = spdk_volumes.list(&ListParams::default()).await?;
     
     for volume in volumes {
-        // Trigger reconciliation for each volume
-        // This will be handled by the controller loop
+        // Trigger reconciliation for each volume by updating a timestamp
+        let patch = json!({
+            "metadata": {
+                "annotations": {
+                    "spdk.io/last-health-check": Utc::now().to_rfc3339()
+                }
+            }
+        });
+        
+        spdk_volumes
+            .patch(&volume.spec.volume_id, &PatchParams::default(), &Patch::Merge(patch))
+            .await
+            .ok(); // Ignore errors for health check annotations
     }
     
     Ok(())

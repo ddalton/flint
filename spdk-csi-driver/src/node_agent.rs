@@ -30,12 +30,15 @@ mod spdk_csi_driver {
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
     pub struct SpdkDiskStatus {
+        pub total_capacity: i64,
         pub free_space: i64,
+        pub used_space: i64,
         pub healthy: bool,
         pub last_checked: String,
-        pub blob_count: u32,
+        pub lvol_count: u32,
         pub blobstore_initialized: bool,
         pub io_stats: IoStatistics,
+        pub lvs_name: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -191,7 +194,7 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         }))
         .send()
         .await?;
-    
+
     let controllers: serde_json::Value = response.json().await?;
     let mut devices = Vec::new();
     
@@ -296,12 +299,15 @@ async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Res
     // Set initial status
     let mut spdk_disk_with_status = spdk_disk;
     spdk_disk_with_status.status = Some(SpdkDiskStatus {
+        total_capacity: device.capacity,
         free_space: device.capacity,
+        used_space: 0,
         healthy: true,
         last_checked: Utc::now().to_rfc3339(),
-        blob_count: 0,
+        lvol_count: 0,
         blobstore_initialized: false,
         io_stats: IoStatistics::default(),
+        lvs_name: None,
     });
     
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
@@ -320,15 +326,16 @@ async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Res
 
 async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
     let http_client = HttpClient::new();
-    let blobstore_name = format!("bs_{}", disk.metadata.name.as_ref().unwrap());
+    let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
+    let controller_id = disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string());
     let attach_result = http_client
         .post(&agent.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
-                "name": disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string()),
+                "name": controller_id,
                 "trtype": "PCIe",
                 "traddr": disk.spec.pcie_addr
             }
@@ -336,31 +343,35 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         .send()
         .await;
     
-    // Create blobstore (lvol store)
-    let blobstore_result = http_client
+    // Wait a moment for the device to be ready
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    
+    // Create lvol store (which serves as our blobstore)
+    let bdev_name = format!("{}n1", controller_id);
+    let lvol_store_result = http_client
         .post(&agent.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_lvol_create_lvstore",
             "params": {
-                "bdev_name": format!("{}n1", disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string())),
-                "lvs_name": blobstore_name,
-                "cluster_sz": 65536
+                "bdev_name": bdev_name,
+                "lvs_name": lvs_name,
+                "cluster_sz": 65536 // 64KB clusters for good performance
             }
         }))
         .send()
         .await;
     
-    match blobstore_result {
+    match lvol_store_result {
         Ok(resp) if resp.status().is_success() => {
-            update_disk_blobstore_status(agent, disk, true).await?;
-            println!("Initialized blobstore on disk: {}", disk.metadata.name.as_ref().unwrap());
+            update_disk_blobstore_status(agent, disk, true, Some(lvs_name)).await?;
+            println!("Initialized lvol store on disk: {}", disk.metadata.name.as_ref().unwrap());
         }
         Ok(resp) => {
             let error_text = resp.text().await.unwrap_or_default();
-            eprintln!("Failed to create blobstore on {}: {}", disk.spec.pcie_addr, error_text);
+            eprintln!("Failed to create lvol store on {}: {}", disk.spec.pcie_addr, error_text);
         }
         Err(e) => {
-            eprintln!("Failed to create blobstore on {}: {}", disk.spec.pcie_addr, e);
+            eprintln!("Failed to create lvol store on {}: {}", disk.spec.pcie_addr, e);
         }
     }
     
@@ -382,6 +393,16 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
             }
         });
         spdk_disks.patch(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await?;
+        
+        // Update total capacity in status
+        updated_status.total_capacity = device.capacity;
+        // Adjust free space proportionally
+        let usage_ratio = if updated_status.total_capacity > 0 {
+            updated_status.used_space as f64 / updated_status.total_capacity as f64
+        } else {
+            0.0
+        };
+        updated_status.free_space = device.capacity - (device.capacity as f64 * usage_ratio) as i64;
         needs_update = true;
     }
     
@@ -396,6 +417,7 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     if !updated_status.blobstore_initialized && agent.auto_initialize_blobstore {
         initialize_blobstore_on_device(agent, disk).await?;
         updated_status.blobstore_initialized = true;
+        updated_status.lvs_name = Some(format!("lvs_{}", disk_name));
         needs_update = true;
     }
     
@@ -415,26 +437,42 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
     let http_client = HttpClient::new();
     
     // Check if device is accessible via SPDK
+    let bdev_name = format!("{}n1", device.controller_id);
     let response = http_client
         .post(&agent.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_get_bdevs",
             "params": {
-                "name": format!("{}n1", device.controller_id)
+                "name": bdev_name
             }
         }))
         .send()
         .await?;
     
-    Ok(response.status().is_success())
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    
+    // Additional health checks could be added here
+    // - SMART data analysis
+    // - Temperature monitoring
+    // - Error rate checking
+    
+    Ok(true)
 }
 
-async fn update_disk_blobstore_status(agent: &NodeAgent, disk: &SpdkDisk, initialized: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn update_disk_blobstore_status(
+    agent: &NodeAgent, 
+    disk: &SpdkDisk, 
+    initialized: bool,
+    lvs_name: Option<String>
+) -> Result<(), Box<dyn std::error::Error>> {
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
     let disk_name = disk.metadata.name.as_ref().unwrap();
     
     let mut status = disk.status.clone().unwrap_or_default();
     status.blobstore_initialized = initialized;
+    status.lvs_name = lvs_name;
     status.last_checked = Utc::now().to_rfc3339();
     
     spdk_disks
@@ -458,6 +496,10 @@ async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std:
         .send()
         .await?;
     
+    if !response.status().is_success() {
+        return Ok(()); // Skip if iostat not available
+    }
+    
     let iostat: serde_json::Value = response.json().await?;
     
     if let Some(bdevs) = iostat["result"]["bdevs"].as_array() {
@@ -465,25 +507,94 @@ async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std:
         
         for bdev in bdevs {
             if let Some(bdev_name) = bdev["name"].as_str() {
-                // Find corresponding SpdkDisk
-                let disk_name = format!("{}-{}", agent.node_name, bdev_name);
-                
-                if let Ok(disk) = spdk_disks.get(&disk_name).await {
-                    let mut status = disk.status.unwrap_or_default();
+                // Find corresponding SpdkDisk by matching the bdev name pattern
+                // For NVMe devices, the pattern is usually nvme0n1, nvme1n1, etc.
+                if let Some(controller_part) = bdev_name.strip_suffix("n1") {
+                    let disk_name = format!("{}-{}", agent.node_name, controller_part);
                     
-                    // Update I/O statistics
-                    status.io_stats.read_iops = bdev["read_ios"].as_u64().unwrap_or(0);
-                    status.io_stats.write_iops = bdev["write_ios"].as_u64().unwrap_or(0);
-                    status.io_stats.read_latency_us = bdev["read_latency_ticks"].as_u64().unwrap_or(0) / 1000;
-                    status.io_stats.write_latency_us = bdev["write_latency_ticks"].as_u64().unwrap_or(0) / 1000;
-                    status.last_checked = Utc::now().to_rfc3339();
-                    
-                    spdk_disks
-                        .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
-                            "status": status
-                        })))
-                        .await
-                        .ok(); // Ignore errors for statistics updates
+                    if let Ok(disk) = spdk_disks.get(&disk_name).await {
+                        let mut status = disk.status.unwrap_or_default();
+                        
+                        // Update I/O statistics
+                        status.io_stats.read_iops = bdev["read_ios"].as_u64().unwrap_or(0);
+                        status.io_stats.write_iops = bdev["write_ios"].as_u64().unwrap_or(0);
+                        status.io_stats.read_latency_us = bdev["read_latency_ticks"].as_u64().unwrap_or(0) / 1000;
+                        status.io_stats.write_latency_us = bdev["write_latency_ticks"].as_u64().unwrap_or(0) / 1000;
+                        status.io_stats.error_count = bdev["io_error"].as_u64().unwrap_or(0);
+                        status.last_checked = Utc::now().to_rfc3339();
+                        
+                        spdk_disks
+                            .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
+                                "status": status
+                            })))
+                            .await
+                            .ok(); // Ignore errors for statistics updates
+                    }
+                }
+            }
+        }
+        
+        // Also update lvol store statistics
+        update_lvol_store_statistics(agent, &spdk_disks).await?;
+    }
+    
+    Ok(())
+}
+
+async fn update_lvol_store_statistics(
+    agent: &NodeAgent,
+    spdk_disks: &Api<SpdkDisk>
+) -> Result<(), Box<dyn std::error::Error>> {
+    let http_client = HttpClient::new();
+    
+    // Get lvol store information
+    let response = http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_lvol_get_lvstores"
+        }))
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Ok(());
+    }
+    
+    let lvstores: serde_json::Value = response.json().await?;
+    
+    if let Some(stores) = lvstores["result"].as_array() {
+        for store in stores {
+            if let Some(lvs_name) = store["name"].as_str() {
+                // Extract disk name from lvs name (format: lvs_node-controller)
+                if let Some(disk_name) = lvs_name.strip_prefix("lvs_") {
+                    if let Ok(disk) = spdk_disks.get(disk_name).await {
+                        let mut status = disk.status.unwrap_or_default();
+                        
+                        // Update capacity information from lvol store
+                        let total_data_clusters = store["total_data_clusters"].as_u64().unwrap_or(0);
+                        let free_clusters = store["free_clusters"].as_u64().unwrap_or(0);
+                        let cluster_size = store["cluster_size"].as_u64().unwrap_or(65536);
+                        
+                        let total_capacity = (total_data_clusters * cluster_size) as i64;
+                        let free_space = (free_clusters * cluster_size) as i64;
+                        let used_space = total_capacity - free_space;
+                        
+                        // Count logical volumes in this store
+                        let lvol_count = store["lvols"].as_array().map(|v| v.len()).unwrap_or(0) as u32;
+                        
+                        status.total_capacity = total_capacity;
+                        status.free_space = free_space;
+                        status.used_space = used_space;
+                        status.lvol_count = lvol_count;
+                        status.last_checked = Utc::now().to_rfc3339();
+                        
+                        spdk_disks
+                            .patch_status(disk_name, &PatchParams::default(), &Patch::Merge(json!({
+                                "status": status
+                            })))
+                            .await
+                            .ok();
+                    }
                 }
             }
         }
