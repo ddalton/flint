@@ -20,7 +20,7 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
         <div className="flex justify-between items-center py-4">
           <div className="flex items-center">
             <Database className="w-8 h-8 text-blue-600 mr-3" />
-            <h1 className="text-2xl font-bold text-gray-900">SPDK CSI Dashboard</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Flint Dashboard</h1>
           </div>
           
           <div className="flex items-center gap-4">

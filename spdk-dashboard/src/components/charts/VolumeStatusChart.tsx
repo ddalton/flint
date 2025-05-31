@@ -1,6 +1,6 @@
 import React from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
-import { Database } from 'lucide-react';
+import { Database, CheckCircle, AlertTriangle, XCircle, Settings } from 'lucide-react';
 import type { Volume } from '../../hooks/useDashboardData';
 
 interface VolumeStatusChartProps {
@@ -13,10 +13,28 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
     return acc;
   }, {} as Record<string, number>);
 
+  // Count volumes with rebuilding replica activity separately
+  const volumesWithRebuilding = volumes.filter(v => 
+    v.replica_statuses.some(replica => 
+      replica.status === 'rebuilding' || 
+      replica.rebuild_progress !== null ||
+      replica.is_new_replica
+    )
+  ).length;
+
+  const getStateColor = (status: string) => {
+    switch (status) {
+      case 'Healthy': return '#10b981';
+      case 'Degraded': return '#f59e0b';
+      case 'Failed': return '#ef4444';
+      default: return '#6b7280';
+    }
+  };
+
   const data = Object.entries(statusCounts).map(([status, count]) => ({
     name: status,
     value: count,
-    color: status === 'Healthy' ? '#10b981' : status === 'Rebuilding' ? '#f59e0b' : '#ef4444'
+    color: getStateColor(status)
   }));
 
   return (
@@ -47,13 +65,59 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
         {data.map((item) => (
           <span
             key={item.name}
-            className="px-3 py-1 rounded-full text-sm text-white"
+            className="px-3 py-1 rounded-full text-sm text-white flex items-center gap-1"
             style={{ backgroundColor: item.color }}
           >
+            {item.name === 'Failed' && <XCircle className="w-3 h-3" />}
+            {item.name === 'Degraded' && <AlertTriangle className="w-3 h-3" />}
+            {item.name === 'Healthy' && <CheckCircle className="w-3 h-3" />}
             {item.name}: {item.value}
           </span>
         ))}
       </div>
+      
+      {/* Add rebuilding activity indicator */}
+      {volumesWithRebuilding > 0 && (
+        <div className="mt-4 p-3 bg-orange-50 rounded-lg border border-orange-200">
+          <div className="flex items-center gap-2">
+            <Settings className="w-4 h-4 text-orange-600" />
+            <span className="text-sm font-medium text-orange-800">
+              Rebuilding Activity: {volumesWithRebuilding} volume{volumesWithRebuilding !== 1 ? 's' : ''} 
+              {volumesWithRebuilding === 1 ? ' has' : ' have'} rebuilding replicas
+            </span>
+          </div>
+          <div className="text-xs text-orange-700 mt-1">
+            Replica recovery operations are in progress to restore full redundancy
+          </div>
+        </div>
+      )}
+      
+      {/* Status summary for volume states only */}
+      {(statusCounts.Failed > 0 || statusCounts.Degraded > 0) && (
+        <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+          <h4 className="text-sm font-medium text-gray-700 mb-2">Volume Status Summary</h4>
+          <div className="space-y-1 text-xs">
+            {statusCounts.Failed > 0 && (
+              <div className="flex items-center gap-2 text-red-700">
+                <XCircle className="w-3 h-3" />
+                <span>{statusCounts.Failed} volume{statusCounts.Failed !== 1 ? 's' : ''} failed - immediate attention required</span>
+              </div>
+            )}
+            {statusCounts.Degraded > 0 && (
+              <div className="flex items-center gap-2 text-yellow-700">
+                <AlertTriangle className="w-3 h-3" />
+                <span>{statusCounts.Degraded} volume{statusCounts.Degraded !== 1 ? 's' : ''} degraded - reduced redundancy but functional</span>
+              </div>
+            )}
+            {statusCounts.Healthy > 0 && (
+              <div className="flex items-center gap-2 text-green-700">
+                <CheckCircle className="w-3 h-3" />
+                <span>{statusCounts.Healthy} volume{statusCounts.Healthy !== 1 ? 's' : ''} healthy - all replicas operational</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

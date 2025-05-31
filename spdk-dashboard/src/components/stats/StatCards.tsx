@@ -1,12 +1,15 @@
 import React from 'react';
-import { Database, AlertTriangle, Settings, Zap } from 'lucide-react';
+import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap } from 'lucide-react';
 import type { VolumeFilter } from '../../hooks/useDashboardData';
 
 interface StatCardsProps {
   stats: {
     totalVolumes: number;
+    healthyVolumes: number;
+    degradedVolumes: number;
+    failedVolumes: number;
     faultedVolumes: number;
-    rebuildingVolumes: number;
+    volumesWithRebuilding: number;
     localNVMeVolumes: number;
   };
   activeFilter?: VolumeFilter;
@@ -25,22 +28,44 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       borderColor: 'border-blue-200'
     },
     {
-      id: 'faulted' as VolumeFilter,
-      title: 'Faulted Volumes',
-      value: stats.faultedVolumes,
+      id: 'healthy' as VolumeFilter,
+      title: 'Healthy',
+      value: stats.healthyVolumes,
+      icon: CheckCircle,
+      color: 'text-green-600',
+      bgColor: 'bg-green-50',
+      borderColor: 'border-green-200',
+      subtitle: 'All replicas operational'
+    },
+    {
+      id: 'degraded' as VolumeFilter,
+      title: 'Degraded',
+      value: stats.degradedVolumes,
       icon: AlertTriangle,
+      color: 'text-yellow-600',
+      bgColor: 'bg-yellow-50',
+      borderColor: 'border-yellow-200',
+      subtitle: 'Reduced redundancy'
+    },
+    {
+      id: 'failed' as VolumeFilter,
+      title: 'Failed',
+      value: stats.failedVolumes,
+      icon: XCircle,
       color: 'text-red-600',
       bgColor: 'bg-red-50',
-      borderColor: 'border-red-200'
+      borderColor: 'border-red-200',
+      subtitle: 'Immediate attention needed'
     },
     {
       id: 'rebuilding' as VolumeFilter,
-      title: 'Rebuilding',
-      value: stats.rebuildingVolumes,
+      title: 'With Rebuilding',
+      value: stats.volumesWithRebuilding,
       icon: Settings,
       color: 'text-orange-600',
       bgColor: 'bg-orange-50',
-      borderColor: 'border-orange-200'
+      borderColor: 'border-orange-200',
+      subtitle: 'Replica recovery active'
     },
     {
       id: 'local-nvme' as VolumeFilter,
@@ -49,12 +74,13 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       icon: Zap,
       color: 'text-green-600',
       bgColor: 'bg-green-50',
-      borderColor: 'border-green-200'
+      borderColor: 'border-green-200',
+      subtitle: 'High performance'
     }
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
       {cards.map((card) => {
         const isActive = activeFilter === card.id;
         const Icon = card.icon;
@@ -63,24 +89,27 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
           <button
             key={card.id}
             onClick={() => onFilterClick(card.id)}
-            className={`bg-white rounded-lg shadow p-6 text-left transition-all duration-200 hover:shadow-lg hover:scale-105 ${
+            className={`bg-white rounded-lg shadow p-4 text-left transition-all duration-200 hover:shadow-lg hover:scale-105 ${
               isActive 
                 ? `ring-2 ring-blue-500 ${card.bgColor} border-2 ${card.borderColor}` 
                 : 'hover:bg-gray-50'
             }`}
           >
-            <div className="flex items-center">
-              <Icon className={`w-10 h-10 ${card.color} mr-4`} />
-              <div>
-                <p className="text-3xl font-bold text-gray-900">{card.value}</p>
-                <p className="text-gray-600">{card.title}</p>
-                {isActive && card.id !== 'all' && (
-                  <p className="text-xs text-blue-600 font-medium mt-1">
-                    Click to clear filter
-                  </p>
+            <div className="flex items-center mb-2">
+              <Icon className={`w-8 h-8 ${card.color} mr-3`} />
+              <div className="flex-1">
+                <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+                <p className="text-sm font-medium text-gray-700">{card.title}</p>
+                {card.subtitle && (
+                  <p className="text-xs text-gray-500 mt-1">{card.subtitle}</p>
                 )}
               </div>
             </div>
+            {isActive && card.id !== 'all' && (
+              <p className="text-xs text-blue-600 font-medium">
+                Click to clear filter
+              </p>
+            )}
           </button>
         );
       })}

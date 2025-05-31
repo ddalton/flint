@@ -21,10 +21,23 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
     }
 
     switch (activeFilter) {
+      case 'healthy':
+        return data.volumes.filter(v => v.state === 'Healthy');
+      case 'degraded':
+        return data.volumes.filter(v => v.state === 'Degraded');
+      case 'failed':
+        return data.volumes.filter(v => v.state === 'Failed');
       case 'faulted':
         return data.volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
       case 'rebuilding':
-        return data.volumes.filter(v => v.state === 'Rebuilding');
+        // Volumes that have any rebuilding replica activity
+        return data.volumes.filter(v => 
+          v.replica_statuses.some(replica => 
+            replica.status === 'rebuilding' || 
+            replica.rebuild_progress !== null ||
+            replica.is_new_replica
+          )
+        );
       case 'local-nvme':
         return data.volumes.filter(v => v.local_nvme);
       default:
@@ -45,19 +58,22 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
     
     filteredVolumes.forEach(volume => {
       switch (activeFilter) {
+        case 'healthy':
+        case 'degraded':
+        case 'failed':
         case 'faulted':
-          // Only include nodes that have failed/degraded replicas for this volume
+          // Include all nodes that have replicas of volumes in these states
           volume.replica_statuses.forEach(replica => {
-            if (replica.status === 'failed' || replica.status === 'degraded' || replica.status === 'Failed' || replica.status === 'Degraded') {
-              relevantNodes.add(replica.node);
-            }
+            relevantNodes.add(replica.node);
           });
           break;
           
         case 'rebuilding':
-          // Only include nodes that have rebuilding replicas for this volume
+          // Only include nodes that actually have rebuilding replicas
           volume.replica_statuses.forEach(replica => {
-            if (replica.status === 'rebuilding' || replica.status === 'Rebuilding' || replica.rebuild_progress !== null) {
+            if (replica.status === 'rebuilding' || 
+                replica.rebuild_progress !== null ||
+                replica.is_new_replica) {
               relevantNodes.add(replica.node);
             }
           });
@@ -86,26 +102,83 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
 
   const getFilterDisplayName = (filter: VolumeFilter) => {
     switch (filter) {
-      case 'faulted': return 'Faulted Replicas';
-      case 'rebuilding': return 'Rebuilding Replicas';
-      case 'local-nvme': return 'Local NVMe Replicas';
+      case 'healthy': return 'Healthy Volumes';
+      case 'degraded': return 'Degraded Volumes';
+      case 'failed': return 'Failed Volumes';
+      case 'faulted': return 'Faulted Volumes (Degraded + Failed)';
+      case 'rebuilding': return 'Volumes with Rebuilding Replicas';
+      case 'local-nvme': return 'Local NVMe Volumes';
       default: return 'All Volumes';
+    }
+  };
+
+  const getNodeFilterDescription = (filter: VolumeFilter) => {
+    switch (filter) {
+      case 'healthy': return 'nodes with healthy volumes';
+      case 'degraded': return 'nodes with degraded volumes';
+      case 'failed': return 'nodes with failed volumes';
+      case 'faulted': return 'nodes with faulted volumes';
+      case 'rebuilding': return 'nodes with rebuilding replica activity';
+      case 'local-nvme': return 'nodes with local NVMe volumes';
+      default: return 'nodes';
+    }
+  };
+
+  const getFilterSeverityInfo = (filter: VolumeFilter) => {
+    switch (filter) {
+      case 'failed':
+        return {
+          bgColor: 'bg-red-50',
+          borderColor: 'border-red-200',
+          textColor: 'text-red-900'
+        };
+      case 'degraded':
+        return {
+          bgColor: 'bg-yellow-50',
+          borderColor: 'border-yellow-200',
+          textColor: 'text-yellow-900'
+        };
+      case 'faulted':
+        return {
+          bgColor: 'bg-orange-50',
+          borderColor: 'border-orange-200',
+          textColor: 'text-orange-900'
+        };
+      case 'rebuilding':
+        return {
+          bgColor: 'bg-orange-50',
+          borderColor: 'border-orange-200',
+          textColor: 'text-orange-900'
+        };
+      case 'healthy':
+        return {
+          bgColor: 'bg-green-50',
+          borderColor: 'border-green-200',
+          textColor: 'text-green-900'
+        };
+      default:
+        return {
+          bgColor: 'bg-blue-50',
+          borderColor: 'border-blue-200',
+          textColor: 'text-blue-900'
+        };
     }
   };
 
   const filteredVolumes = getFilteredVolumes();
   const filteredNodes = getFilteredNodes();
   const totalNodes = data.nodes.length;
+  const severityInfo = getFilterSeverityInfo(activeFilter);
 
   return (
     <div>
       {activeFilter && activeFilter !== 'all' && (
-        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+        <div className={`mb-6 p-4 ${severityInfo.bgColor} border ${severityInfo.borderColor} rounded-lg`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Filter className="w-4 h-4 text-blue-600" />
-              <span className="text-sm font-medium text-blue-900">
-                Showing nodes with: {getFilterDisplayName(activeFilter)}
+              <span className={`text-sm font-medium ${severityInfo.textColor}`}>
+                Showing {getNodeFilterDescription(activeFilter)}
               </span>
             </div>
             {onClearFilter && (
@@ -120,7 +193,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
           </div>
           <div className="mt-2 text-sm text-blue-700">
             <div className="flex gap-4">
-              <span>{filteredNodes.length} of {totalNodes} nodes have {getFilterDisplayName(activeFilter).toLowerCase()}</span>
+              <span>{filteredNodes.length} of {totalNodes} {getNodeFilterDescription(activeFilter)}</span>
               <span>•</span>
               <span>{filteredVolumes.length} volume{filteredVolumes.length !== 1 ? 's' : ''} match this filter</span>
             </div>
@@ -128,7 +201,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
         </div>
       )}
 
-      {/* Debug Information Panel */}
+      {/* Enhanced Debug Information Panel */}
       {activeFilter && activeFilter !== 'all' && (
         <div className="mt-6 p-4 bg-yellow-50 rounded-lg border border-yellow-200 mb-6">
           <h5 className="font-medium text-yellow-800 mb-2">Debug Information</h5>
@@ -139,11 +212,22 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
             {filteredVolumes.length > 0 && (
               <div>
                 <div className="font-medium">Volume Details:</div>
-                {filteredVolumes.slice(0, 2).map((vol, idx) => (
+                {filteredVolumes.slice(0, 3).map((vol, idx) => (
                   <div key={idx} className="ml-2 text-xs">
-                    • {vol.name} (State: {vol.state}) - Replicas: {vol.replica_statuses.map(r => `${r.node}:${r.status}`).join(', ')}
+                    • {vol.name} (State: {vol.state}) - Nodes: {vol.nodes.join(', ')}
+                    <br />
+                    &nbsp;&nbsp;Replica Statuses: {vol.replica_statuses.map(r => `${r.node}:${r.status}`).join(', ')}
                   </div>
                 ))}
+                {filteredVolumes.length > 3 && (
+                  <div className="ml-2 text-xs">... and {filteredVolumes.length - 3} more</div>
+                )}
+              </div>
+            )}
+            {filteredNodes.length > 0 && (
+              <div>
+                <div className="font-medium">Filtered Nodes:</div>
+                <div className="ml-2 text-xs">{filteredNodes.join(', ')}</div>
               </div>
             )}
           </div>
@@ -155,7 +239,13 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
           <div className="text-gray-500 mb-4">
             <Filter className="w-12 h-12 mx-auto mb-2 opacity-50" />
             <p className="text-lg font-medium">No nodes found</p>
-            <p className="text-sm">No nodes have replicas matching the "{getFilterDisplayName(activeFilter)}" filter.</p>
+            <p className="text-sm">No nodes have volumes matching the "{getFilterDisplayName(activeFilter)}" filter.</p>
+            {filteredVolumes.length > 0 && (
+              <p className="text-xs text-yellow-600 mt-2">
+                Found {filteredVolumes.length} matching volume{filteredVolumes.length !== 1 ? 's' : ''}, 
+                but {activeFilter === 'rebuilding' ? 'no rebuilding activity found on any nodes' : 'no matching node conditions found'}.
+              </p>
+            )}
           </div>
           {onClearFilter && (
             <button
@@ -188,17 +278,8 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
                 totalFree={totalFree}
                 volumeFilter={activeFilter}
                 filteredVolumes={filteredVolumes.filter(v => {
-                  // Only include volumes that have replicas matching the filter on this specific node
-                  switch (activeFilter) {
-                    case 'faulted':
-                      return v.replica_statuses.some(r => r.node === node && (r.status === 'failed' || r.status === 'degraded' || r.status === 'Failed' || r.status === 'Degraded'));
-                    case 'rebuilding':
-                      return v.replica_statuses.some(r => r.node === node && (r.status === 'rebuilding' || r.status === 'Rebuilding' || r.rebuild_progress !== null));
-                    case 'local-nvme':
-                      return v.replica_statuses.some(r => r.node === node && r.is_local);
-                    default:
-                      return v.nodes.includes(node);
-                  }
+                  // Include volumes that have replicas on this node matching the filter criteria
+                  return v.nodes.includes(node);
                 })}
               />
             );

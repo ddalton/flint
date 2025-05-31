@@ -6,7 +6,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
   : 'http://localhost:8080/api';
 
 // Types - Export all interfaces that will be used by components
-export type VolumeFilter = 'all' | 'faulted' | 'rebuilding' | 'local-nvme';
+export type VolumeFilter = 'all' | 'healthy' | 'degraded' | 'failed' | 'faulted' | 'rebuilding' | 'local-nvme';
 export type DiskFilter = string | null; // disk ID or null
 export type VolumeReplicaFilter = string | null; // volume ID or null
 
@@ -32,7 +32,7 @@ export interface Volume {
   id: string;
   name: string;
   size: string;
-  state: string;
+  state: string; // Only 'Healthy', 'Degraded', or 'Failed'
   replicas: number;
   active_replicas: number;
   local_nvme: boolean;
@@ -144,24 +144,49 @@ const generateFallbackData = (): DashboardData => {
   for (let i = 1; i <= 8; i++) {
     const totalReplicas = Math.floor(Math.random() * 3 + 2);
     const selectedNodes = nodes.slice(0, totalReplicas);
-    const isHealthy = Math.random() > 0.3;
-    const isRebuilding = !isHealthy && Math.random() > 0.4;
     const hasLocalNVMe = Math.random() > 0.3;
+    
+    // Volume states: only Healthy, Degraded, or Failed
+    const stateRand = Math.random();
+    const volumeState = stateRand > 0.8 ? 'Failed' : (stateRand > 0.6 ? 'Degraded' : 'Healthy');
     
     const replicaStatuses: ReplicaStatus[] = selectedNodes.map((node, index) => {
       const isLocal = index === 0 && hasLocalNVMe;
-      const status = isHealthy ? 'healthy' : 
-                    (Math.random() > 0.6 ? 'failed' : 
-                     (Math.random() > 0.5 ? 'rebuilding' : 'healthy'));
+      
+      // Replica status based on volume state
+      let replicaStatus = 'healthy';
+      let rebuildProgress = null;
+      
+      if (volumeState === 'Failed') {
+        // Failed volumes might have some failed replicas
+        replicaStatus = Math.random() > 0.5 ? 'failed' : 'healthy';
+      } else if (volumeState === 'Degraded') {
+        // Degraded volumes might have some rebuilding or failed replicas
+        const rand = Math.random();
+        if (rand > 0.7) {
+          replicaStatus = 'rebuilding';
+          rebuildProgress = Math.floor(Math.random() * 90 + 10);
+        } else if (rand > 0.5) {
+          replicaStatus = 'failed';
+        } else {
+          replicaStatus = 'healthy';
+        }
+      } else {
+        // Healthy volumes might still have some rebuilding activity
+        if (Math.random() > 0.9) {
+          replicaStatus = 'rebuilding';
+          rebuildProgress = Math.floor(Math.random() * 90 + 10);
+        }
+      }
       
       return {
         node,
-        status,
+        status: replicaStatus,
         is_local: isLocal,
-        last_io_timestamp: status !== 'failed' ? new Date(Date.now() - Math.random() * 3600000).toISOString() : null,
-        rebuild_progress: status === 'rebuilding' ? Math.floor(Math.random() * 90 + 10) : null,
+        last_io_timestamp: replicaStatus !== 'failed' ? new Date(Date.now() - Math.random() * 3600000).toISOString() : null,
+        rebuild_progress: rebuildProgress,
         rebuild_target: null,
-        is_new_replica: false,
+        is_new_replica: replicaStatus === 'rebuilding' && Math.random() > 0.7,
         nvmf_target: !isLocal ? {
           nqn: `nqn.2025-05.io.spdk:vol-${i}-replica-${index}`,
           target_ip: `192.168.1.${100 + nodes.indexOf(node)}`,
@@ -175,11 +200,11 @@ const generateFallbackData = (): DashboardData => {
       id: `spdk-vol-${i}`,
       name: `pvc-workload-${i}`,
       size: `${Math.floor(Math.random() * 500 + 100)}GB`,
-      state: isRebuilding ? 'Rebuilding' : (isHealthy ? 'Healthy' : 'Degraded'),
+      state: volumeState,
       replicas: totalReplicas,
       active_replicas: replicaStatuses.filter(r => r.status === 'healthy' || r.status === 'rebuilding').length,
       local_nvme: hasLocalNVMe,
-      rebuild_progress: isRebuilding ? Math.floor(Math.random() * 90 + 10) : null,
+      rebuild_progress: replicaStatuses.some(r => r.rebuild_progress) ? Math.max(...replicaStatuses.map(r => r.rebuild_progress || 0)) : null,
       nodes: selectedNodes,
       replica_statuses: replicaStatuses
     });
@@ -225,23 +250,13 @@ const generateFallbackData = (): DashboardData => {
           const disk = availableDisks[Math.floor(Math.random() * availableDisks.length)];
           const volumeSize = parseInt(volume.size.replace('GB', ''));
           
-          // Determine the replica status based on the volume's overall state and replica status
-          let replicaStatus = replica.status;
-          if (volume.state === 'Rebuilding' && replica.status === 'healthy') {
-            // If the volume is rebuilding but this replica is healthy, it might still be involved
-            replicaStatus = Math.random() > 0.5 ? 'rebuilding' : 'healthy';
-          } else if (volume.state === 'Degraded' && replica.status === 'healthy') {
-            // If volume is degraded, some replicas might be failed
-            replicaStatus = Math.random() > 0.7 ? 'failed' : 'healthy';
-          }
-          
           disk.provisioned_volumes.push({
             volume_name: volume.name,
             volume_id: volume.id,
             size: volumeSize,
             provisioned_at: new Date(Date.now() - Math.random() * 20 * 24 * 60 * 60 * 1000).toISOString(),
             replica_type: replica.is_local ? 'Local NVMe' : 'NVMe-oF',
-            status: replicaStatus
+            status: replica.status
           });
         }
       }
@@ -344,9 +359,21 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     }
   }, [autoRefresh, fetchData]);
 
-  // Computed values
+  // Computed values - corrected to match actual volume states
+  const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy');
+  const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded');
+  const failedVolumes = data.volumes.filter(v => v.state === 'Failed');
   const faultedVolumes = data.volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
-  const rebuildingVolumes = data.volumes.filter(v => v.state === 'Rebuilding');
+  
+  // Volumes that have any rebuilding replicas
+  const volumesWithRebuilding = data.volumes.filter(v => 
+    v.replica_statuses.some(replica => 
+      replica.status === 'rebuilding' || 
+      replica.rebuild_progress !== null ||
+      replica.is_new_replica
+    )
+  );
+  
   const localNVMeVolumes = data.volumes.filter(v => v.local_nvme);
   const healthyDisks = data.disks.filter(d => d.healthy).length;
   const formattedDisks = data.disks.filter(d => d.lvol_store_initialized).length;
@@ -359,11 +386,14 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     fetchData,
     getVolumeDetails,
     getNodeMetrics,
-    // Computed statistics
+    // Corrected statistics
     stats: {
       totalVolumes: data.volumes.length,
+      healthyVolumes: healthyVolumes.length,
+      degradedVolumes: degradedVolumes.length,
+      failedVolumes: failedVolumes.length,
       faultedVolumes: faultedVolumes.length,
-      rebuildingVolumes: rebuildingVolumes.length,
+      volumesWithRebuilding: volumesWithRebuilding.length,
       localNVMeVolumes: localNVMeVolumes.length,
       totalDisks: data.disks.length,
       healthyDisks,

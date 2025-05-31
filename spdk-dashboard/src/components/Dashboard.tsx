@@ -15,8 +15,11 @@ interface DashboardProps {
   loading: boolean;
   stats: {
     totalVolumes: number;
+    healthyVolumes: number;
+    degradedVolumes: number;
+    failedVolumes: number;
     faultedVolumes: number;
-    rebuildingVolumes: number;
+    volumesWithRebuilding: number;
     localNVMeVolumes: number;
     totalDisks: number;
     healthyDisks: number;
@@ -110,6 +113,75 @@ export const Dashboard: React.FC<DashboardProps> = ({
     );
   };
 
+  // Enhanced filter display with severity indication
+  const getFilterDisplayInfo = (filter: VolumeFilter) => {
+    switch (filter) {
+      case 'failed':
+        return {
+          name: 'Failed Volumes',
+          severity: 'critical',
+          icon: '🔴',
+          description: 'Volumes that have completely failed',
+          bgColor: 'bg-red-50',
+          borderColor: 'border-red-200'
+        };
+      case 'degraded':
+        return {
+          name: 'Degraded Volumes',
+          severity: 'warning', 
+          icon: '🟡',
+          description: 'Volumes with reduced redundancy',
+          bgColor: 'bg-yellow-50',
+          borderColor: 'border-yellow-200'
+        };
+      case 'faulted':
+        return {
+          name: 'All Faulted Volumes',
+          severity: 'mixed',
+          icon: '⚠️',
+          description: 'Both degraded and failed volumes',
+          bgColor: 'bg-orange-50',
+          borderColor: 'border-orange-200'
+        };
+      case 'rebuilding':
+        return {
+          name: 'Volumes with Rebuilding Replicas',
+          severity: 'recovery',
+          icon: '🔄',
+          description: 'Volumes with replica recovery operations',
+          bgColor: 'bg-orange-50',
+          borderColor: 'border-orange-200'
+        };
+      case 'healthy':
+        return {
+          name: 'Healthy Volumes',
+          severity: 'good',
+          icon: '✅',
+          description: 'All replicas operational',
+          bgColor: 'bg-green-50',
+          borderColor: 'border-green-200'
+        };
+      case 'local-nvme':
+        return {
+          name: 'Local NVMe Volumes',
+          severity: 'performance',
+          icon: '⚡',
+          description: 'High-performance local storage',
+          bgColor: 'bg-blue-50',
+          borderColor: 'border-blue-200'
+        };
+      default:
+        return {
+          name: 'All Volumes',
+          severity: 'info',
+          icon: '📊',
+          description: 'All volumes in the system',
+          bgColor: 'bg-blue-50',
+          borderColor: 'border-blue-200'
+        };
+    }
+  };
+
   const renderTabContent = () => {
     switch (activeTab) {
       case 'overview':
@@ -176,6 +248,41 @@ export const Dashboard: React.FC<DashboardProps> = ({
       />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Enhanced filter indication */}
+        {volumeFilter !== 'all' && (
+          <div className="mb-6">
+            <div className={`p-4 rounded-lg border-2 ${getFilterDisplayInfo(volumeFilter).bgColor} ${getFilterDisplayInfo(volumeFilter).borderColor}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{getFilterDisplayInfo(volumeFilter).icon}</span>
+                  <div>
+                    <h3 className="font-semibold text-lg">
+                      {getFilterDisplayInfo(volumeFilter).name}
+                    </h3>
+                    <p className="text-sm text-gray-600">
+                      {getFilterDisplayInfo(volumeFilter).description}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {volumeFilter === 'faulted' && (
+                    <div className="text-sm">
+                      <div className="text-yellow-700">🟡 {stats.degradedVolumes} Degraded</div>
+                      <div className="text-red-700">🔴 {stats.failedVolumes} Failed</div>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setVolumeFilter('all')}
+                    className="px-4 py-2 bg-white border border-gray-300 rounded-md hover:bg-gray-50 text-sm font-medium"
+                  >
+                    Clear Filter
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <StatCards 
           stats={stats} 
           activeFilter={volumeFilter}

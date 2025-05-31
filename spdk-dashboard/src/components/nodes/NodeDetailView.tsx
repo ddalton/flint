@@ -46,6 +46,9 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
 
   const getFilterDisplayName = (filter?: VolumeFilter) => {
     switch (filter) {
+      case 'healthy': return 'healthy';
+      case 'degraded': return 'degraded';
+      case 'failed': return 'failed';
       case 'faulted': return 'faulted';
       case 'rebuilding': return 'rebuilding';
       case 'local-nvme': return 'local NVMe';
@@ -83,6 +86,20 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
             <span className="px-3 py-1 text-sm bg-purple-100 text-purple-800 rounded-full">
               {filteredVolumeCount} Filtered
             </span>
+          )}
+          {/* Quick Access Button */}
+          {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (
+            <button
+              onClick={() => {
+                const element = document.getElementById(`filtered-volumes-${node}`);
+                element?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }}
+              className="px-3 py-1 text-sm bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors flex items-center gap-1"
+              title={`View ${filteredVolumeCount} ${getFilterDisplayName(volumeFilter)} volumes on this node`}
+            >
+              <Database className="w-3 h-3" />
+              View Details
+            </button>
           )}
         </div>
       </div>
@@ -143,6 +160,91 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Filtered Volumes Summary Section */}
+      {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (
+        <div id={`filtered-volumes-${node}`} className="bg-white rounded-lg p-4 mb-6 border border-blue-200">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-lg font-semibold flex items-center gap-2">
+              <Database className="w-5 h-5 text-blue-600" />
+              {getFilterDisplayName(volumeFilter)} Volumes on {node}
+              <span className="text-sm font-normal text-gray-600">
+                ({filteredVolumes.length} volume{filteredVolumes.length !== 1 ? 's' : ''})
+              </span>
+            </h4>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filteredVolumes.map((volume) => {
+              // Find this volume's replica on this specific node
+              const nodeReplica = volume.replica_statuses.find(r => r.node === node);
+              
+              return (
+                <div key={volume.id} className={`p-3 rounded-lg border-2 ${
+                  volume.state === 'Healthy' ? 'border-green-200 bg-green-50' :
+                  volume.state === 'Degraded' ? 'border-yellow-200 bg-yellow-50' :
+                  'border-red-200 bg-red-50'
+                }`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium text-gray-900">{volume.name}</span>
+                    <span className="text-sm text-gray-600">{volume.size}</span>
+                  </div>
+                  
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      volume.state === 'Healthy' ? 'bg-green-100 text-green-700' :
+                      volume.state === 'Degraded' ? 'bg-yellow-100 text-yellow-700' :
+                      'bg-red-100 text-red-700'
+                    }`}>
+                      {volume.state}
+                    </span>
+                    
+                    {nodeReplica && (
+                      <span className={`px-2 py-1 text-xs rounded ${
+                        nodeReplica.is_local 
+                          ? 'bg-blue-100 text-blue-700' 
+                          : 'bg-purple-100 text-purple-700'
+                      }`}>
+                        {nodeReplica.is_local ? 'Local NVMe' : 'NVMe-oF'}
+                      </span>
+                    )}
+                  </div>
+                  
+                  <div className="text-xs text-gray-500 space-y-1">
+                    <div>Replicas: {volume.active_replicas}/{volume.replicas}</div>
+                    {nodeReplica && (
+                      <div>Node Status: 
+                        <span className={`ml-1 font-medium ${
+                          nodeReplica.status === 'healthy' ? 'text-green-600' :
+                          nodeReplica.status === 'rebuilding' ? 'text-orange-600' :
+                          'text-red-600'
+                        }`}>
+                          {nodeReplica.status}
+                        </span>
+                      </div>
+                    )}
+                    
+                    {nodeReplica?.rebuild_progress && (
+                      <div className="mt-2">
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>Rebuild Progress:</span>
+                          <span>{nodeReplica.rebuild_progress}%</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-1.5">
+                          <div 
+                            className="bg-orange-500 h-1.5 rounded-full transition-all duration-300" 
+                            style={{ width: `${nodeReplica.rebuild_progress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="bg-white rounded-lg overflow-hidden">
         <div className="px-6 py-4 bg-gray-100 border-b">
