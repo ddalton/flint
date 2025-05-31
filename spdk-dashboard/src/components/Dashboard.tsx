@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { DashboardData, VolumeFilter } from '../hooks/useDashboardData';
+import type { DashboardData, VolumeFilter, DiskFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
@@ -8,7 +8,7 @@ import { DiskStatusChart } from './charts/DiskStatusChart';
 import { RaidTopologyChart } from './charts/RaidTopologyChart';
 import { VolumesTable } from './tables/VolumesTable';
 import { DisksTable } from './tables/DisksTable';
-import { NodeDetailView } from './nodes/NodeDetailView';
+import { FilteredNodesView } from './nodes/FilteredNodesView';
 
 interface DashboardProps {
   data: DashboardData;
@@ -39,6 +39,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
+  const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -59,18 +60,38 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setActiveTab('volumes');
       }
     }
+    // Clear disk filter when changing volume filter
+    setDiskFilter(null);
   };
 
   const handleClearFilter = () => {
     setVolumeFilter('all');
   };
 
-  // Reset filter when changing tabs away from volumes
+  const handleClearDiskFilter = () => {
+    setDiskFilter(null);
+  };
+
+  const handleDiskClick = (diskId: string) => {
+    // Set disk filter and switch to volumes tab
+    setDiskFilter(diskId);
+    setActiveTab('volumes');
+  };
+
+  // Don't reset filter when changing tabs - keep it persistent across all tabs
   const handleTabChange = (tabId: string) => {
     setActiveTab(tabId);
-    if (tabId !== 'volumes') {
-      setVolumeFilter('all');
-    }
+  };
+
+  // Get volumes that are on the selected disk
+  const getVolumesOnDisk = (diskId: string) => {
+    const disk = data.disks.find(d => d.id === diskId);
+    if (!disk) return [];
+    
+    // Return volumes that have replicas on this disk
+    return data.volumes.filter(volume => 
+      disk.provisioned_volumes.some(pv => pv.volume_id === volume.id)
+    );
   };
 
   const renderTabContent = () => {
@@ -89,9 +110,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
       case 'volumes':
         return (
           <VolumesTable 
-            volumes={data.volumes} 
+            volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
             activeFilter={volumeFilter}
+            diskFilter={diskFilter}
             onClearFilter={handleClearFilter}
+            onClearDiskFilter={handleClearDiskFilter}
           />
         );
 
@@ -99,39 +122,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return (
           <DisksTable 
             disks={data.disks} 
+            volumes={data.volumes}
             stats={{
               totalDisks: stats.totalDisks,
               healthyDisks: stats.healthyDisks,
               formattedDisks: stats.formattedDisks
             }}
+            volumeFilter={volumeFilter}
+            onDiskClick={handleDiskClick}
           />
         );
 
       case 'nodes':
         return (
-          <div className="space-y-6">
-            {data.nodes.map((node) => {
-              const nodeDisks = data.disks.filter(d => d.node === node);
-              const nodeVolumes = data.volumes.filter(v => v.nodes.includes(node));
-              const healthyDisks = nodeDisks.filter(d => d.healthy).length;
-              const totalCapacity = nodeDisks.reduce((sum, disk) => sum + disk.capacity_gb, 0);
-              const totalAllocated = nodeDisks.reduce((sum, disk) => sum + disk.allocated_space, 0);
-              const totalFree = totalCapacity - totalAllocated;
-              
-              return (
-                <NodeDetailView 
-                  key={node} 
-                  node={node}
-                  nodeDisks={nodeDisks}
-                  nodeVolumes={nodeVolumes}
-                  healthyDisks={healthyDisks}
-                  totalCapacity={totalCapacity}
-                  totalAllocated={totalAllocated}
-                  totalFree={totalFree}
-                />
-              );
-            })}
-          </div>
+          <FilteredNodesView 
+            data={data}
+            activeFilter={volumeFilter}
+            onClearFilter={handleClearFilter}
+          />
         );
 
       default:

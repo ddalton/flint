@@ -7,6 +7,7 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
 
 // Types - Export all interfaces that will be used by components
 export type VolumeFilter = 'all' | 'faulted' | 'rebuilding' | 'local-nvme';
+export type DiskFilter = string | null; // disk ID or null
 
 export interface NvmfTarget {
   nqn: string;
@@ -223,13 +224,23 @@ const generateFallbackData = (): DashboardData => {
           const disk = availableDisks[Math.floor(Math.random() * availableDisks.length)];
           const volumeSize = parseInt(volume.size.replace('GB', ''));
           
+          // Determine the replica status based on the volume's overall state and replica status
+          let replicaStatus = replica.status;
+          if (volume.state === 'Rebuilding' && replica.status === 'healthy') {
+            // If the volume is rebuilding but this replica is healthy, it might still be involved
+            replicaStatus = Math.random() > 0.5 ? 'rebuilding' : 'healthy';
+          } else if (volume.state === 'Degraded' && replica.status === 'healthy') {
+            // If volume is degraded, some replicas might be failed
+            replicaStatus = Math.random() > 0.7 ? 'failed' : 'healthy';
+          }
+          
           disk.provisioned_volumes.push({
             volume_name: volume.name,
             volume_id: volume.id,
             size: volumeSize,
             provisioned_at: new Date(Date.now() - Math.random() * 20 * 24 * 60 * 60 * 1000).toISOString(),
             replica_type: replica.is_local ? 'Local NVMe' : 'NVMe-oF',
-            status: replica.status
+            status: replicaStatus
           });
         }
       }
