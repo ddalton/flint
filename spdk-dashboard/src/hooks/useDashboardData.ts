@@ -6,6 +6,8 @@ const API_BASE_URL = process.env.NODE_ENV === 'production'
   : 'http://localhost:8080/api';
 
 // Types - Export all interfaces that will be used by components
+export type VolumeFilter = 'all' | 'faulted' | 'rebuilding' | 'local-nvme';
+
 export interface NvmfTarget {
   nqn: string;
   target_ip: string;

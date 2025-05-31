@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { DashboardData } from '../hooks/useDashboardData';
+import type { DashboardData, VolumeFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
@@ -38,6 +38,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onLogout
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
+  const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -46,6 +47,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
       </div>
     );
   }
+
+  const handleFilterClick = (filter: VolumeFilter) => {
+    // If the same filter is clicked, clear it (toggle behavior)
+    if (volumeFilter === filter) {
+      setVolumeFilter('all');
+    } else {
+      setVolumeFilter(filter);
+      // Automatically switch to volumes tab when a filter is applied
+      if (filter !== 'all') {
+        setActiveTab('volumes');
+      }
+    }
+  };
+
+  const handleClearFilter = () => {
+    setVolumeFilter('all');
+  };
+
+  // Reset filter when changing tabs away from volumes
+  const handleTabChange = (tabId: string) => {
+    setActiveTab(tabId);
+    if (tabId !== 'volumes') {
+      setVolumeFilter('all');
+    }
+  };
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -61,7 +87,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
         );
 
       case 'volumes':
-        return <VolumesTable volumes={data.volumes} />;
+        return (
+          <VolumesTable 
+            volumes={data.volumes} 
+            activeFilter={volumeFilter}
+            onClearFilter={handleClearFilter}
+          />
+        );
 
       case 'disks':
         return (
@@ -117,12 +149,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
       />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <StatCards stats={stats} />
+        <StatCards 
+          stats={stats} 
+          activeFilter={volumeFilter}
+          onFilterClick={handleFilterClick}
+        />
 
         <div className="bg-white rounded-lg shadow mb-6">
           <TabNavigation 
             activeTab={activeTab} 
-            onTabChange={setActiveTab} 
+            onTabChange={handleTabChange} 
           />
           
           <div className="p-6">
