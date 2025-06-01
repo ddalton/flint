@@ -1,0 +1,506 @@
+---
+# Dockerfile for SPDK CSI Driver with vhost support
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spdk-csi-dockerfile
+  namespace: spdk-system
+data:
+  Dockerfile: |
+    FROM ubuntu:22.04
+
+    # Install dependencies
+    RUN apt-get update && apt-get install -y \
+        build-essential \
+        pkg-config \
+        libnuma-dev \
+        libssl-dev \
+        libaio-dev \
+        libcunit1-dev \
+        libncurses5-dev \
+        uuid-dev \
+        python3 \
+        python3-pip \
+        git \
+        curl \
+        qemu-utils \
+        qemu-system-x86 \
+        libvirt-clients \
+        libvirt-daemon-system \
+        hugepages \
+        nvme-cli \
+        util-linux \
+        parted \
+        udev \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Install Rust
+    RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    ENV PATH="/root/.cargo/bin:${PATH}"
+
+    # Install vhost-user-blk
+    RUN git clone https://github.com/rust-vmm/vhost-device.git /tmp/vhost-device && \
+        cd /tmp/vhost-device && \
+        cargo build --release --bin vhost-user-blk && \
+        cp target/release/vhost-user-blk /usr/local/bin/ && \
+        rm -rf /tmp/vhost-device
+
+    # Build SPDK with vhost support
+    RUN git clone https://github.com/spdk/spdk --recurse-submodules /opt/spdk && \
+        cd /opt/spdk && \
+        git checkout v24.01 && \
+        ./configure --with-vhost --with-virtio --enable-debug && \
+        make -j$(nproc)
+
+    # Set up SPDK environment
+    ENV SPDK_PATH=/opt/spdk
+    ENV PATH="${SPDK_PATH}/build/bin:${PATH}"
+
+    # Copy CSI driver binary (built separately)
+    COPY spdk-csi-driver /usr/local/bin/
+    COPY spdk-csi-controller /usr/local/bin/
+    COPY spdk-csi-node-agent /usr/local/bin/
+
+    # Set up entrypoint
+    COPY entrypoint.sh /entrypoint.sh
+    RUN chmod +x /entrypoint.sh
+
+    ENTRYPOINT ["/entrypoint.sh"]
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spdk-csi-entrypoint
+  namespace: spdk-system
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -e
+
+    # Set up hugepages
+    echo 2048 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+
+    # Bind NVMe devices to vfio-pci if specified
+    if [ -n "$NVME_DEVICES" ]; then
+        cd /opt/spdk
+        for device in $(echo $NVME_DEVICES | tr ',' ' '); do
+            echo "Binding $device to vfio-pci"
+            scripts/setup.sh config $device
+        done
+    fi
+
+    # Start SPDK target with vhost support
+    if [ "$1" = "spdk-target" ]; then
+        exec /opt/spdk/build/bin/spdk_tgt \
+            -m 0x3 \
+            -p 0 \
+            -s 512 \
+            --wait-for-rpc
+    fi
+
+    # Start CSI driver components
+    exec "$@"
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spdk-csi-node
+  namespace: spdk-system
+spec:
+  selector:
+    matchLabels:
+      app: spdk-csi-node
+  template:
+    metadata:
+      labels:
+        app: spdk-csi-node
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: spdk-csi-node
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: spdk-target
+        image: spdk/csi-driver:latest
+        command: ["/entrypoint.sh", "spdk-target"]
+        securityContext:
+          privileged: true
+        env:
+        - name: SPDK_RPC_ADDR
+          value: "127.0.0.1"
+        - name: SPDK_RPC_PORT
+          value: "5260"
+        - name: NVME_DEVICES
+          value: "" # Set via node labels or configmap
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: sys
+          mountPath: /sys
+        - name: hugepages
+          mountPath: /dev/hugepages
+        - name: vhost-sockets
+          mountPath: /var/lib/spdk-csi/sockets
+        ports:
+        - containerPort: 5260
+          name: spdk-rpc
+          
+      - name: csi-driver
+        image: spdk/csi-driver:latest
+        command: ["/usr/local/bin/spdk-csi-driver"]
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["SYS_ADMIN"]
+          allowPrivilegeEscalation: true
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CSI_ENDPOINT
+          value: unix:///csi/csi.sock
+        - name: SPDK_RPC_URL
+          value: "http://127.0.0.1:5260"
+        - name: VHOST_SOCKET_PATH
+          value: "/var/lib/spdk-csi/sockets"
+        volumeMounts:
+        - name: kubelet-dir
+          mountPath: /var/lib/kubelet
+          mountPropagation: "Bidirectional"
+        - name: plugin-dir
+          mountPath: /csi
+        - name: device-dir
+          mountPath: /dev
+        - name: sys-dir
+          mountPath: /sys
+        - name: vhost-sockets
+          mountPath: /var/lib/spdk-csi/sockets
+        - name: run-dir
+          mountPath: /var/run/spdk-csi
+        ports:
+        - containerPort: 9808
+          name: healthz
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+          periodSeconds: 10
+          failureThreshold: 5
+
+      - name: node-driver-registrar
+        image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.8.0
+        args:
+        - --v=2
+        - --csi-address=/csi/csi.sock
+        - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.spdk.io/csi.sock
+        env:
+        - name: KUBE_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: plugin-dir
+          mountPath: /csi/
+        - name: registration-dir
+          mountPath: /registration/
+
+      - name: liveness-probe
+        image: registry.k8s.io/sig-storage/livenessprobe:v2.10.0
+        args:
+        - --csi-address=/csi/csi.sock
+        volumeMounts:
+        - name: plugin-dir
+          mountPath: /csi/
+
+      - name: node-agent
+        image: spdk/csi-driver:latest
+        command: ["/usr/local/bin/spdk-csi-node-agent"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: SPDK_RPC_URL
+          value: "http://127.0.0.1:5260"
+        - name: DISK_DISCOVERY_INTERVAL
+          value: "300"
+        - name: AUTO_INITIALIZE_BLOBSTORE
+          value: "true"
+        volumeMounts:
+        - name: dev
+          mountPath: /dev
+        - name: sys
+          mountPath: /sys
+
+      volumes:
+      - name: kubelet-dir
+        hostPath:
+          path: /var/lib/kubelet
+          type: Directory
+      - name: plugin-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins/csi.spdk.io
+          type: DirectoryOrCreate
+      - name: registration-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry/
+          type: Directory
+      - name: device-dir
+        hostPath:
+          path: /dev
+      - name: sys-dir
+        hostPath:
+          path: /sys
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: hugepages
+        hostPath:
+          path: /dev/hugepages
+      - name: vhost-sockets
+        hostPath:
+          path: /var/lib/spdk-csi/sockets
+          type: DirectoryOrCreate
+      - name: run-dir
+        hostPath:
+          path: /var/run/spdk-csi
+          type: DirectoryOrCreate
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spdk-csi-controller
+  namespace: spdk-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-csi-controller
+  template:
+    metadata:
+      labels:
+        app: spdk-csi-controller
+    spec:
+      serviceAccountName: spdk-csi-controller
+      priorityClassName: system-cluster-critical
+      containers:
+      - name: csi-provisioner
+        image: registry.k8s.io/sig-storage/csi-provisioner:v3.5.0
+        args:
+        - --csi-address=$(ADDRESS)
+        - --v=2
+        - --feature-gates=Topology=true
+        - --enable-leader-election
+        - --leader-election-type=leases
+        env:
+        - name: ADDRESS
+          value: /var/lib/csi/sockets/pluginproxy/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy/
+
+      - name: csi-attacher
+        image: registry.k8s.io/sig-storage/csi-attacher:v4.3.0
+        args:
+        - --v=2
+        - --csi-address=$(ADDRESS)
+        - --leader-election
+        env:
+        - name: ADDRESS
+          value: /var/lib/csi/sockets/pluginproxy/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy/
+
+      - name: csi-resizer
+        image: registry.k8s.io/sig-storage/csi-resizer:v1.8.0
+        args:
+        - --csi-address=$(ADDRESS)
+        - --v=2
+        - --leader-election
+        env:
+        - name: ADDRESS
+          value: /var/lib/csi/sockets/pluginproxy/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy/
+
+      - name: csi-snapshotter
+        image: registry.k8s.io/sig-storage/csi-snapshotter:v6.2.2
+        args:
+        - --csi-address=$(ADDRESS)
+        - --v=2
+        - --leader-election
+        env:
+        - name: ADDRESS
+          value: /var/lib/csi/sockets/pluginproxy/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy/
+
+      - name: spdk-controller
+        image: spdk/csi-driver:latest
+        command: ["/usr/local/bin/spdk-csi-controller"]
+        env:
+        - name: CSI_ENDPOINT
+          value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+        - name: SPDK_RPC_URL
+          value: "http://spdk-node:5260"
+        - name: HEALTH_CHECK_INTERVAL
+          value: "30"
+        - name: REBUILD_ENABLED
+          value: "true"
+        - name: VHOST_SOCKET_PATH
+          value: "/var/lib/spdk-csi/sockets"
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /var/lib/csi/sockets/pluginproxy/
+        ports:
+        - containerPort: 9808
+          name: healthz
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+          periodSeconds: 10
+          failureThreshold: 5
+
+      - name: liveness-probe
+        image: registry.k8s.io/sig-storage/livenessprobe:v2.10.0
+        args:
+        - --csi-address=/csi/csi.sock
+        volumeMounts:
+        - name: socket-dir
+          mountPath: /csi/
+
+      volumes:
+      - name: socket-dir
+        emptyDir: {}
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: spdk-vhost
+provisioner: csi.spdk.io
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  # Storage parameters
+  numReplicas: "2"
+  replicaNodes: "node-1,node-2,node-3"
+  protocol: "vhost"
+  writeOrdering: "true"
+  
+  # Performance parameters
+  blockSize: "4096"
+  queueDepth: "32"
+  
+  # vhost-specific parameters
+  vhostMode: "blk"
+  numQueues: "4"
+  queueSize: "128"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spdk-vhost-config
+  namespace: spdk-system
+data:
+  setup-vhost.sh: |
+    #!/bin/bash
+    # Setup script for vhost environment
+    
+    # Configure hugepages
+    echo 2048 > /proc/sys/vm/nr_hugepages
+    
+    # Mount hugepages if not already mounted
+    if ! mountpoint -q /dev/hugepages; then
+        mount -t hugetlbfs nodev /dev/hugepages
+    fi
+    
+    # Load vfio modules
+    modprobe vfio-pci
+    modprobe vhost-net
+    modprobe vhost-scsi
+    
+    # Setup IOMMU
+    echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+    
+    # Create socket directory
+    mkdir -p /var/lib/spdk-csi/sockets
+    chmod 755 /var/lib/spdk-csi/sockets
+
+---
+# Example application using vhost volumes
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spdk-vhost-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: spdk-vhost
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app-vhost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app-vhost
+  template:
+    metadata:
+      labels:
+        app: test-app-vhost
+    spec:
+      containers:
+      - name: app
+        image: ubuntu:22.04
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do echo $(date) >> /data/test.log; sleep 30; done"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: spdk-vhost-pvc

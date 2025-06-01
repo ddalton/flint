@@ -28,6 +28,7 @@ mod spdk_csi_driver {
         pub primary_lvol_uuid: Option<String>,
         pub rebuild_in_progress: Option<ReplicationState>,
         pub write_ordering_enabled: bool,
+        pub vhost_socket: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -46,6 +47,7 @@ mod spdk_csi_driver {
         pub health_status: ReplicaHealth,
         pub last_io_timestamp: Option<String>,
         pub write_sequence: u64,
+        pub vhost_socket: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -87,6 +89,7 @@ mod spdk_csi_driver {
         pub active_replicas: Vec<usize>,
         pub failed_replicas: Vec<usize>,
         pub write_sequence: u64,
+        pub vhost_device: Option<String>,
     }
 
     #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
@@ -134,6 +137,7 @@ struct DashboardVolume {
     replicas: i32,
     active_replicas: i32,
     local_nvme: bool,
+    access_method: String,
     rebuild_progress: Option<f64>,
     nodes: Vec<String>,
     replica_statuses: Vec<DashboardReplicaStatus>,
@@ -149,6 +153,7 @@ struct DashboardReplicaStatus {
     rebuild_target: Option<String>,
     is_new_replica: Option<bool>,
     nvmf_target: Option<NvmfTarget>,
+    access_method: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -278,6 +283,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_node_metrics)
         )
+        .or(
+            // Get vhost controller status
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("vhost"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_node_vhost_status)
+        )
     );
     
     let routes = api.with(cors);
@@ -381,6 +395,13 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
             None
         };
         
+        // Determine replica storage location and access method
+        let access_method = match replica.replica_type.as_str() {
+            "lvol" => "local-nvme".to_string(),    // Local replica: stored on local NVMe
+            "nvmf" => "remote-nvmf".to_string(),   // Remote replica: accessed via NVMe-oF
+            _ => "unknown".to_string(),
+        };
+        
         DashboardReplicaStatus {
             node: replica.node.clone(),
             status: format!("{:?}", replica.health_status).to_lowercase(),
@@ -390,11 +411,16 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
             rebuild_target: None,
             is_new_replica: None,
             nvmf_target,
+            access_method,
         }
     }).collect();
     
     let size_gb = spec.size_bytes / (1024 * 1024 * 1024);
     let has_local_nvme = spec.replicas.iter().any(|r| r.replica_type == "lvol");
+    
+    // Volume is always accessed locally via vhost - the "remote-only" concept doesn't apply
+    // The pod always gets a local vhost device, even if all replicas are remote
+    let volume_access_method = "vhost".to_string();
     
     DashboardVolume {
         id: spec.volume_id.clone(),
@@ -404,6 +430,7 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         replicas: spec.num_replicas,
         active_replicas: status.active_replicas.len() as i32,
         local_nvme: has_local_nvme,
+        access_method: volume_access_method,
         rebuild_progress: spec.rebuild_in_progress.as_ref().map(|r| r.copy_progress),
         nodes: spec.replicas.iter().map(|r| r.node.clone()).collect(),
         replica_statuses,
@@ -424,7 +451,9 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
                         volume_id: vol.id.clone(),
                         size: vol.size.trim_end_matches("GB").parse().unwrap_or(0),
                         provisioned_at: Utc::now().to_rfc3339(), // You might want to track this
-                        replica_type: if replica.is_local { "Local NVMe".to_string() } else { "Remote".to_string() },
+                        replica_type: format!("{} replica ({})", 
+                            if replica.is_local { "Local" } else { "Remote" },
+                            if replica.is_local { "NVMe" } else { "NVMe-oF" }),
                         status: replica.status.clone(),
                     });
                 }
@@ -443,7 +472,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
         free_space: status.free_space,
         free_space_display: format!("{}GB", status.free_space / (1024 * 1024 * 1024)),
         healthy: status.healthy,
-        lvol_store_initialized: status.blobstore_initialized,
+        lvol_store_initialized: status.lvol_store_initialized,
         lvol_count: status.lvol_count,
         model: format!("NVMe Disk"), // You might want to enhance this
         read_iops: status.io_stats.read_iops,
@@ -461,11 +490,6 @@ async fn enhance_with_spdk_metrics(
     _state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Here you can make direct SPDK RPC calls to get real-time metrics
-    // For example:
-    // - Get real-time I/O statistics
-    // - Get current rebuild progress
-    // - Get live health status
-    
     let spdk_nodes = _state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
     
@@ -485,6 +509,36 @@ async fn enhance_with_spdk_metrics(
             }
         }
         
+        // Get vhost controller status for volumes using vhost
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "vhost_get_controllers"
+            }))
+            .send()
+            .await
+        {
+            if let Ok(vhost_info) = response.json::<serde_json::Value>().await {
+                // Process vhost controller information and update volume states
+                if let Some(controllers) = vhost_info["result"].as_array() {
+                    for controller in controllers {
+                        if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
+                            if ctrlr_name.starts_with("vhost_") {
+                                let volume_id = ctrlr_name.strip_prefix("vhost_").unwrap();
+                                // Update corresponding volume with vhost status
+                                for volume in _volumes.iter_mut() {
+                                    if volume.id == volume_id {
+                                        volume.access_method = "vhost".to_string();
+                                        // Could add more vhost-specific metrics here
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         // Get RAID status
         if let Ok(response) = http_client
             .post(rpc_url)
@@ -497,6 +551,20 @@ async fn enhance_with_spdk_metrics(
         {
             if let Ok(raid_info) = response.json::<serde_json::Value>().await {
                 // Update volume states based on RAID status
+                if let Some(raid_bdevs) = raid_info["result"].as_array() {
+                    for raid_bdev in raid_bdevs {
+                        if let Some(raid_name) = raid_bdev["name"].as_str() {
+                            for volume in _volumes.iter_mut() {
+                                if volume.id == raid_name {
+                                    // Update volume state based on RAID status
+                                    if let Some(state) = raid_bdev["state"].as_str() {
+                                        volume.state = state.to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -585,4 +653,25 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
     }
     
     Ok(warp::reply::json(&json!({"error": "Node not found"})))
+}
+
+async fn get_node_vhost_status(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(rpc_url) = spdk_nodes.get(&node) {
+        let http_client = HttpClient::new();
+        
+        // Get vhost controller status
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({"method": "vhost_get_controllers"}))
+            .send()
+            .await
+        {
+            if let Ok(vhost_controllers) = response.json::<serde_json::Value>().await {
+                return Ok(warp::reply::json(&vhost_controllers));
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&json!({"error": "Failed to get vhost status"})))
 }
