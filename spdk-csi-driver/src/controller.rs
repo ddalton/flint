@@ -303,33 +303,6 @@ async fn manage_vhost_controllers(
     Ok(())
 }
 
-async fn check_vhost_controller_exists(
-    ctx: &Context,
-    volume_id: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    let controller_name = format!("vhost_{}", volume_id);
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_get_controllers"
-        }))
-        .send()
-        .await?;
-    
-    if response.status().is_success() {
-        let controllers: serde_json::Value = response.json().await?;
-        if let Some(controller_list) = controllers["result"].as_array() {
-            return Ok(controller_list.iter().any(|c| {
-                c["ctrlr"].as_str() == Some(&controller_name)
-            }));
-        }
-    }
-    
-    Ok(false)
-}
-
 async fn create_vhost_controller_for_volume(
     ctx: &Context,
     volume_id: &str,
@@ -343,17 +316,16 @@ async fn create_vhost_controller_for_volume(
         tokio::fs::create_dir_all(parent).await?;
     }
     
-    // Create vhost-blk controller
+    // Create vhost-nvme controller instead of vhost-blk
     let response = http_client
         .post(&ctx.spdk_rpc_url)
         .json(&json!({
-            "method": "vhost_create_blk_controller",
+            "method": "vhost_create_nvme_controller",
             "params": {
                 "ctrlr": controller_name,
-                "dev_name": volume_id, // Use RAID bdev as the underlying device
+                "io_queues": 4,
                 "cpumask": "0x1",
-                "readonly": false,
-                "packed_ring": false
+                "max_namespaces": 32
             }
         }))
         .send()
@@ -361,8 +333,21 @@ async fn create_vhost_controller_for_volume(
     
     if !response.status().is_success() {
         let error_text = response.text().await?;
-        return Err(format!("Failed to create vhost controller: {}", error_text).into());
+        return Err(format!("Failed to create vhost-nvme controller: {}", error_text).into());
     }
+    
+    // Add namespace to the vhost-nvme controller
+    http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "vhost_nvme_controller_add_ns",
+            "params": {
+                "ctrlr": controller_name,
+                "bdev_name": volume_id // Use RAID bdev as the namespace
+            }
+        }))
+        .send()
+        .await?;
     
     // Start the vhost controller with socket path
     http_client
@@ -377,7 +362,7 @@ async fn create_vhost_controller_for_volume(
         .send()
         .await?;
     
-    println!("Created vhost controller for volume: {}", volume_id);
+    println!("Created vhost-nvme controller for volume: {}", volume_id);
     Ok(())
 }
 
@@ -388,6 +373,20 @@ async fn delete_vhost_controller(
     let http_client = HttpClient::new();
     let controller_name = format!("vhost_{}", volume_id);
     let socket_path = get_vhost_socket_path(ctx, volume_id);
+    
+    // Remove namespace from vhost-nvme controller first
+    http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "vhost_nvme_controller_remove_ns",
+            "params": { 
+                "ctrlr": controller_name,
+                "nsid": 1  // Assuming namespace ID 1
+            }
+        }))
+        .send()
+        .await
+        .ok();
     
     // Stop vhost controller
     http_client
@@ -414,8 +413,36 @@ async fn delete_vhost_controller(
     // Clean up socket file
     tokio::fs::remove_file(&socket_path).await.ok();
     
-    println!("Deleted vhost controller for volume: {}", volume_id);
+    println!("Deleted vhost-nvme controller for volume: {}", volume_id);
     Ok(())
+}
+
+async fn check_vhost_controller_exists(
+    ctx: &Context,
+    volume_id: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let http_client = HttpClient::new();
+    let controller_name = format!("vhost_{}", volume_id);
+    
+    let response = http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "vhost_get_controllers"
+        }))
+        .send()
+        .await?;
+    
+    if response.status().is_success() {
+        let controllers: serde_json::Value = response.json().await?;
+        if let Some(controller_list) = controllers["result"].as_array() {
+            return Ok(controller_list.iter().any(|c| {
+                c["ctrlr"].as_str() == Some(&controller_name) &&
+                c["backend_specific"]["type"].as_str() == Some("nvme") // Check for nvme type
+            }));
+        }
+    }
+    
+    Ok(false)
 }
 
 fn get_vhost_socket_path(ctx: &Context, volume_id: &str) -> String {

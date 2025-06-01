@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap } from 'lucide-react';
+import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap, Cable } from 'lucide-react';
 import type { VolumeFilter } from '../../hooks/useDashboardData';
 
 interface StatCardsProps {
@@ -72,10 +72,10 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Local NVMe',
       value: stats.localNVMeVolumes,
       icon: Zap,
-      color: 'text-green-600',
-      bgColor: 'bg-green-50',
-      borderColor: 'border-green-200',
-      subtitle: 'High performance'
+      color: 'text-blue-600',
+      bgColor: 'bg-blue-50',
+      borderColor: 'border-blue-200',
+      subtitle: 'High performance storage'
     }
   ];
 

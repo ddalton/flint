@@ -201,39 +201,6 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
         </div>
       )}
 
-      {/* Enhanced Debug Information Panel */}
-      {activeFilter && activeFilter !== 'all' && (
-        <div className="mt-6 p-4 bg-yellow-50 rounded-lg border border-yellow-200 mb-6">
-          <h5 className="font-medium text-yellow-800 mb-2">Debug Information</h5>
-          <div className="text-sm text-yellow-700 space-y-1">
-            <div>Active Filter: {activeFilter}</div>
-            <div>Filtered Volumes: {filteredVolumes.length}</div>
-            <div>Filtered Nodes: {filteredNodes.length}</div>
-            {filteredVolumes.length > 0 && (
-              <div>
-                <div className="font-medium">Volume Details:</div>
-                {filteredVolumes.slice(0, 3).map((vol, idx) => (
-                  <div key={idx} className="ml-2 text-xs">
-                    • {vol.name} (State: {vol.state}) - Nodes: {vol.nodes.join(', ')}
-                    <br />
-                    &nbsp;&nbsp;Replica Statuses: {vol.replica_statuses.map(r => `${r.node}:${r.status}`).join(', ')}
-                  </div>
-                ))}
-                {filteredVolumes.length > 3 && (
-                  <div className="ml-2 text-xs">... and {filteredVolumes.length - 3} more</div>
-                )}
-              </div>
-            )}
-            {filteredNodes.length > 0 && (
-              <div>
-                <div className="font-medium">Filtered Nodes:</div>
-                <div className="ml-2 text-xs">{filteredNodes.join(', ')}</div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {filteredNodes.length === 0 && activeFilter && activeFilter !== 'all' ? (
         <div className="text-center py-12">
           <div className="text-gray-500 mb-4">
@@ -243,7 +210,8 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
             {filteredVolumes.length > 0 && (
               <p className="text-xs text-yellow-600 mt-2">
                 Found {filteredVolumes.length} matching volume{filteredVolumes.length !== 1 ? 's' : ''}, 
-                but {activeFilter === 'rebuilding' ? 'no rebuilding activity found on any nodes' : 'no matching node conditions found'}.
+                but {activeFilter === 'rebuilding' ? 'no rebuilding activity found on any nodes' : 
+                     'no matching node conditions found'}.
               </p>
             )}
           </div>

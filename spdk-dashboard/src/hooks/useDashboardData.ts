@@ -1,20 +1,31 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 
-// Backend API configuration
-const API_BASE_URL = process.env.NODE_ENV === 'production' 
-  ? '/api' 
-  : 'http://localhost:8080/api';
+// Types
+export interface Volume {
+  id: string;
+  name: string;
+  size: string;
+  state: string;
+  replicas: number;
+  active_replicas: number;
+  local_nvme: boolean;
+  access_method: string;
+  rebuild_progress: number | null;
+  nodes: string[];
+  replica_statuses: ReplicaStatus[];
+  // VHost-NVMe related fields
+  vhost_socket?: string;
+  vhost_device?: string;
+  vhost_enabled?: boolean;
+  vhost_type?: string; // "nvme" for vhost-nvme
+  nvme_namespaces?: VhostNvmeNamespace[];
+}
 
-// Types - Export all interfaces that will be used by components
-export type VolumeFilter = 'all' | 'healthy' | 'degraded' | 'failed' | 'faulted' | 'rebuilding' | 'local-nvme';
-export type DiskFilter = string | null; // disk ID or null
-export type VolumeReplicaFilter = string | null; // volume ID or null
-
-export interface NvmfTarget {
-  nqn: string;
-  target_ip: string;
-  target_port: string;
-  transport_type: string;
+export interface VhostNvmeNamespace {
+  nsid: number;
+  size: number;
+  uuid: string;
+  bdev_name: string;
 }
 
 export interface ReplicaStatus {
@@ -26,28 +37,14 @@ export interface ReplicaStatus {
   rebuild_target: string | null;
   is_new_replica: boolean;
   nvmf_target: NvmfTarget | null;
+  access_method: string;
 }
 
-export interface Volume {
-  id: string;
-  name: string;
-  size: string;
-  state: string; // Only 'Healthy', 'Degraded', or 'Failed'
-  replicas: number;
-  active_replicas: number;
-  local_nvme: boolean;
-  rebuild_progress: number | null;
-  nodes: string[];
-  replica_statuses: ReplicaStatus[];
-}
-
-export interface ProvisionedVolume {
-  volume_name: string;
-  volume_id: string;
-  size: number;
-  provisioned_at: string;
-  replica_type: string;
-  status: string;
+export interface NvmfTarget {
+  nqn: string;
+  target_ip: string;
+  target_port: string;
+  transport_type: string;
 }
 
 export interface Disk {
@@ -60,7 +57,7 @@ export interface Disk {
   free_space: number;
   free_space_display: string;
   healthy: boolean;
-  lvol_store_initialized: boolean;
+  blobstore_initialized: boolean;
   lvol_count: number;
   model: string;
   read_iops: number;
@@ -71,333 +68,510 @@ export interface Disk {
   provisioned_volumes: ProvisionedVolume[];
 }
 
+export interface ProvisionedVolume {
+  volume_name: string;
+  volume_id: string;
+  size: number;
+  provisioned_at: string;
+  replica_type: string;
+  status: string;
+}
+
 export interface DashboardData {
   volumes: Volume[];
   disks: Disk[];
   nodes: string[];
 }
 
-// Backend API service
-const apiService = {
-  token: '', // Store in memory instead of localStorage
-  
-  login: async (username: string, password: string) => {
-    // For now, keep the mock authentication since backend doesn't implement auth yet
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    if (username === 'admin' && password === 'spdk-admin-2025') {
-      apiService.token = 'mock-token';
-      return { success: true };
-    }
-    throw new Error('Invalid credentials');
-  },
-  
-  logout: () => {
-    apiService.token = '';
-  },
-  
-  isAuthenticated: () => {
-    return !!apiService.token;
-  },
+export interface DashboardStats {
+  totalVolumes: number;
+  healthyVolumes: number;
+  degradedVolumes: number;
+  failedVolumes: number;
+  faultedVolumes: number;
+  volumesWithRebuilding: number;
+  localNVMeVolumes: number;
+  totalDisks: number;
+  healthyDisks: number;
+  formattedDisks: number;
+}
 
-  async fetchDashboardData(): Promise<DashboardData> {
-    const response = await fetch(`${API_BASE_URL}/dashboard`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch dashboard data: ${response.statusText}`);
-    }
-    return response.json();
-  },
+export type VolumeFilter = 
+  | 'all' 
+  | 'healthy' 
+  | 'degraded' 
+  | 'failed' 
+  | 'faulted' 
+  | 'rebuilding' 
+  | 'local-nvme';
 
-  async refreshData() {
-    const response = await fetch(`${API_BASE_URL}/refresh`, {
-      method: 'POST'
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to refresh data: ${response.statusText}`);
-    }
-    return response.json();
-  },
+export type DiskFilter = string | null;
+export type VolumeReplicaFilter = string | null;
 
-  async getVolumeDetails(volumeId: string) {
-    const response = await fetch(`${API_BASE_URL}/volumes/${volumeId}`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch volume details: ${response.statusText}`);
-    }
-    return response.json();
-  },
-
-  async getNodeMetrics(node: string) {
-    const response = await fetch(`${API_BASE_URL}/nodes/${node}/metrics`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch node metrics: ${response.statusText}`);
-    }
-    return response.json();
-  }
-};
-
-// Fallback mock data for development/offline scenarios
-const generateFallbackData = (): DashboardData => {
-  const volumes: Volume[] = [];
-  const disks: Disk[] = [];
-  const nodes = ['node-a', 'node-b', 'node-c', 'node-d', 'node-e'];
-  
-  // Generate mock volumes (representing PVCs -> SPDK logical volumes)
-  for (let i = 1; i <= 8; i++) {
-    const totalReplicas = Math.floor(Math.random() * 3 + 2);
-    const selectedNodes = nodes.slice(0, totalReplicas);
-    const hasLocalNVMe = Math.random() > 0.3;
-    
-    // Volume states: only Healthy, Degraded, or Failed
-    const stateRand = Math.random();
-    const volumeState = stateRand > 0.8 ? 'Failed' : (stateRand > 0.6 ? 'Degraded' : 'Healthy');
-    
-    const replicaStatuses: ReplicaStatus[] = selectedNodes.map((node, index) => {
-      const isLocal = index === 0 && hasLocalNVMe;
-      
-      // Replica status based on volume state
-      let replicaStatus = 'healthy';
-      let rebuildProgress = null;
-      
-      if (volumeState === 'Failed') {
-        // Failed volumes might have some failed replicas
-        replicaStatus = Math.random() > 0.5 ? 'failed' : 'healthy';
-      } else if (volumeState === 'Degraded') {
-        // Degraded volumes might have some rebuilding or failed replicas
-        const rand = Math.random();
-        if (rand > 0.7) {
-          replicaStatus = 'rebuilding';
-          rebuildProgress = Math.floor(Math.random() * 90 + 10);
-        } else if (rand > 0.5) {
-          replicaStatus = 'failed';
-        } else {
-          replicaStatus = 'healthy';
+// Mock data for development
+const mockData: DashboardData = {
+  volumes: [
+    {
+      id: "pvc-12345678-1234-1234-1234-123456789abc",
+      name: "postgres-data-pvc",
+      size: "100GB",
+      state: "Healthy",
+      replicas: 3,
+      active_replicas: 3,
+      local_nvme: true,
+      access_method: "vhost-nvme",
+      rebuild_progress: null,
+      nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
+      vhost_socket: "/var/lib/spdk-csi/sockets/vhost_postgres-data-pvc.sock",
+      vhost_device: "/dev/nvme-vhost-postgres-data-pvc",
+      vhost_enabled: true,
+      vhost_type: "nvme",
+      nvme_namespaces: [
+        {
+          nsid: 1,
+          size: 107374182400, // 100GB in bytes
+          uuid: "12345678-1234-1234-1234-123456789abc",
+          bdev_name: "pvc-12345678-1234-1234-1234-123456789abc"
         }
-      } else {
-        // Healthy volumes might still have some rebuilding activity
-        if (Math.random() > 0.9) {
-          replicaStatus = 'rebuilding';
-          rebuildProgress = Math.floor(Math.random() * 90 + 10);
+      ],
+      replica_statuses: [
+        {
+          node: "worker-node-1",
+          status: "healthy",
+          is_local: true,
+          last_io_timestamp: "2025-06-01T10:30:00Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: null,
+          access_method: "local-nvme"
+        },
+        {
+          node: "worker-node-2",
+          status: "healthy",
+          is_local: false,
+          last_io_timestamp: "2025-06-01T10:29:55Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: {
+            nqn: "nqn.2016-06.io.spdk:cnode2",
+            target_ip: "192.168.1.102",
+            target_port: "4420",
+            transport_type: "TCP"
+          },
+          access_method: "remote-nvmf"
+        },
+        {
+          node: "worker-node-3",
+          status: "rebuilding",
+          is_local: false,
+          last_io_timestamp: "2025-06-01T10:29:50Z",
+          rebuild_progress: 75,
+          rebuild_target: null,
+          is_new_replica: true,
+          nvmf_target: {
+            nqn: "nqn.2016-06.io.spdk:cnode3",
+            target_ip: "192.168.1.103",
+            target_port: "4420",
+            transport_type: "TCP"
+          },
+          access_method: "remote-nvmf"
         }
-      }
-      
-      return {
-        node,
-        status: replicaStatus,
-        is_local: isLocal,
-        last_io_timestamp: replicaStatus !== 'failed' ? new Date(Date.now() - Math.random() * 3600000).toISOString() : null,
-        rebuild_progress: rebuildProgress,
-        rebuild_target: null,
-        is_new_replica: replicaStatus === 'rebuilding' && Math.random() > 0.7,
-        nvmf_target: !isLocal ? {
-          nqn: `nqn.2025-05.io.spdk:vol-${i}-replica-${index}`,
-          target_ip: `192.168.1.${100 + nodes.indexOf(node)}`,
-          target_port: '4420',
-          transport_type: 'TCP'
-        } : null
-      };
-    });
-    
-    volumes.push({
-      id: `spdk-vol-${i}`,
-      name: `pvc-workload-${i}`,
-      size: `${Math.floor(Math.random() * 500 + 100)}GB`,
-      state: volumeState,
-      replicas: totalReplicas,
-      active_replicas: replicaStatuses.filter(r => r.status === 'healthy' || r.status === 'rebuilding').length,
-      local_nvme: hasLocalNVMe,
-      rebuild_progress: replicaStatuses.some(r => r.rebuild_progress) ? Math.max(...replicaStatuses.map(r => r.rebuild_progress || 0)) : null,
-      nodes: selectedNodes,
-      replica_statuses: replicaStatuses
-    });
-  }
-  
-  // Generate mock disks (1:1 with SPDK logical volume stores)
-  nodes.forEach((node, nodeIndex) => {
-    for (let i = 1; i <= Math.floor(Math.random() * 3 + 2); i++) {
-      const isInitialized = Math.random() > 0.2;
-      const isHealthy = Math.random() > 0.1;
-      const totalCapacity = Math.floor(Math.random() * 1000 + 500);
-      const allocatedSpace = isInitialized ? Math.floor(Math.random() * (totalCapacity * 0.7)) : 0;
-      
-      disks.push({
-        id: `${node}-nvme${i}`,
-        node,
-        pci_addr: `0000:${(nodeIndex * 10 + i).toString(16).padStart(2, '0')}:00.0`,
-        capacity: totalCapacity * 1024 * 1024 * 1024, // Backend expects bytes
-        capacity_gb: totalCapacity,
-        allocated_space: allocatedSpace,
-        free_space: totalCapacity - allocatedSpace,
-        free_space_display: `${totalCapacity - allocatedSpace}GB`,
-        healthy: isHealthy,
-        lvol_store_initialized: isInitialized,
-        lvol_count: isInitialized ? Math.floor(Math.random() * 5) : 0,
-        model: `Samsung NVMe SSD ${Math.floor(Math.random() * 3 + 1)}TB`,
-        read_iops: Math.floor(Math.random() * 50000 + 10000),
-        write_iops: Math.floor(Math.random() * 40000 + 8000),
-        read_latency: Math.floor(Math.random() * 100 + 20),
-        write_latency: Math.floor(Math.random() * 150 + 30),
-        brought_online: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString(),
-        provisioned_volumes: []
-      });
+      ]
+    },
+    {
+      id: "pvc-87654321-4321-4321-4321-cba987654321",
+      name: "redis-cache-pvc",
+      size: "50GB",
+      state: "Degraded",
+      replicas: 3,
+      active_replicas: 2,
+      local_nvme: true,
+      access_method: "vhost-nvme",
+      rebuild_progress: null,
+      nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
+      vhost_socket: "/var/lib/spdk-csi/sockets/vhost_redis-cache-pvc.sock",
+      vhost_device: "/dev/nvme-vhost-redis-cache-pvc",
+      vhost_enabled: true,
+      vhost_type: "nvme",
+      nvme_namespaces: [
+        {
+          nsid: 1,
+          size: 53687091200, // 50GB in bytes
+          uuid: "87654321-4321-4321-4321-cba987654321",
+          bdev_name: "pvc-87654321-4321-4321-4321-cba987654321"
+        }
+      ],
+      replica_statuses: [
+        {
+          node: "worker-node-1",
+          status: "healthy",
+          is_local: true,
+          last_io_timestamp: "2025-06-01T10:30:00Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: null,
+          access_method: "local-nvme"
+        },
+        {
+          node: "worker-node-2",
+          status: "healthy",
+          is_local: false,
+          last_io_timestamp: "2025-06-01T10:29:55Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: {
+            nqn: "nqn.2016-06.io.spdk:cnode2",
+            target_ip: "192.168.1.102",
+            target_port: "4420",
+            transport_type: "TCP"
+          },
+          access_method: "remote-nvmf"
+        },
+        {
+          node: "worker-node-3",
+          status: "failed",
+          is_local: false,
+          last_io_timestamp: "2025-06-01T10:25:00Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: {
+            nqn: "nqn.2016-06.io.spdk:cnode3",
+            target_ip: "192.168.1.103",
+            target_port: "4420",
+            transport_type: "TCP"
+          },
+          access_method: "remote-nvmf"
+        }
+      ]
     }
-  });
-  
-  // Map logical volumes to their corresponding volume stores on disks
-  volumes.forEach(volume => {
-    volume.replica_statuses.forEach(replica => {
-      if (replica.status === 'healthy' || replica.status === 'rebuilding') {
-        const availableDisks = disks.filter(d => d.node === replica.node && d.lvol_store_initialized);
-        if (availableDisks.length > 0) {
-          const disk = availableDisks[Math.floor(Math.random() * availableDisks.length)];
-          const volumeSize = parseInt(volume.size.replace('GB', ''));
-          
-          disk.provisioned_volumes.push({
-            volume_name: volume.name,
-            volume_id: volume.id,
-            size: volumeSize,
-            provisioned_at: new Date(Date.now() - Math.random() * 20 * 24 * 60 * 60 * 1000).toISOString(),
-            replica_type: replica.is_local ? 'Local NVMe' : 'NVMe-oF',
-            status: replica.status
-          });
+  ],
+  disks: [
+    {
+      id: "nvme0n1",
+      node: "worker-node-1",
+      pci_addr: "0000:3b:00.0",
+      capacity: 1024000000000,
+      capacity_gb: 1000,
+      allocated_space: 512000000000,
+      free_space: 512000000000,
+      free_space_display: "512GB",
+      healthy: true,
+      blobstore_initialized: true,
+      lvol_count: 2,
+      model: "Samsung SSD 980 PRO 1TB",
+      read_iops: 45000,
+      write_iops: 32000,
+      read_latency: 120,
+      write_latency: 180,
+      brought_online: "2025-06-01T08:00:00Z",
+      provisioned_volumes: [
+        {
+          volume_name: "postgres-data-pvc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          size: 100,
+          provisioned_at: "2025-06-01T08:15:00Z",
+          replica_type: "Local NVMe",
+          status: "healthy"
+        },
+        {
+          volume_name: "redis-cache-pvc",
+          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
+          size: 50,
+          provisioned_at: "2025-06-01T08:20:00Z",
+          replica_type: "Local NVMe",
+          status: "healthy"
         }
-      }
-    });
-  });
-  
-  return { volumes, disks, nodes };
+      ]
+    },
+    {
+      id: "nvme1n1",
+      node: "worker-node-2",
+      pci_addr: "0000:3b:00.0",
+      capacity: 1024000000000,
+      capacity_gb: 1000,
+      allocated_space: 256000000000,
+      free_space: 768000000000,
+      free_space_display: "768GB",
+      healthy: true,
+      blobstore_initialized: true,
+      lvol_count: 2,
+      model: "Samsung SSD 980 PRO 1TB",
+      read_iops: 43000,
+      write_iops: 30000,
+      read_latency: 125,
+      write_latency: 185,
+      brought_online: "2025-06-01T08:00:00Z",
+      provisioned_volumes: [
+        {
+          volume_name: "postgres-data-pvc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          size: 100,
+          provisioned_at: "2025-06-01T08:15:00Z",
+          replica_type: "Remote NVMe-oF",
+          status: "healthy"
+        },
+        {
+          volume_name: "redis-cache-pvc",
+          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
+          size: 50,
+          provisioned_at: "2025-06-01T08:20:00Z",
+          replica_type: "Remote NVMe-oF",
+          status: "healthy"
+        }
+      ]
+    },
+    {
+      id: "nvme2n1",
+      node: "worker-node-3",
+      pci_addr: "0000:3b:00.0",
+      capacity: 1024000000000,
+      capacity_gb: 1000,
+      allocated_space: 150000000000,
+      free_space: 874000000000,
+      free_space_display: "874GB",
+      healthy: true,
+      blobstore_initialized: true,
+      lvol_count: 1,
+      model: "Samsung SSD 980 PRO 1TB",
+      read_iops: 41000,
+      write_iops: 28000,
+      read_latency: 130,
+      write_latency: 190,
+      brought_online: "2025-06-01T08:00:00Z",
+      provisioned_volumes: [
+        {
+          volume_name: "postgres-data-pvc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          size: 100,
+          provisioned_at: "2025-06-01T08:15:00Z",
+          replica_type: "Remote NVMe-oF",
+          status: "rebuilding"
+        }
+      ]
+    }
+  ],
+  nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
 };
 
-// Data fetching function
-const fetchDashboardData = async (): Promise<DashboardData> => {
-  try {
-    return await apiService.fetchDashboardData();
-  } catch (error) {
-    console.error('Failed to fetch real data, falling back to mock data:', error);
-    return generateFallbackData();
-  }
-};
-
-// Authentication hook
-export const useAuth = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(apiService.isAuthenticated());
-
-  const login = async (username: string, password: string) => {
-    await apiService.login(username, password);
-    setIsAuthenticated(true);
-  };
-
-  const logout = () => {
-    apiService.logout();
-    setIsAuthenticated(false);
-  };
-
-  return { isAuthenticated, login, logout };
-};
-
-// Dashboard data hook
+// Hook implementation
 export const useDashboardData = (autoRefresh: boolean = true) => {
-  const [data, setData] = useState<DashboardData>({ volumes: [], disks: [], nodes: [] });
+  const [data, setData] = useState<DashboardData>({
+    volumes: [],
+    disks: [],
+    nodes: []
+  });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
+  const stats = useMemo((): DashboardStats => {
+    const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
+    const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
+    const failedVolumes = data.volumes.filter(v => v.state === 'Failed').length;
+    const faultedVolumes = degradedVolumes + failedVolumes;
+    
+    const volumesWithRebuilding = data.volumes.filter(v => 
+      v.replica_statuses.some(replica => 
+        replica.status === 'rebuilding' || 
+        replica.rebuild_progress !== null ||
+        replica.is_new_replica
+      )
+    ).length;
+    
+    const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
+    
+    const healthyDisks = data.disks.filter(d => d.healthy).length;
+    const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
+
+    return {
+      totalVolumes: data.volumes.length,
+      healthyVolumes,
+      degradedVolumes,
+      failedVolumes,
+      faultedVolumes,
+      volumesWithRebuilding,
+      localNVMeVolumes,
+      totalDisks: data.disks.length,
+      healthyDisks,
+      formattedDisks,
+    };
+  }, [data]);
+
+  const refreshData = useCallback(async () => {
     try {
       setLoading(true);
-      setError(null);
       
-      // Simulate network delay for better UX
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      const dashboardData = await fetchDashboardData();
-      setData(dashboardData);
-    } catch (err) {
-      console.error('Failed to fetch dashboard data:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error occurred');
-      
-      // Use fallback data on error
-      setData(generateFallbackData());
+      // Try to fetch from API, fall back to mock data
+      try {
+        const response = await fetch('/api/dashboard');
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const dashboardData = await response.json();
+        setData(dashboardData);
+      } catch (apiError) {
+        console.warn('API not available, using mock data:', apiError);
+        // Use mock data for development/demo
+        setData(mockData);
+      }
+    } catch (error) {
+      console.error('Failed to fetch dashboard data:', error);
+      // Use mock data as fallback
+      setData(mockData);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  const refreshData = useCallback(async () => {
-    try {
-      await apiService.refreshData();
-      await fetchData();
-    } catch (err) {
-      console.error('Failed to refresh data:', err);
-      setError('Failed to refresh data');
-    }
-  }, [fetchData]);
-
-  const getVolumeDetails = useCallback(async (volumeId: string) => {
-    try {
-      return await apiService.getVolumeDetails(volumeId);
-    } catch (err) {
-      console.error('Failed to get volume details:', err);
-      throw err;
-    }
-  }, []);
-
-  const getNodeMetrics = useCallback(async (node: string) => {
-    try {
-      return await apiService.getNodeMetrics(node);
-    } catch (err) {
-      console.error('Failed to get node metrics:', err);
-      throw err;
-    }
-  }, []);
+  useEffect(() => {
+    refreshData();
+  }, [refreshData]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (!autoRefresh) return;
 
-  useEffect(() => {
-    if (autoRefresh) {
-      const interval = setInterval(fetchData, 30000); // Refresh every 30 seconds
-      return () => clearInterval(interval);
-    }
-  }, [autoRefresh, fetchData]);
-
-  // Computed values - corrected to match actual volume states
-  const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy');
-  const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded');
-  const failedVolumes = data.volumes.filter(v => v.state === 'Failed');
-  const faultedVolumes = data.volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
-  
-  // Volumes that have any rebuilding replicas
-  const volumesWithRebuilding = data.volumes.filter(v => 
-    v.replica_statuses.some(replica => 
-      replica.status === 'rebuilding' || 
-      replica.rebuild_progress !== null ||
-      replica.is_new_replica
-    )
-  );
-  
-  const localNVMeVolumes = data.volumes.filter(v => v.local_nvme);
-  const healthyDisks = data.disks.filter(d => d.healthy).length;
-  const formattedDisks = data.disks.filter(d => d.lvol_store_initialized).length;
+    const interval = setInterval(refreshData, 30000); // Refresh every 30 seconds
+    return () => clearInterval(interval);
+  }, [autoRefresh, refreshData]);
 
   return {
     data,
     loading,
-    error,
-    refreshData,
-    fetchData,
-    getVolumeDetails,
-    getNodeMetrics,
-    // Corrected statistics
-    stats: {
-      totalVolumes: data.volumes.length,
-      healthyVolumes: healthyVolumes.length,
-      degradedVolumes: degradedVolumes.length,
-      failedVolumes: failedVolumes.length,
-      faultedVolumes: faultedVolumes.length,
-      volumesWithRebuilding: volumesWithRebuilding.length,
-      localNVMeVolumes: localNVMeVolumes.length,
-      totalDisks: data.disks.length,
-      healthyDisks,
-      formattedDisks
-    }
+    stats,
+    refreshData
   };
 };
+
+// Authentication hook
+export const useAuth = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const login = useCallback(async (username: string, password: string) => {
+    setLoading(true);
+    try {
+      // Simulate API call
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      if (username === 'admin' && password === 'spdk-admin-2025') {
+        setIsAuthenticated(true);
+        // Note: In production, avoid localStorage for sensitive auth tokens
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('spdk_auth', 'true');
+        }
+      } else {
+        throw new Error('Invalid credentials');
+      }
+    } catch (error) {
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const logout = useCallback(() => {
+    setIsAuthenticated(false);
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('spdk_auth');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('spdk_auth');
+      if (stored === 'true') {
+        setIsAuthenticated(true);
+      }
+    }
+  }, []);
+
+  return {
+    isAuthenticated,
+    loading,
+    login,
+    logout
+  };
+};
+
+// Utility functions
+export const filterVolumesByType = (volumes: Volume[], filter: VolumeFilter): Volume[] => {
+  switch (filter) {
+    case 'healthy':
+      return volumes.filter(v => v.state === 'Healthy');
+    case 'degraded':
+      return volumes.filter(v => v.state === 'Degraded');
+    case 'failed':
+      return volumes.filter(v => v.state === 'Failed');
+    case 'faulted':
+      return volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
+    case 'rebuilding':
+      return volumes.filter(v => 
+        v.replica_statuses.some(replica => 
+          replica.status === 'rebuilding' || 
+          replica.rebuild_progress !== null ||
+          replica.is_new_replica
+        )
+      );
+    case 'local-nvme':
+      return volumes.filter(v => v.local_nvme);
+    case 'all':
+    default:
+      return volumes;
+  }
+};
+
+export const getVHostNvmeStatus = (volume: Volume): {
+  enabled: boolean;
+  socket?: string;
+  device?: string;
+  method: string;
+  type: string;
+  namespaces?: VhostNvmeNamespace[];
+} => {
+  const enabled = Boolean(
+    volume.vhost_enabled || 
+    volume.vhost_socket || 
+    volume.access_method === 'vhost-nvme' ||
+    volume.vhost_type === 'nvme'
+  );
+  
+  return {
+    enabled,
+    socket: volume.vhost_socket,
+    device: volume.vhost_device,
+    method: volume.access_method || 'unknown',
+    type: volume.vhost_type || 'nvme',
+    namespaces: volume.nvme_namespaces
+  };
+};
+
+export const getAccessMethodDisplayName = (accessMethod: string): string => {
+  switch (accessMethod) {
+    case 'vhost-nvme':
+      return 'VHost-NVMe';
+    case 'vhost':
+      return 'VHost-NVMe'; // Default vhost to NVMe
+    case 'nvmf':
+      return 'NVMe-oF';
+    case 'local-nvme':
+      return 'Local NVMe';
+    case 'iscsi':
+      return 'iSCSI';
+    default:
+      return accessMethod || 'Unknown';
+  }
+};
+
+export const hasHighPerformanceAccess = (volume: Volume): boolean => {
+  return volume.local_nvme && (
+    volume.access_method === 'vhost-nvme' || 
+    volume.vhost_enabled ||
+    volume.vhost_socket ||
+    volume.vhost_type === 'nvme'
+  );
+};
+
+export default useDashboardData;

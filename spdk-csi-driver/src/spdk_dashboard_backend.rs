@@ -112,7 +112,7 @@ mod spdk_csi_driver {
         pub healthy: bool,
         pub last_checked: String,
         pub lvol_count: u32,
-        pub lvol_store_initialized: bool,
+        pub blobstore_initialized: bool,
         pub io_stats: IoStatistics,
         pub lvs_name: Option<String>,
     }
@@ -141,6 +141,20 @@ struct DashboardVolume {
     rebuild_progress: Option<f64>,
     nodes: Vec<String>,
     replica_statuses: Vec<DashboardReplicaStatus>,
+    // VHost-NVMe related fields
+    vhost_socket: Option<String>,
+    vhost_device: Option<String>,
+    vhost_enabled: bool,
+    vhost_type: String, // "nvme" instead of "blk"
+    nvme_namespaces: Vec<VhostNvmeNamespace>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct VhostNvmeNamespace {
+    nsid: u32,
+    size: u64,
+    uuid: String,
+    bdev_name: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -175,7 +189,7 @@ struct DashboardDisk {
     free_space: i64,
     free_space_display: String,
     healthy: bool,
-    lvol_store_initialized: bool,
+    blobstore_initialized: bool,
     lvol_count: u32,
     model: String,
     read_iops: u64,
@@ -266,6 +280,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(warp::get())
                 .and(state_filter.clone())
                 .and_then(get_volume_details)
+        )
+        .or(
+            // Get vhost details for a specific volume
+            warp::path("volumes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("vhost"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_vhost_details)
         )
         .or(
             // Trigger manual refresh
@@ -418,13 +441,32 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     let size_gb = spec.size_bytes / (1024 * 1024 * 1024);
     let has_local_nvme = spec.replicas.iter().any(|r| r.replica_type == "lvol");
     
-    // Volume is always accessed locally via vhost - the "remote-only" concept doesn't apply
-    // The pod always gets a local vhost device, even if all replicas are remote
-    let volume_access_method = "vhost".to_string();
+    // Volume is always accessed locally via vhost-nvme
+    let volume_access_method = "vhost-nvme".to_string();
+    
+    // Generate vhost socket path and device path for NVMe
+    let volume_name = volume.metadata.name.clone().unwrap_or(spec.volume_id.clone());
+    let vhost_socket = spec.vhost_socket.clone().or_else(|| 
+        Some(format!("/var/lib/spdk/vhost/vhost_{}.sock", volume_name))
+    );
+    let vhost_device = status.vhost_device.clone().or_else(|| 
+        Some(format!("/dev/nvme-vhost-{}", volume_name))
+    );
+    let vhost_enabled = vhost_socket.is_some();
+    
+    // Create NVMe namespace information
+    let nvme_namespaces = vec![
+        VhostNvmeNamespace {
+            nsid: 1,
+            size: spec.size_bytes as u64,
+            uuid: spec.primary_lvol_uuid.clone().unwrap_or_default(),
+            bdev_name: spec.volume_id.clone(),
+        }
+    ];
     
     DashboardVolume {
         id: spec.volume_id.clone(),
-        name: volume.metadata.name.clone().unwrap_or(spec.volume_id.clone()),
+        name: volume_name,
         size: format!("{}GB", size_gb),
         state: status.state.clone(),
         replicas: spec.num_replicas,
@@ -434,6 +476,11 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         rebuild_progress: spec.rebuild_in_progress.as_ref().map(|r| r.copy_progress),
         nodes: spec.replicas.iter().map(|r| r.node.clone()).collect(),
         replica_statuses,
+        vhost_socket,
+        vhost_device,
+        vhost_enabled,
+        vhost_type: "nvme".to_string(), // Changed from "blk" to "nvme"
+        nvme_namespaces,
     }
 }
 
@@ -472,7 +519,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
         free_space: status.free_space,
         free_space_display: format!("{}GB", status.free_space / (1024 * 1024 * 1024)),
         healthy: status.healthy,
-        lvol_store_initialized: status.lvol_store_initialized,
+        blobstore_initialized: status.blobstore_initialized,
         lvol_count: status.lvol_count,
         model: format!("NVMe Disk"), // You might want to enhance this
         read_iops: status.io_stats.read_iops,
@@ -485,31 +532,15 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
 }
 
 async fn enhance_with_spdk_metrics(
-    _volumes: &mut [DashboardVolume],
-    _disks: &mut [DashboardDisk],
-    _state: &AppState,
+    volumes: &mut [DashboardVolume],
+    disks: &mut [DashboardDisk],
+    state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Here you can make direct SPDK RPC calls to get real-time metrics
-    let spdk_nodes = _state.spdk_nodes.read().await;
+    let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
     
-    for (_node, rpc_url) in spdk_nodes.iter() {
-        // Get real-time bdev statistics
-        if let Ok(response) = http_client
-            .post(rpc_url)
-            .json(&json!({
-                "method": "bdev_get_iostat"
-            }))
-            .send()
-            .await
-        {
-            if let Ok(iostat) = response.json::<serde_json::Value>().await {
-                // Process real-time I/O statistics and update dashboard data
-                // This is where you'd update the live metrics
-            }
-        }
-        
-        // Get vhost controller status for volumes using vhost
+    for (node, rpc_url) in spdk_nodes.iter() {
+        // Get vhost-nvme controller status for volumes using vhost-nvme
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
@@ -523,13 +554,89 @@ async fn enhance_with_spdk_metrics(
                 if let Some(controllers) = vhost_info["result"].as_array() {
                     for controller in controllers {
                         if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
-                            if ctrlr_name.starts_with("vhost_") {
-                                let volume_id = ctrlr_name.strip_prefix("vhost_").unwrap();
-                                // Update corresponding volume with vhost status
-                                for volume in _volumes.iter_mut() {
-                                    if volume.id == volume_id {
-                                        volume.access_method = "vhost".to_string();
-                                        // Could add more vhost-specific metrics here
+                            // Check if this is a vhost-nvme controller
+                            let is_nvme_controller = controller["backend_specific"]["type"]
+                                .as_str() == Some("nvme");
+                            
+                            // Match vhost controller to volume
+                            for volume in volumes.iter_mut() {
+                                // Check if this vhost controller corresponds to this volume
+                                if ctrlr_name.contains(&volume.name) || 
+                                   ctrlr_name.contains(&volume.id) {
+                                    
+                                    // Update vhost information from live SPDK data
+                                    if let Some(socket_path) = controller["socket"].as_str() {
+                                        volume.vhost_socket = Some(socket_path.to_string());
+                                    }
+                                    
+                                    // Check if controller is active
+                                    if let Some(active) = controller["active"].as_bool() {
+                                        volume.vhost_enabled = active;
+                                    }
+                                    
+                                    // Update vhost type
+                                    volume.vhost_type = if is_nvme_controller {
+                                        "nvme".to_string()
+                                    } else {
+                                        "blk".to_string()
+                                    };
+                                    
+                                    // Get NVMe namespace information for vhost-nvme controllers
+                                    if is_nvme_controller {
+                                        if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
+                                            volume.nvme_namespaces = namespaces.iter().map(|ns| {
+                                                VhostNvmeNamespace {
+                                                    nsid: ns["nsid"].as_u64().unwrap_or(1) as u32,
+                                                    size: ns["size"].as_u64().unwrap_or(0),
+                                                    uuid: ns["uuid"].as_str().unwrap_or("").to_string(),
+                                                    bdev_name: ns["bdev_name"].as_str().unwrap_or("").to_string(),
+                                                }
+                                            }).collect();
+                                        }
+                                    }
+                                    
+                                    // Update access method confirmation
+                                    volume.access_method = if is_nvme_controller {
+                                        "vhost-nvme".to_string()
+                                    } else {
+                                        "vhost-blk".to_string()
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Get real-time bdev statistics and update volumes/disks
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_get_iostat"
+            }))
+            .send()
+            .await
+        {
+            if let Ok(iostat) = response.json::<serde_json::Value>().await {
+                // Process real-time I/O statistics and update dashboard data
+                if let Some(bdevs) = iostat["result"].as_array() {
+                    for bdev_stat in bdevs {
+                        if let Some(bdev_name) = bdev_stat["name"].as_str() {
+                            // Update disk statistics
+                            for disk in disks.iter_mut() {
+                                if disk.id == bdev_name || bdev_name.contains(&disk.id) {
+                                    if let Some(read_ios) = bdev_stat["read_ios"].as_u64() {
+                                        disk.read_iops = read_ios;
+                                    }
+                                    if let Some(write_ios) = bdev_stat["write_ios"].as_u64() {
+                                        disk.write_iops = write_ios;
+                                    }
+                                    if let Some(read_latency) = bdev_stat["read_latency_ticks"].as_u64() {
+                                        disk.read_latency = read_latency;
+                                    }
+                                    if let Some(write_latency) = bdev_stat["write_latency_ticks"].as_u64() {
+                                        disk.write_latency = write_latency;
                                     }
                                 }
                             }
@@ -539,7 +646,7 @@ async fn enhance_with_spdk_metrics(
             }
         }
         
-        // Get RAID status
+        // Get RAID status and rebuild information
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
@@ -554,11 +661,48 @@ async fn enhance_with_spdk_metrics(
                 if let Some(raid_bdevs) = raid_info["result"].as_array() {
                     for raid_bdev in raid_bdevs {
                         if let Some(raid_name) = raid_bdev["name"].as_str() {
-                            for volume in _volumes.iter_mut() {
-                                if volume.id == raid_name {
+                            for volume in volumes.iter_mut() {
+                                if volume.id == raid_name || raid_name.contains(&volume.id) {
                                     // Update volume state based on RAID status
                                     if let Some(state) = raid_bdev["state"].as_str() {
-                                        volume.state = state.to_string();
+                                        volume.state = match state {
+                                            "online" => "Healthy".to_string(),
+                                            "degraded" => "Degraded".to_string(),
+                                            "broken" => "Failed".to_string(),
+                                            _ => state.to_string(),
+                                        };
+                                    }
+                                    
+                                    // Check for rebuild operations
+                                    if let Some(rebuild_info) = raid_bdev["rebuild_info"].as_object() {
+                                        if let Some(progress) = rebuild_info["progress_percentage"].as_f64() {
+                                            volume.rebuild_progress = Some(progress);
+                                            
+                                            // Update replica status for rebuilding replicas
+                                            if let Some(target_idx) = rebuild_info["target_replica_index"].as_usize() {
+                                                if let Some(replica) = volume.replica_statuses.get_mut(target_idx) {
+                                                    replica.status = "rebuilding".to_string();
+                                                    replica.rebuild_progress = Some(progress);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Update replica statuses based on RAID member states
+                                    if let Some(base_bdevs) = raid_bdev["base_bdevs"].as_array() {
+                                        for (idx, base_bdev) in base_bdevs.iter().enumerate() {
+                                            if let Some(replica) = volume.replica_statuses.get_mut(idx) {
+                                                if let Some(member_state) = base_bdev["state"].as_str() {
+                                                    replica.status = match member_state {
+                                                        "online" => "healthy".to_string(),
+                                                        "degraded" => "degraded".to_string(),
+                                                        "failed" => "failed".to_string(),
+                                                        "rebuilding" => "rebuilding".to_string(),
+                                                        _ => member_state.to_string(),
+                                                    };
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -610,6 +754,59 @@ async fn get_volume_details(volume_id: String, state: AppState) -> Result<impl w
     Ok(warp::reply::json(&json!({"error": "Volume not found"})))
 }
 
+async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let http_client = HttpClient::new();
+    let mut vhost_details = json!({
+        "volume_id": volume_id,
+        "vhost_controllers": [],
+        "controller_type": "nvme"
+    });
+    
+    // Query all nodes for vhost-nvme controller information
+    for (node, rpc_url) in spdk_nodes.iter() {
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "vhost_get_controllers"
+            }))
+            .send()
+            .await
+        {
+            if let Ok(vhost_info) = response.json::<serde_json::Value>().await {
+                if let Some(controllers) = vhost_info["result"].as_array() {
+                    for controller in controllers {
+                        if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
+                            // Check if this controller is for our volume
+                            if ctrlr_name.contains(&volume_id) {
+                                let mut controller_info = controller.clone();
+                                controller_info["node"] = json!(node);
+                                
+                                // Add NVMe-specific information
+                                if controller["backend_specific"]["type"].as_str() == Some("nvme") {
+                                    controller_info["controller_type"] = json!("nvme");
+                                    if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
+                                        controller_info["nvme_namespaces"] = json!(namespaces);
+                                    }
+                                } else {
+                                    controller_info["controller_type"] = json!("blk");
+                                }
+                                
+                                vhost_details["vhost_controllers"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(controller_info);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&vhost_details))
+}
+
 async fn trigger_refresh(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
     match refresh_dashboard_data(&state).await {
         Ok(_) => Ok(warp::reply::json(&json!({"status": "success"}))),
@@ -649,6 +846,54 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
             }
         }
         
+        // Get vhost-nvme controllers
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({"method": "vhost_get_controllers"}))
+            .send()
+            .await
+        {
+            if let Ok(vhost_controllers) = response.json::<serde_json::Value>().await {
+                metrics["vhost_controllers"] = vhost_controllers;
+            }
+        }
+        
+        // Get RAID information
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({"method": "bdev_raid_get_bdevs"}))
+            .send()
+            .await
+        {
+            if let Ok(raid_bdevs) = response.json::<serde_json::Value>().await {
+                metrics["raid_bdevs"] = raid_bdevs;
+            }
+        }
+        
+        // Get I/O statistics
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({"method": "bdev_get_iostat"}))
+            .send()
+            .await
+        {
+            if let Ok(iostat) = response.json::<serde_json::Value>().await {
+                metrics["iostat"] = iostat;
+            }
+        }
+        
+        // Get NVMe-oF subsystems
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({"method": "nvmf_get_subsystems"}))
+            .send()
+            .await
+        {
+            if let Ok(nvmf_subsystems) = response.json::<serde_json::Value>().await {
+                metrics["nvmf_subsystems"] = nvmf_subsystems;
+            }
+        }
+        
         return Ok(warp::reply::json(&metrics));
     }
     
@@ -660,14 +905,68 @@ async fn get_node_vhost_status(node: String, state: AppState) -> Result<impl war
     if let Some(rpc_url) = spdk_nodes.get(&node) {
         let http_client = HttpClient::new();
         
-        // Get vhost controller status
+        // Get vhost controller status with enhanced NVMe information
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({"method": "vhost_get_controllers"}))
             .send()
             .await
         {
-            if let Ok(vhost_controllers) = response.json::<serde_json::Value>().await {
+            if let Ok(mut vhost_controllers) = response.json::<serde_json::Value>().await {
+                // Enhance with additional NVMe controller information
+                if let Some(controllers) = vhost_controllers["result"].as_array_mut() {
+                    for controller in controllers {
+                        // Add controller type information
+                        let controller_type = controller["backend_specific"]["type"]
+                            .as_str()
+                            .unwrap_or("unknown");
+                        controller["controller_type"] = json!(controller_type);
+                        
+                        // For NVMe controllers, add namespace count and details
+                        if controller_type == "nvme" {
+                            let namespace_count = controller["backend_specific"]["namespaces"]
+                                .as_array()
+                                .map(|ns| ns.len())
+                                .unwrap_or(0);
+                            controller["namespace_count"] = json!(namespace_count);
+                            
+                            // Add detailed namespace information
+                            if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
+                                let mut namespace_details = Vec::new();
+                                for ns in namespaces {
+                                    namespace_details.push(json!({
+                                        "nsid": ns["nsid"],
+                                        "size": ns["size"],
+                                        "uuid": ns["uuid"],
+                                        "bdev_name": ns["bdev_name"],
+                                        "block_size": ns["block_size"],
+                                        "md_size": ns["md_size"]
+                                    }));
+                                }
+                                controller["namespace_details"] = json!(namespace_details);
+                            }
+                        } else if controller_type == "blk" {
+                            // For block controllers, add backend device information
+                            if let Some(backend) = controller["backend_specific"]["backend"].as_str() {
+                                controller["backend_device"] = json!(backend);
+                            }
+                        }
+                        
+                        // Add socket information
+                        if let Some(socket) = controller["socket"].as_str() {
+                            controller["socket_path"] = json!(socket);
+                        }
+                        
+                        // Add connection status
+                        let is_active = controller["active"].as_bool().unwrap_or(false);
+                        controller["connection_status"] = json!(if is_active { "active" } else { "inactive" });
+                        
+                        // Add CPU mask information
+                        if let Some(cpumask) = controller["cpumask"].as_str() {
+                            controller["cpu_affinity"] = json!(cpumask);
+                        }
+                    }
+                }
                 return Ok(warp::reply::json(&vhost_controllers));
             }
         }

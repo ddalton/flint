@@ -207,23 +207,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
           />
         );
 
-      case 'disks':
-        return (
-          <DisksTable 
-            disks={data.disks} 
-            volumes={data.volumes}
-            stats={{
-              totalDisks: stats.totalDisks,
-              healthyDisks: stats.healthyDisks,
-              formattedDisks: stats.formattedDisks
-            }}
-            volumeFilter={volumeFilter}
-            volumeReplicaFilter={volumeReplicaFilter}
-            onDiskClick={handleDiskClick}
-            onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
-          />
-        );
-
       case 'nodes':
         return (
           <FilteredNodesView 
