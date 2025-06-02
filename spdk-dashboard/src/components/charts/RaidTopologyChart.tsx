@@ -91,7 +91,7 @@ export const RaidTopologyChart: React.FC<RaidTopologyChartProps> = ({ volumes })
                   vhostSocket={volume.vhost_socket} 
                   vhostDevice={volume.vhost_device}
                   vhostType={volume.vhost_type}
-                  nvmeNamespaces={volume.nvme_namespaces}
+                  raidLevel={volume.raid_level}
                 >
                   <div className="text-center cursor-help">
                     <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-indigo-300">
@@ -153,16 +153,17 @@ export const RaidTopologyChart: React.FC<RaidTopologyChartProps> = ({ volumes })
                       {volume.vhost_type || 'NVMe'}
                     </span>
                   </div>
-                  {volume.nvme_namespaces && volume.nvme_namespaces.length > 0 && (
+                  {volume.raid_level && (
                     <div>
-                      <span className="text-gray-600 block">Namespaces:</span>
-                      {volume.nvme_namespaces.map((ns, idx) => (
-                        <div key={idx} className="text-indigo-700 ml-2">
-                          NSID {ns.nsid}: {Math.round(ns.size / 1024 / 1024 / 1024)}GB
-                        </div>
-                      ))}
+                      <span className="text-gray-600">RAID Level:</span>
+                      <span className="font-medium text-indigo-700 ml-1">
+                        {volume.raid_level}
+                      </span>
                     </div>
                   )}
+                  <div className="text-xs text-gray-500 mt-2 p-2 bg-blue-50 rounded">
+                    Exposes {volume.raid_level || 'RAID'} volume as single NVMe namespace (NSID 1)
+                  </div>
                 </div>
               </div>
             )}

@@ -25,8 +25,15 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   onDiskClick,
   onClearVolumeReplicaFilter 
 }) => {
-  // Filter disks based on volume filter and volume replica filter
+// Filter disks based on volume filter and volume replica filter
   const getFilteredDisks = () => {
+    // If no filters, return all disks
+    if (!volumeFilter || volumeFilter === 'all') {
+      if (!volumeReplicaFilter) {
+        return disks;
+      }
+    }
+
     let result = disks;
 
     // Apply volume replica filter first (most specific)
@@ -36,21 +43,40 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           diskVolume.volume_id === volumeReplicaFilter
         );
       });
+      return result;
     }
-    // Then apply general volume filter if no specific volume replica filter
-    else if (volumeFilter && volumeFilter !== 'all') {
+    
+    // Apply general volume filter
+    if (volumeFilter && volumeFilter !== 'all') {
       result = result.filter(disk => {
-        // Check if disk has any volumes matching the volume filter by cross-referencing with actual volume data
+        // If disk has no provisioned volumes, don't filter it out unless specifically looking for volumes
+        if (disk.provisioned_volumes.length === 0) {
+          return true; // Show empty disks
+        }
+        
+        // Check if disk has any volumes matching the volume filter
         return disk.provisioned_volumes.some(diskVolume => {
-          // Find the actual volume data
           const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
-          if (!actualVolume) return false;
+          if (!actualVolume) {
+            console.warn('Volume not found:', diskVolume.volume_id);
+            return false;
+          }
           
           switch (volumeFilter) {
+            case 'healthy':
+              return actualVolume.state === 'Healthy';
+            case 'degraded':
+              return actualVolume.state === 'Degraded';
+            case 'failed':
+              return actualVolume.state === 'Failed';
             case 'faulted':
               return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
             case 'rebuilding':
-              return actualVolume.state === 'Rebuilding';
+              return actualVolume.replica_statuses.some(replica => 
+                replica.status === 'rebuilding' || 
+                replica.rebuild_progress !== null ||
+                replica.is_new_replica
+              );
             case 'local-nvme':
               return actualVolume.local_nvme;
             default:

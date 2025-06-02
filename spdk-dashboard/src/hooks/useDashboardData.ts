@@ -18,7 +18,9 @@ export interface Volume {
   vhost_device?: string;
   vhost_enabled?: boolean;
   vhost_type?: string; // "nvme" for vhost-nvme
-  nvme_namespaces?: VhostNvmeNamespace[];
+  // RAID and replica information
+  raid_level?: string;
+  primary_replica_uuid?: string;
 }
 
 export interface VhostNvmeNamespace {
@@ -38,6 +40,10 @@ export interface ReplicaStatus {
   is_new_replica: boolean;
   nvmf_target: NvmfTarget | null;
   access_method: string;
+  // Replica storage details
+  lvol_uuid?: string;
+  disk_ref?: string;
+  replica_size?: number;
 }
 
 export interface NvmfTarget {
@@ -51,13 +57,13 @@ export interface Disk {
   id: string;
   node: string;
   pci_addr: string;
-  capacity: number;
-  capacity_gb: number;
-  allocated_space: number;
-  free_space: number;
+  capacity: number; // bytes
+  capacity_gb: number; // GB
+  allocated_space: number; // GB (not bytes!)
+  free_space: number; // GB (not bytes!)
   free_space_display: string;
   healthy: boolean;
-  blobstore_initialized: boolean;
+  lvol_store_initialized: boolean; // Changed from blobstore_initialized
   lvol_count: number;
   model: string;
   read_iops: number;
@@ -126,14 +132,8 @@ const mockData: DashboardData = {
       vhost_device: "/dev/nvme-vhost-postgres-data-pvc",
       vhost_enabled: true,
       vhost_type: "nvme",
-      nvme_namespaces: [
-        {
-          nsid: 1,
-          size: 107374182400, // 100GB in bytes
-          uuid: "12345678-1234-1234-1234-123456789abc",
-          bdev_name: "pvc-12345678-1234-1234-1234-123456789abc"
-        }
-      ],
+      raid_level: "RAID-1",
+      primary_replica_uuid: "12345678-1234-1234-1234-123456789abc",
       replica_statuses: [
         {
           node: "worker-node-1",
@@ -144,7 +144,10 @@ const mockData: DashboardData = {
           rebuild_target: null,
           is_new_replica: false,
           nvmf_target: null,
-          access_method: "local-nvme"
+          access_method: "local-nvme",
+          lvol_uuid: "11111111-1111-1111-1111-111111111111",
+          disk_ref: "nvme0n1",
+          replica_size: 107374182400
         },
         {
           node: "worker-node-2",
@@ -160,7 +163,10 @@ const mockData: DashboardData = {
             target_port: "4420",
             transport_type: "TCP"
           },
-          access_method: "remote-nvmf"
+          access_method: "remote-nvmf",
+          lvol_uuid: "22222222-2222-2222-2222-222222222222",
+          disk_ref: "nvme1n1",
+          replica_size: 107374182400
         },
         {
           node: "worker-node-3",
@@ -176,7 +182,10 @@ const mockData: DashboardData = {
             target_port: "4420",
             transport_type: "TCP"
           },
-          access_method: "remote-nvmf"
+          access_method: "remote-nvmf",
+          lvol_uuid: "33333333-3333-3333-3333-333333333333",
+          disk_ref: "nvme2n1",
+          replica_size: 107374182400
         }
       ]
     },
@@ -195,14 +204,8 @@ const mockData: DashboardData = {
       vhost_device: "/dev/nvme-vhost-redis-cache-pvc",
       vhost_enabled: true,
       vhost_type: "nvme",
-      nvme_namespaces: [
-        {
-          nsid: 1,
-          size: 53687091200, // 50GB in bytes
-          uuid: "87654321-4321-4321-4321-cba987654321",
-          bdev_name: "pvc-87654321-4321-4321-4321-cba987654321"
-        }
-      ],
+      raid_level: "RAID-1",
+      primary_replica_uuid: "87654321-4321-4321-4321-cba987654321",
       replica_statuses: [
         {
           node: "worker-node-1",
@@ -257,11 +260,11 @@ const mockData: DashboardData = {
       pci_addr: "0000:3b:00.0",
       capacity: 1024000000000,
       capacity_gb: 1000,
-      allocated_space: 512000000000,
-      free_space: 512000000000,
-      free_space_display: "512GB",
+      allocated_space: 512,  // 512GB in GB, not bytes
+      free_space: 488,       // 488GB remaining  
+      free_space_display: "488GB",
       healthy: true,
-      blobstore_initialized: true,
+      lvol_store_initialized: true, // Changed from blobstore_initialized
       lvol_count: 2,
       model: "Samsung SSD 980 PRO 1TB",
       read_iops: 45000,
@@ -272,15 +275,15 @@ const mockData: DashboardData = {
       provisioned_volumes: [
         {
           volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc", // This must match volume.id
           size: 100,
           provisioned_at: "2025-06-01T08:15:00Z",
           replica_type: "Local NVMe",
           status: "healthy"
         },
         {
-          volume_name: "redis-cache-pvc",
-          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
+          volume_name: "redis-cache-pvc", 
+          volume_id: "pvc-87654321-4321-4321-4321-cba987654321", // This must match volume.id
           size: 50,
           provisioned_at: "2025-06-01T08:20:00Z",
           replica_type: "Local NVMe",
@@ -290,15 +293,15 @@ const mockData: DashboardData = {
     },
     {
       id: "nvme1n1",
-      node: "worker-node-2",
+      node: "worker-node-2", 
       pci_addr: "0000:3b:00.0",
       capacity: 1024000000000,
       capacity_gb: 1000,
-      allocated_space: 256000000000,
-      free_space: 768000000000,
-      free_space_display: "768GB",
+      allocated_space: 150,  // 150GB in GB, not bytes
+      free_space: 850,       // 850GB remaining
+      free_space_display: "850GB",
       healthy: true,
-      blobstore_initialized: true,
+      lvol_store_initialized: true, // Changed from blobstore_initialized
       lvol_count: 2,
       model: "Samsung SSD 980 PRO 1TB",
       read_iops: 43000,
@@ -309,7 +312,7 @@ const mockData: DashboardData = {
       provisioned_volumes: [
         {
           volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc", // This must match volume.id
           size: 100,
           provisioned_at: "2025-06-01T08:15:00Z",
           replica_type: "Remote NVMe-oF",
@@ -317,7 +320,7 @@ const mockData: DashboardData = {
         },
         {
           volume_name: "redis-cache-pvc",
-          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
+          volume_id: "pvc-87654321-4321-4321-4321-cba987654321", // This must match volume.id  
           size: 50,
           provisioned_at: "2025-06-01T08:20:00Z",
           replica_type: "Remote NVMe-oF",
@@ -328,14 +331,14 @@ const mockData: DashboardData = {
     {
       id: "nvme2n1",
       node: "worker-node-3",
-      pci_addr: "0000:3b:00.0",
+      pci_addr: "0000:3b:00.0", 
       capacity: 1024000000000,
       capacity_gb: 1000,
-      allocated_space: 150000000000,
-      free_space: 874000000000,
-      free_space_display: "874GB",
+      allocated_space: 100,  // 100GB in GB, not bytes
+      free_space: 900,       // 900GB remaining
+      free_space_display: "900GB",
       healthy: true,
-      blobstore_initialized: true,
+      lvol_store_initialized: true, // Changed from blobstore_initialized
       lvol_count: 1,
       model: "Samsung SSD 980 PRO 1TB",
       read_iops: 41000,
@@ -346,7 +349,7 @@ const mockData: DashboardData = {
       provisioned_volumes: [
         {
           volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
+          volume_id: "pvc-12345678-1234-1234-1234-123456789abc", // This must match volume.id
           size: 100,
           provisioned_at: "2025-06-01T08:15:00Z",
           replica_type: "Remote NVMe-oF",
@@ -384,7 +387,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
     
     const healthyDisks = data.disks.filter(d => d.healthy).length;
-    const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
+    const formattedDisks = data.disks.filter(d => d.lvol_store_initialized).length;
 
     return {
       totalVolumes: data.volumes.length,

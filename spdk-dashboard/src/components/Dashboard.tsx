@@ -182,44 +182,59 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
   };
 
-  const renderTabContent = () => {
-    switch (activeTab) {
-      case 'overview':
-        return (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <VolumeStatusChart volumes={data.volumes} />
-            <DiskStatusChart disks={data.disks} />
-            <div className="lg:col-span-2">
-              <RaidTopologyChart volumes={data.volumes} />
-            </div>
+// In Dashboard.tsx, update the renderTabContent function:
+
+const renderTabContent = () => {
+  switch (activeTab) {
+    case 'overview':
+      return (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <VolumeStatusChart volumes={data.volumes} />
+          <DiskStatusChart disks={data.disks} />
+          <div className="lg:col-span-2">
+            <RaidTopologyChart volumes={data.volumes} />
           </div>
-        );
+        </div>
+      );
 
-      case 'volumes':
-        return (
-          <VolumesTable 
-            volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
-            activeFilter={volumeFilter}
-            diskFilter={diskFilter}
-            onClearFilter={handleClearFilter}
-            onClearDiskFilter={handleClearDiskFilter}
-            onReplicaClick={handleReplicaClick}
-          />
-        );
+    case 'volumes':
+      return (
+        <VolumesTable 
+          volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
+          activeFilter={volumeFilter}
+          diskFilter={diskFilter}
+          onClearFilter={handleClearFilter}
+          onClearDiskFilter={handleClearDiskFilter}
+          onReplicaClick={handleReplicaClick}
+        />
+      );
 
-      case 'nodes':
-        return (
-          <FilteredNodesView 
-            data={data}
-            activeFilter={volumeFilter}
-            onClearFilter={handleClearFilter}
-          />
-        );
+    case 'disks':
+      return (
+        <DisksTable 
+          disks={data.disks}
+          volumes={data.volumes}
+          stats={stats}
+          volumeFilter={volumeFilter}
+          volumeReplicaFilter={volumeReplicaFilter}
+          onDiskClick={handleDiskClick}
+          onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
+        />
+      );
 
-      default:
-        return null;
-    }
-  };
+    case 'nodes':
+      return (
+        <FilteredNodesView 
+          data={data}
+          activeFilter={volumeFilter}
+          onClearFilter={handleClearFilter}
+        />
+      );
+
+    default:
+      return null;
+  }
+};
 
   return (
     <div className="min-h-screen bg-gray-50">

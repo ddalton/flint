@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
-import type { VhostNvmeNamespace } from '../../hooks/useDashboardData';
 
 interface VHostNvmeTooltipProps {
   vhostSocket?: string;
   vhostDevice?: string;
   vhostType?: string;
-  nvmeNamespaces?: VhostNvmeNamespace[];
+  raidLevel?: string;
   children: React.ReactNode;
 }
 
@@ -13,7 +12,7 @@ export const VHostNvmeTooltip: React.FC<VHostNvmeTooltipProps> = ({
   vhostSocket, 
   vhostDevice, 
   vhostType = 'nvme',
-  nvmeNamespaces,
+  raidLevel,
   children 
 }) => {
   const [showTooltip, setShowTooltip] = useState(false);
@@ -37,18 +36,11 @@ export const VHostNvmeTooltip: React.FC<VHostNvmeTooltipProps> = ({
             {vhostDevice && (
               <div><strong>Device Path:</strong> {vhostDevice}</div>
             )}
-            {nvmeNamespaces && nvmeNamespaces.length > 0 && (
-              <div className="mt-2">
-                <div><strong>NVMe Namespaces:</strong></div>
-                {nvmeNamespaces.map((ns, idx) => (
-                  <div key={idx} className="ml-2 text-xs">
-                    NSID {ns.nsid}: {Math.round(ns.size / 1024 / 1024 / 1024)}GB
-                  </div>
-                ))}
-              </div>
+            {raidLevel && (
+              <div><strong>RAID Level:</strong> {raidLevel}</div>
             )}
             <div className="text-gray-300 mt-2">
-              VHost-NVMe provides high-performance userspace NVMe access via Unix socket
+              VHost-NVMe exposes the {raidLevel || 'RAID'} volume as a single NVMe namespace (NSID 1)
             </div>
           </div>
           <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
