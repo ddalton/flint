@@ -1,5 +1,6 @@
-import React from 'react';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings } from 'lucide-react';
+import React, { useState } from 'react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info } from 'lucide-react';
+import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
 
 interface VolumesTableProps {
@@ -19,6 +20,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onClearDiskFilter,
   onReplicaClick
 }) => {
+  const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<{id: string, name: string} | null>(null);
+
   const filteredVolumes = React.useMemo(() => {
     let result = volumes;
 
@@ -129,6 +132,10 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     );
   };
 
+  const handleVolumeNameClick = (volume: Volume) => {
+    setSelectedVolumeDetail({ id: volume.id, name: volume.name });
+  };
+
   return (
     <div>
       <div className="space-y-3 mb-4">
@@ -190,6 +197,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Local NVMe</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rebuild Activity</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nodes</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               {diskFilter && (
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">On Disk</th>
               )}
@@ -198,7 +206,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           <tbody className="bg-white divide-y divide-gray-200">
             {sortedVolumes.length === 0 ? (
               <tr>
-                <td colSpan={diskFilter ? 8 : 7} className="px-6 py-8 text-center text-gray-500">
+                <td colSpan={diskFilter ? 9 : 8} className="px-6 py-8 text-center text-gray-500">
                   {activeFilter && activeFilter !== 'all' 
                     ? `No volumes match the "${getFilterDisplayName(activeFilter)}" filter.`
                     : diskFilter
@@ -218,7 +226,14 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
                 return (
                   <tr key={volume.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{volume.name}</td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <button
+                        onClick={() => handleVolumeNameClick(volume)}
+                        className="text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                      >
+                        {volume.name}
+                      </button>
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{volume.size}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center gap-2">
@@ -228,7 +243,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                         </span>
                         {stateInfo.tooltip && (
                           <span className="text-xs text-gray-400" title={stateInfo.tooltip}>
-                            ℹ️
+                            <Info className="w-3 h-3" />
                           </span>
                         )}
                       </div>
@@ -288,6 +303,15 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                         ))}
                       </div>
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <button
+                        onClick={() => handleVolumeNameClick(volume)}
+                        className="inline-flex items-center px-3 py-1 border border-transparent text-xs leading-4 font-medium rounded text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                      >
+                        <Info className="w-3 h-3 mr-1" />
+                        Details
+                      </button>
+                    </td>
                     {diskFilter && (
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="inline-flex px-2 py-1 text-xs bg-purple-100 text-purple-800 rounded-full">
@@ -326,6 +350,15 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Volume Detail Modal */}
+      {selectedVolumeDetail && (
+        <VolumeDetailAPI
+          volumeId={selectedVolumeDetail.id}
+          volumeName={selectedVolumeDetail.name}
+          onClose={() => setSelectedVolumeDetail(null)}
+        />
       )}
     </div>
   );

@@ -9,8 +9,8 @@ use kube::{Client, Api, api::ListParams};
 use chrono::{Utc, DateTime};
 use std::env;
 
-// Import your existing CRD types
-use spdk_csi_driver::{SpdkVolume, SpdkDisk, SpdkVolumeStatus, SpdkDiskStatus, Replica, ReplicaHealth};
+// Import your existing CRD types with updated RAID status
+use spdk_csi_driver::{SpdkVolume, SpdkDisk, SpdkVolumeStatus, SpdkDiskStatus, Replica, ReplicaHealth, RaidStatus, RaidMember, RaidRebuildInfo, RaidMemberState};
 
 mod spdk_csi_driver {
     use kube::CustomResource;
@@ -26,9 +26,9 @@ mod spdk_csi_driver {
         pub num_replicas: i32,
         pub replicas: Vec<Replica>,
         pub primary_lvol_uuid: Option<String>,
-        pub rebuild_in_progress: Option<ReplicationState>,
         pub write_ordering_enabled: bool,
         pub vhost_socket: Option<String>,
+        pub raid_auto_rebuild: bool,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -48,27 +48,19 @@ mod spdk_csi_driver {
         pub last_io_timestamp: Option<String>,
         pub write_sequence: u64,
         pub vhost_socket: Option<String>,
+        pub raid_member_index: usize,
+        pub raid_member_state: RaidMemberState,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct ReplicationState {
-        pub target_replica_index: usize,
-        pub source_replica_index: usize,
-        pub snapshot_id: String,
-        pub copy_progress: f64,
-        pub phase: String,
-        pub started_at: String,
-        pub catch_write_log: Vec<WriteOperation>,
-        pub write_barrier_active: bool,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct WriteOperation {
-        pub offset: u64,
-        pub length: u64,
-        pub sequence: u64,
-        pub timestamp: String,
-        pub checksum: String,
+    pub enum RaidMemberState {
+        #[default]
+        Online,
+        Degraded,
+        Failed,
+        Rebuilding,
+        Spare,
+        Removing,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -90,6 +82,39 @@ mod spdk_csi_driver {
         pub failed_replicas: Vec<usize>,
         pub write_sequence: u64,
         pub vhost_device: Option<String>,
+        pub raid_status: Option<RaidStatus>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct RaidStatus {
+        pub raid_level: u32,
+        pub state: String,
+        pub num_base_bdevs: u32,
+        pub num_base_bdevs_discovered: u32,
+        pub num_base_bdevs_operational: u32,
+        pub base_bdevs_list: Vec<RaidMember>,
+        pub rebuild_info: Option<RaidRebuildInfo>,
+        pub superblock_version: Option<u32>,
+        pub process_request_fn: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct RaidMember {
+        pub name: String,
+        pub state: String,
+        pub slot: u32,
+        pub uuid: Option<String>,
+        pub is_configured: bool,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct RaidRebuildInfo {
+        pub state: String,
+        pub target_slot: u32,
+        pub source_slot: u32,
+        pub blocks_remaining: u64,
+        pub blocks_total: u64,
+        pub progress_percentage: f64,
     }
 
     #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
@@ -127,7 +152,7 @@ mod spdk_csi_driver {
     }
 }
 
-// Dashboard API response types (matching your frontend expectations)
+// Enhanced dashboard API response types with native RAID status
 #[derive(Serialize, Debug, Clone)]
 struct DashboardVolume {
     id: String,
@@ -141,12 +166,50 @@ struct DashboardVolume {
     rebuild_progress: Option<f64>,
     nodes: Vec<String>,
     replica_statuses: Vec<DashboardReplicaStatus>,
-    // VHost-NVMe related fields
     vhost_socket: Option<String>,
     vhost_device: Option<String>,
     vhost_enabled: bool,
-    vhost_type: String, // "nvme" instead of "blk"
+    vhost_type: String,
     nvme_namespaces: Vec<VhostNvmeNamespace>,
+    // Enhanced RAID status from SPDK
+    raid_status: Option<DashboardRaidStatus>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct DashboardRaidStatus {
+    raid_level: u32,
+    state: String,
+    num_members: u32,
+    operational_members: u32,
+    discovered_members: u32,
+    members: Vec<DashboardRaidMember>,
+    rebuild_info: Option<DashboardRebuildInfo>,
+    superblock_version: Option<u32>,
+    auto_rebuild_enabled: bool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct DashboardRaidMember {
+    slot: u32,
+    name: String,
+    state: String,
+    uuid: Option<String>,
+    is_configured: bool,
+    node: Option<String>,
+    disk_ref: Option<String>,
+    health_status: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct DashboardRebuildInfo {
+    state: String,
+    target_slot: u32,
+    source_slot: u32,
+    blocks_remaining: u64,
+    blocks_total: u64,
+    progress_percentage: f64,
+    estimated_time_remaining: Option<String>,
+    start_time: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -168,6 +231,8 @@ struct DashboardReplicaStatus {
     is_new_replica: Option<bool>,
     nvmf_target: Option<NvmfTarget>,
     access_method: String,
+    raid_member_slot: Option<u32>,
+    raid_member_state: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -220,29 +285,24 @@ struct DashboardData {
 #[derive(Clone)]
 struct AppState {
     kube_client: Client,
-    spdk_nodes: Arc<RwLock<HashMap<String, String>>>, // node -> spdk_rpc_url
+    spdk_nodes: Arc<RwLock<HashMap<String, String>>>,
     cache: Arc<RwLock<Option<DashboardData>>>,
     last_update: Arc<RwLock<DateTime<Utc>>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize Kubernetes client
     let kube_client = Client::try_default().await?;
     
-    // Initialize SPDK node mapping from environment or discovery
     let mut spdk_nodes = HashMap::new();
     
-    // Read SPDK RPC URLs from environment or use defaults
     if let Ok(node_urls) = env::var("SPDK_NODE_URLS") {
-        // Format: "node-a=http://node-a:5260,node-b=http://node-b:5260"
         for pair in node_urls.split(',') {
             if let Some((node, url)) = pair.split_once('=') {
                 spdk_nodes.insert(node.to_string(), url.to_string());
             }
         }
     } else {
-        // Default fallback - discover nodes from SpdkDisk CRDs
         spdk_nodes = discover_spdk_nodes(&kube_client).await?;
     }
     
@@ -253,13 +313,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_update: Arc::new(RwLock::new(Utc::now())),
     };
     
-    // Start background refresh task
     let refresh_state = app_state.clone();
     tokio::spawn(async move {
         refresh_loop(refresh_state).await;
     });
     
-    // Define API routes
     let cors = warp::cors()
         .allow_any_origin()
         .allow_headers(vec!["content-type"])
@@ -268,13 +326,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_filter = warp::any().map(move || app_state.clone());
     
     let api = warp::path("api").and(
-        // Get dashboard data
         warp::path("dashboard")
             .and(warp::get())
             .and(state_filter.clone())
             .and_then(get_dashboard_data)
         .or(
-            // Get individual volume details
             warp::path("volumes")
                 .and(warp::path::param::<String>())
                 .and(warp::get())
@@ -282,7 +338,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_volume_details)
         )
         .or(
-            // Get vhost details for a specific volume
+            warp::path("volumes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("raid"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_volume_raid_status)
+        )
+        .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
                 .and(warp::path("vhost"))
@@ -291,14 +354,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_vhost_details)
         )
         .or(
-            // Trigger manual refresh
             warp::path("refresh")
                 .and(warp::post())
                 .and(state_filter.clone())
                 .and_then(trigger_refresh)
         )
         .or(
-            // Get SPDK metrics from specific node
             warp::path("nodes")
                 .and(warp::path::param::<String>())
                 .and(warp::path("metrics"))
@@ -307,13 +368,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_node_metrics)
         )
         .or(
-            // Get vhost controller status
             warp::path("nodes")
                 .and(warp::path::param::<String>())
-                .and(warp::path("vhost"))
+                .and(warp::path("raid"))
                 .and(warp::get())
                 .and(state_filter.clone())
-                .and_then(get_node_vhost_status)
+                .and_then(get_node_raid_status)
         )
     );
     
@@ -335,7 +395,6 @@ async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>,
     for disk in disk_list.items {
         let node = &disk.spec.node;
         if !nodes.contains_key(node) {
-            // Default SPDK RPC URL pattern
             let url = format!("http://{}:5260", node);
             nodes.insert(node.clone(), url);
         }
@@ -357,20 +416,16 @@ async fn refresh_loop(state: AppState) {
 }
 
 async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
-    // Fetch volumes from Kubernetes
     let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
     let volumes_list = volumes_api.list(&ListParams::default()).await?;
     
-    // Fetch disks from Kubernetes
     let disks_api: Api<SpdkDisk> = Api::namespaced(state.kube_client.clone(), "default");
     let disks_list = disks_api.list(&ListParams::default()).await?;
     
-    // Convert to dashboard format
     let mut dashboard_volumes = Vec::new();
     let mut dashboard_disks = Vec::new();
     let mut nodes = std::collections::HashSet::new();
     
-    // Process volumes
     for volume in volumes_list.items {
         let dashboard_volume = convert_volume_to_dashboard(&volume);
         for replica in &dashboard_volume.replica_statuses {
@@ -379,14 +434,12 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         dashboard_volumes.push(dashboard_volume);
     }
     
-    // Process disks
     for disk in disks_list.items {
         nodes.insert(disk.spec.node.clone());
         let dashboard_disk = convert_disk_to_dashboard(&disk, &dashboard_volumes);
         dashboard_disks.push(dashboard_disk);
     }
     
-    // Enhance with real-time SPDK metrics
     enhance_with_spdk_metrics(&mut dashboard_volumes, &mut dashboard_disks, state).await?;
     
     let dashboard_data = DashboardData {
@@ -395,7 +448,6 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         nodes: nodes.into_iter().collect(),
     };
     
-    // Update cache
     *state.cache.write().await = Some(dashboard_data);
     *state.last_update.write().await = Utc::now();
     
@@ -405,6 +457,51 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
 fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     let status = volume.status.as_ref().unwrap_or(&SpdkVolumeStatus::default());
     let spec = &volume.spec;
+    
+    // Convert RAID status from CRD
+    let raid_status = status.raid_status.as_ref().map(|raid| {
+        let members: Vec<DashboardRaidMember> = raid.base_bdevs_list.iter().map(|member| {
+            // Find corresponding replica for additional info
+            let replica = spec.replicas.iter()
+                .find(|r| r.raid_member_index == member.slot as usize);
+            
+            DashboardRaidMember {
+                slot: member.slot,
+                name: member.name.clone(),
+                state: member.state.clone(),
+                uuid: member.uuid.clone(),
+                is_configured: member.is_configured,
+                node: replica.map(|r| r.node.clone()),
+                disk_ref: replica.map(|r| r.disk_ref.clone()),
+                health_status: replica.map(|r| format!("{:?}", r.health_status)).unwrap_or_default(),
+            }
+        }).collect();
+        
+        let rebuild_info = raid.rebuild_info.as_ref().map(|rebuild| {
+            DashboardRebuildInfo {
+                state: rebuild.state.clone(),
+                target_slot: rebuild.target_slot,
+                source_slot: rebuild.source_slot,
+                blocks_remaining: rebuild.blocks_remaining,
+                blocks_total: rebuild.blocks_total,
+                progress_percentage: rebuild.progress_percentage,
+                estimated_time_remaining: estimate_rebuild_time(rebuild),
+                start_time: None, // Could be tracked separately
+            }
+        });
+        
+        DashboardRaidStatus {
+            raid_level: raid.raid_level,
+            state: raid.state.clone(),
+            num_members: raid.num_base_bdevs,
+            operational_members: raid.num_base_bdevs_operational,
+            discovered_members: raid.num_base_bdevs_discovered,
+            members,
+            rebuild_info,
+            superblock_version: raid.superblock_version,
+            auto_rebuild_enabled: spec.raid_auto_rebuild,
+        }
+    });
     
     let replica_statuses: Vec<DashboardReplicaStatus> = spec.replicas.iter().map(|replica| {
         let nvmf_target = if replica.replica_type == "nvmf" {
@@ -418,33 +515,38 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
             None
         };
         
-        // Determine replica storage location and access method
         let access_method = match replica.replica_type.as_str() {
-            "lvol" => "local-nvme".to_string(),    // Local replica: stored on local NVMe
-            "nvmf" => "remote-nvmf".to_string(),   // Remote replica: accessed via NVMe-oF
+            "lvol" => "local-nvme".to_string(),
+            "nvmf" => "remote-nvmf".to_string(),
             _ => "unknown".to_string(),
         };
+        
+        // Get rebuild progress from RAID status if this replica is rebuilding
+        let rebuild_progress = raid_status.as_ref()
+            .and_then(|rs| rs.rebuild_info.as_ref())
+            .filter(|ri| ri.target_slot == replica.raid_member_index as u32)
+            .map(|ri| ri.progress_percentage);
         
         DashboardReplicaStatus {
             node: replica.node.clone(),
             status: format!("{:?}", replica.health_status).to_lowercase(),
             is_local: replica.replica_type == "lvol",
             last_io_timestamp: replica.last_io_timestamp.clone(),
-            rebuild_progress: None, // Will be populated from rebuild state
+            rebuild_progress,
             rebuild_target: None,
             is_new_replica: None,
             nvmf_target,
             access_method,
+            raid_member_slot: Some(replica.raid_member_index as u32),
+            raid_member_state: format!("{:?}", replica.raid_member_state).to_lowercase(),
         }
     }).collect();
     
     let size_gb = spec.size_bytes / (1024 * 1024 * 1024);
     let has_local_nvme = spec.replicas.iter().any(|r| r.replica_type == "lvol");
     
-    // Volume is always accessed locally via vhost-nvme
     let volume_access_method = "vhost-nvme".to_string();
     
-    // Generate vhost socket path and device path for NVMe
     let volume_name = volume.metadata.name.clone().unwrap_or(spec.volume_id.clone());
     let vhost_socket = spec.vhost_socket.clone().or_else(|| 
         Some(format!("/var/lib/spdk/vhost/vhost_{}.sock", volume_name))
@@ -454,7 +556,6 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     );
     let vhost_enabled = vhost_socket.is_some();
     
-    // Create NVMe namespace information
     let nvme_namespaces = vec![
         VhostNvmeNamespace {
             nsid: 1,
@@ -463,6 +564,11 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
             bdev_name: spec.volume_id.clone(),
         }
     ];
+    
+    // Get rebuild progress from RAID status
+    let rebuild_progress = raid_status.as_ref()
+        .and_then(|rs| rs.rebuild_info.as_ref())
+        .map(|ri| ri.progress_percentage);
     
     DashboardVolume {
         id: spec.volume_id.clone(),
@@ -473,14 +579,33 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         active_replicas: status.active_replicas.len() as i32,
         local_nvme: has_local_nvme,
         access_method: volume_access_method,
-        rebuild_progress: spec.rebuild_in_progress.as_ref().map(|r| r.copy_progress),
+        rebuild_progress,
         nodes: spec.replicas.iter().map(|r| r.node.clone()).collect(),
         replica_statuses,
         vhost_socket,
         vhost_device,
         vhost_enabled,
-        vhost_type: "nvme".to_string(), // Changed from "blk" to "nvme"
+        vhost_type: "nvme".to_string(),
         nvme_namespaces,
+        raid_status,
+    }
+}
+
+fn estimate_rebuild_time(rebuild: &RaidRebuildInfo) -> Option<String> {
+    if rebuild.blocks_remaining == 0 || rebuild.progress_percentage >= 100.0 {
+        return Some("Complete".to_string());
+    }
+    
+    // Simple estimation based on current progress
+    // In a real implementation, you'd track rate over time
+    let estimated_seconds = (rebuild.blocks_remaining as f64 / 1000.0) * 60.0; // Very rough estimate
+    
+    if estimated_seconds < 60.0 {
+        Some(format!("{}s", estimated_seconds as u64))
+    } else if estimated_seconds < 3600.0 {
+        Some(format!("{}m", (estimated_seconds / 60.0) as u64))
+    } else {
+        Some(format!("{}h", (estimated_seconds / 3600.0) as u64))
     }
 }
 
@@ -488,7 +613,6 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
     let status = disk.status.as_ref().unwrap_or(&SpdkDiskStatus::default());
     let spec = &disk.spec;
     
-    // Find volumes using this disk
     let provisioned_volumes: Vec<ProvisionedVolume> = volumes.iter()
         .filter_map(|vol| {
             for replica in &vol.replica_statuses {
@@ -497,7 +621,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
                         volume_name: vol.name.clone(),
                         volume_id: vol.id.clone(),
                         size: vol.size.trim_end_matches("GB").parse().unwrap_or(0),
-                        provisioned_at: Utc::now().to_rfc3339(), // You might want to track this
+                        provisioned_at: Utc::now().to_rfc3339(),
                         replica_type: format!("{} replica ({})", 
                             if replica.is_local { "Local" } else { "Remote" },
                             if replica.is_local { "NVMe" } else { "NVMe-oF" }),
@@ -521,7 +645,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
         healthy: status.healthy,
         blobstore_initialized: status.blobstore_initialized,
         lvol_count: status.lvol_count,
-        model: format!("NVMe Disk"), // You might want to enhance this
+        model: format!("NVMe Disk"),
         read_iops: status.io_stats.read_iops,
         write_iops: status.io_stats.write_iops,
         read_latency: status.io_stats.read_latency_us,
@@ -540,7 +664,33 @@ async fn enhance_with_spdk_metrics(
     let http_client = HttpClient::new();
     
     for (node, rpc_url) in spdk_nodes.iter() {
-        // Get vhost-nvme controller status for volumes using vhost-nvme
+        // Get real-time RAID status and update volumes
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_raid_get_bdevs",
+                "params": { "category": "all" }
+            }))
+            .send()
+            .await
+        {
+            if let Ok(raid_info) = response.json::<serde_json::Value>().await {
+                if let Some(raid_bdevs) = raid_info["result"].as_array() {
+                    for raid_bdev in raid_bdevs {
+                        if let Some(raid_name) = raid_bdev["name"].as_str() {
+                            for volume in volumes.iter_mut() {
+                                if volume.id == raid_name || raid_name.contains(&volume.id) {
+                                    // Update volume with real-time RAID status from SPDK
+                                    update_volume_with_live_raid_status(volume, raid_bdev);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Get vhost-nvme controller status
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
@@ -550,38 +700,30 @@ async fn enhance_with_spdk_metrics(
             .await
         {
             if let Ok(vhost_info) = response.json::<serde_json::Value>().await {
-                // Process vhost controller information and update volume states
                 if let Some(controllers) = vhost_info["result"].as_array() {
                     for controller in controllers {
                         if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
-                            // Check if this is a vhost-nvme controller
                             let is_nvme_controller = controller["backend_specific"]["type"]
                                 .as_str() == Some("nvme");
                             
-                            // Match vhost controller to volume
                             for volume in volumes.iter_mut() {
-                                // Check if this vhost controller corresponds to this volume
                                 if ctrlr_name.contains(&volume.name) || 
                                    ctrlr_name.contains(&volume.id) {
                                     
-                                    // Update vhost information from live SPDK data
                                     if let Some(socket_path) = controller["socket"].as_str() {
                                         volume.vhost_socket = Some(socket_path.to_string());
                                     }
                                     
-                                    // Check if controller is active
                                     if let Some(active) = controller["active"].as_bool() {
                                         volume.vhost_enabled = active;
                                     }
                                     
-                                    // Update vhost type
                                     volume.vhost_type = if is_nvme_controller {
                                         "nvme".to_string()
                                     } else {
                                         "blk".to_string()
                                     };
                                     
-                                    // Get NVMe namespace information for vhost-nvme controllers
                                     if is_nvme_controller {
                                         if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
                                             volume.nvme_namespaces = namespaces.iter().map(|ns| {
@@ -595,7 +737,6 @@ async fn enhance_with_spdk_metrics(
                                         }
                                     }
                                     
-                                    // Update access method confirmation
                                     volume.access_method = if is_nvme_controller {
                                         "vhost-nvme".to_string()
                                     } else {
@@ -609,7 +750,7 @@ async fn enhance_with_spdk_metrics(
             }
         }
         
-        // Get real-time bdev statistics and update volumes/disks
+        // Get real-time bdev statistics
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
@@ -619,11 +760,9 @@ async fn enhance_with_spdk_metrics(
             .await
         {
             if let Ok(iostat) = response.json::<serde_json::Value>().await {
-                // Process real-time I/O statistics and update dashboard data
                 if let Some(bdevs) = iostat["result"].as_array() {
                     for bdev_stat in bdevs {
                         if let Some(bdev_name) = bdev_stat["name"].as_str() {
-                            // Update disk statistics
                             for disk in disks.iter_mut() {
                                 if disk.id == bdev_name || bdev_name.contains(&disk.id) {
                                     if let Some(read_ios) = bdev_stat["read_ios"].as_u64() {
@@ -645,85 +784,111 @@ async fn enhance_with_spdk_metrics(
                 }
             }
         }
-        
-        // Get RAID status and rebuild information
-        if let Ok(response) = http_client
-            .post(rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_get_bdevs",
-                "params": { "category": "all" }
-            }))
-            .send()
-            .await
-        {
-            if let Ok(raid_info) = response.json::<serde_json::Value>().await {
-                // Update volume states based on RAID status
-                if let Some(raid_bdevs) = raid_info["result"].as_array() {
-                    for raid_bdev in raid_bdevs {
-                        if let Some(raid_name) = raid_bdev["name"].as_str() {
-                            for volume in volumes.iter_mut() {
-                                if volume.id == raid_name || raid_name.contains(&volume.id) {
-                                    // Update volume state based on RAID status
-                                    if let Some(state) = raid_bdev["state"].as_str() {
-                                        volume.state = match state {
-                                            "online" => "Healthy".to_string(),
-                                            "degraded" => "Degraded".to_string(),
-                                            "broken" => "Failed".to_string(),
-                                            _ => state.to_string(),
-                                        };
-                                    }
-                                    
-                                    // Check for rebuild operations
-                                    if let Some(rebuild_info) = raid_bdev["rebuild_info"].as_object() {
-                                        if let Some(progress) = rebuild_info["progress_percentage"].as_f64() {
-                                            volume.rebuild_progress = Some(progress);
-                                            
-                                            // Update replica status for rebuilding replicas
-                                            if let Some(target_idx) = rebuild_info["target_replica_index"].as_usize() {
-                                                if let Some(replica) = volume.replica_statuses.get_mut(target_idx) {
-                                                    replica.status = "rebuilding".to_string();
-                                                    replica.rebuild_progress = Some(progress);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    // Update replica statuses based on RAID member states
-                                    if let Some(base_bdevs) = raid_bdev["base_bdevs"].as_array() {
-                                        for (idx, base_bdev) in base_bdevs.iter().enumerate() {
-                                            if let Some(replica) = volume.replica_statuses.get_mut(idx) {
-                                                if let Some(member_state) = base_bdev["state"].as_str() {
-                                                    replica.status = match member_state {
-                                                        "online" => "healthy".to_string(),
-                                                        "degraded" => "degraded".to_string(),
-                                                        "failed" => "failed".to_string(),
-                                                        "rebuilding" => "rebuilding".to_string(),
-                                                        _ => member_state.to_string(),
-                                                    };
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
     
     Ok(())
 }
 
+fn update_volume_with_live_raid_status(volume: &mut DashboardVolume, raid_bdev: &serde_json::Value) {
+    // Update volume state based on live RAID status
+    if let Some(state) = raid_bdev["state"].as_str() {
+        volume.state = match state {
+            "online" => "Healthy".to_string(),
+            "degraded" => "Degraded".to_string(),
+            "broken" | "failed" => "Failed".to_string(),
+            _ => state.to_string(),
+        };
+    }
+    
+    // Update RAID status with live data
+    if let Some(ref mut raid_status) = volume.raid_status {
+        // Update rebuild information
+        if let Some(rebuild_info) = raid_bdev["rebuild_info"].as_object() {
+            let progress = rebuild_info["progress_percentage"].as_f64().unwrap_or(0.0);
+            volume.rebuild_progress = Some(progress);
+            
+            if let Some(ref mut rebuild) = raid_status.rebuild_info {
+                rebuild.state = rebuild_info["state"].as_str().unwrap_or("").to_string();
+                rebuild.progress_percentage = progress;
+                rebuild.blocks_remaining = rebuild_info["blocks_remaining"].as_u64().unwrap_or(0);
+                rebuild.blocks_total = rebuild_info["blocks_total"].as_u64().unwrap_or(0);
+                rebuild.estimated_time_remaining = estimate_rebuild_time_from_live_data(rebuild_info);
+            }
+            
+            // Update replica statuses for rebuilding replicas
+            if let Some(target_slot) = rebuild_info["target_slot"].as_u64() {
+                for replica in &mut volume.replica_statuses {
+                    if replica.raid_member_slot == Some(target_slot as u32) {
+                        replica.status = "rebuilding".to_string();
+                        replica.rebuild_progress = Some(progress);
+                        replica.raid_member_state = "rebuilding".to_string();
+                    }
+                }
+            }
+        } else {
+            volume.rebuild_progress = None;
+            raid_status.rebuild_info = None;
+        }
+        
+        // Update member states
+        if let Some(base_bdevs) = raid_bdev["base_bdevs"].as_array() {
+            for (idx, base_bdev) in base_bdevs.iter().enumerate() {
+                if let Some(member) = raid_status.members.get_mut(idx) {
+                    if let Some(member_state) = base_bdev["state"].as_str() {
+                        member.state = member_state.to_string();
+                    }
+                }
+                
+                // Update corresponding replica status
+                if let Some(replica) = volume.replica_statuses.get_mut(idx) {
+                    if let Some(member_state) = base_bdev["state"].as_str() {
+                        replica.status = match member_state {
+                            "online" => "healthy".to_string(),
+                            "degraded" => "degraded".to_string(),
+                            "failed" => "failed".to_string(),
+                            "rebuilding" => "rebuilding".to_string(),
+                            _ => member_state.to_string(),
+                        };
+                        replica.raid_member_state = member_state.to_string();
+                    }
+                }
+            }
+        }
+        
+        // Update operational member count
+        if let Some(operational) = raid_bdev["num_base_bdevs_operational"].as_u64() {
+            raid_status.operational_members = operational as u32;
+            volume.active_replicas = operational as i32;
+        }
+    }
+}
+
+fn estimate_rebuild_time_from_live_data(rebuild_info: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let blocks_remaining = rebuild_info["blocks_remaining"].as_u64().unwrap_or(0);
+    let progress = rebuild_info["progress_percentage"].as_f64().unwrap_or(0.0);
+    
+    if blocks_remaining == 0 || progress >= 100.0 {
+        return Some("Complete".to_string());
+    }
+    
+    // More sophisticated estimation could use rate tracking here
+    let estimated_seconds = (blocks_remaining as f64 / 1000.0) * 60.0;
+    
+    if estimated_seconds < 60.0 {
+        Some(format!("{}s", estimated_seconds as u64))
+    } else if estimated_seconds < 3600.0 {
+        Some(format!("{}m", (estimated_seconds / 60.0) as u64))
+    } else {
+        Some(format!("{}h", (estimated_seconds / 3600.0) as u64))
+    }
+}
+
 // API handlers
 async fn get_dashboard_data(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    // Check if cache is fresh (less than 60 seconds old)
     let last_update = *state.last_update.read().await;
     let cache_age = Utc::now().signed_duration_since(last_update);
     
     if cache_age.num_seconds() > 60 {
-        // Refresh if cache is stale
         if let Err(e) = refresh_dashboard_data(&state).await {
             eprintln!("Failed to refresh data: {}", e);
         }
@@ -733,7 +898,6 @@ async fn get_dashboard_data(state: AppState) -> Result<impl warp::Reply, warp::R
     if let Some(data) = cache.as_ref() {
         Ok(warp::reply::json(data))
     } else {
-        // Return empty data if cache is not ready
         let empty_data = DashboardData {
             volumes: vec![],
             disks: vec![],
@@ -754,6 +918,70 @@ async fn get_volume_details(volume_id: String, state: AppState) -> Result<impl w
     Ok(warp::reply::json(&json!({"error": "Volume not found"})))
 }
 
+async fn get_volume_raid_status(volume_id: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let http_client = HttpClient::new();
+    let mut raid_details = json!({
+        "volume_id": volume_id,
+        "raid_bdevs": [],
+        "live_status": {}
+    });
+    
+    // Query all nodes for real-time RAID information
+    for (node, rpc_url) in spdk_nodes.iter() {
+        if let Ok(response) = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_raid_get_bdevs",
+                "params": { "category": "all" }
+            }))
+            .send()
+            .await
+        {
+            if let Ok(raid_info) = response.json::<serde_json::Value>().await {
+                if let Some(raid_bdevs) = raid_info["result"].as_array() {
+                    for raid_bdev in raid_bdevs {
+                        if let Some(raid_name) = raid_bdev["name"].as_str() {
+                            if raid_name == volume_id {
+                                let mut raid_bdev_info = raid_bdev.clone();
+                                raid_bdev_info["node"] = json!(node);
+                                
+                                // Add enhanced rebuild information
+                                if let Some(rebuild_info) = raid_bdev["rebuild_info"].as_object() {
+                                    let mut enhanced_rebuild = rebuild_info.clone();
+                                    enhanced_rebuild.insert(
+                                        "estimated_completion".to_string(),
+                                        json!(estimate_rebuild_time_from_live_data(rebuild_info))
+                                    );
+                                    raid_bdev_info["rebuild_info"] = json!(enhanced_rebuild);
+                                }
+                                
+                                // Add member health details
+                                if let Some(base_bdevs) = raid_bdev["base_bdevs"].as_array() {
+                                    let enhanced_members: Vec<serde_json::Value> = base_bdevs.iter().enumerate().map(|(i, member)| {
+                                        let mut enhanced_member = member.clone();
+                                        enhanced_member["slot"] = json!(i);
+                                        enhanced_member["node"] = json!(node);
+                                        enhanced_member
+                                    }).collect();
+                                    raid_bdev_info["base_bdevs"] = json!(enhanced_members);
+                                }
+                                
+                                raid_details["raid_bdevs"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(raid_bdev_info);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&raid_details))
+}
+
 async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
@@ -763,7 +991,6 @@ async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl wa
         "controller_type": "nvme"
     });
     
-    // Query all nodes for vhost-nvme controller information
     for (node, rpc_url) in spdk_nodes.iter() {
         if let Ok(response) = http_client
             .post(rpc_url)
@@ -777,12 +1004,10 @@ async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl wa
                 if let Some(controllers) = vhost_info["result"].as_array() {
                     for controller in controllers {
                         if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
-                            // Check if this controller is for our volume
                             if ctrlr_name.contains(&volume_id) {
                                 let mut controller_info = controller.clone();
                                 controller_info["node"] = json!(node);
                                 
-                                // Add NVMe-specific information
                                 if controller["backend_specific"]["type"].as_str() == Some("nvme") {
                                     controller_info["controller_type"] = json!("nvme");
                                     if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
@@ -819,7 +1044,6 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
     if let Some(rpc_url) = spdk_nodes.get(&node) {
         let http_client = HttpClient::new();
         
-        // Get various SPDK metrics for the node
         let mut metrics = json!({});
         
         // Get bdev list
@@ -858,10 +1082,10 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
             }
         }
         
-        // Get RAID information
+        // Get RAID information with enhanced details
         if let Ok(response) = http_client
             .post(rpc_url)
-            .json(&json!({"method": "bdev_raid_get_bdevs"}))
+            .json(&json!({"method": "bdev_raid_get_bdevs", "params": {"category": "all"}}))
             .send()
             .await
         {
@@ -900,77 +1124,85 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
     Ok(warp::reply::json(&json!({"error": "Node not found"})))
 }
 
-async fn get_node_vhost_status(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+async fn get_node_raid_status(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
     let spdk_nodes = state.spdk_nodes.read().await;
     if let Some(rpc_url) = spdk_nodes.get(&node) {
         let http_client = HttpClient::new();
         
-        // Get vhost controller status with enhanced NVMe information
+        // Get detailed RAID status with enhanced information
         if let Ok(response) = http_client
             .post(rpc_url)
-            .json(&json!({"method": "vhost_get_controllers"}))
+            .json(&json!({
+                "method": "bdev_raid_get_bdevs",
+                "params": { "category": "all" }
+            }))
             .send()
             .await
         {
-            if let Ok(mut vhost_controllers) = response.json::<serde_json::Value>().await {
-                // Enhance with additional NVMe controller information
-                if let Some(controllers) = vhost_controllers["result"].as_array_mut() {
-                    for controller in controllers {
-                        // Add controller type information
-                        let controller_type = controller["backend_specific"]["type"]
-                            .as_str()
-                            .unwrap_or("unknown");
-                        controller["controller_type"] = json!(controller_type);
+            if let Ok(mut raid_bdevs) = response.json::<serde_json::Value>().await {
+                // Enhance RAID information
+                if let Some(raid_list) = raid_bdevs["result"].as_array_mut() {
+                    for raid_bdev in raid_list {
+                        // Add node information
+                        raid_bdev["node"] = json!(node);
                         
-                        // For NVMe controllers, add namespace count and details
-                        if controller_type == "nvme" {
-                            let namespace_count = controller["backend_specific"]["namespaces"]
-                                .as_array()
-                                .map(|ns| ns.len())
-                                .unwrap_or(0);
-                            controller["namespace_count"] = json!(namespace_count);
+                        // Enhance rebuild information with estimates
+                        if let Some(rebuild_info) = raid_bdev["rebuild_info"].as_object() {
+                            let mut enhanced_rebuild = rebuild_info.clone();
+                            enhanced_rebuild.insert(
+                                "estimated_completion".to_string(),
+                                json!(estimate_rebuild_time_from_live_data(rebuild_info))
+                            );
                             
-                            // Add detailed namespace information
-                            if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
-                                let mut namespace_details = Vec::new();
-                                for ns in namespaces {
-                                    namespace_details.push(json!({
-                                        "nsid": ns["nsid"],
-                                        "size": ns["size"],
-                                        "uuid": ns["uuid"],
-                                        "bdev_name": ns["bdev_name"],
-                                        "block_size": ns["block_size"],
-                                        "md_size": ns["md_size"]
-                                    }));
+                            // Calculate rebuild rate if possible
+                            let blocks_total = rebuild_info["blocks_total"].as_u64().unwrap_or(0);
+                            let blocks_remaining = rebuild_info["blocks_remaining"].as_u64().unwrap_or(0);
+                            if blocks_total > 0 {
+                                let blocks_completed = blocks_total - blocks_remaining;
+                                enhanced_rebuild.insert(
+                                    "blocks_completed".to_string(),
+                                    json!(blocks_completed)
+                                );
+                            }
+                            
+                            raid_bdev["rebuild_info"] = json!(enhanced_rebuild);
+                        }
+                        
+                        // Add member health analysis
+                        if let Some(base_bdevs) = raid_bdev["base_bdevs"].as_array() {
+                            let mut health_summary = json!({
+                                "total_members": base_bdevs.len(),
+                                "online_members": 0,
+                                "failed_members": 0,
+                                "rebuilding_members": 0
+                            });
+                            
+                            for member in base_bdevs {
+                                match member["state"].as_str() {
+                                    Some("online") => {
+                                        health_summary["online_members"] = 
+                                            json!(health_summary["online_members"].as_u64().unwrap_or(0) + 1);
+                                    }
+                                    Some("failed") => {
+                                        health_summary["failed_members"] = 
+                                            json!(health_summary["failed_members"].as_u64().unwrap_or(0) + 1);
+                                    }
+                                    Some("rebuilding") => {
+                                        health_summary["rebuilding_members"] = 
+                                            json!(health_summary["rebuilding_members"].as_u64().unwrap_or(0) + 1);
+                                    }
+                                    _ => {}
                                 }
-                                controller["namespace_details"] = json!(namespace_details);
                             }
-                        } else if controller_type == "blk" {
-                            // For block controllers, add backend device information
-                            if let Some(backend) = controller["backend_specific"]["backend"].as_str() {
-                                controller["backend_device"] = json!(backend);
-                            }
-                        }
-                        
-                        // Add socket information
-                        if let Some(socket) = controller["socket"].as_str() {
-                            controller["socket_path"] = json!(socket);
-                        }
-                        
-                        // Add connection status
-                        let is_active = controller["active"].as_bool().unwrap_or(false);
-                        controller["connection_status"] = json!(if is_active { "active" } else { "inactive" });
-                        
-                        // Add CPU mask information
-                        if let Some(cpumask) = controller["cpumask"].as_str() {
-                            controller["cpu_affinity"] = json!(cpumask);
+                            
+                            raid_bdev["health_summary"] = health_summary;
                         }
                     }
                 }
-                return Ok(warp::reply::json(&vhost_controllers));
+                return Ok(warp::reply::json(&raid_bdevs));
             }
         }
     }
     
-    Ok(warp::reply::json(&json!({"error": "Failed to get vhost status"})))
+    Ok(warp::reply::json(&json!({"error": "Failed to get RAID status"})))
 }

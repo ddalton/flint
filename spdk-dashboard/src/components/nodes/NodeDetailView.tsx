@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
+import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
 
 interface NodeDetailViewProps {
@@ -26,6 +27,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   filteredVolumes
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
+  const [showNodeMetrics, setShowNodeMetrics] = useState(false);
   
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
@@ -87,6 +89,17 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               {filteredVolumeCount} Filtered
             </span>
           )}
+          
+          {/* Node Metrics Button */}
+          <button
+            onClick={() => setShowNodeMetrics(true)}
+            className="px-3 py-1 text-sm bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-colors flex items-center gap-1"
+            title="View detailed node metrics and SPDK status"
+          >
+            <Activity className="w-3 h-3" />
+            SPDK Metrics
+          </button>
+          
           {/* Quick Access Button */}
           {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (
             <button
@@ -326,11 +339,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       <td className="px-4 py-4">
                         <div>
                           <span className={`inline-flex px-2 py-1 text-xs rounded-full ${
-                            disk.lvol_store_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+                            disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
                           }`}>
-                            {disk.lvol_store_initialized ? 'Initialized' : 'Not Initialized'}
+                            {disk.blobstore_initialized ? 'Initialized' : 'Not Initialized'}
                           </span>
-                          {disk.lvol_store_initialized && (
+                          {disk.blobstore_initialized && (
                             <div className="text-xs text-gray-500 mt-1">
                               {disk.lvol_count} logical volumes
                             </div>
@@ -439,6 +452,14 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Node Metrics Modal */}
+      {showNodeMetrics && (
+        <NodeMetricsAPI
+          nodeName={node}
+          onClose={() => setShowNodeMetrics(false)}
+        />
+      )}
     </div>
   );
 };
