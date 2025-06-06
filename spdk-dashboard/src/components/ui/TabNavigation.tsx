@@ -1,5 +1,5 @@
 import React from 'react';
-import { Monitor, Database, HardDrive, Server } from 'lucide-react';
+import { Monitor, Database, HardDrive, Server, Settings } from 'lucide-react';
 
 interface Tab {
   id: string;
@@ -16,6 +16,7 @@ const tabs: Tab[] = [
   { id: 'overview', name: 'Overview', icon: Monitor },
   { id: 'volumes', name: 'Volumes', icon: Database },
   { id: 'disks', name: 'Disks', icon: HardDrive },
+  { id: 'disk-setup', name: 'Disk Setup', icon: Settings },
   { id: 'nodes', name: 'Nodes', icon: Server }
 ];
 
