@@ -1,10 +1,13 @@
-import React from 'react';
-import { X, HardDrive } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { 
+  X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
+  Server, Database, AlertTriangle, CheckCircle, Activity
+} from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 
 interface DisksTableProps {
   disks: Disk[];
-  volumes: Volume[]; // Add volumes to cross-reference
+  volumes: Volume[];
   stats: {
     totalDisks: number;
     healthyDisks: number;
@@ -16,6 +19,12 @@ interface DisksTableProps {
   onClearVolumeReplicaFilter?: () => void;
 }
 
+type DiskHealthFilter = 'all' | 'healthy' | 'unhealthy';
+type DiskLVSFilter = 'all' | 'initialized' | 'uninitialized';
+type DiskUtilizationFilter = 'all' | 'low' | 'medium' | 'high' | 'full';
+type DiskSortField = 'id' | 'node' | 'capacity' | 'utilization' | 'free_space' | 'read_iops' | 'write_iops' | 'volumes';
+type DiskSortOrder = 'asc' | 'desc';
+
 export const DisksTable: React.FC<DisksTableProps> = ({ 
   disks, 
   volumes, 
@@ -25,15 +34,24 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   onDiskClick,
   onClearVolumeReplicaFilter 
 }) => {
-// Filter disks based on volume filter and volume replica filter
-  const getFilteredDisks = () => {
-    // If no filters, return all disks
-    if (!volumeFilter || volumeFilter === 'all') {
-      if (!volumeReplicaFilter) {
-        return disks;
-      }
-    }
+  // Disk-specific filters
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
+  const [healthFilter, setHealthFilter] = useState<DiskHealthFilter>('all');
+  const [lvsFilter, setLVSFilter] = useState<DiskLVSFilter>('all');
+  const [utilizationFilter, setUtilizationFilter] = useState<DiskUtilizationFilter>('all');
+  const [capacityRange, setCapacityRange] = useState({ min: '', max: '' });
+  const [sortField, setSortField] = useState<DiskSortField>('id');
+  const [sortOrder, setSortOrder] = useState<DiskSortOrder>('asc');
+  const [showFilters, setShowFilters] = useState(false);
 
+  // Get unique nodes for filter dropdown
+  const availableNodes = useMemo(() => {
+    return Array.from(new Set(disks.map(disk => disk.node))).sort();
+  }, [disks]);
+
+  // Apply all filters
+  const filteredDisks = useMemo(() => {
     let result = disks;
 
     // Apply volume replica filter first (most specific)
@@ -43,24 +61,17 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           diskVolume.volume_id === volumeReplicaFilter
         );
       });
-      return result;
     }
-    
     // Apply general volume filter
-    if (volumeFilter && volumeFilter !== 'all') {
+    else if (volumeFilter && volumeFilter !== 'all') {
       result = result.filter(disk => {
-        // If disk has no provisioned volumes, don't filter it out unless specifically looking for volumes
         if (disk.provisioned_volumes.length === 0) {
           return true; // Show empty disks
         }
         
-        // Check if disk has any volumes matching the volume filter
         return disk.provisioned_volumes.some(diskVolume => {
           const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
-          if (!actualVolume) {
-            console.warn('Volume not found:', diskVolume.volume_id);
-            return false;
-          }
+          if (!actualVolume) return false;
           
           switch (volumeFilter) {
             case 'healthy':
@@ -86,11 +97,150 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       });
     }
 
+    // Apply search filter
+    if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      result = result.filter(disk => 
+        disk.id.toLowerCase().includes(searchLower) ||
+        disk.node.toLowerCase().includes(searchLower) ||
+        disk.model.toLowerCase().includes(searchLower) ||
+        disk.pci_addr.toLowerCase().includes(searchLower)
+      );
+    }
+
+    // Apply node filter
+    if (selectedNodes.length > 0) {
+      result = result.filter(disk => selectedNodes.includes(disk.node));
+    }
+
+    // Apply health filter
+    if (healthFilter !== 'all') {
+      result = result.filter(disk => 
+        healthFilter === 'healthy' ? disk.healthy : !disk.healthy
+      );
+    }
+
+    // Apply LVS filter
+    if (lvsFilter !== 'all') {
+      result = result.filter(disk => 
+        lvsFilter === 'initialized' ? disk.blobstore_initialized : !disk.blobstore_initialized
+      );
+    }
+
+    // Apply utilization filter
+    if (utilizationFilter !== 'all') {
+      result = result.filter(disk => {
+        const utilization = (disk.allocated_space / disk.capacity_gb) * 100;
+        switch (utilizationFilter) {
+          case 'low': return utilization < 25;
+          case 'medium': return utilization >= 25 && utilization < 75;
+          case 'high': return utilization >= 75 && utilization < 95;
+          case 'full': return utilization >= 95;
+          default: return true;
+        }
+      });
+    }
+
+    // Apply capacity range filter
+    if (capacityRange.min || capacityRange.max) {
+      result = result.filter(disk => {
+        const capacity = disk.capacity_gb;
+        const min = capacityRange.min ? parseInt(capacityRange.min) : 0;
+        const max = capacityRange.max ? parseInt(capacityRange.max) : Infinity;
+        return capacity >= min && capacity <= max;
+      });
+    }
+
+    // Apply sorting
+    result.sort((a, b) => {
+      let aValue: any, bValue: any;
+      
+      switch (sortField) {
+        case 'id':
+          aValue = a.id;
+          bValue = b.id;
+          break;
+        case 'node':
+          aValue = a.node;
+          bValue = b.node;
+          break;
+        case 'capacity':
+          aValue = a.capacity_gb;
+          bValue = b.capacity_gb;
+          break;
+        case 'utilization':
+          aValue = (a.allocated_space / a.capacity_gb) * 100;
+          bValue = (b.allocated_space / b.capacity_gb) * 100;
+          break;
+        case 'free_space':
+          aValue = a.free_space;
+          bValue = b.free_space;
+          break;
+        case 'read_iops':
+          aValue = a.read_iops;
+          bValue = b.read_iops;
+          break;
+        case 'write_iops':
+          aValue = a.write_iops;
+          bValue = b.write_iops;
+          break;
+        case 'volumes':
+          aValue = a.provisioned_volumes.length;
+          bValue = b.provisioned_volumes.length;
+          break;
+        default:
+          aValue = a.id;
+          bValue = b.id;
+      }
+
+      if (typeof aValue === 'string') {
+        return sortOrder === 'asc' 
+          ? aValue.localeCompare(bValue)
+          : bValue.localeCompare(aValue);
+      } else {
+        return sortOrder === 'asc' ? aValue - bValue : bValue - aValue;
+      }
+    });
+
     return result;
+  }, [
+    disks, volumes, volumeFilter, volumeReplicaFilter, searchTerm, selectedNodes,
+    healthFilter, lvsFilter, utilizationFilter, capacityRange, sortField, sortOrder
+  ]);
+
+  const handleSort = (field: DiskSortField) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder('asc');
+    }
   };
 
-  const filteredDisks = getFilteredDisks();
+  const clearAllFilters = () => {
+    setSearchTerm('');
+    setSelectedNodes([]);
+    setHealthFilter('all');
+    setLVSFilter('all');
+    setUtilizationFilter('all');
+    setCapacityRange({ min: '', max: '' });
+    setSortField('id');
+    setSortOrder('asc');
+  };
+
+  const getActiveFilterCount = () => {
+    let count = 0;
+    if (searchTerm) count++;
+    if (selectedNodes.length > 0) count++;
+    if (healthFilter !== 'all') count++;
+    if (lvsFilter !== 'all') count++;
+    if (utilizationFilter !== 'all') count++;
+    if (capacityRange.min || capacityRange.max) count++;
+    return count;
+  };
+
   const targetVolume = volumeReplicaFilter ? volumes.find(v => v.id === volumeReplicaFilter) : null;
+  const activeFilterCount = getActiveFilterCount();
 
   const getFilterDisplayName = (filter: VolumeFilter) => {
     switch (filter) {
@@ -101,8 +251,16 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     }
   };
 
+  const SortIcon = ({ field }: { field: DiskSortField }) => {
+    if (sortField !== field) return null;
+    return sortOrder === 'asc' ? 
+      <SortAsc className="w-4 h-4" /> : 
+      <SortDesc className="w-4 h-4" />;
+  };
+
   return (
     <div>
+      {/* Volume-based filters (existing) */}
       {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
           <div className="text-sm font-medium text-blue-900">
@@ -137,74 +295,309 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      {/* Enhanced Disk Filtering Controls */}
+      <div className="mb-6 bg-white border border-gray-200 rounded-lg shadow-sm">
+        {/* Filter Header */}
+        <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Filter className="w-5 h-5 text-gray-600" />
+            <h3 className="text-lg font-medium text-gray-900">Disk Filters</h3>
+            {activeFilterCount > 0 && (
+              <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                {activeFilterCount} active
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {activeFilterCount > 0 && (
+              <button
+                onClick={clearAllFilters}
+                className="text-sm text-gray-600 hover:text-gray-800 flex items-center gap-1"
+              >
+                <X className="w-4 h-4" />
+                Clear All
+              </button>
+            )}
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800"
+            >
+              <ChevronDown className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
+              {showFilters ? 'Hide' : 'Show'} Filters
+            </button>
+          </div>
+        </div>
+
+        {/* Search Bar (always visible) */}
+        <div className="px-4 py-3 bg-gray-50">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search disks by ID, node, model, or PCI address..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+        </div>
+
+        {/* Advanced Filters (collapsible) */}
+        {showFilters && (
+          <div className="px-4 py-4 border-t border-gray-200 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {/* Node Filter */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Nodes ({selectedNodes.length} selected)
+                </label>
+                <div className="space-y-1 max-h-32 overflow-y-auto border border-gray-300 rounded p-2">
+                  {availableNodes.map(node => (
+                    <label key={node} className="flex items-center text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selectedNodes.includes(node)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedNodes([...selectedNodes, node]);
+                          } else {
+                            setSelectedNodes(selectedNodes.filter(n => n !== node));
+                          }
+                        }}
+                        className="mr-2 rounded"
+                      />
+                      {node}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Health Filter */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Health Status</label>
+                <select
+                  value={healthFilter}
+                  onChange={(e) => setHealthFilter(e.target.value as DiskHealthFilter)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Disks</option>
+                  <option value="healthy">Healthy Only</option>
+                  <option value="unhealthy">Unhealthy Only</option>
+                </select>
+              </div>
+
+              {/* LVS Status Filter */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">LVS Status</label>
+                <select
+                  value={lvsFilter}
+                  onChange={(e) => setLVSFilter(e.target.value as DiskLVSFilter)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Disks</option>
+                  <option value="initialized">Initialized Only</option>
+                  <option value="uninitialized">Uninitialized Only</option>
+                </select>
+              </div>
+
+              {/* Utilization Filter */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Utilization</label>
+                <select
+                  value={utilizationFilter}
+                  onChange={(e) => setUtilizationFilter(e.target.value as DiskUtilizationFilter)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="all">All Levels</option>
+                  <option value="low">Low (&lt; 25%)</option>
+                  <option value="medium">Medium (25-75%)</option>
+                  <option value="high">High (75-95%)</option>
+                  <option value="full">Nearly Full (&gt; 95%)</option>
+                </select>
+              </div>
+
+              {/* Capacity Range */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Capacity Range (GB)</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    placeholder="Min"
+                    value={capacityRange.min}
+                    onChange={(e) => setCapacityRange({ ...capacityRange, min: e.target.value })}
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-gray-500">to</span>
+                  <input
+                    type="number"
+                    placeholder="Max"
+                    value={capacityRange.max}
+                    onChange={(e) => setCapacityRange({ ...capacityRange, max: e.target.value })}
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Results Summary */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-gray-50 rounded-lg p-4">
-          <h3 className="text-lg font-semibold">
-            {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter ? 'Filtered Disks' : 
-             volumeReplicaFilter ? 'Replica Disks' : 'Total Disks'}
-          </h3>
-          <p className="text-3xl font-bold text-blue-600">
-            {filteredDisks.length}
-            {(volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter) || volumeReplicaFilter ? (
-              <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
-            ) : null}
-          </p>
+          <div className="flex items-center">
+            <HardDrive className="w-8 h-8 text-blue-600 mr-3" />
+            <div>
+              <h3 className="text-lg font-semibold">
+                {activeFilterCount > 0 || volumeFilter || volumeReplicaFilter ? 'Filtered Disks' : 'Total Disks'}
+              </h3>
+              <p className="text-3xl font-bold text-blue-600">
+                {filteredDisks.length}
+                {(activeFilterCount > 0 || volumeFilter || volumeReplicaFilter) && (
+                  <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
+                )}
+              </p>
+            </div>
+          </div>
         </div>
         <div className="bg-gray-50 rounded-lg p-4">
-          <h3 className="text-lg font-semibold">Healthy Disks</h3>
-          <p className="text-3xl font-bold text-green-600">
-            {filteredDisks.filter(d => d.healthy).length}
-          </p>
+          <div className="flex items-center">
+            <CheckCircle className="w-8 h-8 text-green-600 mr-3" />
+            <div>
+              <h3 className="text-lg font-semibold">Healthy Disks</h3>
+              <p className="text-3xl font-bold text-green-600">
+                {filteredDisks.filter(d => d.healthy).length}
+              </p>
+            </div>
+          </div>
         </div>
         <div className="bg-gray-50 rounded-lg p-4">
-          <h3 className="text-lg font-semibold">LVS Initialized</h3>
-          <p className="text-3xl font-bold text-blue-600">
-            {filteredDisks.filter(d => d.lvol_store_initialized).length}
-          </p>
+          <div className="flex items-center">
+            <Database className="w-8 h-8 text-indigo-600 mr-3" />
+            <div>
+              <h3 className="text-lg font-semibold">LVS Initialized</h3>
+              <p className="text-3xl font-bold text-indigo-600">
+                {filteredDisks.filter(d => d.blobstore_initialized).length}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-4">
+          <div className="flex items-center">
+            <Activity className="w-8 h-8 text-purple-600 mr-3" />
+            <div>
+              <h3 className="text-lg font-semibold">Avg Utilization</h3>
+              <p className="text-3xl font-bold text-purple-600">
+                {filteredDisks.length > 0 ? 
+                  Math.round(filteredDisks.reduce((sum, disk) => 
+                    sum + (disk.allocated_space / disk.capacity_gb) * 100, 0
+                  ) / filteredDisks.length) : 0}%
+              </p>
+            </div>
+          </div>
         </div>
       </div>
       
+      {/* Disks Table */}
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Disk ID</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Node</th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('id')}
+              >
+                <div className="flex items-center gap-1">
+                  Disk ID
+                  <SortIcon field="id" />
+                </div>
+              </th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('node')}
+              >
+                <div className="flex items-center gap-1">
+                  Node
+                  <SortIcon field="node" />
+                </div>
+              </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Capacity</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Free Space</th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('capacity')}
+              >
+                <div className="flex items-center gap-1">
+                  Capacity
+                  <SortIcon field="capacity" />
+                </div>
+              </th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('free_space')}
+              >
+                <div className="flex items-center gap-1">
+                  Free Space
+                  <SortIcon field="free_space" />
+                </div>
+              </th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('utilization')}
+              >
+                <div className="flex items-center gap-1">
+                  Utilization
+                  <SortIcon field="utilization" />
+                </div>
+              </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LVS Initialized</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Performance</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Volumes</th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('read_iops')}
+              >
+                <div className="flex items-center gap-1">
+                  Performance
+                  <SortIcon field="read_iops" />
+                </div>
+              </th>
+              <th 
+                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                onClick={() => handleSort('volumes')}
+              >
+                <div className="flex items-center gap-1">
+                  Volumes
+                  <SortIcon field="volumes" />
+                </div>
+              </th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {filteredDisks.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-6 py-8 text-center text-gray-500">
+                <td colSpan={10} className="px-6 py-8 text-center text-gray-500">
                   {volumeReplicaFilter && targetVolume
                     ? `No disks contain replicas for volume "${targetVolume.name}".`
                     : volumeFilter && volumeFilter !== 'all' 
                     ? `No disks have ${getFilterDisplayName(volumeFilter)}.`
+                    : activeFilterCount > 0
+                    ? 'No disks match the current filters.'
                     : 'No disks found.'
                   }
                 </td>
               </tr>
             ) : (
               filteredDisks.map((disk) => {
-                let filteredVolumes = disk.provisioned_volumes;
+                let displayVolumes = disk.provisioned_volumes;
                 
                 // Apply volume replica filter
                 if (volumeReplicaFilter) {
-                  filteredVolumes = disk.provisioned_volumes.filter(diskVolume => 
+                  displayVolumes = disk.provisioned_volumes.filter(diskVolume => 
                     diskVolume.volume_id === volumeReplicaFilter
                   );
                 }
                 // Apply general volume filter if no specific volume replica filter
                 else if (volumeFilter && volumeFilter !== 'all') {
-                  filteredVolumes = disk.provisioned_volumes.filter(diskVolume => {
-                    // Find the actual volume data to check its state
+                  displayVolumes = disk.provisioned_volumes.filter(diskVolume => {
                     const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
                     if (!actualVolume) return false;
                     
@@ -212,7 +605,11 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       case 'faulted':
                         return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
                       case 'rebuilding':
-                        return actualVolume.state === 'Rebuilding';
+                        return actualVolume.replica_statuses.some(replica => 
+                          replica.status === 'rebuilding' || 
+                          replica.rebuild_progress !== null ||
+                          replica.is_new_replica
+                        );
                       case 'local-nvme':
                         return actualVolume.local_nvme;
                       default:
@@ -220,6 +617,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     }
                   });
                 }
+
+                const utilization = Math.round((disk.allocated_space / disk.capacity_gb) * 100);
 
                 return (
                   <tr key={disk.id} className="hover:bg-gray-50">
@@ -231,10 +630,31 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         {disk.id}
                       </button>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.node}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <div className="flex items-center gap-1">
+                        <Server className="w-4 h-4 text-gray-400" />
+                        {disk.node}
+                      </div>
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space}GB</td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        <div className="w-20 bg-gray-200 rounded-full h-2">
+                          <div 
+                            className={`h-2 rounded-full ${
+                              utilization < 25 ? 'bg-green-500' :
+                              utilization < 75 ? 'bg-yellow-500' :
+                              utilization < 95 ? 'bg-orange-500' :
+                              'bg-red-500'
+                            }`}
+                            style={{ width: `${utilization}%` }}
+                          />
+                        </div>
+                        <span className="text-xs text-gray-600 min-w-[3rem]">{utilization}%</span>
+                      </div>
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
                         disk.healthy ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
@@ -244,15 +664,29 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        disk.lvol_store_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+                        disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
                       }`}>
-                        {disk.lvol_store_initialized ? 'Yes' : 'No'}
+                        {disk.blobstore_initialized ? 'Yes' : 'No'}
                       </span>
+                      {disk.blobstore_initialized && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {disk.lvol_count} logical volumes
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div>
-                        <div>R: {disk.read_iops.toLocaleString()} IOPS</div>
-                        <div>W: {disk.write_iops.toLocaleString()} IOPS</div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-green-600">R:</span>
+                          <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-blue-600">W:</span>
+                          <span className="text-xs">{disk.write_iops.toLocaleString()} IOPS</span>
+                        </div>
+                        <div className="text-xs text-gray-400">
+                          {disk.read_latency}μs / {disk.write_latency}μs
+                        </div>
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -260,9 +694,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         onClick={() => onDiskClick?.(disk.id)}
                         className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
                       >
-                        {filteredVolumes.length} volume{filteredVolumes.length !== 1 ? 's' : ''}
+                        {displayVolumes.length} volume{displayVolumes.length !== 1 ? 's' : ''}
                         {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
-                         filteredVolumes.length !== disk.provisioned_volumes.length && (
+                         displayVolumes.length !== disk.provisioned_volumes.length && (
                           <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
                         )}
                         {volumeReplicaFilter && targetVolume && (
@@ -271,6 +705,26 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                           </span>
                         )}
                       </button>
+                      {displayVolumes.length > 0 && (
+                        <div className="mt-1 space-y-1">
+                          {displayVolumes.slice(0, 2).map((vol, idx) => (
+                            <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
+                              <div className={`w-2 h-2 rounded-full ${
+                                vol.status === 'healthy' ? 'bg-green-500' :
+                                vol.status === 'rebuilding' ? 'bg-orange-500' :
+                                'bg-red-500'
+                              }`}></div>
+                              <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
+                              <span className="text-gray-400">({vol.size}GB)</span>
+                            </div>
+                          ))}
+                          {displayVolumes.length > 2 && (
+                            <div className="text-xs text-gray-400">
+                              +{displayVolumes.length - 2} more...
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );
@@ -279,6 +733,128 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Additional Filter Summary */}
+      {filteredDisks.length > 0 && activeFilterCount > 0 && (
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+          <h4 className="text-sm font-medium text-gray-700 mb-2">Applied Filters Summary</h4>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {searchTerm && (
+              <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full">
+                Search: "{searchTerm}"
+              </span>
+            )}
+            {selectedNodes.length > 0 && (
+              <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded-full">
+                Nodes: {selectedNodes.length} selected
+              </span>
+            )}
+            {healthFilter !== 'all' && (
+              <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full">
+                Health: {healthFilter}
+              </span>
+            )}
+            {lvsFilter !== 'all' && (
+              <span className="px-2 py-1 bg-indigo-100 text-indigo-800 rounded-full">
+                LVS: {lvsFilter}
+              </span>
+            )}
+            {utilizationFilter !== 'all' && (
+              <span className="px-2 py-1 bg-orange-100 text-orange-800 rounded-full">
+                Utilization: {utilizationFilter}
+              </span>
+            )}
+            {(capacityRange.min || capacityRange.max) && (
+              <span className="px-2 py-1 bg-gray-100 text-gray-800 rounded-full">
+                Capacity: {capacityRange.min || '0'}-{capacityRange.max || '∞'}GB
+              </span>
+            )}
+            {sortField !== 'id' && (
+              <span className="px-2 py-1 bg-yellow-100 text-yellow-800 rounded-full">
+                Sort: {sortField} ({sortOrder})
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Performance Insights */}
+      {filteredDisks.length > 10 && (
+        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <h4 className="text-sm font-medium text-blue-800 mb-2 flex items-center gap-2">
+            <Activity className="w-4 h-4" />
+            Performance Insights
+          </h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+            <div>
+              <span className="text-blue-700 font-medium">Highest Read IOPS:</span>
+              <div className="text-blue-900">
+                {Math.max(...filteredDisks.map(d => d.read_iops)).toLocaleString()} IOPS
+              </div>
+            </div>
+            <div>
+              <span className="text-blue-700 font-medium">Highest Write IOPS:</span>
+              <div className="text-blue-900">
+                {Math.max(...filteredDisks.map(d => d.write_iops)).toLocaleString()} IOPS
+              </div>
+            </div>
+            <div>
+              <span className="text-blue-700 font-medium">Total Capacity:</span>
+              <div className="text-blue-900">
+                {filteredDisks.reduce((sum, d) => sum + d.capacity_gb, 0).toLocaleString()}GB
+              </div>
+            </div>
+            <div>
+              <span className="text-blue-700 font-medium">Total Free Space:</span>
+              <div className="text-blue-900">
+                {filteredDisks.reduce((sum, d) => sum + d.free_space, 0).toLocaleString()}GB
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Action Buttons */}
+      {filteredDisks.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            onClick={() => {
+              setHealthFilter('unhealthy');
+              setShowFilters(true);
+            }}
+            className="px-3 py-1 text-xs bg-red-100 text-red-800 rounded-full hover:bg-red-200 transition-colors"
+          >
+            Show Unhealthy Only
+          </button>
+          <button
+            onClick={() => {
+              setLVSFilter('uninitialized');
+              setShowFilters(true);
+            }}
+            className="px-3 py-1 text-xs bg-gray-100 text-gray-800 rounded-full hover:bg-gray-200 transition-colors"
+          >
+            Show Uninitialized Only
+          </button>
+          <button
+            onClick={() => {
+              setUtilizationFilter('high');
+              setShowFilters(true);
+            }}
+            className="px-3 py-1 text-xs bg-orange-100 text-orange-800 rounded-full hover:bg-orange-200 transition-colors"
+          >
+            Show High Utilization
+          </button>
+          <button
+            onClick={() => {
+              setSortField('read_iops');
+              setSortOrder('desc');
+            }}
+            className="px-3 py-1 text-xs bg-blue-100 text-blue-800 rounded-full hover:bg-blue-200 transition-colors"
+          >
+            Sort by Performance
+          </button>
+        </div>
+      )}
     </div>
   );
 };
