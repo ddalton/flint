@@ -7,12 +7,14 @@ interface FilteredNodesViewProps {
   data: DashboardData;
   activeFilter?: VolumeFilter;
   onClearFilter?: () => void;
+  onDiskVolumeFilter?: (diskId: string) => void;
 }
 
 export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({ 
   data, 
   activeFilter, 
-  onClearFilter 
+  onClearFilter,
+  onDiskVolumeFilter
 }) => {
   // Filter volumes based on the active filter
   const getFilteredVolumes = () => {
@@ -249,6 +251,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
                   // Include volumes that have replicas on this node matching the filter criteria
                   return v.nodes.includes(node);
                 })}
+                onDiskVolumeFilter={onDiskVolumeFilter}
               />
             );
           })}

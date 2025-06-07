@@ -17,6 +17,7 @@ interface DisksTableProps {
   volumeReplicaFilter?: VolumeReplicaFilter;
   onDiskClick?: (diskId: string) => void;
   onClearVolumeReplicaFilter?: () => void;
+  onDiskVolumeFilter?: (diskId: string) => void;
 }
 
 type DiskHealthFilter = 'all' | 'healthy' | 'unhealthy';
@@ -624,7 +625,13 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                   <tr key={disk.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                       <button
-                        onClick={() => onDiskClick?.(disk.id)}
+                        onClick={() => {
+                          if (onDiskVolumeFilter) {
+                            onDiskVolumeFilter(disk.id);
+                          } else {
+                            onDiskClick?.(disk.id);
+                          }
+                        }}
                         className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
                       >
                         {disk.id}

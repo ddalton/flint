@@ -13,6 +13,7 @@ interface NodeDetailViewProps {
   totalFree: number;
   volumeFilter?: VolumeFilter;
   filteredVolumes?: Volume[];
+  onDiskVolumeFilter?: (diskId: string) => void;
 }
 
 export const NodeDetailView: React.FC<NodeDetailViewProps> = ({ 
@@ -24,7 +25,8 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   totalAllocated, 
   totalFree,
   volumeFilter,
-  filteredVolumes
+  filteredVolumes,
+  onDiskVolumeFilter
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
   const [showNodeMetrics, setShowNodeMetrics] = useState(false);
@@ -298,10 +300,17 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                     <tr className="hover:bg-gray-50">
                       <td className="px-4 py-4">
                         <div>
-                          <div className="text-sm font-medium text-gray-900">{disk.id}</div>
+                          <button
+                            onClick={() => onDiskVolumeFilter?.(disk.id)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                            title={`Click to filter volumes on disk ${disk.id}`}
+                          >
+                            <div className="text-sm font-medium text-gray-900">{disk.id}</div>
+                          </button>
                           <div className="text-xs text-gray-500">{disk.pci_addr}</div>
                         </div>
                       </td>
+                      {/* Rest of the table cells remain the same */}
                       <td className="px-4 py-4 text-sm text-gray-700">{disk.model}</td>
                       <td className="px-4 py-4">
                         <div className="text-sm">
@@ -352,12 +361,16 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       </td>
                       <td className="px-4 py-4">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm text-gray-600">
+                          <button
+                            onClick={() => onDiskVolumeFilter?.(disk.id)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
+                            title={`Click to see all volumes on disk ${disk.id}`}
+                          >
                             {filteredDiskVolumes.length} volume{filteredDiskVolumes.length !== 1 ? 's' : ''}
                             {volumeFilter && volumeFilter !== 'all' && filteredDiskVolumes.length !== disk.provisioned_volumes.length && (
                               <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
                             )}
-                          </span>
+                          </button>
                           {filteredDiskVolumes.length > 0 && (
                             <button
                               onClick={() => toggleDiskExpansion(disk.id)}
@@ -374,9 +387,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       </td>
                     </tr>
                     
+                    {/* Rest of the expanded section remains the same */}
                     {expandedDisks.has(disk.id) && filteredDiskVolumes.length > 0 && (
                       <tr>
                         <td colSpan={7} className="px-4 py-2 bg-gray-50">
+                          {/* Existing expanded content */}
                           <div className="space-y-3">
                             <h5 className="text-sm font-medium text-gray-700 flex items-center gap-2">
                               <Database className="w-4 h-4" />

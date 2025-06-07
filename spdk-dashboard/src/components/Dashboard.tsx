@@ -230,6 +230,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             data={data}
             activeFilter={volumeFilter}
             onClearFilter={handleClearFilter}
+            onDiskVolumeFilter={handleDiskClick}
           />
         );
 
