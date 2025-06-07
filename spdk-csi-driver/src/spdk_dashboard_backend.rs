@@ -5,16 +5,56 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
-use kube::{Client, Api, api::ListParams};
+use kube::{Client, Api, api::ListParams, CustomResource};
 use chrono::{Utc, DateTime};
 use std::env;
 
 // Import your existing CRD types with updated RAID status
-use spdk_csi_driver::{SpdkVolume, SpdkDisk, SpdkVolumeStatus, SpdkDiskStatus, Replica, ReplicaHealth, RaidStatus, RaidMember, RaidRebuildInfo, RaidMemberState};
+use spdk_csi_driver::{SpdkVolume, SpdkDisk, SpdkVolumeStatus, SpdkDiskStatus, Replica, ReplicaHealth, RaidStatus, RaidMember, RaidRebuildInfo, RaidMemberState, SpdkSnapshot, SnapshotType};
 
 mod spdk_csi_driver {
     use kube::CustomResource;
     use serde::{Deserialize, Serialize};
+    use chrono::{DateTime, Utc};
+
+    // --- Start of New Snapshot Definitions ---
+
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+    pub enum SnapshotType {
+        #[default]
+        Bdev,
+        LvolClone,
+        External,
+    }
+
+    #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
+    #[kube(
+        group = "csi.spdk.io",
+        version = "v1",
+        kind = "SpdkSnapshot",
+        plural = "spdksnapshots"
+    )]
+    #[kube(namespaced)]
+    #[kube(status = "SpdkSnapshotStatus")]
+    pub struct SpdkSnapshotSpec {
+        pub source_volume_id: String,
+        pub snapshot_id: String,
+        pub spdk_snapshot_lvol: String,
+        #[serde(default)]
+        pub snapshot_type: SnapshotType,
+        pub clone_source_snapshot_id: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct SpdkSnapshotStatus {
+        pub creation_time: Option<DateTime<Utc>>,
+        pub ready_to_use: bool,
+        pub size_bytes: i64,
+        pub error: Option<String>,
+    }
+
+    // --- End of New Snapshot Definitions ---
+
 
     #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
     #[kube(group = "csi.spdk.io", version = "v1", kind = "SpdkVolume", plural = "spdkvolumes")]
@@ -151,6 +191,32 @@ mod spdk_csi_driver {
         pub error_count: u64,
     }
 }
+
+// --- Start of New API Response Structs ---
+#[derive(Serialize, Debug, Clone)]
+struct DetailedSnapshotInfo {
+    // From SpdkSnapshot CR
+    pub snapshot_id: String,
+    pub source_volume_id: String,
+    pub creation_time: Option<DateTime<Utc>>,
+    pub ready_to_use: bool,
+    pub size_bytes: i64,
+    pub snapshot_type: SnapshotType,
+    pub clone_source_snapshot_id: Option<String>,
+    // From SPDK RPC
+    pub spdk_bdev_details: Option<SpdkBdevDetails>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct SpdkBdevDetails {
+    pub node: String, // The node where the snapshot bdev was found
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub driver: String,
+    pub snapshot_source_bdev: Option<String>,
+}
+// --- End of New API Response Structs ---
+
 
 // Enhanced dashboard API response types with native RAID status
 #[derive(Serialize, Debug, Clone)]
@@ -337,6 +403,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_volume_details)
         )
+        // --- Start of New Endpoint ---
+        .or(
+            warp::path("volumes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("snapshots"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_volume_snapshots)
+        )
+        // --- End of New Endpoint ---
         .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
@@ -386,6 +462,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     Ok(())
 }
+
+// --- Start of New Handler Function ---
+async fn get_volume_snapshots(
+    volume_id: String,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    let http_client = HttpClient::new();
+    let spdk_nodes = state.spdk_nodes.read().await;
+
+    let all_snapshots = match snapshots_api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            return Ok(warp::reply::json(&json!({
+                "error": format!("Failed to list snapshots from Kubernetes: {}", e)
+            })));
+        }
+    };
+
+    let mut detailed_results = Vec::new();
+
+    let volume_snapshots = all_snapshots.items.into_iter()
+        .filter(|s| s.spec.source_volume_id == volume_id);
+
+    for s in volume_snapshots {
+        let bdev_name_to_find = s.spec.spdk_snapshot_lvol.clone();
+        let mut bdev_details = None;
+
+        // Search for the snapshot bdev across all known SPDK nodes
+        for (node, rpc_url) in spdk_nodes.iter() {
+            let resp = http_client
+                .post(rpc_url)
+                .json(&json!({
+                    "method": "bdev_get_bdevs",
+                    "params": { "name": &bdev_name_to_find }
+                }))
+                .send()
+                .await;
+
+            if let Ok(resp) = resp {
+                if resp.status().is_success() {
+                    let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                        if !bdev_array.is_empty() {
+                            let bdev = &bdev_array[0];
+                            bdev_details = Some(SpdkBdevDetails {
+                                node: node.clone(),
+                                name: bdev["name"].as_str().unwrap_or("").to_string(),
+                                aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
+                                    .filter_map(|a| a.as_str().map(String::from)).collect(),
+                                driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                                snapshot_source_bdev: bdev.get("driver_specific")
+                                    .and_then(|ds| ds.get("snapshot"))
+                                    .and_then(|snap| snap.get("snapshot_bdev"))
+                                    .and_then(|sb| sb.as_str().map(String::from)),
+                            });
+                            break; // Found it, no need to query other nodes
+                        }
+                    }
+                }
+            }
+        }
+        
+        let status = s.status.unwrap_or_default();
+        detailed_results.push(DetailedSnapshotInfo {
+            snapshot_id: s.spec.snapshot_id,
+            source_volume_id: s.spec.source_volume_id,
+            creation_time: status.creation_time,
+            ready_to_use: status.ready_to_use,
+            size_bytes: status.size_bytes,
+            snapshot_type: s.spec.snapshot_type,
+            clone_source_snapshot_id: s.spec.clone_source_snapshot_id,
+            spdk_bdev_details: bdev_details,
+        });
+    }
+
+    Ok(warp::reply::json(&detailed_results))
+}
+// --- End of New Handler Function ---
 
 async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     let disks: Api<SpdkDisk> = Api::namespaced(client.clone(), "default");
