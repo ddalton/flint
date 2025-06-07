@@ -451,6 +451,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_node_raid_status)
         )
+        .or(
+            warp::path("snapshots")
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_all_snapshots)
+        )
+        .or(
+            warp::path("snapshots")
+                .and(warp::path::param::<String>())
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_snapshot_details)
+        )
+        .or(
+            warp::path("snapshots")
+                .and(warp::path("tree"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_snapshots_tree)
+        )
     );
     
     let routes = api.with(cors);
@@ -1360,4 +1380,224 @@ async fn get_node_raid_status(node: String, state: AppState) -> Result<impl warp
     }
     
     Ok(warp::reply::json(&json!({"error": "Failed to get RAID status"})))
+}
+
+async fn get_all_snapshots(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    let http_client = HttpClient::new();
+    let spdk_nodes = state.spdk_nodes.read().await;
+
+    let all_snapshots = match snapshots_api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            return Ok(warp::reply::json(&json!({
+                "error": format!("Failed to list snapshots from Kubernetes: {}", e),
+                "snapshots": []
+            })));
+        }
+    };
+
+    let mut detailed_results = Vec::new();
+
+    for snapshot_crd in all_snapshots.items {
+        let bdev_name_to_find = snapshot_crd.spec.spdk_snapshot_lvol.clone();
+        let mut bdev_details = None;
+
+        // Search for the snapshot bdev across all known SPDK nodes
+        for (node, rpc_url) in spdk_nodes.iter() {
+            let resp = http_client
+                .post(rpc_url)
+                .json(&json!({
+                    "method": "bdev_get_bdevs",
+                    "params": { "name": &bdev_name_to_find }
+                }))
+                .send()
+                .await;
+
+            if let Ok(resp) = resp {
+                if resp.status().is_success() {
+                    let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                        if !bdev_array.is_empty() {
+                            let bdev = &bdev_array[0];
+                            bdev_details = Some(SpdkBdevDetails {
+                                node: node.clone(),
+                                name: bdev["name"].as_str().unwrap_or("").to_string(),
+                                aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
+                                    .filter_map(|a| a.as_str().map(String::from)).collect(),
+                                driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                                snapshot_source_bdev: bdev.get("driver_specific")
+                                    .and_then(|ds| ds.get("snapshot"))
+                                    .and_then(|snap| snap.get("snapshot_bdev"))
+                                    .and_then(|sb| sb.as_str().map(String::from)),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        let status = snapshot_crd.status.unwrap_or_default();
+        detailed_results.push(DetailedSnapshotInfo {
+            snapshot_id: snapshot_crd.spec.snapshot_id,
+            source_volume_id: snapshot_crd.spec.source_volume_id,
+            creation_time: status.creation_time,
+            ready_to_use: status.ready_to_use,
+            size_bytes: status.size_bytes,
+            snapshot_type: snapshot_crd.spec.snapshot_type,
+            clone_source_snapshot_id: snapshot_crd.spec.clone_source_snapshot_id,
+            spdk_bdev_details: bdev_details,
+        });
+    }
+
+    Ok(warp::reply::json(&detailed_results))
+}
+
+async fn get_snapshot_details(
+    snapshot_id: String,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    
+    match snapshots_api.get(&snapshot_id).await {
+        Ok(snapshot_crd) => {
+            let http_client = HttpClient::new();
+            let spdk_nodes = state.spdk_nodes.read().await;
+            let bdev_name_to_find = snapshot_crd.spec.spdk_snapshot_lvol.clone();
+            let mut bdev_details = None;
+
+            // Find the snapshot bdev details
+            for (node, rpc_url) in spdk_nodes.iter() {
+                let resp = http_client
+                    .post(rpc_url)
+                    .json(&json!({
+                        "method": "bdev_get_bdevs",
+                        "params": { "name": &bdev_name_to_find }
+                    }))
+                    .send()
+                    .await;
+
+                if let Ok(resp) = resp {
+                    if resp.status().is_success() {
+                        let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                        if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                            if !bdev_array.is_empty() {
+                                let bdev = &bdev_array[0];
+                                bdev_details = Some(SpdkBdevDetails {
+                                    node: node.clone(),
+                                    name: bdev["name"].as_str().unwrap_or("").to_string(),
+                                    aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
+                                        .filter_map(|a| a.as_str().map(String::from)).collect(),
+                                    driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                                    snapshot_source_bdev: bdev.get("driver_specific")
+                                        .and_then(|ds| ds.get("snapshot"))
+                                        .and_then(|snap| snap.get("snapshot_bdev"))
+                                        .and_then(|sb| sb.as_str().map(String::from)),
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            let status = snapshot_crd.status.unwrap_or_default();
+            let detailed_snapshot = DetailedSnapshotInfo {
+                snapshot_id: snapshot_crd.spec.snapshot_id,
+                source_volume_id: snapshot_crd.spec.source_volume_id,
+                creation_time: status.creation_time,
+                ready_to_use: status.ready_to_use,
+                size_bytes: status.size_bytes,
+                snapshot_type: snapshot_crd.spec.snapshot_type,
+                clone_source_snapshot_id: snapshot_crd.spec.clone_source_snapshot_id,
+                spdk_bdev_details: bdev_details,
+            };
+
+            Ok(warp::reply::json(&detailed_snapshot))
+        }
+        Err(_) => Ok(warp::reply::json(&json!({
+            "error": "Snapshot not found"
+        })))
+    }
+}
+
+async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
+    
+    let all_snapshots = match snapshots_api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            return Ok(warp::reply::json(&json!({
+                "error": format!("Failed to list snapshots: {}", e),
+                "tree": {}
+            })));
+        }
+    };
+
+    let all_volumes = match volumes_api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            return Ok(warp::reply::json(&json!({
+                "error": format!("Failed to list volumes: {}", e),
+                "tree": {}
+            })));
+        }
+    };
+
+    // Build tree structure
+    let mut tree = json!({});
+    let mut volume_snapshots: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+
+    // Group snapshots by volume
+    for snapshot in all_snapshots.items {
+        let volume_id = snapshot.spec.source_volume_id.clone();
+        volume_snapshots.entry(volume_id).or_insert(Vec::new()).push(snapshot);
+    }
+
+    // Build tree for each volume
+    for volume in all_volumes.items {
+        let volume_id = volume.spec.volume_id.clone();
+        let volume_name = volume.metadata.name.unwrap_or(volume_id.clone());
+        
+        if let Some(snapshots) = volume_snapshots.get(&volume_id) {
+            // Sort snapshots by creation time
+            let mut sorted_snapshots = snapshots.clone();
+            sorted_snapshots.sort_by(|a, b| {
+                let time_a = a.status.as_ref()
+                    .and_then(|s| s.creation_time)
+                    .unwrap_or_else(|| chrono::Utc::now());
+                let time_b = b.status.as_ref()
+                    .and_then(|s| s.creation_time)
+                    .unwrap_or_else(|| chrono::Utc::now());
+                time_a.cmp(&time_b)
+            });
+
+            // Build hierarchy
+            let mut snapshot_tree = Vec::new();
+            for snapshot in sorted_snapshots {
+                let status = snapshot.status.unwrap_or_default();
+                let snapshot_info = json!({
+                    "snapshot_id": snapshot.spec.snapshot_id,
+                    "snapshot_type": snapshot.spec.snapshot_type,
+                    "creation_time": status.creation_time,
+                    "ready_to_use": status.ready_to_use,
+                    "size_bytes": status.size_bytes,
+                    "clone_source_snapshot_id": snapshot.spec.clone_source_snapshot_id,
+                    "children": []
+                });
+                snapshot_tree.push(snapshot_info);
+            }
+
+            tree[volume_id] = json!({
+                "volume_name": volume_name,
+                "volume_id": volume_id,
+                "volume_size": volume.spec.size_bytes,
+                "snapshots": snapshot_tree
+            });
+        }
+    }
+
+    Ok(warp::reply::json(&tree))
 }

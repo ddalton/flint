@@ -5,11 +5,12 @@ import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
 import { VolumeStatusChart } from './charts/VolumeStatusChart';
 import { DiskStatusChart } from './charts/DiskStatusChart';
-import { EnhancedRaidTopologyChart } from './charts/EnhancedRaidTopologyChart'; // Updated import
+import { EnhancedRaidTopologyChart } from './charts/EnhancedRaidTopologyChart';
 import { VolumesTable } from './tables/VolumesTable';
 import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
 import { DiskSetupTab } from './setup/DiskSetupTab';
+import { SnapshotsTab } from './snapshots/SnapshotsTab'; // New import
 
 interface DashboardProps {
   data: DashboardData;
@@ -218,6 +219,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
             volumeReplicaFilter={volumeReplicaFilter}
             onDiskClick={handleDiskClick}
             onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
+          />
+        );
+
+      case 'snapshots':
+        return (
+          <SnapshotsTab
+            volumes={data.volumes.map(v => ({
+              id: v.id,
+              name: v.name,
+              size: v.size,
+              state: v.state
+            }))}
           />
         );
 
