@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Database, Activity, X, Settings, Zap, Network, Info, AlertTriangle, 
-  Cable, Monitor, Shield, HardDrive, Clock, CheckCircle
+  Cable, Monitor, Shield, HardDrive, Clock, CheckCircle, Search, ChevronDown
 } from 'lucide-react';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VHostNvmeTooltip } from '../ui/VHostNvmeTooltip';
@@ -14,10 +14,55 @@ interface EnhancedRaidTopologyChartProps {
 export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps> = ({ volumes }) => {
   const [selectedVolume, setSelectedVolume] = useState(volumes[0]?.id || '');
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
+
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   
-  const volume = volumes.find(v => v.id === selectedVolume);
+  // Filter volumes based on search term
+  const filteredVolumes = useMemo(() => {
+    if (!searchTerm.trim()) return volumes;
+    
+    const searchLower = searchTerm.toLowerCase();
+    return volumes.filter(volume => 
+      volume.name.toLowerCase().includes(searchLower) ||
+      volume.id.toLowerCase().includes(searchLower) ||
+      volume.state.toLowerCase().includes(searchLower) ||
+      volume.nodes.some(node => node.toLowerCase().includes(searchLower))
+    );
+  }, [volumes, searchTerm]);
+
+  // Handle clicking outside to close dropdown
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Handle volume selection
+  const handleVolumeSelect = (volumeId: string, volumeName: string) => {
+    setSelectedVolume(volumeId);
+    setIsDropdownOpen(false);
+    setSearchTerm('');
+  };
+
+  // Open dropdown and focus search input
+  const openDropdown = () => {
+    setIsDropdownOpen(true);
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
+  };
+
+  const selectedVolumeInfo = volumes.find(v => v.id === selectedVolume);
   
-  if (!volume) return null;
+  if (!selectedVolumeInfo) return null;
 
   const getRaidLevelDisplayName = (raidLevel: number): string => {
     switch (raidLevel) {
@@ -83,12 +128,12 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
   };
 
   // Check if volume has vhost-nvme configuration
-  const hasVHostNvme = volume.vhost_socket || 
-                       volume.vhost_enabled || 
-                       volume.access_method === 'vhost-nvme' ||
-                       volume.vhost_type === 'nvme';
+  const hasVHostNvme = selectedVolumeInfo.vhost_socket || 
+                       selectedVolumeInfo.vhost_enabled || 
+                       selectedVolumeInfo.access_method === 'vhost-nvme' ||
+                       selectedVolumeInfo.vhost_type === 'nvme';
 
-  const raidStatus = volume.raid_status;
+  const raidStatus = selectedVolumeInfo.raid_status;
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
@@ -98,17 +143,136 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           <h3 className="text-lg font-semibold">Enhanced RAID Topology & Storage Architecture</h3>
         </div>
         <div className="flex items-center gap-4">
-          <select
-            value={selectedVolume}
-            onChange={(e) => setSelectedVolume(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-          >
-            {volumes.map((vol) => (
-              <option key={vol.id} value={vol.id}>
-                {vol.name} ({vol.state})
-              </option>
-            ))}
-          </select>
+          {/* Searchable Volume Dropdown */}
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={openDropdown}
+              className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white hover:bg-gray-50 min-w-[300px] text-left"
+            >
+              <Database className="w-4 h-4 text-gray-500" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-gray-900 truncate">
+                  {selectedVolumeInfo?.name || 'Select Volume'}
+                </div>
+                <div className="text-xs text-gray-500 truncate">
+                  {selectedVolumeInfo?.state} • {selectedVolumeInfo?.size}
+                </div>
+              </div>
+              <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${
+                isDropdownOpen ? 'rotate-180' : ''
+              }`} />
+            </button>
+
+            {/* Dropdown Menu */}
+            {isDropdownOpen && (
+              <div className="absolute z-50 mt-1 w-full bg-white border border-gray-300 rounded-md shadow-lg max-h-96 overflow-hidden">
+                {/* Search Input */}
+                <div className="p-3 border-b border-gray-200">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input
+                      ref={searchInputRef}
+                      type="text"
+                      placeholder="Search volumes by name, ID, state, or node..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                  </div>
+                  {searchTerm && (
+                    <div className="mt-2 text-xs text-gray-500">
+                      {filteredVolumes.length} of {volumes.length} volumes
+                    </div>
+                  )}
+                </div>
+
+                {/* Volume List */}
+                <div className="max-h-80 overflow-y-auto">
+                  {filteredVolumes.length === 0 ? (
+                    <div className="p-4 text-center text-gray-500 text-sm">
+                      {searchTerm ? 'No volumes match your search' : 'No volumes available'}
+                    </div>
+                  ) : (
+                    filteredVolumes.map((volume) => (
+                      <button
+                        key={volume.id}
+                        onClick={() => handleVolumeSelect(volume.id, volume.name)}
+                        className={`w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0 transition-colors ${
+                          selectedVolume === volume.id ? 'bg-blue-50 border-blue-200' : ''
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-gray-900 truncate">
+                              {volume.name}
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              ID: {volume.id.length > 20 ? `${volume.id.substring(0, 20)}...` : volume.id}
+                            </div>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className={`px-2 py-0.5 text-xs rounded-full ${
+                                volume.state === 'Healthy' ? 'bg-green-100 text-green-700' :
+                                volume.state === 'Degraded' ? 'bg-yellow-100 text-yellow-700' :
+                                'bg-red-100 text-red-700'
+                              }`}>
+                                {volume.state}
+                              </span>
+                              <span className="text-xs text-gray-500">{volume.size}</span>
+                              <span className="text-xs text-gray-500">
+                                {volume.active_replicas}/{volume.replicas} replicas
+                              </span>
+                            </div>
+                          </div>
+                          {volume.rebuild_progress && (
+                            <div className="ml-3 flex-shrink-0">
+                              <Settings className="w-4 h-4 text-orange-500 animate-spin" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {volume.nodes.slice(0, 3).map(node => (
+                            <span key={node} className="px-2 py-0.5 text-xs bg-gray-100 text-gray-600 rounded">
+                              {node}
+                            </span>
+                          ))}
+                          {volume.nodes.length > 3 && (
+                            <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-600 rounded">
+                              +{volume.nodes.length - 3}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+
+                {/* Quick Stats */}
+                {volumes.length > 10 && (
+                  <div className="p-3 bg-gray-50 border-t border-gray-200">
+                    <div className="text-xs text-gray-600 space-y-1">
+                      <div className="flex justify-between">
+                        <span>Total Volumes:</span>
+                        <span className="font-medium">{volumes.length}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Healthy:</span>
+                        <span className="text-green-600 font-medium">
+                          {volumes.filter(v => v.state === 'Healthy').length}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>With Issues:</span>
+                        <span className="text-red-600 font-medium">
+                          {volumes.filter(v => v.state !== 'Healthy').length}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
             className={`px-3 py-2 text-sm rounded-md transition-colors ${
@@ -144,9 +308,9 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 </div>
                 
                 <VHostNvmeTooltip 
-                  vhostSocket={volume.vhost_socket} 
-                  vhostDevice={volume.vhost_device}
-                  vhostType={volume.vhost_type}
+                  vhostSocket={selectedVolumeInfo.vhost_socket} 
+                  vhostDevice={selectedVolumeInfo.vhost_device}
+                  vhostType={selectedVolumeInfo.vhost_type}
                   raidLevel={raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : undefined}
                 >
                   <div className="text-center cursor-help">
@@ -169,7 +333,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
         
         {/* SPDK RAID Layer */}
         <div className="mb-8">
-          <h4 className="text-xl font-semibold mb-6">SPDK Storage Architecture: {volume.name}</h4>
+          <h4 className="text-xl font-semibold mb-6">SPDK Storage Architecture: {selectedVolumeInfo.name}</h4>
           
           <div className="flex justify-center mb-8">
             <div className="text-center">
@@ -177,8 +341,8 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 <Database className="w-10 h-10 text-blue-600" />
               </div>
               <p className="font-medium text-lg">SPDK RAID Bdev</p>
-              <p className="text-sm text-gray-600">{volume.name}</p>
-              <p className="text-xs text-gray-500">{volume.size}</p>
+              <p className="text-sm text-gray-600">{selectedVolumeInfo.name}</p>
+              <p className="text-xs text-gray-500">{selectedVolumeInfo.size}</p>
               
               {/* Enhanced RAID Status Display */}
               {raidStatus && (
@@ -235,7 +399,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
             <div className="bg-gray-50 rounded-lg p-6">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
                 {raidStatus.members.map((member: RaidMember, index: number) => {
-                  const correspondingReplica = volume.replica_statuses.find(
+                  const correspondingReplica = selectedVolumeInfo.replica_statuses.find(
                     r => r.raid_member_slot === member.slot
                   );
                   
@@ -375,7 +539,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           <h5 className="text-lg font-semibold mb-4 text-center text-gray-700">Network Replica Status</h5>
           <div className="bg-gray-50 rounded-lg p-6">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-4xl mx-auto">
-              {volume.replica_statuses.map((replica, index) => (
+              {selectedVolumeInfo.replica_statuses.map((replica, index) => (
                 <div key={`${replica.node}-${index}`} className="text-center">
                   <div className="mb-4">
                     <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-gray-300">
@@ -498,14 +662,14 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
         <div className="mt-8 flex justify-center gap-4 flex-wrap">
           <span 
             className={`px-4 py-2 rounded-full text-sm font-medium ${
-              volume.active_replicas === volume.replicas 
+              selectedVolumeInfo.active_replicas === selectedVolumeInfo.replicas 
                 ? 'bg-green-100 text-green-800' 
-                : volume.active_replicas > 0
+                : selectedVolumeInfo.active_replicas > 0
                 ? 'bg-yellow-100 text-yellow-800'
                 : 'bg-red-100 text-red-800'
             }`}
           >
-            {volume.active_replicas}/{volume.replicas} Active Replicas
+            {selectedVolumeInfo.active_replicas}/{selectedVolumeInfo.replicas} Active Replicas
           </span>
           
           {raidStatus && (
@@ -519,7 +683,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
             </span>
           )}
           
-          {volume.local_nvme && (
+          {selectedVolumeInfo.local_nvme && (
             <span className="px-4 py-2 rounded-full text-sm font-medium bg-blue-100 text-blue-800 flex items-center gap-1">
               <Zap className="w-4 h-4" />
               High Performance Path
@@ -625,11 +789,11 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 </div>
               </div>
               
-              {volume.nvme_namespaces && volume.nvme_namespaces.length > 0 && (
+              {selectedVolumeInfo.nvme_namespaces && selectedVolumeInfo.nvme_namespaces.length > 0 && (
                 <div className="mt-3 p-2 bg-blue-50 rounded">
                   <h6 className="font-medium text-gray-700 mb-1">NVMe Namespaces:</h6>
                   <div className="text-xs space-y-1">
-                    {volume.nvme_namespaces.map((ns, idx) => (
+                    {selectedVolumeInfo.nvme_namespaces.map((ns, idx) => (
                       <div key={idx} className="flex justify-between">
                         <span>NSID {ns.nsid}:</span>
                         <span>{Math.round(ns.size / 1024 / 1024 / 1024)}GB ({ns.bdev_name})</span>
@@ -643,32 +807,32 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 <div className="mt-3 p-2 bg-gray-100 rounded">
                   <h6 className="font-medium text-gray-700 mb-1">Technical Details:</h6>
                   <div className="text-xs space-y-1">
-                    {volume.vhost_socket && (
+                    {selectedVolumeInfo.vhost_socket && (
                       <div>
                         <span className="text-gray-600">Socket Path:</span>
                         <div className="font-mono text-xs break-all text-gray-500 ml-2">
-                          {volume.vhost_socket}
+                          {selectedVolumeInfo.vhost_socket}
                         </div>
                       </div>
                     )}
-                    {volume.vhost_device && (
+                    {selectedVolumeInfo.vhost_device && (
                       <div>
                         <span className="text-gray-600">Device Path:</span>
                         <div className="font-mono text-xs break-all text-gray-500 ml-2">
-                          {volume.vhost_device}
+                          {selectedVolumeInfo.vhost_device}
                         </div>
                       </div>
                     )}
                     <div>
                       <span className="text-gray-600">Controller Type:</span>
                       <span className="font-medium text-indigo-700 ml-1 uppercase">
-                        {volume.vhost_type || 'NVMe'}
+                        {selectedVolumeInfo.vhost_type || 'NVMe'}
                       </span>
                     </div>
                     <div>
                       <span className="text-gray-600">Access Method:</span>
                       <span className="font-medium text-indigo-700 ml-1">
-                        {volume.access_method}
+                        {selectedVolumeInfo.access_method}
                       </span>
                     </div>
                   </div>
