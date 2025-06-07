@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   Camera, Search, Filter, RefreshCw, Clock, Database, 
   GitBranch, Eye, Trash2, Plus, ChevronDown, 
@@ -15,6 +15,8 @@ import ReactFlow, {
 } from 'reactflow';
 import type { Connection, Node, Edge, NodeTypes } from 'reactflow';
 import 'reactflow/dist/style.css';
+
+// --- Interfaces and Custom Nodes remain the same ---
 
 interface Snapshot {
   snapshot_id: string;
@@ -44,7 +46,6 @@ interface SnapshotsTabProps {
   volumes: Volume[];
 }
 
-// Custom node component for volumes
 const VolumeNode = ({ data }: { data: any }) => {
   const { volume, snapshots } = data;
   const snapshotCount = snapshots?.length || 0;
@@ -67,7 +68,6 @@ const VolumeNode = ({ data }: { data: any }) => {
   );
 };
 
-// Custom node component for snapshots
 const SnapshotNode = ({ data }: { data: any }) => {
   const { snapshot } = data;
   const formatDate = (dateStr: string | null) => {
@@ -128,6 +128,7 @@ const nodeTypes: NodeTypes = {
   snapshot: SnapshotNode,
 };
 
+
 export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -141,14 +142,21 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
+  // --- New state and refs for searchable volume dropdown ---
+  const [isVolumeDropdownOpen, setIsVolumeDropdownOpen] = useState(false);
+  const [volumeSearchTerm, setVolumeSearchTerm] = useState('');
+  const volumeDropdownRef = useRef<HTMLDivElement>(null);
+  const volumeSearchInputRef = useRef<HTMLInputElement>(null);
+
   // Fetch all snapshots
   useEffect(() => {
     fetchAllSnapshots();
   }, []);
-
+  
   const fetchAllSnapshots = async () => {
     setLoading(true);
     try {
+      // If a volume is selected, fetch only its snapshots
       if (selectedVolumeId) {
         const response = await fetch(`/api/volumes/${selectedVolumeId}/snapshots`);
         if (response.ok) {
@@ -159,7 +167,7 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           setSnapshots([]);
         }
       } else {
-        // Fetch snapshots for all volumes
+        // Otherwise, fetch snapshots for all volumes
         const allSnapshots: Snapshot[] = [];
         for (const volume of volumes) {
           try {
@@ -185,21 +193,53 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
   // Refetch when selected volume changes
   useEffect(() => {
     fetchAllSnapshots();
-  }, [selectedVolumeId, volumes]);
+  }, [selectedVolumeId]);
 
+  // --- Logic for the searchable volume dropdown ---
+  const filteredVolumesForDropdown = useMemo(() => {
+    if (!volumeSearchTerm.trim()) return volumes;
+    const searchLower = volumeSearchTerm.toLowerCase();
+    return volumes.filter(volume => 
+      volume.name.toLowerCase().includes(searchLower) ||
+      volume.id.toLowerCase().includes(searchLower)
+    );
+  }, [volumes, volumeSearchTerm]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (volumeDropdownRef.current && !volumeDropdownRef.current.contains(event.target as Node)) {
+        setIsVolumeDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleVolumeSelect = (volumeId: string) => {
+    setSelectedVolumeId(volumeId);
+    setIsVolumeDropdownOpen(false);
+    setVolumeSearchTerm('');
+  };
+
+  const openVolumeDropdown = () => {
+    setIsVolumeDropdownOpen(true);
+    setTimeout(() => volumeSearchInputRef.current?.focus(), 0);
+  };
+  
+  const selectedVolumeInfo = volumes.find(v => v.id === selectedVolumeId);
+  
   // Filter snapshots based on current filters
   const filteredSnapshots = useMemo(() => {
     return snapshots.filter(snapshot => {
-      // Apply search filter
+      // Apply search filter for snapshot details
       if (searchTerm) {
         const searchLower = searchTerm.toLowerCase();
         const matchesSearch = 
           snapshot.snapshot_id.toLowerCase().includes(searchLower) ||
-          snapshot.source_volume_id.toLowerCase().includes(searchLower) ||
           (snapshot.spdk_bdev_details?.name || '').toLowerCase().includes(searchLower);
         if (!matchesSearch) return false;
       }
-
+      
       // Apply snapshot type filter
       if (snapshotTypeFilter !== 'all' && snapshot.snapshot_type !== snapshotTypeFilter) {
         return false;
@@ -212,14 +252,13 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
       return true;
     });
   }, [snapshots, searchTerm, snapshotTypeFilter, readyStatusFilter]);
-
-  // Build the flow graph
+  
+  // Build the flow graph (This logic remains the same)
   const { flowNodes, flowEdges } = useMemo(() => {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
     const volumeGroups = new Map<string, Snapshot[]>();
     
-    // Group snapshots by volume
     filteredSnapshots.forEach(snapshot => {
       if (!volumeGroups.has(snapshot.source_volume_id)) {
         volumeGroups.set(snapshot.source_volume_id, []);
@@ -235,7 +274,6 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
       const volume = volumes.find(v => v.id === volumeId);
       if (!volume) return;
 
-      // Create volume node
       const volumeNodeId = `volume-${volumeId}`;
       nodes.push({
         id: volumeNodeId,
@@ -246,14 +284,12 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
         targetPosition: layoutDirection === 'TB' ? Position.Top : Position.Left,
       });
 
-      // Sort snapshots by creation time to show chronological order
       const sortedSnapshots = [...volumeSnapshots].sort((a, b) => {
         const timeA = new Date(a.creation_time || 0).getTime();
         const timeB = new Date(b.creation_time || 0).getTime();
         return timeA - timeB;
       });
-
-      // Create snapshot nodes
+      
       sortedSnapshots.forEach((snapshot, index) => {
         const snapshotNodeId = `snapshot-${snapshot.snapshot_id}`;
         
@@ -268,7 +304,6 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           targetPosition: layoutDirection === 'TB' ? Position.Top : Position.Left,
         });
 
-        // Create edge from volume to snapshot
         if (index === 0 || !snapshot.clone_source_snapshot_id) {
           edges.push({
             id: `${volumeNodeId}-${snapshotNodeId}`,
@@ -276,20 +311,13 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
             target: snapshotNodeId,
             type: 'smoothstep',
             animated: !snapshot.ready_to_use,
-            style: { 
-              stroke: snapshot.ready_to_use ? '#10b981' : '#f59e0b',
-              strokeWidth: 2 
-            },
-            markerEnd: {
-              type: MarkerType.ArrowClosed,
-              color: snapshot.ready_to_use ? '#10b981' : '#f59e0b',
-            },
+            style: { stroke: snapshot.ready_to_use ? '#10b981' : '#f59e0b', strokeWidth: 2 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: snapshot.ready_to_use ? '#10b981' : '#f59e0b' },
             label: snapshot.snapshot_type,
             labelStyle: { fontSize: 10 },
           });
         }
 
-        // Create edge from parent snapshot if this is a clone
         if (snapshot.clone_source_snapshot_id) {
           const parentNodeId = `snapshot-${snapshot.clone_source_snapshot_id}`;
           edges.push({
@@ -297,21 +325,13 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
             source: parentNodeId,
             target: snapshotNodeId,
             type: 'smoothstep',
-            style: { 
-              stroke: '#8b5cf6',
-              strokeWidth: 2,
-              strokeDasharray: '5,5'
-            },
-            markerEnd: {
-              type: MarkerType.ArrowClosed,
-              color: '#8b5cf6',
-            },
+            style: { stroke: '#8b5cf6', strokeWidth: 2, strokeDasharray: '5,5' },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6' },
             label: 'Clone',
             labelStyle: { fontSize: 10, color: '#8b5cf6' },
           });
         }
       });
-
       yOffset += Math.max(ySpacing * (sortedSnapshots.length + 1), ySpacing * 2);
     });
 
@@ -323,11 +343,13 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
     setNodes(flowNodes);
     setEdges(flowEdges);
   }, [flowNodes, flowEdges, setNodes, setEdges]);
-
+  
   const onConnect = useCallback((params: Connection) => {
     setEdges((eds) => addEdge(params, eds));
   }, [setEdges]);
 
+  // --- The rest of the component JSX with the new dropdown ---
+  
   const clearAllFilters = () => {
     setSearchTerm('');
     setSelectedVolumeId('');
@@ -343,10 +365,10 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
     if (readyStatusFilter !== 'all') count++;
     return count;
   };
-
+  
   const activeFilterCount = getActiveFilterCount();
 
-  if (loading) {
+  if (loading && snapshots.length === 0) {
     return (
       <div className="flex justify-center items-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
@@ -357,7 +379,7 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header and Stats remain the same */}
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -377,8 +399,6 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
             </button>
           </div>
         </div>
-
-        {/* Statistics */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="bg-blue-50 rounded-lg p-4 text-center">
             <Camera className="w-6 h-6 text-blue-600 mx-auto mb-2" />
@@ -408,8 +428,8 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           </div>
         </div>
       </div>
-
-      {/* Filters */}
+      
+      {/* Filters section with updated volume selector */}
       <div className="bg-white rounded-lg shadow">
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -427,8 +447,7 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
                 onClick={clearAllFilters}
                 className="text-sm text-gray-600 hover:text-gray-800 flex items-center gap-1"
               >
-                <X className="w-4 h-4" />
-                Clear All
+                <X className="w-4 h-4" /> Clear All
               </button>
             )}
             <button
@@ -441,13 +460,12 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           </div>
         </div>
 
-        {/* Search Bar */}
         <div className="px-6 py-4 bg-gray-50">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
-              placeholder="Search by snapshot ID, volume ID, or node..."
+              placeholder="Search displayed snapshots by ID or name..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -455,25 +473,59 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           </div>
         </div>
 
-        {/* Advanced Filters */}
         {showAdvancedFilters && (
           <div className="px-6 py-4 border-t border-gray-200 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Volume Filter */}
+              {/* --- New Searchable Volume Filter --- */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Volume</label>
-                <select
-                  value={selectedVolumeId}
-                  onChange={(e) => setSelectedVolumeId(e.target.value)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">All Volumes</option>
-                  {volumes.map(volume => (
-                    <option key={volume.id} value={volume.id}>
-                      {volume.name} ({volume.size})
-                    </option>
-                  ))}
-                </select>
+                <div className="relative" ref={volumeDropdownRef}>
+                  <button
+                    onClick={openVolumeDropdown}
+                    className="flex w-full items-center gap-2 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white hover:bg-gray-50 text-left"
+                  >
+                    <Database className="w-4 h-4 text-gray-500" />
+                    <span className="flex-1 truncate">
+                      {selectedVolumeInfo?.name || 'All Volumes'}
+                    </span>
+                    <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${isVolumeDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {isVolumeDropdownOpen && (
+                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-hidden">
+                      <div className="p-2 border-b border-gray-200">
+                        <div className="relative">
+                          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <input
+                            ref={volumeSearchInputRef}
+                            type="text"
+                            placeholder="Search volumes..."
+                            value={volumeSearchTerm}
+                            onChange={(e) => setVolumeSearchTerm(e.target.value)}
+                            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="max-h-48 overflow-y-auto">
+                        <button
+                          onClick={() => handleVolumeSelect('')}
+                          className="w-full px-4 py-2 text-left hover:bg-gray-50 border-b border-gray-100"
+                        >
+                          All Volumes
+                        </button>
+                        {filteredVolumesForDropdown.map((volume) => (
+                          <button
+                            key={volume.id}
+                            onClick={() => handleVolumeSelect(volume.id)}
+                            className={`w-full px-4 py-2 text-left hover:bg-gray-50 ${selectedVolumeId === volume.id ? 'bg-blue-50' : ''}`}
+                          >
+                            <div className="font-medium truncate">{volume.name}</div>
+                            <div className="text-xs text-gray-500">{volume.size} - {volume.state}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Snapshot Type Filter */}
@@ -509,34 +561,31 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
         )}
       </div>
 
-      {/* Layout Controls */}
+      {/* Layout Controls, Flow Diagram, and Legend remain the same */}
       <div className="bg-white rounded-lg shadow p-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <span className="text-sm font-medium text-gray-700">Layout:</span>
-            <div className="flex border border-gray-300 rounded-md overflow-hidden">
-              <button
-                onClick={() => setLayoutDirection('TB')}
-                className={`px-3 py-1 text-sm ${layoutDirection === 'TB' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-              >
-                Top to Bottom
-              </button>
-              <button
-                onClick={() => setLayoutDirection('LR')}
-                className={`px-3 py-1 text-sm border-l border-gray-300 ${layoutDirection === 'LR' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-              >
-                Left to Right
-              </button>
+            <div className="flex items-center gap-4">
+                <span className="text-sm font-medium text-gray-700">Layout:</span>
+                <div className="flex border border-gray-300 rounded-md overflow-hidden">
+                <button
+                    onClick={() => setLayoutDirection('TB')}
+                    className={`px-3 py-1 text-sm ${layoutDirection === 'TB' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                >
+                    Top to Bottom
+                </button>
+                <button
+                    onClick={() => setLayoutDirection('LR')}
+                    className={`px-3 py-1 text-sm border-l border-gray-300 ${layoutDirection === 'LR' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+                >
+                    Left to Right
+                </button>
+                </div>
             </div>
-          </div>
-          
-          <div className="text-sm text-gray-500">
-            {filteredSnapshots.length} snapshot{filteredSnapshots.length !== 1 ? 's' : ''} displayed
-          </div>
+            <div className="text-sm text-gray-500">
+                {filteredSnapshots.length} snapshot{filteredSnapshots.length !== 1 ? 's' : ''} displayed
+            </div>
         </div>
       </div>
-
-      {/* React Flow Diagram */}
       <div className="bg-white rounded-lg shadow" style={{ height: '600px' }}>
         {flowNodes.length > 0 ? (
           <ReactFlow
@@ -565,78 +614,53 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
           </div>
         )}
       </div>
-
-      {/* Legend */}
       <div className="bg-white rounded-lg shadow p-6">
         <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Info className="w-5 h-5 text-blue-600" />
-          Legend
+            <Info className="w-5 h-5 text-blue-600" />
+            Legend
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
+            <div>
             <h4 className="font-medium text-gray-700 mb-3">Node Types</h4>
             <div className="space-y-2">
-              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3">
                 <div className="w-4 h-4 bg-blue-200 border border-blue-300 rounded"></div>
                 <span className="text-sm">Volume (Source)</span>
-              </div>
-              <div className="flex items-center gap-3">
+                </div>
+                <div className="flex items-center gap-3">
                 <div className="w-4 h-4 bg-green-200 border border-green-300 rounded"></div>
                 <span className="text-sm">Standard Snapshot</span>
-              </div>
-              <div className="flex items-center gap-3">
+                </div>
+                <div className="flex items-center gap-3">
                 <div className="w-4 h-4 bg-purple-200 border border-purple-300 rounded"></div>
                 <span className="text-sm">Clone (Writable)</span>
-              </div>
-              <div className="flex items-center gap-3">
+                </div>
+                <div className="flex items-center gap-3">
                 <div className="w-4 h-4 bg-orange-200 border border-orange-300 rounded"></div>
                 <span className="text-sm">External Snapshot</span>
-              </div>
+                </div>
             </div>
-          </div>
-          <div>
+            </div>
+            <div>
             <h4 className="font-medium text-gray-700 mb-3">Connections</h4>
             <div className="space-y-2">
-              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3">
                 <div className="w-8 h-0.5 bg-green-500"></div>
                 <span className="text-sm">Snapshot Created (Ready)</span>
-              </div>
-              <div className="flex items-center gap-3">
+                </div>
+                <div className="flex items-center gap-3">
                 <div className="w-8 h-0.5 bg-yellow-500"></div>
                 <span className="text-sm">Snapshot Creating (Not Ready)</span>
-              </div>
-              <div className="flex items-center gap-3">
+                </div>
+                <div className="flex items-center gap-3">
                 <div className="w-8 h-0.5 bg-purple-500 border-dashed border-t-2 border-purple-500"></div>
                 <span className="text-sm">Clone Relationship</span>
-              </div>
+                </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Information Panel */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-        <div className="flex items-start gap-3">
-          <Info className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0" />
-          <div>
-            <h4 className="font-medium text-blue-900 mb-2">SPDK Logical Volume Snapshots</h4>
-            <div className="text-sm text-blue-800 space-y-2">
-              <p>
-                <strong>Snapshots:</strong> Read-only point-in-time copies of volumes that share storage 
-                efficiently using copy-on-write.
-              </p>
-              <p>
-                <strong>Clones:</strong> Writable volumes created from snapshots that can be modified 
-                independently while sharing unchanged data.
-              </p>
-              <p>
-                <strong>Tree Structure:</strong> Shows the hierarchical relationship between volumes, 
-                snapshots, and clones as described in the SPDK documentation.
-              </p>
             </div>
-          </div>
         </div>
       </div>
     </div>
   );
 };
+
