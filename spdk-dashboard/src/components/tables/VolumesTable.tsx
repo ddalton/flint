@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
 
@@ -21,8 +21,12 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onReplicaClick
 }) => {
   const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<{id: string, name: string} | null>(null);
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
-  const filteredVolumes = React.useMemo(() => {
+  const filteredVolumes = useMemo(() => {
     let result = volumes;
 
     // Apply volume filter first
@@ -73,6 +77,15 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     return result;
   }, [volumes, activeFilter, diskFilter]);
 
+  // Calculate pagination
+  const totalPages = Math.ceil(filteredVolumes.length / pageSize);
+  const paginatedVolumes = filteredVolumes.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  // Reset to first page when filters change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [activeFilter, diskFilter, pageSize]);
+
   const getFilterDisplayName = (filter: VolumeFilter) => {
     switch (filter) {
       case 'healthy': return 'Healthy Volumes';
@@ -117,7 +130,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   };
 
   // Sort volumes by state priority (Failed -> Degraded -> Healthy)
-  const sortedVolumes = filteredVolumes.sort((a, b) => {
+  const sortedVolumes = paginatedVolumes.sort((a, b) => {
     const aInfo = getVolumeStateInfo(a.state);
     const bInfo = getVolumeStateInfo(b.state);
     return bInfo.priority - aInfo.priority; // Reverse sort for priority
@@ -134,6 +147,10 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
   const handleVolumeNameClick = (volume: Volume) => {
     setSelectedVolumeDetail({ id: volume.id, name: volume.name });
+  };
+
+  const goToPage = (page: number) => {
+    setCurrentPage(Math.max(1, Math.min(totalPages, page)));
   };
 
   return (
@@ -185,6 +202,53 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           </div>
         )}
       </div>
+
+      {/* Pagination Controls - Top */}
+      {totalPages > 1 && (
+        <div className="bg-white rounded-lg shadow p-4 mb-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              {/* Page Size Selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-700">Show:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="border border-gray-300 rounded px-2 py-1 text-sm"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span className="text-sm text-gray-700">per page</span>
+              </div>
+            </div>
+
+            {/* Pagination */}
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-700">
+                {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredVolumes.length)} of {filteredVolumes.length}
+              </span>
+              <button
+                onClick={() => goToPage(currentPage - 1)}
+                disabled={currentPage === 1}
+                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
+              <button
+                onClick={() => goToPage(currentPage + 1)}
+                disabled={currentPage === totalPages}
+                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
@@ -327,6 +391,66 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
         </table>
       </div>
 
+      {/* Pagination Controls - Bottom */}
+      {totalPages > 1 && (
+        <div className="bg-white rounded-lg shadow p-4 mt-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-gray-700">
+              Showing {((currentPage - 1) * pageSize) + 1} to {Math.min(currentPage * pageSize, filteredVolumes.length)} of {filteredVolumes.length} results
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => goToPage(1)}
+                disabled={currentPage === 1}
+                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+              >
+                First
+              </button>
+              <button
+                onClick={() => goToPage(currentPage - 1)}
+                disabled={currentPage === 1}
+                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              
+              {/* Page numbers */}
+              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                const pageNum = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i;
+                return (
+                  <button
+                    key={pageNum}
+                    onClick={() => goToPage(pageNum)}
+                    className={`px-3 py-1 text-sm border rounded ${
+                      pageNum === currentPage
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {pageNum}
+                  </button>
+                );
+              })}
+              
+              <button
+                onClick={() => goToPage(currentPage + 1)}
+                disabled={currentPage === totalPages}
+                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+              >
+                Next
+              </button>
+              <button
+                onClick={() => goToPage(totalPages)}
+                disabled={currentPage === totalPages}
+                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+              >
+                Last
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Summary information */}
       {sortedVolumes.length > 0 && (
         <div className="mt-4 p-4 bg-gray-50 rounded-lg">
@@ -334,21 +458,26 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
             <div className="flex items-center gap-2">
               <CheckCircle className="w-4 h-4 text-green-600" />
-              <span>{sortedVolumes.filter(v => v.state === 'Healthy').length} Healthy</span>
+              <span>{filteredVolumes.filter(v => v.state === 'Healthy').length} Healthy</span>
             </div>
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-yellow-600" />
-              <span>{sortedVolumes.filter(v => v.state === 'Degraded').length} Degraded</span>
+              <span>{filteredVolumes.filter(v => v.state === 'Degraded').length} Degraded</span>
             </div>
             <div className="flex items-center gap-2">
               <XCircle className="w-4 h-4 text-red-600" />
-              <span>{sortedVolumes.filter(v => v.state === 'Failed').length} Failed</span>
+              <span>{filteredVolumes.filter(v => v.state === 'Failed').length} Failed</span>
             </div>
             <div className="flex items-center gap-2">
               <Settings className="w-4 h-4 text-orange-600" />
-              <span>{sortedVolumes.filter(v => hasRebuildingActivity(v)).length} With Rebuilding</span>
+              <span>{filteredVolumes.filter(v => hasRebuildingActivity(v)).length} With Rebuilding</span>
             </div>
           </div>
+          {totalPages > 1 && (
+            <div className="mt-2 text-xs text-gray-500">
+              Showing page {currentPage} of {totalPages} • {pageSize} volumes per page
+            </div>
+          )}
         </div>
       )}
 
