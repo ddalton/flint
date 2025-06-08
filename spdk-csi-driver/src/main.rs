@@ -187,6 +187,7 @@ struct SpdkCsiDriver {
     node_id: String,
     kube_client: Client,
     spdk_rpc_url: String,
+    spdk_node_urls: Arc<Mutex<HashMap<String, String>>>, // Map of node name to its RPC URL
     write_sequence_counter: Arc<Mutex<u64>>,
     local_lvol_cache: Arc<Mutex<HashMap<String, String>>>,
     vhost_socket_base_path: String,
@@ -915,23 +916,31 @@ impl Controller for SpdkCsiDriver {
         }
 
         let (spdk_volume, new_volume_id) = if let Some(source) = req.volume_content_source {
-            // --- NEW: Handle Create Volume From Snapshot ---
+            // --- MODIFIED: Handle Create Volume From Decentralized Snapshot ---
             if let Some(snapshot_source) = source.snapshot {
                 let snapshot_id = snapshot_source.snapshot_id;
                 
-                // 1. Get source snapshot bdev name from the SpdkSnapshot CRD
+                // 1. Get source SpdkSnapshot CRD
                 let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.kube_client.clone(), "default");
                 let snapshot_crd = snapshots_api.get(&snapshot_id).await
                     .map_err(|_| Status::not_found(format!("Source snapshot {} not found", snapshot_id)))?;
-                let source_bdev_name = snapshot_crd.spec.spdk_snapshot_lvol;
 
-                // 2. Provision the new destination RAID volume scaffolding
+                // 2. Select a source replica snapshot to clone from. Any healthy one will do.
+                let source_replica_snapshot = snapshot_crd.spec.replica_snapshots.first()
+                    .ok_or_else(|| Status::not_found(format!("No available replica snapshots found for snapshot {}", snapshot_id)))?;
+                
+                let source_bdev_name = &source_replica_snapshot.spdk_snapshot_lvol;
+                let source_node_name = &source_replica_snapshot.node_name;
+                
+                // 3. Provision the new destination RAID volume scaffolding
                 let (dest_spdk_volume, dest_raid_bdev_name) = self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?;
                 
-                // 3. Perform the copy from the snapshot bdev to the new RAID bdev
-                // Note: For production, this should be a background task.
+                // 4. Perform the copy from the snapshot bdev to the new RAID bdev.
+                // The copy command should be sent to the node where the source snapshot bdev exists.
+                println!("Cloning from snapshot bdev '{}' on node '{}' to new volume '{}'", source_bdev_name, source_node_name, dest_raid_bdev_name);
+                let source_node_rpc_url = self.get_rpc_url_for_node(source_node_name).await?;
                 let http_client = HttpClient::new();
-                let copy_response = http_client.post(&self.spdk_rpc_url)
+                let copy_response = http_client.post(&source_node_rpc_url)
                     .json(&json!({
                         "method": "bdev_copy",
                         "params": {
@@ -961,7 +970,6 @@ impl Controller for SpdkCsiDriver {
 
         let mut volume_context = HashMap::new();
         volume_context.insert("storageType".to_string(), "vhost-raid".to_string());
-        // ... populate other context fields as needed ...
 
         Ok(Response::new(CreateVolumeResponse {
             volume: Some(Volume {
@@ -974,7 +982,6 @@ impl Controller for SpdkCsiDriver {
         }))
     }
     
-    // ... (rest of the Controller and Node impls remain the same) ...
     async fn delete_volume(
         &self,
         request: Request<DeleteVolumeRequest>,
@@ -1298,6 +1305,45 @@ impl Node for SpdkCsiDriver {
 }
 
 impl SpdkCsiDriver {
+    /// Gets the SPDK RPC URL for a specific node by finding the 'node_agent' pod
+    /// running on that node and returning its IP-based URL.
+    /// It uses a cache to avoid repeated lookups.
+    pub async fn get_rpc_url_for_node(&self, node_name: &str) -> Result<String, Status> {
+        let mut cache = self.spdk_node_urls.lock().await;
+
+        // 1. Check cache first
+        if let Some(url) = cache.get(node_name) {
+            return Ok(url.clone());
+        }
+
+        // 2. If not in cache, query the Kubernetes API.
+        // Assumes node_agent pods are labeled with 'app=spdk-node-agent'.
+        println!("Cache miss for node '{}'. Discovering spdk-node-agent pod...", node_name);
+        let pods_api: Api<Pod> = Api::all(self.kube_client.clone());
+        let lp = ListParams::default().labels("app=spdk-node-agent");
+
+        let pods = pods_api.list(&lp).await
+            .map_err(|e| Status::internal(format!("Failed to list spdk-node-agent pods: {}", e)))?;
+
+        for pod in pods {
+            let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
+            let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref());
+
+            if let (Some(p_node), Some(p_ip)) = (pod_node, pod_ip) {
+                let url = format!("http://{}:5260", p_ip);
+                // Update cache for the found pod
+                cache.insert(p_node.to_string(), url);
+            }
+        }
+
+        // 3. Try the cache again after discovery
+        if let Some(url) = cache.get(node_name) {
+            Ok(url.clone())
+        } else {
+            Err(Status::not_found(format!("Could not find a running spdk-node-agent pod on node '{}'", node_name)))
+        }
+    }
+
     async fn update_replica_scheduling(
         &self,
         volume_id: &str,
@@ -1601,6 +1647,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         kube_client,
         spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
+        spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
         write_sequence_counter: Arc::new(Mutex::new(0)),
         local_lvol_cache: Arc::new(Mutex::new(HashMap::new())),
         vhost_socket_base_path,

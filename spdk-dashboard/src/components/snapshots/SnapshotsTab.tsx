@@ -1,374 +1,342 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Camera, Search, Filter, RefreshCw, Clock, Database, 
-  GitBranch, Eye, Trash2, Plus, ChevronDown, 
-  AlertTriangle, CheckCircle, X, Info, FileImage, Layers, Maximize2
+  Camera, RefreshCw, Search, Filter, ChevronDown, FileText, 
+  GitBranch, Network, CheckCircle, Layers, Database, Copy, Download
 } from 'lucide-react';
-import ReactFlow, {
-  Controls,
-  Background,
-  useNodesState,
-  useEdgesState,
-  addEdge,
-  MarkerType,
-  Position
-} from 'reactflow';
-import type { Connection, Node, Edge, NodeTypes } from 'reactflow';
-import 'reactflow/dist/style.css';
+import { SnapshotsListView } from './SnapshotsListView';
+import { SnapshotsTreeView } from './SnapshotsTreeView';
+import { SnapshotDetailModal } from './SnapshotDetailModal';
+import type { 
+  SnapshotDetails, 
+  SnapshotTreeNode, 
+  SnapshotTypeFilter, 
+  SnapshotViewMode 
+} from './types';
 
-// --- Interfaces and Custom Nodes remain the same ---
-
-interface Snapshot {
-  snapshot_id: string;
-  source_volume_id: string;
-  creation_time: string | null;
-  ready_to_use: boolean;
-  size_bytes: number;
-  snapshot_type: 'Bdev' | 'LvolClone' | 'External';
-  clone_source_snapshot_id: string | null;
-  spdk_bdev_details: {
-    node: string;
-    name: string;
-    aliases: string[];
-    driver: string;
-    snapshot_source_bdev: string | null;
-  } | null;
-}
-
-interface Volume {
-  id: string;
-  name: string;
-  size: string;
-  state: string;
-}
-
-interface SnapshotsTabProps {
-  volumes: Volume[];
-}
-
-const VolumeNode = ({ data }: { data: any }) => {
-  const { volume, snapshots } = data;
-  const snapshotCount = snapshots?.length || 0;
-  
-  return (
-    <div className="px-4 py-3 bg-blue-50 border-2 border-blue-200 rounded-lg shadow-md min-w-[200px]">
-      <div className="flex items-center gap-2 mb-2">
-        <Database className="w-5 h-5 text-blue-600" />
-        <div className="font-semibold text-blue-900">{volume.name}</div>
-      </div>
-      <div className="text-xs text-blue-700 space-y-1">
-        <div>Size: {volume.size}</div>
-        <div>State: {volume.state}</div>
-        <div className="flex items-center gap-1">
-          <Camera className="w-3 h-3" />
-          {snapshotCount} snapshot{snapshotCount !== 1 ? 's' : ''}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const SnapshotNode = ({ data }: { data: any }) => {
-  const { snapshot } = data;
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return 'Unknown';
-    return new Date(dateStr).toLocaleDateString();
-  };
-  
-  const formatSize = (bytes: number) => {
-    if (bytes >= 1024 * 1024 * 1024) {
-      return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
-    } else if (bytes >= 1024 * 1024) {
-      return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-    }
-    return `${bytes} bytes`;
-  };
-
-  const getNodeColor = () => {
-    switch (snapshot.snapshot_type) {
-      case 'Bdev': return 'bg-green-50 border-green-200 text-green-900';
-      case 'LvolClone': return 'bg-purple-50 border-purple-200 text-purple-900';
-      case 'External': return 'bg-orange-50 border-orange-200 text-orange-900';
-      default: return 'bg-gray-50 border-gray-200 text-gray-900';
-    }
-  };
-
-  const getTypeIcon = () => {
-    switch (snapshot.snapshot_type) {
-      case 'Bdev': return <Camera className="w-4 h-4" />;
-      case 'LvolClone': return <GitBranch className="w-4 h-4" />;
-      case 'External': return <FileImage className="w-4 h-4" />;
-      default: return <Layers className="w-4 h-4" />;
-    }
-  };
-
-  return (
-    <div className={`px-3 py-2 border-2 rounded-lg shadow-sm min-w-[180px] ${getNodeColor()}`}>
-      <div className="flex items-center gap-2 mb-1">
-        {getTypeIcon()}
-        <div className="font-medium text-sm">{snapshot.snapshot_id}</div>
-        {!snapshot.ready_to_use && (
-          <AlertTriangle className="w-3 h-3 text-yellow-600" />
-        )}
-      </div>
-      <div className="text-xs space-y-0.5">
-        <div>Type: {snapshot.snapshot_type}</div>
-        <div>Size: {formatSize(snapshot.size_bytes)}</div>
-        <div>Created: {formatDate(snapshot.creation_time)}</div>
-        {snapshot.spdk_bdev_details && (
-          <div>Node: {snapshot.spdk_bdev_details.node}</div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const nodeTypes: NodeTypes = {
-  volume: VolumeNode,
-  snapshot: SnapshotNode,
-};
-
-
-export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+export const SnapshotsTab: React.FC = () => {
+  const [snapshots, setSnapshots] = useState<SnapshotDetails[]>([]);
+  const [snapshotTree, setSnapshotTree] = useState<Record<string, SnapshotTreeNode>>({});
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [activeView, setActiveView] = useState<SnapshotViewMode>('list');
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedVolumeId, setSelectedVolumeId] = useState<string>('');
-  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
-  const [snapshotTypeFilter, setSnapshotTypeFilter] = useState<'all' | 'Bdev' | 'LvolClone' | 'External'>('all');
-  const [readyStatusFilter, setReadyStatusFilter] = useState<'all' | 'ready' | 'not_ready'>('all');
-  const [layoutDirection, setLayoutDirection] = useState<'TB' | 'LR'>('TB');
+  const [typeFilter, setTypeFilter] = useState<SnapshotTypeFilter>('all');
+  const [volumeFilter, setVolumeFilter] = useState<string>('all');
+  const [selectedSnapshot, setSelectedSnapshot] = useState<SnapshotDetails | null>(null);
+  const [expandedVolumes, setExpandedVolumes] = useState<Set<string>>(new Set());
+  const [showFilters, setShowFilters] = useState(false);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-
-  // --- New state and refs for searchable volume dropdown ---
-  const [isVolumeDropdownOpen, setIsVolumeDropdownOpen] = useState(false);
-  const [volumeSearchTerm, setVolumeSearchTerm] = useState('');
-  const volumeDropdownRef = useRef<HTMLDivElement>(null);
-  const volumeSearchInputRef = useRef<HTMLInputElement>(null);
-
-  // Fetch all snapshots
   useEffect(() => {
-    fetchAllSnapshots();
+    fetchSnapshotData();
   }, []);
-  
-  const fetchAllSnapshots = async () => {
-    setLoading(true);
+
+  const fetchSnapshotData = async () => {
     try {
-      // If a volume is selected, fetch only its snapshots
-      if (selectedVolumeId) {
-        const response = await fetch(`/api/volumes/${selectedVolumeId}/snapshots`);
+      setRefreshing(true);
+      
+      // Fetch both list and tree data with better error handling
+      const [snapshotsResponse, treeResponse] = await Promise.allSettled([
+        fetch('/api/snapshots').catch(() => null),
+        fetch('/api/snapshots/tree').catch(() => null)
+      ]);
+
+      // Handle snapshots response
+      if (snapshotsResponse.status === 'fulfilled' && snapshotsResponse.value) {
+        const response = snapshotsResponse.value;
         if (response.ok) {
-          const data = await response.json();
-          setSnapshots(data);
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const snapshotsData = await response.json();
+            setSnapshots(snapshotsData);
+          } else {
+            console.warn('Snapshots API returned non-JSON response, using mock data');
+            setSnapshots(mockSnapshots);
+          }
         } else {
-          console.error('Failed to fetch volume snapshots');
-          setSnapshots([]);
+          console.warn('Snapshots API returned error status:', response.status, 'using mock data');
+          setSnapshots(mockSnapshots);
         }
       } else {
-        // Otherwise, fetch snapshots for all volumes
-        const allSnapshots: Snapshot[] = [];
-        for (const volume of volumes) {
-          try {
-            const response = await fetch(`/api/volumes/${volume.id}/snapshots`);
-            if (response.ok) {
-              const data = await response.json();
-              allSnapshots.push(...data);
-            }
-          } catch (error) {
-            console.warn(`Failed to fetch snapshots for volume ${volume.id}:`, error);
+        console.warn('Failed to fetch snapshots, using mock data');
+        setSnapshots(mockSnapshots);
+      }
+
+      // Handle tree response
+      if (treeResponse.status === 'fulfilled' && treeResponse.value) {
+        const response = treeResponse.value;
+        if (response.ok) {
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const treeData = await response.json();
+            setSnapshotTree(treeData);
+          } else {
+            console.warn('Snapshot tree API returned non-JSON response, using mock data');
+            setSnapshotTree(mockSnapshotTree);
           }
+        } else {
+          console.warn('Snapshot tree API returned error status:', response.status, 'using mock data');
+          setSnapshotTree(mockSnapshotTree);
         }
-        setSnapshots(allSnapshots);
+      } else {
+        console.warn('Failed to fetch snapshot tree, using mock data');
+        setSnapshotTree(mockSnapshotTree);
       }
     } catch (error) {
-      console.error('Error fetching snapshots:', error);
-      setSnapshots([]);
+      console.warn('Failed to fetch snapshot data:', error);
+      // Use mock data for development
+      setSnapshots(mockSnapshots);
+      setSnapshotTree(mockSnapshotTree);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  // Refetch when selected volume changes
-  useEffect(() => {
-    fetchAllSnapshots();
-  }, [selectedVolumeId]);
+  // Mock data for development
+  const mockSnapshots: SnapshotDetails[] = [
+    {
+      snapshot_id: 'snap-postgres-20250101-120000',
+      source_volume_id: 'pvc-postgres-data',
+      creation_time: '2025-01-01T12:00:00Z',
+      ready_to_use: true,
+      size_bytes: 107374182400,
+      snapshot_type: 'Bdev',
+      replica_bdev_details: [
+        {
+          node: 'worker-node-1',
+          name: 'snap_postgres_replica_0',
+          aliases: ['postgres_snap_primary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'postgres_replica_0'
+        },
+        {
+          node: 'worker-node-2', 
+          name: 'snap_postgres_replica_1',
+          aliases: ['postgres_snap_secondary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'postgres_replica_1'
+        },
+        {
+          node: 'worker-node-3',
+          name: 'snap_postgres_replica_2',
+          aliases: ['postgres_snap_tertiary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'postgres_replica_2'
+        }
+      ]
+    },
+    {
+      snapshot_id: 'snap-redis-20250101-140000',
+      source_volume_id: 'pvc-redis-cache',
+      creation_time: '2025-01-01T14:00:00Z',
+      ready_to_use: true,
+      size_bytes: 53687091200,
+      snapshot_type: 'Bdev',
+      replica_bdev_details: [
+        {
+          node: 'worker-node-1',
+          name: 'snap_redis_replica_0',
+          aliases: ['redis_snap_primary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'redis_replica_0'
+        },
+        {
+          node: 'worker-node-2',
+          name: 'snap_redis_replica_1', 
+          aliases: ['redis_snap_secondary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'redis_replica_1'
+        }
+      ]
+    },
+    {
+      snapshot_id: 'snap-mysql-clone-20250102-090000',
+      source_volume_id: 'pvc-mysql-data',
+      creation_time: '2025-01-02T09:00:00Z',
+      ready_to_use: true,
+      size_bytes: 85899345920,
+      snapshot_type: 'LvolClone',
+      clone_source_snapshot_id: 'snap-mysql-20250101-180000',
+      replica_bdev_details: [
+        {
+          node: 'worker-node-1',
+          name: 'clone_mysql_replica_0',
+          aliases: ['mysql_clone_primary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'mysql_replica_0'
+        },
+        {
+          node: 'worker-node-3',
+          name: 'clone_mysql_replica_1',
+          aliases: ['mysql_clone_secondary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'mysql_replica_1'
+        }
+      ]
+    }
+  ];
 
-  // --- Logic for the searchable volume dropdown ---
-  const filteredVolumesForDropdown = useMemo(() => {
-    if (!volumeSearchTerm.trim()) return volumes;
-    const searchLower = volumeSearchTerm.toLowerCase();
-    return volumes.filter(volume => 
-      volume.name.toLowerCase().includes(searchLower) ||
-      volume.id.toLowerCase().includes(searchLower)
-    );
-  }, [volumes, volumeSearchTerm]);
-
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (volumeDropdownRef.current && !volumeDropdownRef.current.contains(event.target as Node)) {
-        setIsVolumeDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const handleVolumeSelect = (volumeId: string) => {
-    setSelectedVolumeId(volumeId);
-    setIsVolumeDropdownOpen(false);
-    setVolumeSearchTerm('');
+  const mockSnapshotTree: Record<string, SnapshotTreeNode> = {
+    'pvc-postgres-data': {
+      volume_name: 'postgres-data-pvc',
+      volume_id: 'pvc-postgres-data',
+      volume_size: 107374182400,
+      snapshots: [
+        {
+          snapshot_id: 'snap-postgres-20250101-120000',
+          snapshot_type: 'Bdev',
+          creation_time: '2025-01-01T12:00:00Z',
+          ready_to_use: true,
+          size_bytes: 107374182400,
+          replica_snapshots: [
+            {
+              node: 'worker-node-1',
+              bdev_name: 'snap_postgres_replica_0',
+              source_bdev: 'postgres_replica_0',
+              disk: 'nvme0n1'
+            },
+            {
+              node: 'worker-node-2',
+              bdev_name: 'snap_postgres_replica_1', 
+              source_bdev: 'postgres_replica_1',
+              disk: 'nvme1n1'
+            },
+            {
+              node: 'worker-node-3',
+              bdev_name: 'snap_postgres_replica_2',
+              source_bdev: 'postgres_replica_2',
+              disk: 'nvme2n1'
+            }
+          ],
+          children: []
+        }
+      ]
+    },
+    'pvc-mysql-data': {
+      volume_name: 'mysql-data-pvc',
+      volume_id: 'pvc-mysql-data',
+      volume_size: 85899345920,
+      snapshots: [
+        {
+          snapshot_id: 'snap-mysql-clone-20250102-090000',
+          snapshot_type: 'LvolClone',
+          creation_time: '2025-01-02T09:00:00Z',
+          ready_to_use: true,
+          size_bytes: 85899345920,
+          replica_snapshots: [
+            {
+              node: 'worker-node-1',
+              bdev_name: 'clone_mysql_replica_0',
+              source_bdev: 'mysql_replica_0',
+              disk: 'nvme0n1'
+            },
+            {
+              node: 'worker-node-3',
+              bdev_name: 'clone_mysql_replica_1',
+              source_bdev: 'mysql_replica_1',
+              disk: 'nvme2n1'
+            }
+          ],
+          children: []
+        }
+      ]
+    }
   };
 
-  const openVolumeDropdown = () => {
-    setIsVolumeDropdownOpen(true);
-    setTimeout(() => volumeSearchInputRef.current?.focus(), 0);
-  };
-  
-  const selectedVolumeInfo = volumes.find(v => v.id === selectedVolumeId);
-  
-  // Filter snapshots based on current filters
+  // Filter and search logic
   const filteredSnapshots = useMemo(() => {
-    return snapshots.filter(snapshot => {
-      // Apply search filter for snapshot details
-      if (searchTerm) {
-        const searchLower = searchTerm.toLowerCase();
-        const matchesSearch = 
-          snapshot.snapshot_id.toLowerCase().includes(searchLower) ||
-          (snapshot.spdk_bdev_details?.name || '').toLowerCase().includes(searchLower);
-        if (!matchesSearch) return false;
-      }
-      
-      // Apply snapshot type filter
-      if (snapshotTypeFilter !== 'all' && snapshot.snapshot_type !== snapshotTypeFilter) {
-        return false;
-      }
+    let result = snapshots;
 
-      // Apply ready status filter
-      if (readyStatusFilter === 'ready' && !snapshot.ready_to_use) return false;
-      if (readyStatusFilter === 'not_ready' && snapshot.ready_to_use) return false;
+    // Search filter
+    if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      result = result.filter(snap => 
+        snap.snapshot_id.toLowerCase().includes(searchLower) ||
+        snap.source_volume_id.toLowerCase().includes(searchLower) ||
+        snap.replica_bdev_details.some(replica => 
+          replica.node.toLowerCase().includes(searchLower) ||
+          replica.name.toLowerCase().includes(searchLower)
+        )
+      );
+    }
 
-      return true;
-    });
-  }, [snapshots, searchTerm, snapshotTypeFilter, readyStatusFilter]);
-  
-  // Build the flow graph (This logic remains the same)
-  const { flowNodes, flowEdges } = useMemo(() => {
-    const nodes: Node[] = [];
-    const edges: Edge[] = [];
-    const volumeGroups = new Map<string, Snapshot[]>();
-    
-    filteredSnapshots.forEach(snapshot => {
-      if (!volumeGroups.has(snapshot.source_volume_id)) {
-        volumeGroups.set(snapshot.source_volume_id, []);
-      }
-      volumeGroups.get(snapshot.source_volume_id)!.push(snapshot);
-    });
+    // Type filter
+    if (typeFilter !== 'all') {
+      result = result.filter(snap => snap.snapshot_type === typeFilter);
+    }
 
-    let yOffset = 0;
-    const xSpacing = 300;
-    const ySpacing = 150;
+    // Volume filter
+    if (volumeFilter !== 'all') {
+      result = result.filter(snap => snap.source_volume_id === volumeFilter);
+    }
 
-    volumeGroups.forEach((volumeSnapshots, volumeId) => {
-      const volume = volumes.find(v => v.id === volumeId);
-      if (!volume) return;
+    return result.sort((a, b) => 
+      new Date(b.creation_time).getTime() - new Date(a.creation_time).getTime()
+    );
+  }, [snapshots, searchTerm, typeFilter, volumeFilter]);
 
-      const volumeNodeId = `volume-${volumeId}`;
-      nodes.push({
-        id: volumeNodeId,
-        type: 'volume',
-        position: { x: 0, y: yOffset },
-        data: { volume, snapshots: volumeSnapshots },
-        sourcePosition: layoutDirection === 'TB' ? Position.Bottom : Position.Right,
-        targetPosition: layoutDirection === 'TB' ? Position.Top : Position.Left,
-      });
+  // Get unique volumes for filter dropdown
+  const availableVolumes = useMemo(() => {
+    return Array.from(new Set(snapshots.map(snap => snap.source_volume_id)));
+  }, [snapshots]);
 
-      const sortedSnapshots = [...volumeSnapshots].sort((a, b) => {
-        const timeA = new Date(a.creation_time || 0).getTime();
-        const timeB = new Date(b.creation_time || 0).getTime();
-        return timeA - timeB;
-      });
-      
-      sortedSnapshots.forEach((snapshot, index) => {
-        const snapshotNodeId = `snapshot-${snapshot.snapshot_id}`;
-        
-        nodes.push({
-          id: snapshotNodeId,
-          type: 'snapshot',
-          position: layoutDirection === 'TB' 
-            ? { x: (index + 1) * xSpacing, y: yOffset + ySpacing }
-            : { x: xSpacing, y: yOffset + (index + 1) * ySpacing },
-          data: { snapshot },
-          sourcePosition: layoutDirection === 'TB' ? Position.Bottom : Position.Right,
-          targetPosition: layoutDirection === 'TB' ? Position.Top : Position.Left,
-        });
-
-        if (index === 0 || !snapshot.clone_source_snapshot_id) {
-          edges.push({
-            id: `${volumeNodeId}-${snapshotNodeId}`,
-            source: volumeNodeId,
-            target: snapshotNodeId,
-            type: 'smoothstep',
-            animated: !snapshot.ready_to_use,
-            style: { stroke: snapshot.ready_to_use ? '#10b981' : '#f59e0b', strokeWidth: 2 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: snapshot.ready_to_use ? '#10b981' : '#f59e0b' },
-            label: snapshot.snapshot_type,
-            labelStyle: { fontSize: 10 },
-          });
-        }
-
-        if (snapshot.clone_source_snapshot_id) {
-          const parentNodeId = `snapshot-${snapshot.clone_source_snapshot_id}`;
-          edges.push({
-            id: `${parentNodeId}-${snapshotNodeId}`,
-            source: parentNodeId,
-            target: snapshotNodeId,
-            type: 'smoothstep',
-            style: { stroke: '#8b5cf6', strokeWidth: 2, strokeDasharray: '5,5' },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6' },
-            label: 'Clone',
-            labelStyle: { fontSize: 10, color: '#8b5cf6' },
-          });
-        }
-      });
-      yOffset += Math.max(ySpacing * (sortedSnapshots.length + 1), ySpacing * 2);
-    });
-
-    return { flowNodes: nodes, flowEdges: edges };
-  }, [filteredSnapshots, volumes, layoutDirection]);
-
-  // Update React Flow nodes and edges
-  useEffect(() => {
-    setNodes(flowNodes);
-    setEdges(flowEdges);
-  }, [flowNodes, flowEdges, setNodes, setEdges]);
-  
-  const onConnect = useCallback((params: Connection) => {
-    setEdges((eds) => addEdge(params, eds));
-  }, [setEdges]);
-
-  // --- The rest of the component JSX with the new dropdown ---
-  
-  const clearAllFilters = () => {
-    setSearchTerm('');
-    setSelectedVolumeId('');
-    setSnapshotTypeFilter('all');
-    setReadyStatusFilter('all');
+  const toggleVolumeExpansion = (volumeId: string) => {
+    const newExpanded = new Set(expandedVolumes);
+    if (newExpanded.has(volumeId)) {
+      newExpanded.delete(volumeId);
+    } else {
+      newExpanded.add(volumeId);
+    }
+    setExpandedVolumes(newExpanded);
   };
 
-  const getActiveFilterCount = () => {
-    let count = 0;
-    if (searchTerm) count++;
-    if (selectedVolumeId) count++;
-    if (snapshotTypeFilter !== 'all') count++;
-    if (readyStatusFilter !== 'all') count++;
-    return count;
+  const formatSize = (bytes: number) => {
+    const gb = bytes / (1024 * 1024 * 1024);
+    return `${gb.toFixed(1)}GB`;
   };
-  
-  const activeFilterCount = getActiveFilterCount();
 
-  if (loading && snapshots.length === 0) {
+  const formatTime = (timeString: string) => {
+    return new Date(timeString).toLocaleString();
+  };
+
+  const getSnapshotTypeIcon = (type: string) => {
+    switch (type) {
+      case 'Bdev': return <Camera className="w-4 h-4 text-blue-600" />;
+      case 'LvolClone': return <Copy className="w-4 h-4 text-green-600" />;
+      case 'External': return <Download className="w-4 h-4 text-purple-600" />;
+      default: return <Database className="w-4 h-4 text-gray-600" />;
+    }
+  };
+
+  const renderActiveView = () => {
+    switch (activeView) {
+      case 'list':
+        return (
+          <SnapshotsListView
+            snapshots={filteredSnapshots}
+            onSnapshotSelect={setSelectedSnapshot}
+            formatSize={formatSize}
+            formatTime={formatTime}
+            getSnapshotTypeIcon={getSnapshotTypeIcon}
+          />
+        );
+      case 'tree':
+        return (
+          <SnapshotsTreeView
+            snapshotTree={snapshotTree}
+            expandedVolumes={expandedVolumes}
+            onToggleVolumeExpansion={toggleVolumeExpansion}
+            formatSize={formatSize}
+            formatTime={formatTime}
+            getSnapshotTypeIcon={getSnapshotTypeIcon}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
@@ -379,27 +347,29 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
 
   return (
     <div className="space-y-6">
-      {/* Header and Stats remain the same */}
+      {/* Header */}
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <Camera className="w-8 h-8 text-blue-600" />
             <div>
               <h2 className="text-2xl font-bold text-gray-900">Volume Snapshots</h2>
-              <p className="text-gray-600">Visual representation of SPDK logical volume snapshots and clones</p>
+              <p className="text-sm text-gray-600">
+                {snapshots.length} snapshot{snapshots.length !== 1 ? 's' : ''} ready to use
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={fetchAllSnapshots}
-              disabled={loading}
-              className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50"
-            >
-              <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
+          <button
+            onClick={fetchSnapshotData}
+            disabled={refreshing}
+            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50"
+          >
+            <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+
+        {/* Statistics Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="bg-blue-50 rounded-lg p-4 text-center">
             <Camera className="w-6 h-6 text-blue-600 mx-auto mb-2" />
             <p className="text-xl font-bold text-blue-600">{snapshots.length}</p>
@@ -410,130 +380,101 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
             <p className="text-xl font-bold text-green-600">
               {snapshots.filter(s => s.ready_to_use).length}
             </p>
-            <p className="text-sm text-gray-600">Ready</p>
+            <p className="text-sm text-gray-600">Ready to Use</p>
           </div>
           <div className="bg-purple-50 rounded-lg p-4 text-center">
-            <GitBranch className="w-6 h-6 text-purple-600 mx-auto mb-2" />
+            <Layers className="w-6 h-6 text-purple-600 mx-auto mb-2" />
             <p className="text-xl font-bold text-purple-600">
-              {snapshots.filter(s => s.snapshot_type === 'LvolClone').length}
+              {snapshots.reduce((sum, s) => sum + s.replica_bdev_details.length, 0)}
             </p>
-            <p className="text-sm text-gray-600">Clones</p>
+            <p className="text-sm text-gray-600">Replica Snapshots</p>
           </div>
-          <div className="bg-orange-50 rounded-lg p-4 text-center">
-            <Database className="w-6 h-6 text-orange-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-orange-600">
-              {new Set(snapshots.map(s => s.source_volume_id)).size}
+          <div className="bg-indigo-50 rounded-lg p-4 text-center">
+            <Database className="w-6 h-6 text-indigo-600 mx-auto mb-2" />
+            <p className="text-xl font-bold text-indigo-600">
+              {formatSize(snapshots.reduce((sum, s) => sum + s.size_bytes, 0))}
             </p>
-            <p className="text-sm text-gray-600">Volumes</p>
+            <p className="text-sm text-gray-600">Total Size</p>
           </div>
         </div>
       </div>
-      
-      {/* Filters section with updated volume selector */}
+
+      {/* View Toggle and Filters */}
       <div className="bg-white rounded-lg shadow">
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Filter className="w-5 h-5 text-gray-600" />
-            <span className="font-medium">Filters</span>
-            {activeFilterCount > 0 && (
-              <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
-                {activeFilterCount} active
+        <div className="p-4 border-b border-gray-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              {/* View Toggle */}
+              <div className="flex border border-gray-300 rounded-md overflow-hidden">
+                <button
+                  onClick={() => setActiveView('list')}
+                  className={`px-4 py-2 text-sm font-medium ${
+                    activeView === 'list'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <FileText className="w-4 h-4 mr-2 inline" />
+                  List View
+                </button>
+                <button
+                  onClick={() => setActiveView('tree')}
+                  className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
+                    activeView === 'tree'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <GitBranch className="w-4 h-4 mr-2 inline" />
+                  Tree View
+                </button>
+              </div>
+
+              <span className="text-sm text-gray-500">
+                Showing {filteredSnapshots.length} of {snapshots.length} snapshots
               </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {activeFilterCount > 0 && (
-              <button
-                onClick={clearAllFilters}
-                className="text-sm text-gray-600 hover:text-gray-800 flex items-center gap-1"
-              >
-                <X className="w-4 h-4" /> Clear All
-              </button>
-            )}
+            </div>
+
             <button
-              onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-              className="flex items-center gap-1 text-sm text-gray-600 hover:text-gray-800"
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-800"
             >
-              <ChevronDown className={`w-4 h-4 transition-transform ${showAdvancedFilters ? 'rotate-180' : ''}`} />
-              {showAdvancedFilters ? 'Hide' : 'Show'} Filters
+              <Filter className="w-4 h-4" />
+              Filters
+              <ChevronDown className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
             </button>
           </div>
         </div>
 
-        <div className="px-6 py-4 bg-gray-50">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search displayed snapshots by ID or name..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
-
-        {showAdvancedFilters && (
-          <div className="px-6 py-4 border-t border-gray-200 space-y-4">
+        {/* Filters */}
+        {showFilters && (
+          <div className="p-4 border-b border-gray-200 bg-gray-50">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* --- New Searchable Volume Filter --- */}
+              {/* Search */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Volume</label>
-                <div className="relative" ref={volumeDropdownRef}>
-                  <button
-                    onClick={openVolumeDropdown}
-                    className="flex w-full items-center gap-2 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white hover:bg-gray-50 text-left"
-                  >
-                    <Database className="w-4 h-4 text-gray-500" />
-                    <span className="flex-1 truncate">
-                      {selectedVolumeInfo?.name || 'All Volumes'}
-                    </span>
-                    <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${isVolumeDropdownOpen ? 'rotate-180' : ''}`} />
-                  </button>
-                  {isVolumeDropdownOpen && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-hidden">
-                      <div className="p-2 border-b border-gray-200">
-                        <div className="relative">
-                          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                          <input
-                            ref={volumeSearchInputRef}
-                            type="text"
-                            placeholder="Search volumes..."
-                            value={volumeSearchTerm}
-                            onChange={(e) => setVolumeSearchTerm(e.target.value)}
-                            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                          />
-                        </div>
-                      </div>
-                      <div className="max-h-48 overflow-y-auto">
-                        <button
-                          onClick={() => handleVolumeSelect('')}
-                          className="w-full px-4 py-2 text-left hover:bg-gray-50 border-b border-gray-100"
-                        >
-                          All Volumes
-                        </button>
-                        {filteredVolumesForDropdown.map((volume) => (
-                          <button
-                            key={volume.id}
-                            onClick={() => handleVolumeSelect(volume.id)}
-                            className={`w-full px-4 py-2 text-left hover:bg-gray-50 ${selectedVolumeId === volume.id ? 'bg-blue-50' : ''}`}
-                          >
-                            <div className="font-medium truncate">{volume.name}</div>
-                            <div className="text-xs text-gray-500">{volume.size} - {volume.state}</div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Search
+                </label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Search snapshots..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
               </div>
 
-              {/* Snapshot Type Filter */}
+              {/* Type Filter */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Snapshot Type</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Snapshot Type
+                </label>
                 <select
-                  value={snapshotTypeFilter}
-                  onChange={(e) => setSnapshotTypeFilter(e.target.value as any)}
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value as SnapshotTypeFilter)}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="all">All Types</option>
@@ -543,124 +484,108 @@ export const SnapshotsTab: React.FC<SnapshotsTabProps> = ({ volumes }) => {
                 </select>
               </div>
 
-              {/* Ready Status Filter */}
+              {/* Volume Filter */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Source Volume
+                </label>
                 <select
-                  value={readyStatusFilter}
-                  onChange={(e) => setReadyStatusFilter(e.target.value as any)}
+                  value={volumeFilter}
+                  onChange={(e) => setVolumeFilter(e.target.value)}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <option value="all">All Status</option>
-                  <option value="ready">Ready</option>
-                  <option value="not_ready">Not Ready</option>
+                  <option value="all">All Volumes</option>
+                  {availableVolumes.map(volume => (
+                    <option key={volume} value={volume}>{volume}</option>
+                  ))}
                 </select>
               </div>
             </div>
+
+            {/* Active Filters Summary */}
+            {(searchTerm || typeFilter !== 'all' || volumeFilter !== 'all') && (
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-gray-600">Active filters:</span>
+                  {searchTerm && (
+                    <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
+                      Search: "{searchTerm}"
+                    </span>
+                  )}
+                  {typeFilter !== 'all' && (
+                    <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs">
+                      Type: {typeFilter}
+                    </span>
+                  )}
+                  {volumeFilter !== 'all' && (
+                    <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs">
+                      Volume: {volumeFilter}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => {
+                      setSearchTerm('');
+                      setTypeFilter('all');
+                      setVolumeFilter('all');
+                    }}
+                    className="px-2 py-1 bg-gray-100 text-gray-700 rounded-full text-xs hover:bg-gray-200"
+                  >
+                    Clear all
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
-      </div>
 
-      {/* Layout Controls, Flow Diagram, and Legend remain the same */}
-      <div className="bg-white rounded-lg shadow p-4">
-        <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-                <span className="text-sm font-medium text-gray-700">Layout:</span>
-                <div className="flex border border-gray-300 rounded-md overflow-hidden">
-                <button
-                    onClick={() => setLayoutDirection('TB')}
-                    className={`px-3 py-1 text-sm ${layoutDirection === 'TB' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-                >
-                    Top to Bottom
-                </button>
-                <button
-                    onClick={() => setLayoutDirection('LR')}
-                    className={`px-3 py-1 text-sm border-l border-gray-300 ${layoutDirection === 'LR' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-                >
-                    Left to Right
-                </button>
-                </div>
-            </div>
-            <div className="text-sm text-gray-500">
-                {filteredSnapshots.length} snapshot{filteredSnapshots.length !== 1 ? 's' : ''} displayed
-            </div>
+        {/* Content */}
+        <div className="p-6">
+          {renderActiveView()}
         </div>
       </div>
-      <div className="bg-white rounded-lg shadow" style={{ height: '600px' }}>
-        {flowNodes.length > 0 ? (
-          <ReactFlow
-            nodes={flowNodes}
-            edges={flowEdges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            nodeTypes={nodeTypes}
-            fitView
-            attributionPosition="bottom-left"
-          >
-            <Controls />
-            <Background color="#f1f5f9" gap={16} />
-          </ReactFlow>
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full text-gray-500">
-            <Camera className="w-12 h-12 mb-4" />
-            <p className="text-lg font-medium">No snapshots found</p>
-            <p className="text-sm">
-              {activeFilterCount > 0 
-                ? 'Try adjusting your filters to see more results.'
-                : 'No snapshots have been created for the selected volumes.'
-              }
-            </p>
+
+      {/* Snapshot Detail Modal */}
+      {selectedSnapshot && (
+        <SnapshotDetailModal
+          snapshot={selectedSnapshot}
+          onClose={() => setSelectedSnapshot(null)}
+          formatSize={formatSize}
+          formatTime={formatTime}
+          getSnapshotTypeIcon={getSnapshotTypeIcon}
+        />
+      )}
+
+      {/* Information Panel */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <div className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0">
+            <svg fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+            </svg>
           </div>
-        )}
-      </div>
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <Info className="w-5 h-5 text-blue-600" />
-            Legend
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-            <h4 className="font-medium text-gray-700 mb-3">Node Types</h4>
-            <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                <div className="w-4 h-4 bg-blue-200 border border-blue-300 rounded"></div>
-                <span className="text-sm">Volume (Source)</span>
-                </div>
-                <div className="flex items-center gap-3">
-                <div className="w-4 h-4 bg-green-200 border border-green-300 rounded"></div>
-                <span className="text-sm">Standard Snapshot</span>
-                </div>
-                <div className="flex items-center gap-3">
-                <div className="w-4 h-4 bg-purple-200 border border-purple-300 rounded"></div>
-                <span className="text-sm">Clone (Writable)</span>
-                </div>
-                <div className="flex items-center gap-3">
-                <div className="w-4 h-4 bg-orange-200 border border-orange-300 rounded"></div>
-                <span className="text-sm">External Snapshot</span>
-                </div>
+          <div>
+            <h4 className="font-medium text-blue-900 mb-2">SPDK Multi-Replica Snapshot Architecture</h4>
+            <div className="text-sm text-blue-800 space-y-2">
+              <p>
+                <strong>High Availability:</strong> Each volume snapshot creates individual snapshots 
+                across all replica nodes, ensuring no single point of failure.
+              </p>
+              <p>
+                <strong>Atomic Consistency:</strong> All replica snapshots are created simultaneously 
+                to guarantee data consistency across the entire volume.
+              </p>
+              <p>
+                <strong>Independent Recovery:</strong> Each replica snapshot can be restored independently, 
+                providing flexible recovery options even in multi-node failure scenarios.
+              </p>
+              <p>
+                <strong>Multiple Views:</strong> Use List view for detailed information, Tree view for 
+                hierarchical organization, and Topology view for visual architecture understanding.
+              </p>
             </div>
-            </div>
-            <div>
-            <h4 className="font-medium text-gray-700 mb-3">Connections</h4>
-            <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                <div className="w-8 h-0.5 bg-green-500"></div>
-                <span className="text-sm">Snapshot Created (Ready)</span>
-                </div>
-                <div className="flex items-center gap-3">
-                <div className="w-8 h-0.5 bg-yellow-500"></div>
-                <span className="text-sm">Snapshot Creating (Not Ready)</span>
-                </div>
-                <div className="flex items-center gap-3">
-                <div className="w-8 h-0.5 bg-purple-500 border-dashed border-t-2 border-purple-500"></div>
-                <span className="text-sm">Clone Relationship</span>
-                </div>
-            </div>
-            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
-

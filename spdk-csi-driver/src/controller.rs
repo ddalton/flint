@@ -475,6 +475,28 @@ async fn replace_raid_member_with_spdk(
     Ok(())
 }
 
+/// Finds the RPC URL for the node_agent pod on a given node.
+/// This is a standalone function for use in the volume controller.
+async fn get_rpc_url_for_node_in_controller(
+    client: &Client,
+    node_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // Assumes node_agent pods are labeled with 'app=spdk-node-agent'.
+    let pods_api: Api<Pod> = Api::all(client.clone());
+    let lp = ListParams::default().labels("app=spdk-node-agent");
+
+    for pod in pods_api.list(&lp).await? {
+        if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
+            if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {
+                return Ok(format!("http://{}:5260", pod_ip));
+            }
+        }
+    }
+
+    Err(format!("Could not find spdk-node-agent pod on node '{}'", node_name).into())
+}
+
+/// Creates a replacement lvol on the specified disk by connecting to the correct node_agent pod.
 async fn create_replacement_lvol(
     ctx: &Context,
     replacement_disk: &SpdkDisk,
@@ -485,9 +507,14 @@ async fn create_replacement_lvol(
     let lvs_name = format!("lvs_{}", replacement_disk.metadata.name.as_ref().unwrap());
     let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
 
-    // Create the new lvol
-    http_client
-        .post(&ctx.spdk_rpc_url)
+    // Discover the RPC URL for the target node.
+    let target_node_name = &replacement_disk.spec.node;
+    let rpc_url = get_rpc_url_for_node_in_controller(&ctx.client, target_node_name).await?;
+    println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
+
+    // Create the new lvol by calling the correct node's SPDK instance.
+    let res = http_client
+        .post(&rpc_url) // Use the discovered URL
         .json(&json!({
             "method": "bdev_lvol_create",
             "params": {
@@ -500,6 +527,11 @@ async fn create_replacement_lvol(
         }))
         .send()
         .await?;
+    
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(format!("Failed to create replacement lvol: {}", err_text).into());
+    }
 
     Ok(format!("{}/{}", lvs_name, lvol_name))
 }

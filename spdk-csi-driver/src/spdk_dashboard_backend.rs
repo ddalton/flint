@@ -203,8 +203,7 @@ struct DetailedSnapshotInfo {
     pub size_bytes: i64,
     pub snapshot_type: SnapshotType,
     pub clone_source_snapshot_id: Option<String>,
-    // From SPDK RPC
-    pub spdk_bdev_details: Option<SpdkBdevDetails>,
+    pub replica_bdev_details: Vec<SpdkBdevDetails>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -403,15 +402,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_volume_details)
         )
-        // --- Start of New Endpoint ---
-        .or(
-            warp::path("volumes")
-                .and(warp::path::param::<String>())
-                .and(warp::path("snapshots"))
-                .and(warp::get())
-                .and(state_filter.clone())
-                .and_then(get_volume_snapshots)
-        )
         // --- End of New Endpoint ---
         .or(
             warp::path("volumes")
@@ -483,98 +473,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// --- Start of New Handler Function ---
-async fn get_volume_snapshots(
-    volume_id: String,
-    state: AppState,
-) -> Result<impl warp::Reply, warp::Rejection> {
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
-    let http_client = HttpClient::new();
-    let spdk_nodes = state.spdk_nodes.read().await;
-
-    let all_snapshots = match snapshots_api.list(&ListParams::default()).await {
-        Ok(list) => list,
-        Err(e) => {
-            return Ok(warp::reply::json(&json!({
-                "error": format!("Failed to list snapshots from Kubernetes: {}", e)
-            })));
-        }
-    };
-
-    let mut detailed_results = Vec::new();
-
-    let volume_snapshots = all_snapshots.items.into_iter()
-        .filter(|s| s.spec.source_volume_id == volume_id);
-
-    for s in volume_snapshots {
-        let bdev_name_to_find = s.spec.spdk_snapshot_lvol.clone();
-        let mut bdev_details = None;
-
-        // Search for the snapshot bdev across all known SPDK nodes
-        for (node, rpc_url) in spdk_nodes.iter() {
-            let resp = http_client
-                .post(rpc_url)
-                .json(&json!({
-                    "method": "bdev_get_bdevs",
-                    "params": { "name": &bdev_name_to_find }
-                }))
-                .send()
-                .await;
-
-            if let Ok(resp) = resp {
-                if resp.status().is_success() {
-                    let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
-                    if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
-                        if !bdev_array.is_empty() {
-                            let bdev = &bdev_array[0];
-                            bdev_details = Some(SpdkBdevDetails {
-                                node: node.clone(),
-                                name: bdev["name"].as_str().unwrap_or("").to_string(),
-                                aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
-                                    .filter_map(|a| a.as_str().map(String::from)).collect(),
-                                driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
-                                snapshot_source_bdev: bdev.get("driver_specific")
-                                    .and_then(|ds| ds.get("snapshot"))
-                                    .and_then(|snap| snap.get("snapshot_bdev"))
-                                    .and_then(|sb| sb.as_str().map(String::from)),
-                            });
-                            break; // Found it, no need to query other nodes
-                        }
-                    }
-                }
-            }
-        }
-        
-        let status = s.status.unwrap_or_default();
-        detailed_results.push(DetailedSnapshotInfo {
-            snapshot_id: s.spec.snapshot_id,
-            source_volume_id: s.spec.source_volume_id,
-            creation_time: status.creation_time,
-            ready_to_use: status.ready_to_use,
-            size_bytes: status.size_bytes,
-            snapshot_type: s.spec.snapshot_type,
-            clone_source_snapshot_id: s.spec.clone_source_snapshot_id,
-            spdk_bdev_details: bdev_details,
-        });
-    }
-
-    Ok(warp::reply::json(&detailed_results))
-}
-// --- End of New Handler Function ---
-
+/// Discovers SPDK nodes by finding running node_agent pods via the Kubernetes API.
 async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    let disks: Api<SpdkDisk> = Api::namespaced(client.clone(), "default");
-    let disk_list = disks.list(&ListParams::default()).await?;
-    
+    println!("Discovering SPDK nodes by listing 'spdk-node-agent' pods...");
     let mut nodes = HashMap::new();
-    for disk in disk_list.items {
-        let node = &disk.spec.node;
-        if !nodes.contains_key(node) {
-            let url = format!("http://{}:5260", node);
-            nodes.insert(node.clone(), url);
+    // Assumes node_agent pods are labeled with 'app=spdk-node-agent'.
+    let pods_api: Api<Pod> = Api::all(client.clone());
+    let lp = ListParams::default().labels("app=spdk-node-agent");
+
+    let pods = pods_api.list(&lp).await?;
+
+    for pod in pods.items {
+        let node_name = pod.spec.as_ref().and_then(|s| s.node_name.clone());
+        let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.clone());
+
+        if let (Some(name), Some(ip)) = (node_name, pod_ip) {
+            let url = format!("http://{}:5260", ip);
+            println!("Discovered SPDK node '{}' at '{}'", name, url);
+            nodes.insert(name, url);
         }
     }
     
+    if nodes.is_empty() {
+        eprintln!("Warning: No SPDK node agent pods found. Dashboard may not show live data.");
+    }
+
     Ok(nodes)
 }
 
@@ -1400,38 +1323,39 @@ async fn get_all_snapshots(state: AppState) -> Result<impl warp::Reply, warp::Re
     let mut detailed_results = Vec::new();
 
     for snapshot_crd in all_snapshots.items {
-        let bdev_name_to_find = snapshot_crd.spec.spdk_snapshot_lvol.clone();
-        let mut bdev_details = None;
+        let mut bdev_details_list = Vec::new();
 
-        // Search for the snapshot bdev across all known SPDK nodes
-        for (node, rpc_url) in spdk_nodes.iter() {
-            let resp = http_client
-                .post(rpc_url)
-                .json(&json!({
-                    "method": "bdev_get_bdevs",
-                    "params": { "name": &bdev_name_to_find }
-                }))
-                .send()
-                .await;
+        // Iterate over each replica snapshot defined in the CRD spec.
+        for replica_snap in &snapshot_crd.spec.replica_snapshots {
+            // Get the correct RPC URL for the node where the replica snapshot resides.
+            if let Some(rpc_url) = spdk_nodes.get(&replica_snap.node_name) {
+                let resp = http_client
+                    .post(rpc_url)
+                    .json(&json!({
+                        "method": "bdev_get_bdevs",
+                        "params": { "name": &replica_snap.spdk_snapshot_lvol }
+                    }))
+                    .send()
+                    .await;
 
-            if let Ok(resp) = resp {
-                if resp.status().is_success() {
-                    let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
-                    if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
-                        if !bdev_array.is_empty() {
-                            let bdev = &bdev_array[0];
-                            bdev_details = Some(SpdkBdevDetails {
-                                node: node.clone(),
-                                name: bdev["name"].as_str().unwrap_or("").to_string(),
-                                aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
-                                    .filter_map(|a| a.as_str().map(String::from)).collect(),
-                                driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
-                                snapshot_source_bdev: bdev.get("driver_specific")
-                                    .and_then(|ds| ds.get("snapshot"))
-                                    .and_then(|snap| snap.get("snapshot_bdev"))
-                                    .and_then(|sb| sb.as_str().map(String::from)),
-                            });
-                            break;
+                if let Ok(resp) = resp {
+                    if resp.status().is_success() {
+                        let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                        if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                            if !bdev_array.is_empty() {
+                                let bdev = &bdev_array[0];
+                                bdev_details_list.push(SpdkBdevDetails {
+                                    node: replica_snap.node_name.clone(),
+                                    name: bdev["name"].as_str().unwrap_or("").to_string(),
+                                    aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
+                                        .filter_map(|a| a.as_str().map(String::from)).collect(),
+                                    driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                                    snapshot_source_bdev: bdev.get("driver_specific")
+                                        .and_then(|ds| ds.get("snapshot"))
+                                        .and_then(|snap| snap.get("snapshot_bdev"))
+                                        .and_then(|sb| sb.as_str().map(String::from)),
+                                });
+                            }
                         }
                     }
                 }
@@ -1447,7 +1371,7 @@ async fn get_all_snapshots(state: AppState) -> Result<impl warp::Reply, warp::Re
             size_bytes: status.size_bytes,
             snapshot_type: snapshot_crd.spec.snapshot_type,
             clone_source_snapshot_id: snapshot_crd.spec.clone_source_snapshot_id,
-            spdk_bdev_details: bdev_details,
+            replica_bdev_details: bdev_details_list, // Use the populated list.
         });
     }
 
@@ -1464,38 +1388,38 @@ async fn get_snapshot_details(
         Ok(snapshot_crd) => {
             let http_client = HttpClient::new();
             let spdk_nodes = state.spdk_nodes.read().await;
-            let bdev_name_to_find = snapshot_crd.spec.spdk_snapshot_lvol.clone();
-            let mut bdev_details = None;
+            let mut bdev_details_list = Vec::new();
 
-            // Find the snapshot bdev details
-            for (node, rpc_url) in spdk_nodes.iter() {
-                let resp = http_client
-                    .post(rpc_url)
-                    .json(&json!({
-                        "method": "bdev_get_bdevs",
-                        "params": { "name": &bdev_name_to_find }
-                    }))
-                    .send()
-                    .await;
+            // Iterate through each replica snapshot and find its details.
+            for replica_snap in &snapshot_crd.spec.replica_snapshots {
+                if let Some(rpc_url) = spdk_nodes.get(&replica_snap.node_name) {
+                    let resp = http_client
+                        .post(rpc_url)
+                        .json(&json!({
+                            "method": "bdev_get_bdevs",
+                            "params": { "name": &replica_snap.spdk_snapshot_lvol }
+                        }))
+                        .send()
+                        .await;
 
-                if let Ok(resp) = resp {
-                    if resp.status().is_success() {
-                        let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
-                        if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
-                            if !bdev_array.is_empty() {
-                                let bdev = &bdev_array[0];
-                                bdev_details = Some(SpdkBdevDetails {
-                                    node: node.clone(),
-                                    name: bdev["name"].as_str().unwrap_or("").to_string(),
-                                    aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
-                                        .filter_map(|a| a.as_str().map(String::from)).collect(),
-                                    driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
-                                    snapshot_source_bdev: bdev.get("driver_specific")
-                                        .and_then(|ds| ds.get("snapshot"))
-                                        .and_then(|snap| snap.get("snapshot_bdev"))
-                                        .and_then(|sb| sb.as_str().map(String::from)),
-                                });
-                                break;
+                    if let Ok(resp) = resp {
+                        if resp.status().is_success() {
+                             let json_body: serde_json::Value = resp.json().await.unwrap_or_default();
+                            if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                                if !bdev_array.is_empty() {
+                                    let bdev = &bdev_array[0];
+                                    bdev_details_list.push(SpdkBdevDetails {
+                                        node: replica_snap.node_name.clone(),
+                                        name: bdev["name"].as_str().unwrap_or("").to_string(),
+                                        aliases: bdev["aliases"].as_array().unwrap_or(&vec![]).iter()
+                                            .filter_map(|a| a.as_str().map(String::from)).collect(),
+                                        driver: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                                        snapshot_source_bdev: bdev.get("driver_specific")
+                                            .and_then(|ds| ds.get("snapshot"))
+                                            .and_then(|snap| snap.get("snapshot_bdev"))
+                                            .and_then(|sb| sb.as_str().map(String::from)),
+                                    });
+                                }
                             }
                         }
                     }
@@ -1511,7 +1435,7 @@ async fn get_snapshot_details(
                 size_bytes: status.size_bytes,
                 snapshot_type: snapshot_crd.spec.snapshot_type,
                 clone_source_snapshot_id: snapshot_crd.spec.clone_source_snapshot_id,
-                spdk_bdev_details: bdev_details,
+                replica_bdev_details: bdev_details_list,
             };
 
             Ok(warp::reply::json(&detailed_snapshot))
@@ -1559,25 +1483,37 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
     // Build tree for each volume
     for volume in all_volumes.items {
         let volume_id = volume.spec.volume_id.clone();
-        let volume_name = volume.metadata.name.unwrap_or(volume_id.clone());
+        let volume_name = volume.metadata.name.clone().unwrap_or(volume_id.clone());
         
-        if let Some(snapshots) = volume_snapshots.get(&volume_id) {
+        if let Some(snapshots) = volume_snapshots.get_mut(&volume_id) {
             // Sort snapshots by creation time
-            let mut sorted_snapshots = snapshots.clone();
-            sorted_snapshots.sort_by(|a, b| {
+            snapshots.sort_by(|a, b| {
                 let time_a = a.status.as_ref()
                     .and_then(|s| s.creation_time)
-                    .unwrap_or_else(|| chrono::Utc::now());
+                    .unwrap_or_else(chrono::Utc::now);
                 let time_b = b.status.as_ref()
                     .and_then(|s| s.creation_time)
-                    .unwrap_or_else(|| chrono::Utc::now());
+                    .unwrap_or_else(chrono::Utc::now);
                 time_a.cmp(&time_b)
             });
 
             // Build hierarchy
             let mut snapshot_tree = Vec::new();
-            for snapshot in sorted_snapshots {
-                let status = snapshot.status.unwrap_or_default();
+            for snapshot in snapshots {
+                let status = snapshot.status.clone().unwrap_or_default();
+
+                // --- Start of Change ---
+                // Create a JSON object for each replica snapshot with its details.
+                let replica_details: Vec<_> = snapshot.spec.replica_snapshots.iter().map(|rs| {
+                    json!({
+                        "node": rs.node_name,
+                        "bdev_name": rs.spdk_snapshot_lvol,
+                        "source_bdev": rs.source_lvol_bdev,
+                        "disk": rs.disk_ref
+                    })
+                }).collect();
+                // --- End of Change ---
+
                 let snapshot_info = json!({
                     "snapshot_id": snapshot.spec.snapshot_id,
                     "snapshot_type": snapshot.spec.snapshot_type,
@@ -1585,12 +1521,16 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
                     "ready_to_use": status.ready_to_use,
                     "size_bytes": status.size_bytes,
                     "clone_source_snapshot_id": snapshot.spec.clone_source_snapshot_id,
+                    // --- Start of Change ---
+                    // Add the new detailed array to the response.
+                    "replica_snapshots": replica_details,
+                    // --- End of Change ---
                     "children": []
                 });
                 snapshot_tree.push(snapshot_info);
             }
 
-            tree[volume_id] = json!({
+            tree[&volume_id] = json!({
                 "volume_name": volume_name,
                 "volume_id": volume_id,
                 "volume_size": volume.spec.size_bytes,
