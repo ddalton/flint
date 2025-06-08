@@ -10,7 +10,7 @@ import { VolumesTable } from './tables/VolumesTable';
 import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
 import { DiskSetupTab } from './setup/DiskSetupTab';
-import { SnapshotsTab } from './snapshots/SnapshotsTab'; // New import
+import { EnhancedSnapshotsTab } from './snapshots/EnhancedSnapshotsTab';
 
 interface DashboardProps {
   data: DashboardData;
@@ -222,18 +222,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
           />
         );
 
-      case 'snapshots':
-        return (
-          <SnapshotsTab
-            volumes={data.volumes.map(v => ({
-              id: v.id,
-              name: v.name,
-              size: v.size,
-              state: v.state
-            }))}
-          />
-        );
-
       case 'disk-setup':
         return <DiskSetupTab />;
 
@@ -246,6 +234,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
             onDiskVolumeFilter={handleDiskClick}
           />
         );
+
+      case 'snapshots':
+        return <EnhancedSnapshotsTab />;
 
       default:
         return null;

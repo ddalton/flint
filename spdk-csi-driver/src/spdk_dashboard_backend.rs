@@ -1446,19 +1446,122 @@ async fn get_snapshot_details(
     }
 }
 
-async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
-    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
-    
-    let all_snapshots = match snapshots_api.list(&ListParams::default()).await {
-        Ok(list) => list,
-        Err(e) => {
-            return Ok(warp::reply::json(&json!({
-                "error": format!("Failed to list snapshots: {}", e),
-                "tree": {}
-            })));
+#[derive(Clone, Debug)]
+struct SnapshotNode {
+    bdev_name: String,
+    parent_name: Option<String>,
+    details: serde_json::Value,
+}
+
+/// Recursively builds a JSON tree from a map of nodes and a starting parent.
+fn build_snapshot_tree_from_map(
+    parent_name: &Option<String>,
+    nodes: &HashMap<String, SnapshotNode>,
+) -> Vec<serde_json::Value> {
+    let mut tree = Vec::new();
+
+    // Find all children of the current parent
+    for node in nodes.values() {
+        if node.parent_name == *parent_name {
+            // This node is a direct child. Create its JSON object.
+            let mut node_json = json!({
+                "bdev_name": node.bdev_name,
+                "details": &node.details,
+                "children": build_snapshot_tree_from_map(&Some(node.bdev_name.clone()), nodes)
+            });
+
+            // --- Start of New Code ---
+            // Calculate and include the storage consumed by this specific snapshot/lvol.
+            if let Some(lvol_details) = node.details.get("driver_specific").and_then(|ds| ds.get("lvol")) {
+                let cluster_size = lvol_details["cluster_size"].as_u64().unwrap_or(0);
+                let allocated_clusters = lvol_details["num_allocated_clusters"].as_u64().unwrap_or(0);
+                let consumed_bytes = cluster_size * allocated_clusters;
+
+                node_json["storage_info"] = json!({
+                    "consumed_bytes": consumed_bytes,
+                    "cluster_size": cluster_size,
+                    "allocated_clusters": allocated_clusters
+                });
+            }
+            // --- End of New Code ---
+
+
+            // Add CRD info if we can find it
+            if let Some(aliases) = node.details["aliases"].as_array() {
+                for alias in aliases {
+                     if let Some(alias_str) = alias.as_str() {
+                        // The alias often corresponds to the SpdkSnapshot CRD name
+                        // A real implementation would need a more robust mapping
+                        if alias_str.starts_with("snap_") {
+                             node_json["snapshot_id"] = json!(alias_str);
+                        }
+                     }
+                }
+            }
+            tree.push(node_json);
         }
-    };
+    }
+    tree
+}
+
+
+/// Connects to a node and traces the snapshot chain for a given starting lvol.
+async fn trace_snapshot_chain_on_node(
+    starting_lvol_name: String,
+    rpc_url: &str,
+    http_client: &HttpClient,
+) -> HashMap<String, SnapshotNode> {
+    let mut nodes = HashMap::new();
+    let mut queue = vec![starting_lvol_name];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(bdev_name) = queue.pop() {
+        if !visited.insert(bdev_name.clone()) {
+            continue;
+        }
+
+        // Get details for the current bdev in the chain
+        let resp = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_get_bdevs",
+                "params": { "name": &bdev_name }
+            }))
+            .send()
+            .await;
+
+        if let Ok(resp) = resp {
+            if let Ok(json_body) = resp.json::<serde_json::Value>().await {
+                 if let Some(bdev_array) = json_body.get("result").and_then(|r| r.as_array()) {
+                    if let Some(bdev_details) = bdev_array.get(0) {
+                        // Find the parent (backing device) of this bdev
+                        let parent_name = bdev_details.get("driver_specific")
+                            .and_then(|ds| ds.get("lvol"))
+                            .and_then(|lvol| lvol.get("backing_bdev"))
+                            .and_then(|b| b.as_str().map(String::from));
+
+                        // Add this node to our map
+                        nodes.insert(bdev_name.clone(), SnapshotNode {
+                            bdev_name: bdev_name.clone(),
+                            parent_name: parent_name.clone(),
+                            details: bdev_details.clone(),
+                        });
+
+                        // If it has a parent, add the parent to the queue to be traced
+                        if let Some(p_name) = parent_name {
+                            queue.push(p_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    nodes
+}
+
+async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
 
     let all_volumes = match volumes_api.list(&ListParams::default()).await {
         Ok(list) => list,
@@ -1470,73 +1573,53 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
         }
     };
 
-    // Build tree structure
+    let http_client = HttpClient::new();
+    let spdk_nodes = state.spdk_nodes.read().await;
     let mut tree = json!({});
-    let mut volume_snapshots: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
 
-    // Group snapshots by volume
-    for snapshot in all_snapshots.items {
-        let volume_id = snapshot.spec.source_volume_id.clone();
-        volume_snapshots.entry(volume_id).or_insert(Vec::new()).push(snapshot);
-    }
-
-    // Build tree for each volume
     for volume in all_volumes.items {
-        let volume_id = volume.spec.volume_id.clone();
-        let volume_name = volume.metadata.name.clone().unwrap_or(volume_id.clone());
-        
-        if let Some(snapshots) = volume_snapshots.get_mut(&volume_id) {
-            // Sort snapshots by creation time
-            snapshots.sort_by(|a, b| {
-                let time_a = a.status.as_ref()
-                    .and_then(|s| s.creation_time)
-                    .unwrap_or_else(chrono::Utc::now);
-                let time_b = b.status.as_ref()
-                    .and_then(|s| s.creation_time)
-                    .unwrap_or_else(chrono::Utc::now);
-                time_a.cmp(&time_b)
-            });
+        let volume_id = &volume.spec.volume_id;
+        let volume_name = volume.metadata.name.as_ref().unwrap_or(volume_id);
+        let mut snapshot_chain_json = json!({
+            "error": "Could not trace snapshot chain. No healthy replicas found or lvol_uuid missing."
+        });
 
-            // Build hierarchy
-            let mut snapshot_tree = Vec::new();
-            for snapshot in snapshots {
-                let status = snapshot.status.clone().unwrap_or_default();
+        // To trace the chain, we only need to inspect one replica. Let's find the first one
+        // that is local or has an lvol_uuid we can use as a starting point.
+        if let Some(replica_to_trace) = volume.spec.replicas.first() {
+            if let (Some(lvol_uuid), Some(rpc_url)) = (
+                &replica_to_trace.lvol_uuid,
+                spdk_nodes.get(&replica_to_trace.node),
+            ) {
+                // The name of the active lvol bdev for this replica. This is the head of the chain.
+                // The SpdkDiskStatus contains the lvs_name. We can construct it.
+                let lvs_name = format!("lvs_{}", replica_to_trace.disk_ref); //
+                let starting_lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
-                // --- Start of Change ---
-                // Create a JSON object for each replica snapshot with its details.
-                let replica_details: Vec<_> = snapshot.spec.replica_snapshots.iter().map(|rs| {
-                    json!({
-                        "node": rs.node_name,
-                        "bdev_name": rs.spdk_snapshot_lvol,
-                        "source_bdev": rs.source_lvol_bdev,
-                        "disk": rs.disk_ref
-                    })
-                }).collect();
-                // --- End of Change ---
+                // Trace the entire chain on the node where the replica resides.
+                let nodes_map = trace_snapshot_chain_on_node(
+                    starting_lvol_name.clone(),
+                    rpc_url,
+                    &http_client,
+                ).await;
 
-                let snapshot_info = json!({
-                    "snapshot_id": snapshot.spec.snapshot_id,
-                    "snapshot_type": snapshot.spec.snapshot_type,
-                    "creation_time": status.creation_time,
-                    "ready_to_use": status.ready_to_use,
-                    "size_bytes": status.size_bytes,
-                    "clone_source_snapshot_id": snapshot.spec.clone_source_snapshot_id,
-                    // --- Start of Change ---
-                    // Add the new detailed array to the response.
-                    "replica_snapshots": replica_details,
-                    // --- End of Change ---
-                    "children": []
+                // Build the nested JSON tree from the dependency map.
+                let root_snapshots = build_snapshot_tree_from_map(&Some(starting_lvol_name), &nodes_map);
+
+                snapshot_chain_json = json!({
+                    "active_lvol": starting_lvol_name,
+                    "chain_depth": nodes_map.len(),
+                    "snapshots": root_snapshots
                 });
-                snapshot_tree.push(snapshot_info);
             }
-
-            tree[&volume_id] = json!({
-                "volume_name": volume_name,
-                "volume_id": volume_id,
-                "volume_size": volume.spec.size_bytes,
-                "snapshots": snapshot_tree
-            });
         }
+
+        tree[volume_id] = json!({
+            "volume_name": volume_name,
+            "volume_id": volume_id,
+            "volume_size": volume.spec.size_bytes, //
+            "snapshot_chain": snapshot_chain_json,
+        });
     }
 
     Ok(warp::reply::json(&tree))
