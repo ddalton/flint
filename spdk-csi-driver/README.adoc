@@ -1,0 +1,33 @@
+# In your DaemonSet or Pod definition for the node agent pods
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spdk-csi-node
+spec:
+  template:
+    spec:
+      containers:
+        - name: node-agent
+          # ... your existing container configuration ...
+          env:
+            - name: API_PORT
+              value: "8081"
+          ports:
+            - name: api-port
+              containerPort: 8081 # Expose the port for the API server
+          lifecycle:
+            preStop:
+              exec:
+                # This command is executed inside the 'node-agent' container
+                # before it receives the SIGTERM signal.
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - "curl -X POST http://localhost:8081/api/spdk/shutdown"
+        - name: spdk-tgt # The SPDK sidecar
+          # ... your existing spdk-tgt container configuration ...
+      
+      # Crucially, give SPDK enough time to perform the graceful shutdown.
+      # This value should be long enough for the preStop hook to run and
+      # for SPDK to unmount its blobstores.
+      terminationGracePeriodSeconds: 60

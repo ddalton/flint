@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use regex::Regex;
 use warp::Filter;
+use warp::{http::StatusCode, reply, Rejection, Reply};
+
 
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
 
@@ -199,6 +201,14 @@ async fn start_api_server(agent: NodeAgent) {
                 .and(warp::post())
                 .and(agent_filter.clone())
                 .and_then(refresh_disk_discovery)
+        )
+        .or(
+            // Gracefully shut down the SPDK process
+            warp::path("spdk")
+                .and(warp::path("shutdown"))
+                .and(warp::post())
+                .and(agent_filter.clone())
+                .and_then(shutdown_spdk_process)
         )
     );
 
@@ -1392,5 +1402,52 @@ impl NodeAgent {
             "disks": disk_statuses,
             "checked_at": Utc::now().to_rfc3339()
         }))
+    }
+}
+
+/// API handler to trigger a graceful shutdown of the SPDK process.
+async fn shutdown_spdk_process(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    println!("Received request to gracefully shut down SPDK process via RPC.");
+    
+    let http_client = HttpClient::new();
+
+    // The `spdk_app_stop` RPC tells the SPDK application to initiate a clean exit.
+    let response = http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&json!({
+            "method": "spdk_app_stop",
+            "params": {} // spdk_app_stop takes no parameters
+        }))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            println!("Successfully sent spdk_app_stop RPC. SPDK will now shut down.");
+            let reply = reply::json(&json!({
+                "success": true,
+                "message": "SPDK shutdown initiated successfully."
+            }));
+            Ok(reply::with_status(reply, StatusCode::OK))
+        }
+        Ok(res) => {
+            let status = res.status();
+            let err_text = res.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
+            eprintln!("Failed to initiate SPDK shutdown, RPC returned error: {} - {}", status, err_text);
+            
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("SPDK RPC call failed with status {}: {}", status, err_text)
+            }));
+            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
+        }
+        Err(e) => {
+            eprintln!("Failed to send SPDK shutdown RPC: {}", e);
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to SPDK RPC server at {}: {}", agent.spdk_rpc_url, e)
+            }));
+            Ok(reply::with_status(reply, StatusCode::SERVICE_UNAVAILABLE))
+        }
     }
 }
