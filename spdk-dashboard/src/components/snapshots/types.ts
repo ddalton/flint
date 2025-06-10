@@ -104,7 +104,7 @@ export interface SnapshotRelationshipMap {
 }
 
 export type SnapshotTypeFilter = 'all' | 'Bdev' | 'LvolClone' | 'External';
-export type SnapshotViewMode = 'list' | 'tree' | 'topology' | 'storage';
+export type SnapshotViewMode = 'list' | 'tree' | 'storage' | 'topology';
 
 // New view mode for storage analysis
 export interface SnapshotStorageViewProps {

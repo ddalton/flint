@@ -7,6 +7,7 @@ import {
 import { SnapshotsListView } from './SnapshotsListView';
 import { EnhancedSnapshotsTreeView } from './EnhancedSnapshotsTreeView';
 import { SnapshotStorageView } from './SnapshotStorageView';
+import { SnapshotsTopologyView } from './SnapshotsTopologyView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import type { 
   SnapshotDetails, 
@@ -28,6 +29,13 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   const [expandedVolumes, setExpandedVolumes] = useState<Set<string>>(new Set());
   const [showFilters, setShowFilters] = useState(false);
 
+  // Get unique volumes for filter dropdown
+  const availableVolumes = useMemo(() => {
+    return Array.from(new Set(snapshots.map(snap => snap.source_volume_id)));
+  }, [snapshots]);
+
+  const [topologyVolume, setTopologyVolume] = useState<string>('all');
+
   useEffect(() => {
     fetchSnapshotData();
   }, []);
@@ -42,17 +50,18 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         fetch('/api/snapshots/tree')
       ]);
 
-      if (snapshotsResponse.ok) {
+      const snapshotsContentType = snapshotsResponse.headers.get("content-type");
+      if (snapshotsResponse.ok && snapshotsContentType && snapshotsContentType.indexOf("application/json") !== -1) {
         const snapshotsData = await snapshotsResponse.json();
         // Transform backend data to include storage relationships
         const enhancedSnapshots = enhanceSnapshotsWithRelationships(snapshotsData);
         setSnapshots(enhancedSnapshots);
       } else {
-        // Use enhanced mock data with storage information
         setSnapshots(mockSnapshotsWithStorage);
       }
 
-      if (treeResponse.ok) {
+      const treeContentType = treeResponse.headers.get("content-type");
+      if (treeResponse.ok && treeContentType && treeContentType.indexOf("application/json") !== -1) {
         const treeData = await treeResponse.json();
         // Transform tree data to include storage analytics
         const enhancedTree = enhanceTreeWithStorageAnalytics(treeData);
@@ -129,6 +138,49 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       ]
     },
     {
+      snapshot_id: 'snap-redis-20241231-140000', // Has a parent snapshot
+      source_volume_id: 'pvc-redis-cache',
+      creation_time: '2024-12-31T14:00:00Z',
+      ready_to_use: true,
+      size_bytes: 53687091200,
+      snapshot_type: 'Bdev',
+      storage_consumption: {
+        consumed_bytes: 10737418240,
+        cluster_size: 4194304,
+        allocated_clusters: 2560,
+        actual_storage_overhead: 16106127360, // ~15GB overhead - needs attention!
+        compression_ratio: 0.8, // Poor compression
+        deduplication_savings: 1073741824 // 1GB dedup
+      },
+      replica_bdev_details: [
+        {
+          node: 'worker-node-1',
+          name: 'snap_redis_replica_0',
+          aliases: ['redis_snap_primary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'redis_replica_0',
+          storage_info: {
+            consumed_bytes: 10737418240,
+            cluster_size: 4194304,
+            allocated_clusters: 2560
+          }
+        },
+        {
+          node: 'worker-node-2',
+          name: 'snap_redis_replica_1', 
+          aliases: ['redis_snap_secondary'],
+          driver: 'lvol',
+          snapshot_source_bdev: 'redis_replica_1',
+          storage_info: {
+            consumed_bytes: 10737418240,
+            cluster_size: 4194304,
+            allocated_clusters: 2560
+          }
+        }
+      ],
+      parent_snapshot_id: 'snap-redis-20250101-140000',
+    },
+    {
       snapshot_id: 'snap-redis-20250101-140000',
       source_volume_id: 'pvc-redis-cache',
       creation_time: '2025-01-01T14:00:00Z',
@@ -169,8 +221,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           }
         }
       ],
-      parent_snapshot_id: 'snap-redis-20241231-140000', // Has a parent snapshot
     },
+
     {
       snapshot_id: 'snap-mysql-clone-20250102-090000',
       source_volume_id: 'pvc-mysql-data',
@@ -213,7 +265,6 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           }
         }
       ],
-      parent_snapshot_id: 'snap-mysql-20250101-180000',
     }
   ];
 
@@ -229,17 +280,17 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           {
             bdev_name: 'lvs_redis/redis-active-lvol',
             snapshot_id: 'current-active-volume',
-            details: {},
+            details: { creation_time: '2025-01-02T00:00:00Z' },
             children: [
               {
                 bdev_name: 'snap_redis_replica_0',
                 snapshot_id: 'snap-redis-20250101-140000',
-                details: {},
+                details: { creation_time: '2025-01-01T14:00:00Z' },
                 children: [
                   {
                     bdev_name: 'snap_redis_old_replica_0',
                     snapshot_id: 'snap-redis-20241231-140000',
-                    details: {},
+                    details: { creation_time: '2024-12-31T14:00:00Z' },
                     children: [],
                     storage_info: {
                       consumed_bytes: 10737418240,
@@ -301,12 +352,12 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           {
             bdev_name: 'lvs_mysql/mysql-active-lvol',
             snapshot_id: 'current-active-volume',
-            details: {},
+            details: { creation_time: '2025-01-03T00:00:00Z' },
             children: [
               {
                 bdev_name: 'clone_mysql_replica_0',
                 snapshot_id: 'snap-mysql-clone-20250102-090000',
-                details: {},
+                details: { creation_time: '2025-01-02T09:00:00Z' },
                 children: [],
                 storage_info: {
                   consumed_bytes: 15728640000,
@@ -357,12 +408,12 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           {
             bdev_name: 'lvs_postgres/postgres-active-lvol',
             snapshot_id: 'current-active-volume',
-            details: {},
+            details: { creation_time: '2025-01-02T00:00:00Z' },
             children: [
               {
                 bdev_name: 'snap_postgres_replica_0',
                 snapshot_id: 'snap-postgres-20250101-120000',
-                details: {},
+                details: { creation_time: '2025-01-01T12:00:00Z' },
                 children: [],
                 storage_info: {
                   consumed_bytes: 4294967296, // 4GB - very efficient
@@ -509,11 +560,6 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     );
   }, [snapshots, searchTerm, typeFilter, volumeFilter]);
 
-  // Get unique volumes for filter dropdown
-  const availableVolumes = useMemo(() => {
-    return Array.from(new Set(snapshots.map(snap => snap.source_volume_id)));
-  }, [snapshots]);
-
   // Calculate storage insights
   const storageInsights = useMemo(() => {
     const totalLogicalSize = Object.values(snapshotTree).reduce((sum, tree) => 
@@ -597,6 +643,16 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             snapshotTree={snapshotTree}
             onSnapshotSelect={setSelectedSnapshot}
             formatSize={formatSize}
+          />
+        );
+      case 'topology':
+        return (
+          <SnapshotsTopologyView
+            snapshots={snapshots}
+            formatSize={formatSize}
+            selectedVolume={topologyVolume}
+            onVolumeChange={setTopologyVolume}
+            availableVolumes={availableVolumes}
           />
         );
       default:
@@ -737,6 +793,17 @@ export const EnhancedSnapshotsTab: React.FC = () => {
                 >
                   <GitBranch className="w-4 h-4 mr-2 inline" />
                   Tree View
+                </button>
+                <button
+                  onClick={() => setActiveView('topology')}
+                  className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
+                    activeView === 'topology'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <TrendingUp className="w-4 h-4 mr-2 inline" />
+                  Topology View
                 </button>
               </div>
 

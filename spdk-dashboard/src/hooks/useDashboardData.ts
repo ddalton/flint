@@ -570,14 +570,17 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
       // Try to fetch from API, fall back to mock data
       try {
         const response = await fetch('/api/dashboard');
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const dashboardData = await response.json();
-        
-        // Transform backend data to match frontend interface if needed
-        const transformedData = transformBackendData(dashboardData);
-        setData(transformedData);
+        const contentType = response.headers.get("content-type");
+        if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
+          const dashboardData = await response.json();
+          // Transform backend data to match frontend interface if needed
+          const transformedData = transformBackendData(dashboardData);
+          setData(transformedData);
+        } else {
+          // Fallback if the response is not ok or not JSON
+          throw new Error(response.ok ? 'Received non-JSON response' : `HTTP error! status: ${response.status}`);
+         }
+
       } catch (apiError) {
         console.warn('API not available, using mock data:', apiError);
         // Use mock data for development/demo
