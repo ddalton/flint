@@ -40,7 +40,7 @@ export const VHostNvmeTooltip: React.FC<VHostNvmeTooltipProps> = ({
               <div><strong>RAID Level:</strong> {raidLevel}</div>
             )}
             <div className="text-gray-300 mt-2">
-              VHost-NVMe exposes the {raidLevel || 'RAID'} volume as a single NVMe namespace (NSID 1)
+              VHost-NVMe exposes the {raidLevel || 'bdev'} volume as a single NVMe namespace (NSID 1)
             </div>
           </div>
           <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>

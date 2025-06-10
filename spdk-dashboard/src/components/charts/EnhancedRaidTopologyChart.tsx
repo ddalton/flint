@@ -140,7 +140,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center">
           <Activity className="w-6 h-6 text-blue-600 mr-2" />
-          <h3 className="text-lg font-semibold">Enhanced RAID Topology & Storage Architecture</h3>
+          <h3 className="text-lg font-semibold">Volume Topology</h3>
         </div>
         <div className="flex items-center gap-4">
           {/* Searchable Volume Dropdown */}
@@ -340,7 +340,9 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
               <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-blue-300">
                 <Database className="w-10 h-10 text-blue-600" />
               </div>
-              <p className="font-medium text-lg">SPDK RAID Bdev</p>
+              <p className="font-medium text-lg">
+                {raidStatus ? 'SPDK RAID Bdev' : 'SPDK Bdev'}
+              </p>
               <p className="text-sm text-gray-600">{selectedVolumeInfo.name}</p>
               <p className="text-xs text-gray-500">{selectedVolumeInfo.size}</p>
               

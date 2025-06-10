@@ -154,6 +154,49 @@ export type VolumeReplicaFilter = string | null;
 const mockData: DashboardData = {
   volumes: [
     {
+      id: "pvc-single-replica-volume",
+      name: "single-replica-volume",
+      size: "20GB",
+      state: "Healthy",
+      replicas: 1,
+      active_replicas: 1,
+      local_nvme: true,
+      access_method: "vhost-nvme", // Set to vhost-nvme
+      rebuild_progress: null,
+      nodes: ["worker-node-1"],
+      // Added VHost properties to ensure the access layer is displayed
+      vhost_socket: "/var/lib/spdk/vhost/vhost_single-replica-volume.sock",
+      vhost_device: "/dev/nvme-vhost-single-replica-volume",
+      vhost_enabled: true,
+      vhost_type: "nvme",
+      nvme_namespaces: [
+        {
+          nsid: 1,
+          size: 21474836480,
+          uuid: "77777777-7777-7777-7777-777777777777",
+          bdev_name: "pvc-single-replica-volume"
+        }
+      ],
+      // No raid_status for this volume
+      replica_statuses: [
+        {
+          node: "worker-node-1",
+          status: "healthy",
+          is_local: true,
+          last_io_timestamp: "2025-06-01T11:00:00Z",
+          rebuild_progress: null,
+          rebuild_target: null,
+          is_new_replica: false,
+          nvmf_target: null,
+          access_method: "local-nvme",
+          raid_member_state: "online",
+          lvol_uuid: "77777777-7777-7777-7777-777777777777",
+          disk_ref: "nvme0n1",
+          replica_size: 21474836480
+        }
+      ]
+    },
+    {
       id: "pvc-12345678-1234-1234-1234-123456789abc",
       name: "postgres-data-pvc",
       size: "100GB",
