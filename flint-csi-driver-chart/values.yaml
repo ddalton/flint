@@ -1,0 +1,66 @@
+# Default values for flint-csi-driver-chart.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+driver:
+  name: "flint.csi.storage.io"
+
+# Image configuration for the CSI driver and sidecars
+images:
+  driver:
+    repository: "your-repo/flint-csi-driver"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  
+  csiProvisioner:
+    repository: "registry.k8s.io/sig-storage/csi-provisioner"
+    tag: "v3.1.0"
+    pullPolicy: IfNotPresent
+
+  csiAttacher:
+    repository: "registry.k8s.io/sig-storage/csi-attacher"
+    tag: "v3.4.0"
+    pullPolicy: IfNotPresent
+
+  csiResizer:
+    repository: "registry.k8s.io/sig-storage/csi-resizer"
+    tag: "v1.4.0"
+    pullPolicy: IfNotPresent
+
+  csiNodeDriverRegistrar:
+    repository: "registry.k8s.io/sig-storage/csi-node-driver-registrar"
+    tag: "v2.5.0"
+    pullPolicy: IfNotPresent
+
+# Controller configuration
+controller:
+  replicas: 1
+  resources: {}
+  #  requests:
+  #    cpu: 100m
+  #    memory: 128Mi
+  #  limits:
+  #    cpu: 200m
+  #    memory: 256Mi
+
+# Node configuration
+node:
+  resources: {}
+  #  requests:
+  #    cpu: 100m
+  #    memory: 128Mi
+  #  limits:
+  #    cpu: 200m
+  #    memory: 256Mi
+
+# RBAC configuration
+rbac:
+  create: true
+
+serviceAccount:
+  controller:
+    create: true
+    name: "flint-csi-controller-sa"
+  node:
+    create: true
+    name: "flint-csi-node-sa"

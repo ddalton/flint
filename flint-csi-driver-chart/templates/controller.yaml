@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flint-csi-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: flint-csi-controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app: flint-csi-controller
+  template:
+    metadata:
+      labels:
+        app: flint-csi-controller
+    spec:
+      serviceAccountName: {{ .Values.controller.serviceAccount }}
+      containers:
+        - name: flint-csi-driver
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CSI_MODE
+              value: "controller"
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
+            # Add any other necessary environment variables for the controller
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: "{{ .Values.sidecars.csi_provisioner.repository }}:{{ .Values.sidecars.csi_provisioner.tag }}"
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--feature-gates=Topology=true"
+            - "--leader-election"
+          env:
+            - name: ADDRESS
+              value: "/csi/csi.sock"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: "{{ .Values.sidecars.csi_snapshotter.repository }}:{{ .Values.sidecars.csi_snapshotter.tag }}"
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+          env:
+            - name: ADDRESS
+              value: "/csi/csi.sock"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: "{{ .Values.sidecars.csi_resizer.repository }}:{{ .Values.sidecars.csi_resizer.tag }}"
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+          env:
+            - name: ADDRESS
+              value: "/csi/csi.sock"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

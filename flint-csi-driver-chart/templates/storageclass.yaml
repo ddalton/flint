@@ -1,0 +1,18 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  annotations:
+    {{- if .Values.storageClass.isDefaultClass }}
+    storageclass.kubernetes.io/is-default-class: "true"
+    {{- end }}
+provisioner: flint.csi.storage.io
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+parameters:
+  numReplicas: "{{ .Values.storageClass.parameters.numReplicas }}"
+  autoRebuild: "{{ .Values.storageClass.parameters.autoRebuild }}"
+  # Users can add other parameters here, like:
+  # "fsType": "ext4"
+{{- end }}

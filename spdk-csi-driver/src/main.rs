@@ -7,6 +7,10 @@ use csi_driver::csi::{
     NodeStageVolumeResponse, NodeUnpublishVolumeRequest, NodeUnpublishVolumeResponse,
     NodeUnstageVolumeRequest, NodeUnstageVolumeResponse, Volume, VolumeCapability,
 };
+use csi_driver::csi::{
+    identity_server::Identity, GetPluginInfoResponse, GetPluginCapabilitiesResponse,
+    PluginCapability, ProbeResponse
+};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     api::{Api, ListParams, Patch, PatchParams, PostParams, ResourceExt},
@@ -38,7 +42,7 @@ mod csi_driver {
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
 #[kube(
-    group = "csi.spdk.io",
+    group = "flint.csi.storage.io",
     version = "v1",
     kind = "SpdkVolume",
     plural = "spdkvolumes"
@@ -145,7 +149,7 @@ struct RaidRebuildInfo {
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
 #[kube(
-    group = "csi.spdk.io",
+    group = "flint.csi.storage.io",
     version = "v1",
     kind = "SpdkDisk",
     plural = "spdkdisks"
@@ -1128,6 +1132,52 @@ impl Controller for SpdkCsiDriver {
     }
 }
 
+#[tonic::async_trait]
+impl Identity for SpdkCsiDriver {
+    async fn get_plugin_info(
+        &self,
+        _request: Request<()>,
+    ) -> Result<Response<GetPluginInfoResponse>, Status> {
+        Ok(Response::new(GetPluginInfoResponse {
+            name: "flint.csi.storage.io".to_string(),
+            vendor_version: "1.0.0".to_string(),
+            ..Default::default()
+        }))
+    }
+
+    async fn get_plugin_capabilities(
+        &self,
+        _request: Request<()>,
+    ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
+        use csi_driver::csi::plugin_capability;
+
+        Ok(Response::new(GetPluginCapabilitiesResponse {
+            capabilities: vec![
+                PluginCapability {
+                    r#type: Some(plugin_capability::Type::Service(
+                        plugin_capability::Service {
+                            r#type: plugin_capability::service::Type::ControllerService as i32,
+                        },
+                    )),
+                },
+                PluginCapability {
+                    r#type: Some(plugin_capability::Type::Service(
+                        plugin_capability::Service {
+                            r#type: plugin_capability::service::Type::VolumeAccessibilityConstraints as i32,
+                        },
+                    )),
+                },
+            ],
+        }))
+    }
+
+    async fn probe(&self, _request: Request<()>) -> Result<Response<ProbeResponse>, Status> {
+        Ok(Response::new(ProbeResponse {
+            ready: Some(true),
+        }))
+    }
+}
+
 
 #[tonic::async_trait]
 impl Node for SpdkCsiDriver {
@@ -1770,24 +1820,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vhost_socket_base_path,
     };
 
+    let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
+
     let addr = std::env::var("CSI_ENDPOINT")
-        .unwrap_or("[::1]:50051".to_string())
+        .unwrap_or("unix:///csi/csi.sock".to_string())
         .parse()?;
 
+    let mut server = Server::builder();
+
+    // The Identity service is always required
+    server = server.add_service(csi_driver::csi::identity_server::IdentityServer::new(
+        driver.clone(),
+    ));
+
+    if mode == "controller" || mode == "all" {
+        println!("Starting in Controller mode...");
+        server = server.add_service(csi_driver::csi::controller_server::ControllerServer::new(
+            driver.clone(),
+        ));
+    }
+
+    if mode == "node" || mode == "all" {
+        println!("Starting in Node mode...");
+        server = server.add_service(csi_driver::csi::node_server::NodeServer::new(
+            driver.clone(),
+        ));
+    }
+
     println!(
-        "Starting SPDK CSI Driver with native RAID1 support on {} for node {}",
-        addr, driver.node_id
+        "SPDK CSI Driver ('{}' mode) starting on {} for node {}",
+        mode, addr, driver.node_id
     );
 
-    Server::builder()
-        .add_service(csi_driver::csi::node_server::NodeServer::new(
-            driver.clone(),
-        ))
-        .add_service(csi_driver::csi::controller_server::ControllerServer::new(
-            driver,
-        ))
-        .serve(addr)
-        .await?;
+    server.serve(addr).await?;
 
     Ok(())
 }

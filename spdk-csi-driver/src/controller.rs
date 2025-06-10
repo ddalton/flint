@@ -20,7 +20,7 @@ mod spdk_csi_driver {
     use serde::{Deserialize, Serialize};
 
     #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kube(group = "csi.spdk.io", version = "v1", kind = "SpdkVolume", plural = "spdkvolumes")]
+    #[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkVolume", plural = "spdkvolumes")]
     #[kube(namespaced)]
     #[kube(status = "SpdkVolumeStatus")]
     pub struct SpdkVolumeSpec {
@@ -125,7 +125,7 @@ mod spdk_csi_driver {
 
     // Keeping existing disk definitions...
     #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kube(group = "csi.spdk.io", version = "v1", kind = "SpdkDisk", plural = "spdkdisks")]
+    #[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkDisk", plural = "spdkdisks")]
     #[kube(namespaced)]
     #[kube(status = "SpdkDiskStatus")]
     pub struct SpdkDiskSpec {

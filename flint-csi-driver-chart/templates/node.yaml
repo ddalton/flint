@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: flint-csi-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: flint-csi-node
+spec:
+  selector:
+    matchLabels:
+      app: flint-csi-node
+  template:
+    metadata:
+      labels:
+        app: flint-csi-node
+    spec:
+      serviceAccountName: {{ .Values.node.serviceAccount | default "default" }}
+      hostNetwork: true # Necessary for SPDK to interact with host devices
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: spdk-tgt
+          image: "{{ .Values.spdkTgtImage.repository }}:{{ .Values.spdkTgtImage.tag }}"
+          securityContext:
+            privileged: true
+          # Add commands to start spdk_tgt with appropriate config
+          command: ["/path/to/spdk_tgt"]
+          args: ["-c", "/path/to/spdk.conf"]
+          volumeMounts:
+            - name: spdk-run
+              mountPath: /var/run/spdk
+            - name: hugepages
+              mountPath: /dev/hugepages
+            - name: dev
+              mountPath: /dev
+        - name: node-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          securityContext:
+            privileged: true # May be required for device discovery
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SPDK_RPC_URL
+              value: "http://localhost:5260"
+          volumeMounts:
+            - name: sys-bus
+              mountPath: /sys/bus
+        - name: flint-csi-driver
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: CSI_MODE
+              value: "node"
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
+            - name: VHOST_SOCKET_PATH
+              value: "/var/lib/flint-csi/sockets"
+          volumeMounts:
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: "Bidirectional"
+            - name: plugin-dir
+              mountPath: /csi
+            - name: vhost-sockets
+              mountPath: /var/lib/flint-csi/sockets
+        - name: node-driver-registrar
+          image: "{{ .Values.sidecars.node_driver_registrar.repository }}:{{ .Values.sidecars.node_driver_registrar.tag }}"
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+          env:
+            - name: ADDRESS
+              value: "/csi/csi.sock"
+            - name: DRIVER_REG_SOCK_PATH
+              value: "/var/lib/kubelet/plugins/flint.csi.storage.io/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+      volumes:
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/flint.csi.storage.io/
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: Directory
+        - name: vhost-sockets
+          hostPath:
+            path: /var/lib/flint-csi/sockets/
+            type: DirectoryOrCreate
+        - name: spdk-run
+          emptyDir: {}
+        - name: hugepages
+          hostPath:
+            path: /dev/hugepages
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: sys-bus
+          hostPath:
+            path: /sys/bus
