@@ -562,12 +562,14 @@ impl SpdkCsiDriver {
         Ok(socket_path)
     }
 
-    async fn export_raid_as_vhost(
+    async fn export_bdev_as_vhost(
         &self,
         volume_id: &str,
+        bdev_name: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        // For RAID volumes, export the RAID bdev as vhost-nvme
-        self.create_vhost_controller(volume_id, volume_id).await
+        // The implementation remains the same, as create_vhost_controller
+        // already takes a generic bdev_name.
+        self.create_vhost_controller(volume_id, bdev_name).await
     }
 
     async fn export_lvol_as_nvmf(
@@ -915,61 +917,84 @@ impl Controller for SpdkCsiDriver {
             return Err(Status::invalid_argument("Missing name or capacity"));
         }
 
-        let (spdk_volume, new_volume_id) = if let Some(source) = req.volume_content_source {
-            // --- MODIFIED: Handle Create Volume From Decentralized Snapshot ---
-            if let Some(snapshot_source) = source.snapshot {
-                let snapshot_id = snapshot_source.snapshot_id;
+        // --- NEW: Determine the number of replicas from storage class parameters ---
+        let num_replicas = req.parameters
+            .get("numReplicas")
+            .and_then(|n| n.parse::<i32>().ok())
+            .unwrap_or(1); // Default to a single replica if not specified
+
+        let (spdk_volume, new_volume_id) = if let Some(source) = &req.volume_content_source {
+            // --- Handle Create Volume From Snapshot ---
+            if let Some(snapshot_source) = &source.snapshot {
+                let snapshot_id = &snapshot_source.snapshot_id;
                 
-                // 1. Get source SpdkSnapshot CRD
                 let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.kube_client.clone(), "default");
-                let snapshot_crd = snapshots_api.get(&snapshot_id).await
+                let snapshot_crd = snapshots_api.get(snapshot_id).await
                     .map_err(|_| Status::not_found(format!("Source snapshot {} not found", snapshot_id)))?;
 
-                // 2. Select a source replica snapshot to clone from. Any healthy one will do.
                 let source_replica_snapshot = snapshot_crd.spec.replica_snapshots.first()
-                    .ok_or_else(|| Status::not_found(format!("No available replica snapshots found for snapshot {}", snapshot_id)))?;
+                    .ok_or_else(|| Status::not_found(format!("No replica snapshots in {}", snapshot_id)))?;
                 
-                let source_bdev_name = &source_replica_snapshot.spdk_snapshot_lvol;
-                let source_node_name = &source_replica_snapshot.node_name;
-                
-                // 3. Provision the new destination RAID volume scaffolding
-                let (dest_spdk_volume, dest_raid_bdev_name) = self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?;
-                
-                // 4. Perform the copy from the snapshot bdev to the new RAID bdev.
-                // The copy command should be sent to the node where the source snapshot bdev exists.
-                println!("Cloning from snapshot bdev '{}' on node '{}' to new volume '{}'", source_bdev_name, source_node_name, dest_raid_bdev_name);
-                let source_node_rpc_url = self.get_rpc_url_for_node(source_node_name).await?;
+                // Provision the destination volume (RAID or single lvol)
+                let (dest_spdk_volume, dest_bdev_name) = if num_replicas > 1 {
+                    self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?
+                } else {
+                    self.provision_single_lvol_volume(&volume_name, capacity, &req.parameters).await?
+                };
+
+                // Perform the copy/clone
                 let http_client = HttpClient::new();
+                let source_node_rpc_url = self.get_rpc_url_for_node(&source_replica_snapshot.node_name).await?;
                 let copy_response = http_client.post(&source_node_rpc_url)
                     .json(&json!({
                         "method": "bdev_copy",
                         "params": {
-                            "src_bdev": source_bdev_name,
-                            "dst_bdev": dest_raid_bdev_name,
+                            "src_bdev": &source_replica_snapshot.spdk_snapshot_lvol,
+                            "dst_bdev": &dest_bdev_name,
                         }
                     }))
-                    .send()
-                    .await
-                    .map_err(|e| Status::internal(format!("SPDK bdev_copy RPC call failed: {}", e)))?;
+                    .send().await.map_err(|e| Status::internal(format!("SPDK bdev_copy RPC failed: {}", e)))?;
 
                 if !copy_response.status().is_success() {
                     let err_text = copy_response.text().await.unwrap_or_default();
-                    // Attempt to clean up the newly created volume if copy fails
-                    self.delete_volume(Request::new(DeleteVolumeRequest{ volume_id: dest_spdk_volume.spec.volume_id.clone() })).await.ok();
-                    return Err(Status::internal(format!("Failed to copy data from snapshot: {}", err_text)));
+                    self.delete_volume(Request::new(DeleteVolumeRequest { volume_id: dest_spdk_volume.spec.volume_id.clone() })).await.ok();
+                    return Err(Status::internal(format!("Failed to copy data: {}", err_text)));
                 }
 
-                (dest_spdk_volume, dest_spdk_volume.spec.volume_id.clone())
+                (dest_spdk_volume, dest_bdev_name)
             } else {
-                return Err(Status::invalid_argument("Unsupported volume content source type"));
+                return Err(Status::invalid_argument("Unsupported volume content source"));
             }
         } else {
-            // --- Original Path: Create an empty volume ---
-            self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?
+            // --- Create an empty volume (RAID or single lvol) ---
+            if num_replicas > 1 {
+                self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?
+            } else {
+                self.provision_single_lvol_volume(&volume_name, capacity, &req.parameters).await?
+            }
         };
 
+        // --- NEW: Set context and topology based on replica count ---
         let mut volume_context = HashMap::new();
-        volume_context.insert("storageType".to_string(), "vhost-raid".to_string());
+        let mut accessible_topology = vec![];
+
+        if num_replicas > 1 {
+            volume_context.insert("storageType".to_string(), "vhost-raid".to_string());
+        } else {
+            volume_context.insert("storageType".to_string(), "vhost-lvol".to_string());
+            // For single-replica volumes, specify the node for the scheduler.
+            if let Some(replica) = spdk_volume.spec.replicas.first() {
+                let topology = csi_driver::csi::Topology {
+                    segments: [(
+                        "topology.kubernetes.io/hostname".to_string(),
+                        replica.node.clone(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                };
+                accessible_topology.push(topology);
+            }
+        }
 
         Ok(Response::new(CreateVolumeResponse {
             volume: Some(Volume {
@@ -977,11 +1002,12 @@ impl Controller for SpdkCsiDriver {
                 capacity_bytes: spdk_volume.spec.size_bytes,
                 volume_context,
                 content_source: req.volume_content_source,
+                accessible_topology, // This field is now correctly populated
                 ..Default::default()
             }),
         }))
     }
-    
+
     async fn delete_volume(
         &self,
         request: Request<DeleteVolumeRequest>,
@@ -1003,7 +1029,9 @@ impl Controller for SpdkCsiDriver {
         self.delete_vhost_controller(&volume_id).await.ok();
 
         // Delete RAID configuration
-        self.delete_lvol_raid(&volume_id).await.ok();
+        if spdk_volume.spec.num_replicas > 1 {
+            self.delete_lvol_raid(&volume_id).await.ok();
+        }
 
         // Delete lvols from each replica
         for replica in &spdk_volume.spec.replicas {
@@ -1103,6 +1131,7 @@ impl Controller for SpdkCsiDriver {
 
 #[tonic::async_trait]
 impl Node for SpdkCsiDriver {
+
     async fn node_stage_volume(
         &self,
         request: Request<NodeStageVolumeRequest>,
@@ -1118,12 +1147,6 @@ impl Node for SpdkCsiDriver {
             return Err(Status::invalid_argument("Missing required parameters"));
         }
 
-        let context = req.volume_context;
-        let auto_rebuild = context
-            .get("autoRebuild")
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(true);
-
         let pod_node = get_pod_node(&self.kube_client)
             .await
             .map_err(|e| Status::internal(format!("Failed to get pod node: {}", e)))?;
@@ -1131,54 +1154,73 @@ impl Node for SpdkCsiDriver {
         let pod_name = std::env::var("POD_NAME")
             .map_err(|e| Status::internal(format!("Failed to get POD_NAME: {}", e)))?;
 
-        // Update SpdkVolume CRD with pod scheduling info
+        // Update SpdkVolume CRD with pod scheduling info.
         self.update_replica_scheduling(&volume_id, &pod_node, &pod_name)
             .await
             .map_err(|e| Status::internal(format!("Failed to update replica scheduling: {}", e)))?;
 
-        // Create vhost-nvme controller for RAID volume
+        // --- NEW: Determine the correct bdev to expose based on replica count ---
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let spdk_volume = crd_api.get(&volume_id).await
+            .map_err(|_| Status::not_found(format!("SpdkVolume {} not found", volume_id)))?;
+
+        let bdev_to_expose = if spdk_volume.spec.num_replicas > 1 {
+            // For multi-replica volumes, the bdev is the RAID device, which uses the volume_id as its name.
+            volume_id.clone()
+        } else {
+            // For single-replica volumes, we must construct the lvol's bdev name.
+            let replica = spdk_volume.spec.replicas.first()
+                .ok_or_else(|| Status::internal("Volume has no replica information"))?;
+            let lvs_name = format!("lvs_{}", replica.disk_ref);
+            let lvol_uuid = replica.lvol_uuid.as_ref()
+                .ok_or_else(|| Status::internal("Replica is missing lvol_uuid"))?;
+            self.get_lvol_bdev_name(&lvs_name, lvol_uuid)
+        };
+
+        // Create the vhost-nvme controller for the correct bdev.
+        // Note the call to the renamed function.
         let socket_path = self
-            .export_raid_as_vhost(&volume_id)
+            .export_bdev_as_vhost(&volume_id, &bdev_to_expose)
             .await
             .map_err(|e| Status::internal(format!("Failed to create vhost controller: {}", e)))?;
 
-        // Update volume CRD with vhost socket path and current RAID status
-        self.update_volume_with_raid_status(&volume_id, &socket_path)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to update volume status: {}", e)))?;
+        // --- MODIFIED: Only update RAID status for multi-replica volumes ---
+        if spdk_volume.spec.num_replicas > 1 {
+            self.update_volume_with_raid_status(&volume_id, &socket_path)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to update volume status: {}", e)))?;
+        } else {
+            // For single-replica volumes, we can patch the vhost socket path to the CRD.
+            let patch = json!({
+                "spec": { "vhost_socket": &socket_path },
+                "status": { "state": "Staged", "last_checked": Utc::now().to_rfc3339() }
+            });
+            crd_api.patch(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await
+                .map_err(|e| Status::internal(format!("Failed to patch SpdkVolume status: {}", e)))?;
+        }
 
-        // Start QEMU vhost-user-nvme device and get device path
+        // Start QEMU vhost-user-nvme device and get the local device path.
         let device_path = self
             .start_vhost_user_nvme(&socket_path, &volume_id)
             .await
             .map_err(|e| Status::internal(format!("Failed to start vhost-user-nvme: {}", e)))?;
 
-        // Stage volume based on capability
+        // --- The rest of the staging logic (formatting and mounting) remains the same ---
         if volume_capability.block.is_some() {
             if !Path::new(&device_path).exists() {
-                return Err(Status::internal("Vhost NVMe device not found"));
+                return Err(Status::internal("Vhost NVMe device not found after starting process"));
             }
             return Ok(Response::new(NodeStageVolumeResponse {}));
         }
 
-        // Filesystem volume
-        let fs_type = volume_capability
-            .mount
-            .as_ref()
-            .map(|m| m.fs_type.clone())
-            .unwrap_or("ext4".to_string());
+        let fs_type = volume_capability.mount.as_ref().map(|m| m.fs_type.clone()).unwrap_or("ext4".to_string());
 
         if !is_device_formatted(&device_path)? {
             format_device(&device_path, &fs_type)
                 .map_err(|e| Status::internal(format!("Failed to format device: {}", e)))?;
         }
 
-        let mount_flags = volume_capability
-            .mount
-            .as_ref()
-            .map(|m| m.mount_flags.clone())
-            .unwrap_or_default();
-
+        let mount_flags = volume_capability.mount.as_ref().map(|m| m.mount_flags.clone()).unwrap_or_default();
         mount_device(&device_path, &staging_target_path, &fs_type, &mount_flags)
             .map_err(|e| Status::internal(format!("Failed to mount device: {}", e)))?;
 
@@ -1296,6 +1338,14 @@ impl Node for SpdkCsiDriver {
                     r#type: Some(node_service_capability::Type::Rpc(
                         node_service_capability::Rpc {
                             r#type: node_service_capability::rpc::Type::GetVolumeStats as i32,
+                        },
+                    )),
+                },
+                // Advertise that the driver understands volume topology.
+                NodeServiceCapability {
+                    r#type: Some(node_service_capability::Type::Rpc(
+                        node_service_capability::Rpc {
+                            r#type: node_service_capability::rpc::Type::VolumeAccessibilityConstraints as i32,
                         },
                     )),
                 },
@@ -1545,6 +1595,73 @@ impl SpdkCsiDriver {
         }
 
         Ok(())
+    }
+
+    /// Provisions a new volume consisting of a single lvol without RAID.
+    /// Returns the SpdkVolume CRD and the name of the bdev to be used for I/O.
+    async fn provision_single_lvol_volume(
+        &self,
+        volume_name: &str,
+        capacity: i64,
+        params: &HashMap<String, String>,
+    ) -> Result<(SpdkVolume, String), Status> {
+        let disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), "default");
+        
+        // In a real implementation, you would use accessibility requirements
+        // to select the correct node and disk.
+        let selected_disk = disks.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list SpdkDisks: {}", e)))?
+            .items
+            .into_iter()
+            .find(|d| {
+                d.status.as_ref().map_or(false, |s| s.healthy && s.blobstore_initialized && s.free_space >= capacity)
+            })
+            .ok_or_else(|| Status::resource_exhausted("No suitable disk found for single-replica volume"))?;
+
+        let new_volume_id = format!("lvol-{}", Uuid::new_v4());
+        let lvol_uuid = self
+            .create_volume_lvol(&selected_disk, capacity, &new_volume_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
+
+        let replica = Replica {
+            node: selected_disk.spec.node.clone(),
+            replica_type: "lvol".to_string(),
+            disk_ref: selected_disk.metadata.name.clone().unwrap_or_default(),
+            lvol_uuid: Some(lvol_uuid.clone()),
+            health_status: ReplicaHealth::Healthy,
+            ..Default::default()
+        };
+
+        let spdk_volume = SpdkVolume::new(
+            &new_volume_id,
+            SpdkVolumeSpec {
+                volume_id: new_volume_id.clone(),
+                size_bytes: capacity,
+                num_replicas: 1,
+                replicas: vec![replica],
+                ..Default::default()
+            },
+        );
+
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        crd_api.create(&PostParams::default(), &spdk_volume).await
+            .map_err(|e| Status::internal(format!("Failed to create SpdkVolume CRD: {}", e)))?;
+
+        // Update disk status
+        let disk_name = selected_disk.metadata.name.as_ref().unwrap();
+        let mut disk_status = selected_disk.status.clone().unwrap_or_default();
+        disk_status.free_space -= capacity;
+        disk_status.used_space += capacity;
+        disk_status.lvol_count += 1;
+        disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(json!({ "status": disk_status }))).await
+            .map_err(|e| Status::internal(format!("Failed to update SpdkDisk status: {}", e)))?;
+
+        // The bdev to expose is the lvol itself.
+        let lvs_name = format!("lvs_{}", selected_disk.metadata.name.as_ref().unwrap());
+        let bdev_name = self.get_lvol_bdev_name(&lvs_name, &lvol_uuid);
+
+        Ok((spdk_volume, bdev_name))
     }
 }
 

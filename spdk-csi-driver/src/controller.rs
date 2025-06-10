@@ -169,6 +169,13 @@ struct Context {
     // Removed rebuild tracking - SPDK handles this
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct LvolStatus {
+    pub name: String,
+    pub is_healthy: bool,
+    pub error_reason: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
@@ -211,88 +218,100 @@ async fn reconcile(spdk_volume: SpdkVolume, ctx: Arc<Context>) -> Result<(), kub
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
     let volume_id = spdk_volume.spec.volume_id.clone();
-    let mut status = spdk_volume.status.unwrap_or_default();
-    let mut update_needed = false;
+    let mut status = spdk_volume.status.clone().unwrap_or_default();
+    let mut spec_update_needed = false;
+    let mut status_update_needed = false;
 
-    // Get current RAID1 status from SPDK
-    let raid_status = get_raid_status(&ctx, &volume_id).await
-        .map_err(|e| {
-            eprintln!("Failed to get RAID status for {}: {}", volume_id, e);
-            kube::Error::Api(kube::api::ErrorResponse {
+    // --- Health Check Logic ---
+    if spdk_volume.spec.num_replicas > 1 {
+        // --- Multi-Replica (RAID1) Volume Health Check ---
+        let raid_status = get_raid_status(&ctx, &volume_id).await
+            .map_err(|e| kube::Error::Api(kube::api::ErrorResponse {
                 status: "Failure".to_string(),
                 message: format!("Failed to get RAID status: {}", e),
                 reason: "SPDKError".to_string(),
                 code: 500,
-            })
-        })?;
+            }))?;
 
-    // Update volume status based on SPDK RAID1 status
-    if let Some(ref raid_info) = raid_status {
-        status.raid_status = Some(raid_info.clone());
-        
-        // Update volume state based on RAID state
-        status.state = match raid_info.state.as_str() {
-            "online" => "Healthy".to_string(),
-            "degraded" => "Degraded".to_string(),
-            "failed" | "broken" => "Failed".to_string(),
-            _ => raid_info.state.clone(),
-        };
-        
-        status.degraded = raid_info.state == "degraded";
-        
-        // Update replica statuses based on RAID member states
-        let mut active_replicas = Vec::new();
-        let mut failed_replicas = Vec::new();
-        
-        for (i, member) in raid_info.base_bdevs_list.iter().enumerate() {
-            match member.state.as_str() {
-                "online" => active_replicas.push(i),
-                "failed" => failed_replicas.push(i),
-                _ => {}
+        if let Some(ref raid_info) = raid_status {
+            status.raid_status = Some(raid_info.clone());
+            status.state = match raid_info.state.as_str() {
+                "online" => "Healthy".to_string(),
+                "degraded" => "Degraded".to_string(),
+                "failed" | "broken" => "Failed".to_string(),
+                _ => raid_info.state.clone(),
+            };
+            status.degraded = raid_info.state == "degraded";
+            
+            let failed_replicas: Vec<usize> = raid_info.base_bdevs_list.iter()
+                .filter(|m| m.state == "failed")
+                .map(|m| m.slot as usize)
+                .collect();
+            
+            if !failed_replicas.is_empty() {
+                 status.failed_replicas = failed_replicas;
+            }
+
+            status_update_needed = true;
+        }
+
+        if ctx.rebuild_enabled && !status.failed_replicas.is_empty() {
+            for &failed_index in &status.failed_replicas {
+                if let Err(e) = handle_failed_replica_with_spdk(&spdk_volume, &ctx, failed_index, &spdk_disks).await {
+                    eprintln!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
+                    status.state = "RebuildFailed".to_string();
+                }
             }
         }
-        
-        status.active_replicas = active_replicas;
-        status.failed_replicas = failed_replicas;
-        update_needed = true;
+
+    } else {
+        // --- Single-Replica (Lvol) Volume Health Check ---
+        if let Some(replica) = spdk_volume.spec.replicas.first() {
+            if let Some(lvol_uuid) = &replica.lvol_uuid {
+                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                let bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
+
+                match get_lvol_status(&ctx, &bdev_name).await {
+                    Ok(lvol_status) => {
+                        let current_state_is_healthy = status.state == "Healthy";
+                        if lvol_status.is_healthy && !current_state_is_healthy {
+                            status.state = "Healthy".to_string();
+                            status.degraded = false;
+                            status_update_needed = true;
+                        } else if !lvol_status.is_healthy && current_state_is_healthy {
+                            status.state = "Failed".to_string();
+                            status.degraded = true;
+                            eprintln!("Lvol {} is unhealthy: {:?}", bdev_name, lvol_status.error_reason);
+                            status_update_needed = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error checking lvol status for {}: {}", bdev_name, e);
+                    }
+                }
+            }
+        }
     }
 
-    // Check and manage vhost controllers
+    // --- Manage Vhost Controllers ---
     manage_vhost_controllers(&spdk_volume, &ctx).await
-        .map_err(|e| {
-            eprintln!("Failed to manage vhost controllers for {}: {}", volume_id, e);
-            kube::Error::Api(kube::api::ErrorResponse {
-                status: "Failure".to_string(),
-                message: format!("Vhost management error: {}", e),
-                reason: "VHostError".to_string(),
-                code: 500,
-            })
-        })?;
-
-    // Handle failed replicas using SPDK's native capabilities
-    if ctx.rebuild_enabled && !status.failed_replicas.is_empty() {
-        for &failed_index in &status.failed_replicas {
-            if let Err(e) = handle_failed_replica_with_spdk(
-                &spdk_volume,
-                &ctx,
-                failed_index,
-                &spdk_disks,
-            ).await {
-                eprintln!("Failed to handle failed replica {}: {}", failed_index, e);
-                status.state = "Failed".to_string();
-            }
-        }
+        .map_err(|e| kube::Error::Api(kube::api::ErrorResponse {
+            status: "Failure".to_string(),
+            message: format!("Vhost management error: {}", e),
+            reason: "VHostError".to_string(),
+            code: 500,
+        }))?;
+    
+    // --- Update Status if Changed ---
+    let current_time = Utc::now().to_rfc3339();
+    if status.last_checked != current_time {
+        status.last_checked = current_time;
+        status_update_needed = true;
     }
 
-    status.last_checked = Utc::now().to_rfc3339();
-    update_needed = true;
-
-    if update_needed {
-        spdk_volumes
-            .patch_status(&volume_id, &PatchParams::default(), &Patch::Merge(json!({
-                "status": status
-            })))
-            .await?;
+    if status_update_needed {
+        let patch = json!({ "status": status });
+        spdk_volumes.patch_status(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await?;
     }
 
     Ok(())
@@ -943,6 +962,52 @@ async fn perform_periodic_health_check(ctx: &Context) -> Result<(), Box<dyn std:
     }
     
     Ok(())
+}
+
+/// Gets the real-time status of a single lvol bdev from the SPDK RPC server.
+async fn get_lvol_status(
+    ctx: &Context,
+    bdev_name: &str,
+) -> Result<LvolStatus, Box<dyn std::error::Error>> {
+    let http_client = HttpClient::new();
+    
+    let response = http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_get_bdevs",
+            "params": { "name": bdev_name }
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Ok(LvolStatus {
+            name: bdev_name.to_string(),
+            is_healthy: false,
+            error_reason: Some(format!("RPC failed with status: {}", response.status())),
+        });
+    }
+
+    let bdev_info: serde_json::Value = response.json().await?;
+    
+    if let Some(bdev) = bdev_info.get("result").and_then(|r| r.as_array()).and_then(|a| a.get(0)) {
+        // A bdev is considered healthy if it supports read and write I/O.
+        let is_healthy = bdev["supported_io_types"]["read"].as_bool().unwrap_or(false) &&
+                         bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
+
+        Ok(LvolStatus {
+            name: bdev_name.to_string(),
+            is_healthy,
+            error_reason: if is_healthy { None } else { Some("Bdev does not support read/write I/O".to_string()) },
+        })
+    } else {
+        // The bdev was not found in the SPDK instance.
+        Ok(LvolStatus {
+            name: bdev_name.to_string(),
+            is_healthy: false,
+            error_reason: Some("Bdev not found in SPDK".to_string()),
+        })
+    }
 }
 
 fn error_policy(_error: &kube::Error, _ctx: Arc<Context>) -> watcher::Action {
