@@ -110,6 +110,9 @@ struct NodeAgent {
     auto_initialize_blobstore: bool,
     backup_path: String,
     spdk_path: Option<String>,
+    // New fields for metadata sync configuration
+    metadata_sync_interval: u64,
+    metadata_sync_enabled: bool,
 }
 
 #[tokio::main]
@@ -134,6 +137,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backup_path: env::var("DISK_BACKUP_PATH")
             .unwrap_or("/var/lib/spdk-csi/backups".to_string()),
         spdk_path: env::var("SPDK_PATH").ok(),
+        // Configure metadata sync - default to every 30 seconds
+        metadata_sync_interval: env::var("METADATA_SYNC_INTERVAL")
+            .unwrap_or("30".to_string())
+            .parse()
+            .unwrap_or(30),
+        metadata_sync_enabled: env::var("METADATA_SYNC_ENABLED")
+            .unwrap_or("true".to_string())
+            .parse()
+            .unwrap_or(true),
     };
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
@@ -147,8 +159,169 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         start_api_server(api_agent).await;
     });
     
+    // Start periodic metadata sync task
+    if agent.metadata_sync_enabled {
+        let metadata_agent = agent.clone();
+        tokio::spawn(async move {
+            run_metadata_sync_loop(metadata_agent).await;
+        });
+        println!("Started periodic metadata sync task (interval: {}s)", agent.metadata_sync_interval);
+    }
+    
     // Start disk discovery loop
     run_discovery_loop(agent).await?;
+    
+    Ok(())
+}
+
+/// Background task that periodically calls spdk_blob_sync_md to sync metadata
+/// This reduces the amount of work needed during SPDK shutdown
+async fn run_metadata_sync_loop(agent: NodeAgent) {
+    let mut interval = interval(Duration::from_secs(agent.metadata_sync_interval));
+    
+    loop {
+        interval.tick().await;
+        
+        if let Err(e) = sync_blob_metadata(&agent).await {
+            eprintln!("Metadata sync failed: {}", e);
+        }
+    }
+}
+
+/// Calls spdk_blob_sync_md RPC to sync blob metadata to persistent storage
+async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+    let http_client = HttpClient::new();
+    
+    // First, get all lvol stores to sync their metadata
+    let lvstores_response = http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_lvol_get_lvstores"
+        }))
+        .send()
+        .await?;
+
+    if !lvstores_response.status().is_success() {
+        return Ok(()); // Skip if lvol stores not available
+    }
+
+    let lvstores: serde_json::Value = lvstores_response.json().await?;
+    
+    if let Some(stores) = lvstores["result"].as_array() {
+        for store in stores {
+            if let Some(lvs_name) = store["name"].as_str() {
+                println!("Syncing metadata for lvol store: {}", lvs_name);
+                
+                // Call spdk_blob_sync_md for this lvol store
+                let sync_response = http_client
+                    .post(&agent.spdk_rpc_url)
+                    .json(&json!({
+                        "method": "spdk_blob_sync_md",
+                        "params": {
+                            "lvs_name": lvs_name
+                        }
+                    }))
+                    .send()
+                    .await;
+
+                match sync_response {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("Successfully synced metadata for lvol store: {}", lvs_name);
+                    }
+                    Ok(resp) => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        eprintln!("Failed to sync metadata for lvol store {}: {}", lvs_name, error_text);
+                    }
+                    Err(e) => {
+                        eprintln!("Error calling spdk_blob_sync_md for lvol store {}: {}", lvs_name, e);
+                    }
+                }
+                
+                // Small delay between stores to avoid overwhelming SPDK
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    
+    // Also try to sync metadata for all blobstores directly
+    let bdevs_response = http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_get_bdevs"
+        }))
+        .send()
+        .await?;
+
+    if bdevs_response.status().is_success() {
+        let bdevs: serde_json::Value = bdevs_response.json().await?;
+        
+        if let Some(bdev_list) = bdevs["result"].as_array() {
+            for bdev in bdev_list {
+                // Look for blobstore bdevs (typically NVMe devices with blobstores)
+                if let Some(driver_name) = bdev["driver_specific"]["blobfs"].as_object() {
+                    if let Some(bdev_name) = bdev["name"].as_str() {
+                        println!("Syncing blobstore metadata for bdev: {}", bdev_name);
+                        
+                        // Try alternative RPC method for blobstore sync
+                        let _sync_response = http_client
+                            .post(&agent.spdk_rpc_url)
+                            .json(&json!({
+                                "method": "blobfs_sync",
+                                "params": {
+                                    "bdev_name": bdev_name
+                                }
+                            }))
+                            .send()
+                            .await;
+                        // Best effort - don't fail if this doesn't work
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Enhanced shutdown handler that performs final metadata sync before exit
+async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Performing graceful shutdown with final metadata sync...");
+    
+    // Perform final metadata sync before shutdown
+    if agent.metadata_sync_enabled {
+        println!("Performing final metadata sync before shutdown...");
+        if let Err(e) = sync_blob_metadata(agent).await {
+            eprintln!("Warning: Final metadata sync failed: {}", e);
+        } else {
+            println!("Final metadata sync completed successfully");
+        }
+    }
+    
+    // Then proceed with normal SPDK shutdown
+    let http_client = HttpClient::new();
+    
+    println!("Initiating SPDK application shutdown...");
+    let response = http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&json!({
+            "method": "spdk_app_stop",
+            "params": {}
+        }))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            println!("SPDK shutdown initiated successfully");
+        }
+        Ok(res) => {
+            let error_text = res.text().await.unwrap_or_default();
+            eprintln!("SPDK shutdown RPC failed: {}", error_text);
+        }
+        Err(e) => {
+            eprintln!("Failed to send SPDK shutdown RPC: {}", e);
+        }
+    }
     
     Ok(())
 }
@@ -203,12 +376,28 @@ async fn start_api_server(agent: NodeAgent) {
                 .and_then(refresh_disk_discovery)
         )
         .or(
-            // Gracefully shut down the SPDK process
+            // Enhanced shutdown with metadata sync
             warp::path("spdk")
                 .and(warp::path("shutdown"))
                 .and(warp::post())
                 .and(agent_filter.clone())
-                .and_then(shutdown_spdk_process)
+                .and_then(shutdown_spdk_process_with_sync)
+        )
+        .or(
+            // Manual metadata sync trigger
+            warp::path("spdk")
+                .and(warp::path("sync-metadata"))
+                .and(warp::post())
+                .and(agent_filter.clone())
+                .and_then(trigger_metadata_sync)
+        )
+        .or(
+            // Get metadata sync status
+            warp::path("spdk")
+                .and(warp::path("sync-status"))
+                .and(warp::get())
+                .and(agent_filter.clone())
+                .and_then(get_metadata_sync_status)
         )
     );
 
@@ -300,6 +489,65 @@ async fn refresh_disk_discovery(agent: NodeAgent) -> Result<impl warp::Reply, wa
             "node": agent.node_name
         })))
     }
+}
+
+/// Enhanced shutdown handler that performs metadata sync before shutdown
+async fn shutdown_spdk_process_with_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    println!("Received request to gracefully shut down SPDK process with metadata sync.");
+    
+    match perform_graceful_shutdown_with_sync(&agent).await {
+        Ok(_) => {
+            let reply = reply::json(&json!({
+                "success": true,
+                "message": "SPDK shutdown with metadata sync initiated successfully."
+            }));
+            Ok(reply::with_status(reply, StatusCode::OK))
+        }
+        Err(e) => {
+            eprintln!("Failed to perform graceful shutdown: {}", e);
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("Graceful shutdown failed: {}", e)
+            }));
+            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
+
+/// API handler to manually trigger metadata sync
+async fn trigger_metadata_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    println!("Received request to manually trigger metadata sync.");
+    
+    match sync_blob_metadata(&agent).await {
+        Ok(_) => {
+            let reply = reply::json(&json!({
+                "success": true,
+                "message": "Metadata sync completed successfully.",
+                "synced_at": Utc::now().to_rfc3339()
+            }));
+            Ok(reply::with_status(reply, StatusCode::OK))
+        }
+        Err(e) => {
+            eprintln!("Manual metadata sync failed: {}", e);
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("Metadata sync failed: {}", e)
+            }));
+            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
+
+/// API handler to get metadata sync configuration and status
+async fn get_metadata_sync_status(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    let reply = reply::json(&json!({
+        "success": true,
+        "metadata_sync_enabled": agent.metadata_sync_enabled,
+        "metadata_sync_interval": agent.metadata_sync_interval,
+        "node": agent.node_name,
+        "checked_at": Utc::now().to_rfc3339()
+    }));
+    Ok(reply::with_status(reply, StatusCode::OK))
 }
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
@@ -1400,54 +1648,10 @@ impl NodeAgent {
             "spdk_ready_disks": disk_statuses.iter().filter(|d| d["spdk_ready"].as_bool().unwrap_or(false)).count(),
             "uninitialized_disks": disk_statuses.iter().filter(|d| !d["spdk_ready"].as_bool().unwrap_or(true) && !d["is_system_disk"].as_bool().unwrap_or(true)).count(),
             "disks": disk_statuses,
-            "checked_at": Utc::now().to_rfc3339()
+            "checked_at": Utc::now().to_rfc3339(),
+            "metadata_sync_enabled": self.metadata_sync_enabled,
+            "metadata_sync_interval": self.metadata_sync_interval
         }))
     }
 }
-
-/// API handler to trigger a graceful shutdown of the SPDK process.
-async fn shutdown_spdk_process(agent: NodeAgent) -> Result<impl Reply, Rejection> {
-    println!("Received request to gracefully shut down SPDK process via RPC.");
-    
-    let http_client = HttpClient::new();
-
-    // The `spdk_app_stop` RPC tells the SPDK application to initiate a clean exit.
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "spdk_app_stop",
-            "params": {} // spdk_app_stop takes no parameters
-        }))
-        .send()
-        .await;
-
-    match response {
-        Ok(res) if res.status().is_success() => {
-            println!("Successfully sent spdk_app_stop RPC. SPDK will now shut down.");
-            let reply = reply::json(&json!({
-                "success": true,
-                "message": "SPDK shutdown initiated successfully."
-            }));
-            Ok(reply::with_status(reply, StatusCode::OK))
-        }
-        Ok(res) => {
-            let status = res.status();
-            let err_text = res.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
-            eprintln!("Failed to initiate SPDK shutdown, RPC returned error: {} - {}", status, err_text);
             
-            let reply = reply::json(&json!({
-                "success": false,
-                "error": format!("SPDK RPC call failed with status {}: {}", status, err_text)
-            }));
-            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
-        }
-        Err(e) => {
-            eprintln!("Failed to send SPDK shutdown RPC: {}", e);
-            let reply = reply::json(&json!({
-                "success": false,
-                "error": format!("Failed to connect to SPDK RPC server at {}: {}", agent.spdk_rpc_url, e)
-            }));
-            Ok(reply::with_status(reply, StatusCode::SERVICE_UNAVAILABLE))
-        }
-    }
-}
