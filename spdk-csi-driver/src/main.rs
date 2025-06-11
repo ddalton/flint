@@ -93,7 +93,7 @@ parameters:
   autoRebuild: "true"
 */
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SpdkCsiDriver {
     node_id: String,
     kube_client: Client,
@@ -464,6 +464,7 @@ impl SpdkCsiDriver {
             base_bdevs_list,
             rebuild_info,
             superblock_version: raid_bdev["superblock_version"].as_u64().map(|v| v as u32),
+            process_request_fn: raid_bdev["process_request_fn"].as_str().map(|s| s.to_string()),  
             read_policy: raid_bdev["read_policy"].as_str().map(|s| s.to_string()),
             primary_member_slot: Some(0), // Assume first member is primary
         })
@@ -1111,48 +1112,59 @@ impl Controller for SpdkCsiDriver {
             .and_then(|n| n.parse::<i32>().ok())
             .unwrap_or(1);
 
-        // Create the volume (existing logic)
         let (spdk_volume, new_volume_id) = if let Some(source) = &req.volume_content_source {
-            // Handle snapshot creation logic...
-            if let Some(snapshot_source) = &source.snapshot {
-                let snapshot_id = &snapshot_source.snapshot_id;
-                
-                let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.kube_client.clone(), "default");
-                let snapshot_crd = snapshots_api.get(snapshot_id).await
-                    .map_err(|_| Status::not_found(format!("Source snapshot {} not found", snapshot_id)))?;
+            // Handle volume content source - check the type field
+            match &source.r#type {
+                Some(volume_content_source::Type::Snapshot(snapshot_source)) => {
+                    let snapshot_id = &snapshot_source.snapshot_id;
+                    
+                    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.kube_client.clone(), "default");
+                    let snapshot_crd = snapshots_api.get(snapshot_id).await
+                        .map_err(|_| Status::not_found(format!("Source snapshot {} not found", snapshot_id)))?;
 
-                let source_replica_snapshot = snapshot_crd.spec.replica_snapshots.first()
-                    .ok_or_else(|| Status::not_found(format!("No replica snapshots in {}", snapshot_id)))?;
-                
-                // Provision the destination volume (RAID or single lvol)
-                let (dest_spdk_volume, dest_bdev_name) = if num_replicas > 1 {
-                    self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?
-                } else {
-                    self.provision_single_lvol_volume(&volume_name, capacity, &req.parameters).await?
-                };
+                    let source_replica_snapshot = snapshot_crd.spec.replica_snapshots.first()
+                        .ok_or_else(|| Status::not_found(format!("No replica snapshots in {}", snapshot_id)))?;
+                    
+                    // Provision the destination volume (RAID or single lvol)
+                    let (dest_spdk_volume, dest_bdev_name) = if num_replicas > 1 {
+                        self.provision_new_raid_volume(&volume_name, capacity, &req.parameters).await?
+                    } else {
+                        self.provision_single_lvol_volume(&volume_name, capacity, &req.parameters).await?
+                    };
 
-                // Perform the copy/clone
-                let http_client = HttpClient::new();
-                let source_node_rpc_url = self.get_rpc_url_for_node(&source_replica_snapshot.node_name).await?;
-                let copy_response = http_client.post(&source_node_rpc_url)
-                    .json(&json!({
-                        "method": "bdev_copy",
-                        "params": {
-                            "src_bdev": &source_replica_snapshot.spdk_snapshot_lvol,
-                            "dst_bdev": &dest_bdev_name,
-                        }
-                    }))
-                    .send().await.map_err(|e| Status::internal(format!("SPDK bdev_copy RPC failed: {}", e)))?;
+                    // Perform the copy/clone
+                    let http_client = HttpClient::new();
+                    let source_node_rpc_url = self.get_rpc_url_for_node(&source_replica_snapshot.node_name).await?;
+                    let copy_response = http_client.post(&source_node_rpc_url)
+                        .json(&json!({
+                            "method": "bdev_copy",
+                            "params": {
+                                "src_bdev": &source_replica_snapshot.spdk_snapshot_lvol,
+                                "dst_bdev": &dest_bdev_name,
+                            }
+                        }))
+                        .send().await.map_err(|e| Status::internal(format!("SPDK bdev_copy RPC failed: {}", e)))?;
 
-                if !copy_response.status().is_success() {
-                    let err_text = copy_response.text().await.unwrap_or_default();
-                    self.delete_volume(Request::new(DeleteVolumeRequest { volume_id: dest_spdk_volume.spec.volume_id.clone() })).await.ok();
-                    return Err(Status::internal(format!("Failed to copy data: {}", err_text)));
+                    if !copy_response.status().is_success() {
+                        let err_text = copy_response.text().await.unwrap_or_default();
+                        self.delete_volume(Request::new(DeleteVolumeRequest { 
+                            volume_id: dest_spdk_volume.spec.volume_id.clone(),
+                            secrets: std::collections::HashMap::new(),
+                        })).await.ok();
+                        return Err(Status::internal(format!("Failed to copy data: {}", err_text)));
+                    }
+
+                    (dest_spdk_volume, dest_bdev_name)
                 }
-
-                (dest_spdk_volume, dest_bdev_name)
-            } else {
-                return Err(Status::invalid_argument("Unsupported volume content source"));
+                Some(volume_content_source::Type::Volume(volume_source)) => {
+                    // Handle volume cloning
+                    let source_volume_id = &volume_source.volume_id;
+                    // Implement volume cloning logic here if needed
+                    return Err(Status::unimplemented("Volume cloning not yet implemented"));
+                }
+                None => {
+                    return Err(Status::invalid_argument("Volume content source type not specified"));
+                }
             }
         } else {
             // Create an empty volume (RAID or single lvol)
@@ -1329,9 +1341,8 @@ impl Controller for SpdkCsiDriver {
 
     async fn controller_get_capabilities(
         &self,
-        _request: Request<()>,
+        _request: Request<ControllerGetCapabilitiesRequest>,
     ) -> Result<Response<ControllerGetCapabilitiesResponse>, Status> {
-        use csi_driver::csi::controller_service_capability;
 
         Ok(Response::new(ControllerGetCapabilitiesResponse {
             capabilities: vec![
@@ -1379,7 +1390,7 @@ impl Controller for SpdkCsiDriver {
 impl Identity for SpdkCsiDriver {
     async fn get_plugin_info(
         &self,
-        _request: Request<()>,
+        _request: Request<GetPluginInfoRequest>,
     ) -> Result<Response<GetPluginInfoResponse>, Status> {
         Ok(Response::new(GetPluginInfoResponse {
             name: "flint.csi.storage.io".to_string(),
@@ -1390,9 +1401,8 @@ impl Identity for SpdkCsiDriver {
 
     async fn get_plugin_capabilities(
         &self,
-        _request: Request<()>,
+        _request: Request<GetPluginCapabilitiesRequest>,
     ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
-        use csi_driver::csi::plugin_capability;
 
         Ok(Response::new(GetPluginCapabilitiesResponse {
             capabilities: vec![
@@ -1414,7 +1424,7 @@ impl Identity for SpdkCsiDriver {
         }))
     }
 
-    async fn probe(&self, _request: Request<()>) -> Result<Response<ProbeResponse>, Status> {
+    async fn probe(&self, _request: Request<ProbeRequest>) -> Result<Response<ProbeResponse>, Status> {
         Ok(Response::new(ProbeResponse {
             ready: Some(true),
         }))
@@ -1609,9 +1619,9 @@ impl Node for SpdkCsiDriver {
             Ok(stats) => {
                 // Add block-level statistics (always available for SPDK volumes)
                 usage.push(VolumeUsage {
-                    available: stats.available_bytes,
-                    total: stats.total_bytes,
-                    used: stats.used_bytes,
+                    available: stats.available_bytes as i64,
+                    total: stats.total_bytes as i64,
+                    used: stats.used_bytes as i64,
                     unit: volume_usage::Unit::Bytes as i32,
                 });
 
@@ -1987,26 +1997,42 @@ impl Node for SpdkCsiDriver {
             .await
             .map_err(|e| Status::internal(format!("Failed to start vhost-user-nvme: {}", e)))?;
 
-        // Handle block vs filesystem mounting
-        if volume_capability.block.is_some() {
-            if !Path::new(&device_path).exists() {
-                return Err(Status::internal("Vhost NVMe device not found after starting process"));
+        // Handle block vs filesystem mounting - check the access_type field
+        match &volume_capability.access_type {
+            Some(volume_capability::AccessType::Block(_)) => {
+                // Block device mode
+                if !Path::new(&device_path).exists() {
+                    return Err(Status::internal("Vhost NVMe device not found after starting process"));
+                }
+                return Ok(Response::new(NodeStageVolumeResponse {}));
             }
-            return Ok(Response::new(NodeStageVolumeResponse {}));
+            Some(volume_capability::AccessType::Mount(mount_volume)) => {
+                // Mount mode - fix the fs_type access
+                let fs_type = if mount_volume.fs_type.is_empty() {
+                    "ext4".to_string()
+                } else {
+                    mount_volume.fs_type.clone()
+                };
+
+                // Fix the error conversion
+                if !is_device_formatted(&device_path)
+                    .map_err(|e| Status::internal(format!("Failed to check device format: {}", e)))? 
+                {
+                    format_device(&device_path, &fs_type)
+                        .map_err(|e| Status::internal(format!("Failed to format device: {}", e)))?;
+                }
+
+                let mount_flags = mount_volume.mount_flags.clone();
+                mount_device(&device_path, &staging_target_path, &fs_type, &mount_flags)
+                    .map_err(|e| Status::internal(format!("Failed to mount device: {}", e)))?;
+
+                Ok(Response::new(NodeStageVolumeResponse {}))
+            }
+            None => {
+                Err(Status::invalid_argument("Volume capability access type not specified"))
+            }
         }
 
-        let fs_type = volume_capability.mount.as_ref().map(|m| m.fs_type.clone()).unwrap_or("ext4".to_string());
-
-        if !is_device_formatted(&device_path)? {
-            format_device(&device_path, &fs_type)
-                .map_err(|e| Status::internal(format!("Failed to format device: {}", e)))?;
-        }
-
-        let mount_flags = volume_capability.mount.as_ref().map(|m| m.mount_flags.clone()).unwrap_or_default();
-        mount_device(&device_path, &staging_target_path, &fs_type, &mount_flags)
-            .map_err(|e| Status::internal(format!("Failed to mount device: {}", e)))?;
-
-        Ok(Response::new(NodeStageVolumeResponse {}))
     }
 
     async fn node_unstage_volume(
@@ -2070,7 +2096,6 @@ impl Node for SpdkCsiDriver {
         &self,
         _request: Request<NodeGetCapabilitiesRequest>,
     ) -> Result<Response<NodeGetCapabilitiesResponse>, Status> {
-        use csi_driver::csi::node_service_capability;
 
         Ok(Response::new(NodeGetCapabilitiesResponse {
             capabilities: vec![
@@ -2088,11 +2113,19 @@ impl Node for SpdkCsiDriver {
                         },
                     )),
                 },
-                // Advertise that the driver understands volume topology.
+                // Add volume condition capability if you want to report volume health
                 NodeServiceCapability {
                     r#type: Some(node_service_capability::Type::Rpc(
                         node_service_capability::Rpc {
-                            r#type: node_service_capability::rpc::Type::VolumeAccessibilityConstraints as i32,
+                            r#type: node_service_capability::rpc::Type::VolumeCondition as i32,
+                        },
+                    )),
+                },
+                // Add expand volume capability if you support online volume expansion
+                NodeServiceCapability {
+                    r#type: Some(node_service_capability::Type::Rpc(
+                        node_service_capability::Rpc {
+                            r#type: node_service_capability::rpc::Type::ExpandVolume as i32,
                         },
                     )),
                 },
@@ -2104,6 +2137,41 @@ impl Node for SpdkCsiDriver {
 }
 
 impl SpdkCsiDriver {
+    async fn ensure_vhost_controller_active(
+        &self,
+        volume_id: &str,
+        socket_path: &str,
+    ) -> Result<(), Status> {
+        let http_client = reqwest::Client::new();
+        let controller_name = format!("vhost_{}", volume_id);
+
+        // Check if controller exists and is active
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "vhost_get_controllers"
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to check vhost controllers: {}", e)))?;
+
+        if let Ok(controllers_info) = response.json::<serde_json::Value>().await {
+            if let Some(controllers) = controllers_info["result"].as_array() {
+                for controller in controllers {
+                    if controller["ctrlr"].as_str() == Some(&controller_name) {
+                        if controller["active"].as_bool() == Some(true) {
+                            return Ok(()); // Controller is active
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(Status::failed_precondition(
+            format!("Vhost controller {} is not active", controller_name)
+        ))
+    }
+
     async fn find_vhost_device_path(&self, socket_path: &str) -> Result<String, Status> {
         // Wait for the vhost device to appear (up to 30 seconds)
         let max_wait = std::time::Duration::from_secs(30);
