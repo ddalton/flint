@@ -9,8 +9,15 @@ use kube::api::{Api, PostParams, Patch, PatchParams};
 use reqwest::Client as HttpClient;
 use serde_json::json;
 use tonic::{Request, Response, Status};
-use chrono::Utc;
 use crate::SpdkCsiDriver;
+use std::time::SystemTime;
+use chrono::{DateTime, Utc};
+
+// Helper function to convert DateTime<Utc> to prost_types::Timestamp
+fn datetime_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
+    let system_time: SystemTime = dt.into();
+    system_time.into()
+}
 
 /// An RAII guard to ensure the RAID device is resumed.
 struct RaiiRaidResume<'a> {
@@ -177,7 +184,7 @@ impl SpdkCsiDriver {
             snapshot: Some(Snapshot {
                 snapshot_id,
                 source_volume_id,
-                creation_time: Some(creation_time.into()),
+                creation_time:  Some(datetime_to_timestamp(creation_time)),
                 ready_to_use: true,
                 size_bytes: source_volume.spec.size_bytes,
                 ..Default::default()
@@ -249,7 +256,7 @@ impl SpdkCsiDriver {
                     snapshot: Some(Snapshot {
                         snapshot_id: s.spec.snapshot_id,
                         source_volume_id: s.spec.source_volume_id,
-                        creation_time: status.creation_time.map(|t| t.into()),
+                        creation_time: status.creation_time.map(|t| datetime_to_timestamp(t)),
                         ready_to_use: status.ready_to_use,
                         size_bytes: status.size_bytes,
                         ..Default::default()

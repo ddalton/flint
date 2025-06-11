@@ -20,6 +20,7 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.11"
 prost = "0.12"
+prost-types = "0.12"
 kube = { version = "1.1.0", features = ["client", "derive", "runtime"] }
 kube-derive = "1.1.0"
 k8s-openapi = { version = "0.25.0", features = ["v1_30"] }
@@ -32,9 +33,10 @@ clap = { version = "4.0", features = ["derive"] }
 warp = "0.3.7"
 schemars = { version = "0.8.15", features = ["chrono"] }
 regex = "1.11.1"
+futures = "0.3.31"
 
 [build-dependencies]
-tonic-build = "0.10"
+tonic-build = "0.11"
 
 [lib]
 name = "spdk_csi_driver"

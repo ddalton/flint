@@ -25,6 +25,44 @@ struct Context {
     // Removed rebuild tracking - SPDK handles this
 }
 
+// Custom error type that is Send + Sync
+#[derive(Debug, Clone)]
+pub struct ControllerError {
+    pub message: String,
+}
+
+impl std::fmt::Display for ControllerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ControllerError {}
+
+impl From<Box<dyn std::error::Error>> for ControllerError {
+    fn from(err: Box<dyn std::error::Error>) -> Self {
+        ControllerError {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<reqwest::Error> for ControllerError {
+    fn from(err: reqwest::Error) -> Self {
+        ControllerError {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for ControllerError {
+    fn from(err: serde_json::Error) -> Self {
+        ControllerError {
+            message: err.to_string(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
@@ -56,14 +94,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vhost_cleanup_task(cleanup_ctx).await;
     });
 
-    Controller::new(spdk_volumes, watcher::Config::default())
-        .run(reconcile, error_policy, ctx)
-        .await;
+    // Fix: Use for_each instead of await, and fix reconcile function signature
+    let controller = Controller::new(spdk_volumes, watcher::Config::default())
+        .run(reconcile, error_policy, ctx);
+    
+    // Run the controller stream
+    use futures::stream::StreamExt;
+    controller.for_each(|res| async move {
+        match res {
+            Ok((obj_ref, action)) => {
+                println!("Reconciled {}: {:?}", obj_ref.name, action);
+            }
+            Err(e) => {
+                eprintln!("Controller error: {}", e);
+            }
+        }
+    }).await;
 
     Ok(())
 }
 
-async fn reconcile(spdk_volume: SpdkVolume, ctx: Arc<Context>) -> Result<(), kube::Error> {
+async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
     let volume_id = spdk_volume.spec.volume_id.clone();
@@ -163,14 +214,14 @@ async fn reconcile(spdk_volume: SpdkVolume, ctx: Arc<Context>) -> Result<(), kub
         spdk_volumes.patch_status(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await?;
     }
 
-    Ok(())
+    Ok(Action::requeue(Duration::from_secs(300)))
 }
 
 // New function to get RAID status directly from SPDK
 async fn get_raid_status(
     ctx: &Context,
     volume_id: &str,
-) -> Result<Option<RaidStatus>, Box<dyn std::error::Error>> {
+) -> Result<Option<RaidStatus>, ControllerError> {
     let http_client = HttpClient::new();
     
     let response = http_client
@@ -194,7 +245,7 @@ async fn get_raid_status(
         for raid_bdev in raid_bdevs {
             if let Some(name) = raid_bdev["name"].as_str() {
                 if name == volume_id {
-                    return Ok(Some(parse_raid_status(raid_bdev)?));
+                    return Ok(Some(RaidStatus::from_spdk_response(raid_bdev)?));
                 }
             }
         }
@@ -203,54 +254,13 @@ async fn get_raid_status(
     Ok(None)
 }
 
-fn parse_raid_status(raid_bdev: &serde_json::Value) -> Result<RaidStatus, Box<dyn std::error::Error>> {
-    let base_bdevs_list: Vec<RaidMember> = raid_bdev["base_bdevs"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .enumerate()
-        .map(|(i, member)| RaidMember {
-            name: member["name"].as_str().unwrap_or("").to_string(),
-            state: member["state"].as_str().unwrap_or("unknown").to_string(),
-            slot: i as u32,
-            uuid: member["uuid"].as_str().map(|s| s.to_string()),
-            is_configured: member["is_configured"].as_bool().unwrap_or(false),
-        })
-        .collect();
-
-    let rebuild_info = if let Some(rebuild) = raid_bdev["rebuild_info"].as_object() {
-        Some(RaidRebuildInfo {
-            state: rebuild["state"].as_str().unwrap_or("").to_string(),
-            target_slot: rebuild["target_slot"].as_u64().unwrap_or(0) as u32,
-            source_slot: rebuild["source_slot"].as_u64().unwrap_or(0) as u32,
-            blocks_remaining: rebuild["blocks_remaining"].as_u64().unwrap_or(0),
-            blocks_total: rebuild["blocks_total"].as_u64().unwrap_or(0),
-            progress_percentage: rebuild["progress_percentage"].as_f64().unwrap_or(0.0),
-        })
-    } else {
-        None
-    };
-
-    Ok(RaidStatus {
-        raid_level: raid_bdev["raid_level"].as_u64().unwrap_or(1) as u32,
-        state: raid_bdev["state"].as_str().unwrap_or("unknown").to_string(),
-        num_base_bdevs: raid_bdev["num_base_bdevs"].as_u64().unwrap_or(0) as u32,
-        num_base_bdevs_discovered: raid_bdev["num_base_bdevs_discovered"].as_u64().unwrap_or(0) as u32,
-        num_base_bdevs_operational: raid_bdev["num_base_bdevs_operational"].as_u64().unwrap_or(0) as u32,
-        base_bdevs_list,
-        rebuild_info,
-        superblock_version: raid_bdev["superblock_version"].as_u64().map(|v| v as u32),
-        process_request_fn: raid_bdev["process_request_fn"].as_str().map(|s| s.to_string()),
-    })
-}
-
 // Updated function to handle failed replicas using SPDK's native RAID capabilities
 async fn handle_failed_replica_with_spdk(
     spdk_volume: &SpdkVolume,
     ctx: &Context,
     failed_replica_index: usize,
     spdk_disks: &Api<SpdkDisk>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ControllerError> {
     let volume_id = &spdk_volume.spec.volume_id;
     
     // Find a suitable replacement disk
@@ -610,7 +620,7 @@ async fn create_vhost_controller_for_volume(
 async fn delete_vhost_controller(
     ctx: &Context,
     volume_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ControllerError> {
     let http_client = HttpClient::new();
     let controller_name = format!("vhost_{}", volume_id);
     let socket_path = get_vhost_socket_path(ctx, volume_id);
@@ -700,7 +710,7 @@ async fn vhost_cleanup_task(ctx: Arc<Context>) {
 
 async fn cleanup_orphaned_vhost_controllers(
     ctx: &Context,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ControllerError> {
     let http_client = HttpClient::new();
     
     let response = http_client
@@ -718,7 +728,8 @@ async fn cleanup_orphaned_vhost_controllers(
     let controllers: serde_json::Value = response.json().await?;
     if let Some(controller_list) = controllers["result"].as_array() {
         let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-        let volumes = spdk_volumes.list(&ListParams::default()).await?;
+        let volumes = spdk_volumes.list(&ListParams::default()).await
+            .map_err(|e| ControllerError { message: format!("Failed to list volumes: {}", e) })?;
         
         for controller in controller_list {
             if let Some(controller_name) = controller["ctrlr"].as_str() {
@@ -752,9 +763,10 @@ async fn health_monitor_task(ctx: Arc<Context>) {
     }
 }
 
-async fn perform_periodic_health_check(ctx: &Context) -> Result<(), Box<dyn std::error::Error>> {
+async fn perform_periodic_health_check(ctx: &Context) -> Result<(), ControllerError> {
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    let volumes = spdk_volumes.list(&ListParams::default()).await?;
+    let volumes = spdk_volumes.list(&ListParams::default()).await
+        .map_err(|e| ControllerError { message: format!("Failed to list volumes: {}", e) })?;
     
     for volume in volumes {
         // Get updated RAID status from SPDK
@@ -817,7 +829,7 @@ async fn perform_periodic_health_check(ctx: &Context) -> Result<(), Box<dyn std:
 async fn get_lvol_status(
     ctx: &Context,
     bdev_name: &str,
-) -> Result<LvolStatus, Box<dyn std::error::Error>> {
+) -> Result<LvolStatus, ControllerError> {
     let http_client = HttpClient::new();
     
     let response = http_client
@@ -862,13 +874,12 @@ async fn get_lvol_status(
 fn error_policy(obj: Arc<SpdkVolume>, error: &kube::Error, _ctx: Arc<Context>) -> Action {
     match error {
         kube::Error::Api(api_error) if api_error.code == 404 => {
-            // Don't requeue if object was deleted - use NoRequeue instead of Await
-            Action::NoRequeue
+            Action::await_change()
         }
         _ => {
             eprintln!("Error reconciling volume {}: {}", 
                       obj.spec.volume_id, error);
-            Action::Requeue(Duration::from_secs(60))
+            Action::requeue(Duration::from_secs(60))
         }
     }
 }

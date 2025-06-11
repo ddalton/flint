@@ -415,59 +415,13 @@ impl SpdkCsiDriver {
             for raid_bdev in raid_bdevs {
                 if let Some(name) = raid_bdev["name"].as_str() {
                     if name == volume_id {
-                        return Ok(Some(self.parse_raid_status(raid_bdev)?));
+                        return Ok(Some(RaidStatus::from_spdk_response(raid_bdev)?));
                     }
                 }
             }
         }
         
         Ok(None)
-    }
-
-    fn parse_raid_status(&self, raid_bdev: &serde_json::Value) -> Result<RaidStatus, Box<dyn std::error::Error>> {
-        let base_bdevs_list: Vec<RaidMember> = raid_bdev["base_bdevs"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .enumerate()
-            .map(|(i, member)| RaidMember {
-                name: member["name"].as_str().unwrap_or("").to_string(),
-                state: member["state"].as_str().unwrap_or("unknown").to_string(),
-                slot: i as u32,
-                uuid: member["uuid"].as_str().map(|s| s.to_string()),
-                is_configured: member["is_configured"].as_bool().unwrap_or(false),
-                node: None, // Will be filled in later
-                is_local: None,
-                read_priority: Some(i as u32),
-            })
-            .collect();
-
-        let rebuild_info = if let Some(rebuild) = raid_bdev["rebuild_info"].as_object() {
-            Some(RaidRebuildInfo {
-                state: rebuild["state"].as_str().unwrap_or("").to_string(),
-                target_slot: rebuild["target_slot"].as_u64().unwrap_or(0) as u32,
-                source_slot: rebuild["source_slot"].as_u64().unwrap_or(0) as u32,
-                blocks_remaining: rebuild["blocks_remaining"].as_u64().unwrap_or(0),
-                blocks_total: rebuild["blocks_total"].as_u64().unwrap_or(0),
-                progress_percentage: rebuild["progress_percentage"].as_f64().unwrap_or(0.0),
-            })
-        } else {
-            None
-        };
-
-        Ok(RaidStatus {
-            raid_level: raid_bdev["raid_level"].as_u64().unwrap_or(1) as u32,
-            state: raid_bdev["state"].as_str().unwrap_or("unknown").to_string(),
-            num_base_bdevs: raid_bdev["num_base_bdevs"].as_u64().unwrap_or(0) as u32,
-            num_base_bdevs_discovered: raid_bdev["num_base_bdevs_discovered"].as_u64().unwrap_or(0) as u32,
-            num_base_bdevs_operational: raid_bdev["num_base_bdevs_operational"].as_u64().unwrap_or(0) as u32,
-            base_bdevs_list,
-            rebuild_info,
-            superblock_version: raid_bdev["superblock_version"].as_u64().map(|v| v as u32),
-            process_request_fn: raid_bdev["process_request_fn"].as_str().map(|s| s.to_string()),  
-            read_policy: raid_bdev["read_policy"].as_str().map(|s| s.to_string()),
-            primary_member_slot: Some(0), // Assume first member is primary
-        })
     }
 
     // Enhanced volume status update with locality information
@@ -1089,6 +1043,430 @@ impl SpdkCsiDriver {
 
 #[tonic::async_trait]
 impl Controller for SpdkCsiDriver {
+    async fn controller_publish_volume(
+        &self,
+        _request: Request<ControllerPublishVolumeRequest>,
+    ) -> Result<Response<ControllerPublishVolumeResponse>, Status> {
+        // SPDK CSI driver handles attachment at the node level during staging
+        // No controller-level attachment is needed
+        Ok(Response::new(ControllerPublishVolumeResponse {
+            publish_context: std::collections::HashMap::new(),
+        }))
+    }
+
+    async fn controller_unpublish_volume(
+        &self,
+        _request: Request<ControllerUnpublishVolumeRequest>,
+    ) -> Result<Response<ControllerUnpublishVolumeResponse>, Status> {
+        // SPDK CSI driver handles detachment at the node level during unstaging
+        // No controller-level detachment is needed
+        Ok(Response::new(ControllerUnpublishVolumeResponse {}))
+    }
+
+    async fn validate_volume_capabilities(
+        &self,
+        request: Request<ValidateVolumeCapabilitiesRequest>,
+    ) -> Result<Response<ValidateVolumeCapabilitiesResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        // Check if volume exists
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        match volumes_api.get(&volume_id).await {
+            Ok(_) => {
+                // Validate each capability
+                let mut confirmed_capabilities = Vec::new();
+                
+                for capability in req.volume_capabilities {
+                    // Check access mode
+                    let supported_access_mode = if let Some(access_mode) = &capability.access_mode {
+                        let mode_value = access_mode.mode;
+                        mode_value == (volume_capability::access_mode::Mode::SingleNodeWriter as i32) ||
+                        mode_value == (volume_capability::access_mode::Mode::SingleNodeReaderOnly as i32) ||
+                        mode_value == (volume_capability::access_mode::Mode::SingleNodeSingleWriter as i32)
+                    } else {
+                        false
+                    };
+
+                    // Check access type (block or mount)
+                    let supported_access_type = matches!(
+                        capability.access_type,
+                        Some(volume_capability::AccessType::Block(_)) |
+                        Some(volume_capability::AccessType::Mount(_))
+                    );
+
+                    if supported_access_mode && supported_access_type {
+                        confirmed_capabilities.push(capability);
+                    }
+                }
+
+                let is_empty = confirmed_capabilities.is_empty();
+
+
+                Ok(Response::new(ValidateVolumeCapabilitiesResponse {
+                    confirmed: if is_empty {
+                        None
+                    } else {
+                        Some(validate_volume_capabilities_response::Confirmed { 
+                            volume_capabilities: confirmed_capabilities,
+                            volume_context: req.volume_context,
+                            parameters: req.parameters,
+                            mutable_parameters: std::collections::HashMap::new(),
+                        })
+                    },
+                    message: if is_empty {
+                        "Unsupported volume capabilities".to_string()
+                    } else {
+                        "Volume capabilities validated successfully".to_string()
+                    },
+                }))
+            }
+            Err(_) => Err(Status::not_found(format!("Volume {} not found", volume_id))),
+        }
+    }
+
+    async fn list_volumes(
+        &self,
+        request: Request<ListVolumesRequest>,
+    ) -> Result<Response<ListVolumesResponse>, Status> {
+        let req = request.into_inner();
+        let max_entries = req.max_entries as usize;
+        let starting_token = req.starting_token;
+
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let volume_list = volumes_api.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list volumes: {}", e)))?;
+
+        let mut entries = Vec::new();
+        let mut start_index = 0;
+
+        // Handle pagination
+        if !starting_token.is_empty() {
+            start_index = starting_token.parse().unwrap_or(0);
+        }
+
+        let volumes_slice = if max_entries > 0 {
+            volume_list.items.iter()
+                .skip(start_index)
+                .take(max_entries)
+                .collect::<Vec<_>>()
+        } else {
+            volume_list.items.iter().skip(start_index).collect::<Vec<_>>()
+        };
+
+        for volume in volumes_slice {
+            let volume_context = std::collections::HashMap::from([
+                ("storageType".to_string(), if volume.spec.num_replicas > 1 { 
+                    "vhost-raid".to_string() 
+                } else { 
+                    "vhost-lvol".to_string() 
+                }),
+                ("schedulingPolicy".to_string(), 
+                 volume.spec.scheduling_policy.clone().unwrap_or("AnyNode".to_string())),
+            ]);
+
+            // Create topology based on replica nodes
+            let accessible_topology = volume.spec.replicas.iter()
+                .map(|replica| Topology {
+                    segments: [(
+                        "topology.kubernetes.io/hostname".to_string(),
+                        replica.node.clone(),
+                    )].into_iter().collect(),
+                })
+                .collect();
+
+            let entry = list_volumes_response::Entry {
+                volume: Some(Volume {
+                    volume_id: volume.spec.volume_id.clone(),
+                    capacity_bytes: volume.spec.size_bytes,
+                    volume_context,
+                    content_source: None,
+                    accessible_topology,
+                }),
+                status: volume.status.as_ref().map(|s| list_volumes_response::VolumeStatus {
+                    published_node_ids: if let Some(scheduled_node) = &s.scheduled_node {
+                        vec![scheduled_node.clone()]
+                    } else {
+                        vec![]
+                    },
+                    volume_condition: if s.degraded {
+                        Some(VolumeCondition {
+                            abnormal: true,
+                            message: "Volume is in degraded state".to_string(),
+                        })
+                    } else {
+                        None
+                    },
+                }),
+            };
+
+            entries.push(entry);
+        }
+
+        // Calculate next token
+        let next_token = if max_entries > 0 && entries.len() == max_entries {
+            (start_index + max_entries).to_string()
+        } else {
+            String::new()
+        };
+
+        Ok(Response::new(ListVolumesResponse {
+            entries,
+            next_token,
+        }))
+    }
+
+    async fn get_capacity(
+        &self,
+        request: Request<GetCapacityRequest>,
+    ) -> Result<Response<GetCapacityResponse>, Status> {
+        let req = request.into_inner();
+        
+        // Parse topology requirements if specified
+        let mut target_nodes = Vec::new();
+        if let Some(topology) = req.accessible_topology {
+            if let Some(hostname) = topology.segments.get("topology.kubernetes.io/hostname") {
+                target_nodes.push(hostname.clone());
+            }
+        }
+
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), "default");
+        let disk_list = disks_api.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list disks: {}", e)))?;
+
+        let total_capacity = disk_list.items.iter()
+            .filter(|disk| {
+                // Filter by topology if specified
+                if !target_nodes.is_empty() && !target_nodes.contains(&disk.spec.node) {
+                    return false;
+                }
+                
+                // Only count healthy disks with initialized blobstores
+                disk.status.as_ref().map_or(false, |s| 
+                    s.healthy && s.blobstore_initialized
+                )
+            })
+            .map(|disk| disk.status.as_ref().unwrap().free_space)
+            .sum::<i64>();
+
+        Ok(Response::new(GetCapacityResponse {
+            available_capacity: total_capacity,
+            maximum_volume_size: Some(total_capacity), // Single volume can use all available space
+            minimum_volume_size: Some(1024 * 1024 * 1024), // 1GB minimum
+        }))
+    }
+
+    async fn create_snapshot(
+        &self,
+        request: Request<CreateSnapshotRequest>,
+    ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        // Delegate to the implementation in csi_snapshotter.rs
+        self.create_snapshot_impl(request).await
+    }
+
+    async fn delete_snapshot(
+        &self,
+        request: Request<DeleteSnapshotRequest>,
+    ) -> Result<Response<DeleteSnapshotResponse>, Status> {
+        // Delegate to the implementation in csi_snapshotter.rs
+        self.delete_snapshot_impl(request).await
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<ListSnapshotsRequest>,
+    ) -> Result<Response<ListSnapshotsResponse>, Status> {
+        // Delegate to the implementation in csi_snapshotter.rs
+        self.list_snapshots_impl(request).await
+    }
+
+    async fn controller_expand_volume(
+        &self,
+        request: Request<ControllerExpandVolumeRequest>,
+    ) -> Result<Response<ControllerExpandVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let new_capacity = req.capacity_range
+            .as_ref()
+            .map(|cr| cr.required_bytes)
+            .unwrap_or(0);
+
+        if volume_id.is_empty() || new_capacity <= 0 {
+            return Err(Status::invalid_argument("Volume ID and new capacity are required"));
+        }
+
+        // Get the volume
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+
+        if new_capacity <= volume.spec.size_bytes {
+            return Err(Status::invalid_argument("New capacity must be larger than current capacity"));
+        }
+
+        // Check if all target disks have enough free space
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), "default");
+        let capacity_increase = new_capacity - volume.spec.size_bytes;
+
+        for replica in &volume.spec.replicas {
+            if let Ok(disk) = disks_api.get(&replica.disk_ref).await {
+                if let Some(status) = &disk.status {
+                    if status.free_space < capacity_increase {
+                        return Err(Status::resource_exhausted(
+                            format!("Insufficient space on disk {} (node: {})", 
+                                   replica.disk_ref, replica.node)
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Expand lvols on each replica
+        let http_client = reqwest::Client::new();
+        let mut failed_replicas = Vec::new();
+
+        for replica in &volume.spec.replicas {
+            if let Some(lvol_uuid) = &replica.lvol_uuid {
+                let rpc_url = self.get_rpc_url_for_node(&replica.node).await?;
+                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
+
+                let response = http_client
+                    .post(&rpc_url)
+                    .json(&serde_json::json!({
+                        "method": "bdev_lvol_resize",
+                        "params": {
+                            "name": lvol_name,
+                            "size": new_capacity
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+                if !response.status().is_success() {
+                    let error_text = response.text().await.unwrap_or_default();
+                    failed_replicas.push(format!("Replica on node {}: {}", replica.node, error_text));
+                }
+            }
+        }
+
+        if !failed_replicas.is_empty() {
+            return Err(Status::internal(format!("Failed to expand replicas: {:?}", failed_replicas)));
+        }
+
+        // Update volume spec with new capacity
+        let patch = serde_json::json!({
+            "spec": {
+                "size_bytes": new_capacity
+            }
+        });
+        volumes_api.patch(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await
+            .map_err(|e| Status::internal(format!("Failed to update volume spec: {}", e)))?;
+
+        // Update disk statuses
+        for replica in &volume.spec.replicas {
+            if let Ok(disk) = disks_api.get(&replica.disk_ref).await {
+                let mut status = disk.status.unwrap_or_default();
+                status.free_space -= capacity_increase;
+                status.used_space += capacity_increase;
+                status.last_checked = chrono::Utc::now().to_rfc3339();
+
+                disks_api
+                    .patch_status(&replica.disk_ref, &PatchParams::default(), 
+                                 &Patch::Merge(serde_json::json!({"status": status})))
+                    .await
+                    .ok(); // Ignore disk status update errors
+            }
+        }
+
+        Ok(Response::new(ControllerExpandVolumeResponse {
+            capacity_bytes: new_capacity,
+            node_expansion_required: true, // Always require node expansion for filesystem resize
+        }))
+    }
+
+    async fn controller_get_volume(
+        &self,
+        request: Request<ControllerGetVolumeRequest>,
+    ) -> Result<Response<ControllerGetVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|_| Status::not_found(format!("Volume {} not found", volume_id)))?;
+
+        let volume_context = std::collections::HashMap::from([
+            ("storageType".to_string(), if volume.spec.num_replicas > 1 { 
+                "vhost-raid".to_string() 
+            } else { 
+                "vhost-lvol".to_string() 
+            }),
+            ("schedulingPolicy".to_string(), 
+             volume.spec.scheduling_policy.clone().unwrap_or("AnyNode".to_string())),
+        ]);
+
+        let accessible_topology = volume.spec.replicas.iter()
+            .map(|replica| Topology {
+                segments: [(
+                    "topology.kubernetes.io/hostname".to_string(),
+                    replica.node.clone(),
+                )].into_iter().collect(),
+            })
+            .collect();
+
+        let csi_volume = Volume {
+            volume_id: volume.spec.volume_id.clone(),
+            capacity_bytes: volume.spec.size_bytes,
+            volume_context,
+            content_source: None,
+            accessible_topology,
+        };
+
+        let status = if let Some(vol_status) = &volume.status {
+            Some(controller_get_volume_response::VolumeStatus {
+                published_node_ids: if let Some(scheduled_node) = &vol_status.scheduled_node {
+                    vec![scheduled_node.clone()]
+                } else {
+                    vec![]
+                },
+                volume_condition: if vol_status.degraded {
+                    Some(VolumeCondition {
+                        abnormal: true,
+                        message: format!("Volume state: {}", vol_status.state),
+                    })
+                } else {
+                    None
+                },
+            })
+        } else {
+            None
+        };
+
+        Ok(Response::new(ControllerGetVolumeResponse {
+            volume: Some(csi_volume),
+            status,
+        }))
+    }
+
+    async fn controller_modify_volume(
+        &self,
+        _request: Request<ControllerModifyVolumeRequest>,
+    ) -> Result<Response<ControllerModifyVolumeResponse>, Status> {
+        // Volume modification is not supported in this implementation
+        // This could be extended to support changing volume parameters
+        Err(Status::unimplemented("Volume modification is not supported"))
+    }
+
     async fn create_volume(
         &self,
         request: Request<CreateVolumeRequest>,

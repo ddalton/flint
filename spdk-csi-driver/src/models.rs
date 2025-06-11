@@ -234,3 +234,52 @@ pub struct LvolStatus {
     pub is_healthy: bool,
     pub error_reason: Option<String>,
 }
+
+impl RaidStatus {
+    /// Parse RAID status from SPDK RPC response
+    pub fn from_spdk_response(raid_bdev: &serde_json::Value) -> Result<Self, Box<dyn std::error::Error>> {
+        let base_bdevs_list: Vec<RaidMember> = raid_bdev["base_bdevs"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .enumerate()
+            .map(|(i, member)| RaidMember {
+                name: member["name"].as_str().unwrap_or("").to_string(),
+                state: member["state"].as_str().unwrap_or("unknown").to_string(),
+                slot: i as u32,
+                uuid: member["uuid"].as_str().map(|s| s.to_string()),
+                is_configured: member["is_configured"].as_bool().unwrap_or(false),
+                node: None, // Will be filled in later if needed
+                is_local: None, // Will be determined by caller
+                read_priority: Some(i as u32), // Assign based on slot order
+            })
+            .collect();
+
+        let rebuild_info = if let Some(rebuild) = raid_bdev["rebuild_info"].as_object() {
+            Some(RaidRebuildInfo {
+                state: rebuild["state"].as_str().unwrap_or("").to_string(),
+                target_slot: rebuild["target_slot"].as_u64().unwrap_or(0) as u32,
+                source_slot: rebuild["source_slot"].as_u64().unwrap_or(0) as u32,
+                blocks_remaining: rebuild["blocks_remaining"].as_u64().unwrap_or(0),
+                blocks_total: rebuild["blocks_total"].as_u64().unwrap_or(0),
+                progress_percentage: rebuild["progress_percentage"].as_f64().unwrap_or(0.0),
+            })
+        } else {
+            None
+        };
+
+        Ok(RaidStatus {
+            raid_level: raid_bdev["raid_level"].as_u64().unwrap_or(1) as u32,
+            state: raid_bdev["state"].as_str().unwrap_or("unknown").to_string(),
+            num_base_bdevs: raid_bdev["num_base_bdevs"].as_u64().unwrap_or(0) as u32,
+            num_base_bdevs_discovered: raid_bdev["num_base_bdevs_discovered"].as_u64().unwrap_or(0) as u32,
+            num_base_bdevs_operational: raid_bdev["num_base_bdevs_operational"].as_u64().unwrap_or(0) as u32,
+            base_bdevs_list,
+            rebuild_info,
+            superblock_version: raid_bdev["superblock_version"].as_u64().map(|v| v as u32),
+            process_request_fn: raid_bdev["process_request_fn"].as_str().map(|s| s.to_string()),
+            read_policy: raid_bdev["read_policy"].as_str().map(|s| s.to_string()),
+            primary_member_slot: Some(0), // Assume first member is primary
+        })
+    }
+}
