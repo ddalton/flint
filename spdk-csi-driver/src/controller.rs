@@ -1,163 +1,19 @@
 // Updated controller.rs leveraging SPDK's native RAID1 rebuild capabilities
 use kube::{
-    Client, Api, ResourceExt, runtime::{Controller, watcher},
-    api::{PatchParams, Patch, ListParams, PostParams},
+    Client, Api, runtime::{Controller, watcher, controller::Action},
+    api::{PatchParams, Patch, ListParams},
+    error::ErrorResponse,
 };
-use tokio::time::{Duration, interval, timeout};
+use k8s_openapi::api::core::v1::Pod;
+use tokio::time::{Duration, interval};
 use reqwest::Client as HttpClient;
 use serde_json::json;
-use chrono::{Utc, Duration as ChronoDuration};
+use chrono::Utc;
 use std::env;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
-use uuid::Uuid;
+use spdk_csi_driver::models::*;
 
 use spdk_csi_driver::{SpdkVolume, SpdkDisk, Replica, SpdkVolumeStatus};
-
-mod spdk_csi_driver {
-    use kube::CustomResource;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkVolume", plural = "spdkvolumes")]
-    #[kube(namespaced)]
-    #[kube(status = "SpdkVolumeStatus")]
-    pub struct SpdkVolumeSpec {
-        pub volume_id: String,
-        pub size_bytes: i64,
-        pub num_replicas: i32,
-        pub replicas: Vec<Replica>,
-        pub primary_lvol_uuid: Option<String>,
-        // Removed rebuild_in_progress - SPDK RAID1 handles this internally
-        pub write_ordering_enabled: bool,
-        pub vhost_socket: Option<String>,
-        pub raid_auto_rebuild: bool, // Enable/disable SPDK's automatic rebuild
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct Replica {
-        pub node: String,
-        #[serde(rename = "type")]
-        pub replica_type: String,
-        pub pcie_addr: Option<String>,
-        pub nqn: Option<String>,
-        pub ip: Option<String>,
-        pub port: Option<String>,
-        pub local_pod_scheduled: bool,
-        pub pod_name: Option<String>,
-        pub disk_ref: String,
-        pub lvol_uuid: Option<String>,
-        pub health_status: ReplicaHealth,
-        pub last_io_timestamp: Option<String>,
-        pub write_sequence: u64,
-        pub vhost_socket: Option<String>,
-        // RAID member specific fields
-        pub raid_member_index: usize,
-        pub raid_member_state: RaidMemberState,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub enum RaidMemberState {
-        #[default]
-        Online,
-        Degraded,
-        Failed,
-        Rebuilding,
-        Spare,
-        Removing,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub enum ReplicaHealth {
-        #[default]
-        Healthy,
-        Degraded,
-        Failed,
-        Rebuilding,
-        Syncing,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct SpdkVolumeStatus {
-        pub state: String,
-        pub degraded: bool,
-        pub last_checked: String,
-        pub active_replicas: Vec<usize>,
-        pub failed_replicas: Vec<usize>,
-        pub write_sequence: u64,
-        pub vhost_device: Option<String>,
-        // RAID1 specific status from SPDK
-        pub raid_status: Option<RaidStatus>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct RaidStatus {
-        pub raid_level: u32,
-        pub state: String, // "online", "degraded", "failed"
-        pub num_base_bdevs: u32,
-        pub num_base_bdevs_discovered: u32,
-        pub num_base_bdevs_operational: u32,
-        pub base_bdevs_list: Vec<RaidMember>,
-        pub rebuild_info: Option<RaidRebuildInfo>,
-        pub superblock_version: Option<u32>,
-        pub process_request_fn: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct RaidMember {
-        pub name: String,
-        pub state: String, // "online", "failed", "rebuilding"
-        pub slot: u32,
-        pub uuid: Option<String>,
-        pub is_configured: bool,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct RaidRebuildInfo {
-        pub state: String, // "init", "running", "completed", "failed"
-        pub target_slot: u32,
-        pub source_slot: u32,
-        pub blocks_remaining: u64,
-        pub blocks_total: u64,
-        pub progress_percentage: f64,
-    }
-
-    // Keeping existing disk definitions...
-    #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkDisk", plural = "spdkdisks")]
-    #[kube(namespaced)]
-    #[kube(status = "SpdkDiskStatus")]
-    pub struct SpdkDiskSpec {
-        pub node: String,
-        pub pcie_addr: String,
-        pub capacity: i64,
-        pub blobstore_uuid: Option<String>,
-        pub nvme_controller_id: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct SpdkDiskStatus {
-        pub total_capacity: i64,
-        pub free_space: i64,
-        pub used_space: i64,
-        pub healthy: bool,
-        pub last_checked: String,
-        pub lvol_count: u32,
-        pub blobstore_initialized: bool,
-        pub io_stats: IoStatistics,
-        pub lvs_name: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct IoStatistics {
-        pub read_iops: u64,
-        pub write_iops: u64,
-        pub read_latency_us: u64,
-        pub write_latency_us: u64,
-        pub error_count: u64,
-    }
-}
 
 struct Context {
     client: Client,
@@ -167,13 +23,6 @@ struct Context {
     max_retries: u32,
     vhost_socket_base_path: String,
     // Removed rebuild tracking - SPDK handles this
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct LvolStatus {
-    pub name: String,
-    pub is_healthy: bool,
-    pub error_reason: Option<String>,
 }
 
 #[tokio::main]
@@ -219,14 +68,14 @@ async fn reconcile(spdk_volume: SpdkVolume, ctx: Arc<Context>) -> Result<(), kub
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
     let volume_id = spdk_volume.spec.volume_id.clone();
     let mut status = spdk_volume.status.clone().unwrap_or_default();
-    let mut spec_update_needed = false;
+    let _spec_update_needed = false;
     let mut status_update_needed = false;
 
     // --- Health Check Logic ---
     if spdk_volume.spec.num_replicas > 1 {
         // --- Multi-Replica (RAID1) Volume Health Check ---
         let raid_status = get_raid_status(&ctx, &volume_id).await
-            .map_err(|e| kube::Error::Api(kube::api::ErrorResponse {
+            .map_err(|e| kube::Error::Api(ErrorResponse {
                 status: "Failure".to_string(),
                 message: format!("Failed to get RAID status: {}", e),
                 reason: "SPDKError".to_string(),
@@ -295,7 +144,7 @@ async fn reconcile(spdk_volume: SpdkVolume, ctx: Arc<Context>) -> Result<(), kub
 
     // --- Manage Vhost Controllers ---
     manage_vhost_controllers(&spdk_volume, &ctx).await
-        .map_err(|e| kube::Error::Api(kube::api::ErrorResponse {
+        .map_err(|e| kube::Error::Api(ErrorResponse {
             status: "Failure".to_string(),
             message: format!("Vhost management error: {}", e),
             reason: "VHostError".to_string(),
@@ -1010,6 +859,16 @@ async fn get_lvol_status(
     }
 }
 
-fn error_policy(_error: &kube::Error, _ctx: Arc<Context>) -> watcher::Action {
-    watcher::Action::Requeue(Duration::from_secs(60))
+fn error_policy(obj: Arc<SpdkVolume>, error: &kube::Error, _ctx: Arc<Context>) -> Action {
+    match error {
+        kube::Error::Api(api_error) if api_error.code == 404 => {
+            // Don't requeue if object was deleted - use NoRequeue instead of Await
+            Action::NoRequeue
+        }
+        _ => {
+            eprintln!("Error reconciling volume {}: {}", 
+                      obj.spec.volume_id, error);
+            Action::Requeue(Duration::from_secs(60))
+        }
+    }
 }

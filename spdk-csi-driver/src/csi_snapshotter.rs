@@ -1,19 +1,16 @@
 // csi_snapshotter.rs
-use crate::csi_driver::csi::{
+use crate::csi_driver::csi::csi::v1::{
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
     ListSnapshotsRequest, ListSnapshotsResponse, Snapshot,
+    list_snapshots_response
 };
-use crate::{SpdkCsiDriver, ReplicaSnapshot, SpdkSnapshot, SpdkSnapshotSpec, SpdkVolume, main, snapshot};
-use crate::main::{ReplicaHealth, RaidMemberState};
-use crate::snapshot::SnapshotType;
-use kube::{
-    api::{Api, PostParams, Patch, PatchParams},
-    Client,
-};
+use spdk_csi_driver::*;
+use kube::api::{Api, PostParams, Patch, PatchParams};
 use reqwest::Client as HttpClient;
 use serde_json::json;
 use tonic::{Request, Response, Status};
 use chrono::Utc;
+use crate::SpdkCsiDriver;
 
 /// An RAII guard to ensure the RAID device is resumed.
 struct RaiiRaidResume<'a> {
@@ -248,7 +245,7 @@ impl SpdkCsiDriver {
 
         let entries = crd_list.items.into_iter().filter_map(|s| {
             s.status.as_ref().map(|status| {
-                crate::csi_driver::csi::list_snapshots_response::Entry {
+                list_snapshots_response::Entry {
                     snapshot: Some(Snapshot {
                         snapshot_id: s.spec.snapshot_id,
                         source_volume_id: s.spec.source_volume_id,

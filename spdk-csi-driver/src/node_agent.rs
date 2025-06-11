@@ -1,63 +1,21 @@
 use kube::{
-    Client, Api, ResourceExt,
-    api::{PatchParams, Patch, PostParams, ListParams},
+    Client, Api, 
+    api::{PatchParams, Patch, PostParams},
 };
 use tokio::time::{Duration, interval};
 use reqwest::Client as HttpClient;
 use serde_json::json;
 use chrono::Utc;
 use std::env;
-use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use regex::Regex;
 use warp::Filter;
 use warp::{http::StatusCode, reply, Rejection, Reply};
 
-
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
-
-mod spdk_csi_driver {
-    use kube::CustomResource;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-    #[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkDisk", plural = "spdkdisks")]
-    #[kube(namespaced)]
-    #[kube(status = "SpdkDiskStatus")]
-    pub struct SpdkDiskSpec {
-        pub node: String,
-        pub pcie_addr: String,
-        pub capacity: i64,
-        pub blobstore_uuid: Option<String>,
-        pub nvme_controller_id: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct SpdkDiskStatus {
-        pub total_capacity: i64,
-        pub free_space: i64,
-        pub used_space: i64,
-        pub healthy: bool,
-        pub last_checked: String,
-        pub lvol_count: u32,
-        pub blobstore_initialized: bool,
-        pub io_stats: IoStatistics,
-        pub lvs_name: Option<String>,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-    pub struct IoStatistics {
-        pub read_iops: u64,
-        pub write_iops: u64,
-        pub read_latency_us: u64,
-        pub write_latency_us: u64,
-        pub error_count: u64,
-    }
-}
 
 // Disk setup functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +59,7 @@ pub struct DiskSetupResult {
     pub completed_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct NodeAgent {
     node_name: String,
     kube_client: Client,
@@ -787,8 +745,8 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
-    let controller_id = disk.spec.nvme_controller_id.as_ref().unwrap_or(&"nvme0".to_string());
-    let attach_result = http_client
+    let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
+    let _attach_result = http_client
         .post(&agent.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_nvme_attach_controller",
@@ -1388,8 +1346,7 @@ impl NodeAgent {
         }
 
         // Step 4: Load target driver module
-        let target_driver = request.driver_override.as_ref()
-            .unwrap_or(&"vfio-pci".to_string());
+        let target_driver = request.driver_override.as_deref().unwrap_or(&"vfio-pci");
         self.load_driver_module(target_driver).await?;
 
         // Step 5: Bind to new driver

@@ -1,23 +1,17 @@
 // Updated main.rs leveraging SPDK's native RAID1 capabilities
-use csi_driver::csi::{
-    controller_server::Controller, node_server::Node, ControllerGetCapabilitiesResponse,
-    ControllerServiceCapability, CreateVolumeRequest, CreateVolumeResponse, DeleteVolumeRequest,
-    DeleteVolumeResponse, Identity, NodeGetCapabilitiesResponse, NodePublishVolumeRequest,
-    NodePublishVolumeResponse, NodeServiceCapability, NodeStageVolumeRequest,
-    NodeStageVolumeResponse, NodeUnpublishVolumeRequest, NodeUnpublishVolumeResponse,
-    NodeUnstageVolumeRequest, NodeUnstageVolumeResponse, Volume, VolumeCapability,
-};
-use csi_driver::csi::{
-    identity_server::Identity, GetPluginInfoResponse, GetPluginCapabilitiesResponse,
-    PluginCapability, ProbeResponse
+use csi_driver::csi::csi::v1::*;
+use csi_driver::csi::csi::v1::{
+    controller_server::{Controller, ControllerServer},
+    identity_server::{Identity, IdentityServer}, 
+    node_server::{Node, NodeServer},
+    PluginCapability, ProbeResponse,
 };
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, ListParams, Patch, PatchParams, PostParams, ResourceExt},
-    Client, CustomResource,
+    api::{Api, ListParams, Patch, PatchParams, PostParams},
+    Client, 
 };
 use reqwest::Client as HttpClient;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::process::Command;
@@ -27,14 +21,14 @@ use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 use std::path::Path;
+use spdk_csi_driver::models::*;
+use chrono::Utc;
 
-mod snapshot;
 mod csi_snapshotter;
-use snapshot::{SpdkSnapshot, SpdkSnapshotSpec, SpdkSnapshotStatus};
 
 mod csi_driver {
     pub mod csi {
-        tonic::include_proto!("csi.v1");
+        tonic::include_proto!("csi");
     }
 }
 
@@ -58,94 +52,6 @@ impl std::str::FromStr for SchedulingPolicy {
             _ => Err(format!("Invalid scheduling policy: {}", s))
         }
     }
-}
-
-#[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-#[kube(
-    group = "flint.csi.storage.io",
-    version = "v1",
-    kind = "SpdkVolume",
-    plural = "spdkvolumes"
-)]
-#[kube(namespaced)]
-#[kube(status = "SpdkVolumeStatus")]
-struct SpdkVolumeSpec {
-    volume_id: String,
-    size_bytes: i64,
-    num_replicas: i32,
-    replicas: Vec<Replica>,
-    primary_lvol_uuid: Option<String>,
-    write_ordering_enabled: bool,
-    vhost_socket: Option<String>,
-    raid_auto_rebuild: bool, // Enable SPDK's automatic rebuild
-    // New scheduling and optimization fields
-    scheduling_policy: Option<String>,
-    preferred_nodes: Option<Vec<String>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-struct Replica {
-    node: String,
-    #[serde(rename = "type")]
-    replica_type: String,
-    pcie_addr: Option<String>,
-    nqn: Option<String>,
-    ip: Option<String>,
-    port: Option<String>,
-    local_pod_scheduled: bool,
-    pod_name: Option<String>,
-    disk_ref: String,
-    lvol_uuid: Option<String>,
-    health_status: ReplicaHealth,
-    last_io_timestamp: Option<String>,
-    write_sequence: u64,
-    vhost_socket: Option<String>,
-    raid_member_index: usize, // Position in RAID array
-    raid_member_state: RaidMemberState,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-enum RaidMemberState {
-    #[default]
-    Online,
-    Degraded,
-    Failed,
-    Rebuilding,
-    Spare,
-    Removing,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-enum ReplicaHealth {
-    #[default]
-    Healthy,
-    Degraded,
-    Failed,
-    Rebuilding,
-    Syncing,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-struct SpdkVolumeStatus {
-    state: String,
-    degraded: bool,
-    last_checked: String,
-    active_replicas: Vec<usize>,
-    failed_replicas: Vec<usize>,
-    write_sequence: u64,
-    last_successful_write: Option<String>,
-    vhost_device: Option<String>,
-    // Native SPDK RAID status
-    raid_status: Option<RaidStatus>,
-
-    // NEW: Scheduling and optimization tracking fields
-    scheduled_node: Option<String>,        // Which node is the pod currently on
-    has_local_replica: bool,               // Does the scheduled node have a local replica
-    scheduling_policy: Option<String>,     // Which policy was used
-    replica_nodes: Vec<String>,            // List of all nodes with replicas
-    read_optimized: bool,                  // Whether reads are optimized for locality
-    read_policy: Option<String>,           // Current RAID read policy
-    local_replica_performance: Option<LocalReplicaMetrics>,
 }
 
 // Example usage with Storage Classes for different optimization levels
@@ -186,93 +92,6 @@ parameters:
   schedulingPolicy: "require-replicas"  # Must have local replica
   autoRebuild: "true"
 */
-
-// New struct to track local replica performance
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct LocalReplicaMetrics {
-    local_read_percentage: f64,     // % of reads served locally
-    local_read_latency_avg: u64,    // Average local read latency
-    remote_read_latency_avg: u64,   // Average remote read latency
-    optimization_ratio: f64,        // Performance improvement ratio
-    last_updated: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct RaidStatus {
-    raid_level: u32,
-    state: String, // "online", "degraded", "failed"
-    num_base_bdevs: u32,
-    num_base_bdevs_discovered: u32,
-    num_base_bdevs_operational: u32,
-    base_bdevs_list: Vec<RaidMember>,
-    rebuild_info: Option<RaidRebuildInfo>,
-    superblock_version: Option<u32>,
-    // New fields for read optimization
-    read_policy: Option<String>,
-    primary_member_slot: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct RaidMember {
-    name: String,
-    state: String, // "online", "failed", "rebuilding"
-    slot: u32,
-    uuid: Option<String>,
-    is_configured: bool,
-    // New fields for optimization tracking
-    node: Option<String>,
-    is_local: Option<bool>,
-    read_priority: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct RaidRebuildInfo {
-    state: String, // "init", "running", "completed", "failed"
-    target_slot: u32,
-    source_slot: u32,
-    blocks_remaining: u64,
-    blocks_total: u64,
-    progress_percentage: f64,
-}
-
-#[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default)]
-#[kube(
-    group = "flint.csi.storage.io",
-    version = "v1",
-    kind = "SpdkDisk",
-    plural = "spdkdisks"
-)]
-#[kube(namespaced)]
-#[kube(status = "SpdkDiskStatus")]
-struct SpdkDiskSpec {
-    node: String,
-    pcie_addr: String,
-    capacity: i64,
-    blobstore_uuid: Option<String>,
-    nvme_controller_id: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-struct SpdkDiskStatus {
-    total_capacity: i64,
-    free_space: i64,
-    used_space: i64,
-    healthy: bool,
-    last_checked: String,
-    lvol_count: u32,
-    blobstore_initialized: bool,
-    io_stats: IoStatistics,
-    lvs_name: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-struct IoStatistics {
-    read_iops: u64,
-    write_iops: u64,
-    read_latency_us: u64,
-    write_latency_us: u64,
-    error_count: u64,
-}
 
 #[derive(Debug, Clone)]
 struct SpdkCsiDriver {
@@ -1602,9 +1421,474 @@ impl Identity for SpdkCsiDriver {
     }
 }
 
+// Helper structs for SPDK statistics
+#[derive(Debug, Default)]
+struct SpdkVolumeStatsDetailed {
+    total_bytes: u64,
+    used_bytes: u64,
+    available_bytes: u64,
+    total_clusters: u64,
+    used_clusters: u64,
+    available_clusters: u64,
+    cluster_size: u64,
+    read_iops: u64,
+    write_iops: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    read_latency_us: u64,
+    write_latency_us: u64,
+    io_error_count: u64,
+    is_healthy: bool,
+    thin_provisioned: bool,
+    raid_level: Option<u64>,
+    raid_state: Option<String>,
+    operational_members: Option<u64>,
+    total_members: Option<u64>,
+}
+
+#[derive(Debug)]
+struct BdevInfo {
+    name: String,
+    num_blocks: u64,
+    block_size: u64,
+    claimed: bool,
+    driver_name: String,
+}
+
+#[derive(Debug)]
+struct BdevIoStat {
+    read_ios: u64,
+    write_ios: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    read_latency_ticks: u64,
+    write_latency_ticks: u64,
+    io_error: u64,
+}
+
+#[derive(Debug)]
+struct RaidBdevStat {
+    raid_level: u64,
+    state: String,
+    num_base_bdevs: u64,
+    num_base_bdevs_operational: u64,
+    rebuild_progress: f64,
+}
+
+#[derive(Debug)]
+struct LvolStat {
+    total_data_clusters: u64,
+    free_clusters: u64,
+    num_allocated_clusters: u64,
+    cluster_size: u64,
+    thin_provision: bool,
+}
 
 #[tonic::async_trait]
 impl Node for SpdkCsiDriver {
+    async fn node_publish_volume(
+        &self,
+        request: Request<NodePublishVolumeRequest>,
+    ) -> Result<Response<NodePublishVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let target_path = req.target_path;
+        let staging_target_path = req.staging_target_path;
+
+        if volume_id.is_empty() || target_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and target path are required"));
+        }
+
+        // Get the SpdkVolume CR to find vhost socket path
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+
+        // Check if volume has a local replica on this node
+        let node_name = std::env::var("NODE_NAME")
+            .map_err(|_| Status::internal("NODE_NAME environment variable not set"))?;
+
+        let local_replica = volume.spec.replicas.iter()
+            .find(|r| r.node == node_name && r.replica_type == "lvol")
+            .ok_or_else(|| Status::failed_precondition(
+                format!("No local replica found for volume {} on node {}", volume_id, node_name)
+            ))?;
+
+        // Get vhost socket path from volume spec or construct default
+        let vhost_socket = volume.spec.vhost_socket
+            .unwrap_or_else(|| format!("/var/lib/spdk-csi/sockets/vhost_{}.sock", volume_id));
+
+        // Ensure vhost controller exists and is active
+        self.ensure_vhost_controller_active(&volume_id, &vhost_socket).await?;
+
+        // Create target directory if it doesn't exist
+        if let Some(parent) = std::path::Path::new(&target_path).parent() {
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e| Status::internal(format!("Failed to create target directory: {}", e)))?;
+        }
+
+        // For block volumes, create a symlink to the vhost device
+        if let Some(volume_capability) = req.volume_capability {
+            match volume_capability.access_type {
+                Some(volume_capability::AccessType::Block(_)) => {
+                    // Find the vhost-nvme device path
+                    let device_path = self.find_vhost_device_path(&vhost_socket).await?;
+                    
+                    // Create symlink from target_path to the actual device
+                    if std::path::Path::new(&target_path).exists() {
+                        tokio::fs::remove_file(&target_path).await.ok();
+                    }
+                    
+                    tokio::fs::symlink(&device_path, &target_path).await
+                        .map_err(|e| Status::internal(format!("Failed to create device symlink: {}", e)))?;
+                }
+                Some(volume_capability::AccessType::Mount(mount)) => {
+                    // For filesystem access, we need to format and mount the device
+                    let device_path = self.find_vhost_device_path(&vhost_socket).await?;
+                    
+                    // Format the device if needed
+                    let fs_type = if mount.fs_type.is_empty() { "ext4" } else { &mount.fs_type };
+                    self.format_device_if_needed(&device_path, fs_type).await?;
+                    
+                    // Create target directory
+                    tokio::fs::create_dir_all(&target_path).await
+                        .map_err(|e| Status::internal(format!("Failed to create mount point: {}", e)))?;
+                    
+                    // Mount the device
+                    let mut mount_cmd = tokio::process::Command::new("mount");
+                    mount_cmd.arg("-t").arg(fs_type);
+                    
+                    // Add mount flags if specified
+                    for flag in &mount.mount_flags {
+                        mount_cmd.arg("-o").arg(flag);
+                    }
+                    
+                    if req.readonly {
+                        mount_cmd.arg("-o").arg("ro");
+                    }
+                    
+                    mount_cmd.arg(&device_path).arg(&target_path);
+                    
+                    let output = mount_cmd.output().await
+                        .map_err(|e| Status::internal(format!("Failed to execute mount: {}", e)))?;
+                    
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return Err(Status::internal(format!("Mount failed: {}", stderr)));
+                    }
+                }
+                None => {
+                    return Err(Status::invalid_argument("Volume capability access type must be specified"));
+                }
+            }
+        }
+
+        // Update the replica status to indicate it's published
+        self.update_replica_published_status(&volume_id, &node_name, true).await?;
+
+        Ok(Response::new(NodePublishVolumeResponse {}))
+    }
+
+    async fn node_get_volume_stats(
+        &self,
+        request: Request<NodeGetVolumeStatsRequest>,
+    ) -> Result<Response<NodeGetVolumeStatsResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let volume_path = req.volume_path;
+
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        let mut usage = Vec::new();
+        let mut volume_condition = None;
+
+        // Get comprehensive SPDK statistics
+        match self.get_pure_spdk_volume_stats(&volume_id).await {
+            Ok(stats) => {
+                // Add block-level statistics (always available for SPDK volumes)
+                usage.push(VolumeUsage {
+                    available: stats.available_bytes,
+                    total: stats.total_bytes,
+                    used: stats.used_bytes,
+                    unit: volume_usage::Unit::Bytes as i32,
+                });
+
+                // For lvol-based volumes, we can also provide cluster statistics
+                if stats.total_clusters > 0 {
+                    usage.push(VolumeUsage {
+                        available: stats.available_clusters as i64,
+                        total: stats.total_clusters as i64,
+                        used: stats.used_clusters as i64,
+                        unit: volume_usage::Unit::Inodes as i32, // Repurpose inodes for clusters
+                    });
+                }
+
+                // Determine volume health based on SPDK metrics
+                let is_healthy = stats.is_healthy && stats.available_bytes > 0;
+                let mut health_message = String::new();
+
+                if !stats.is_healthy {
+                    health_message.push_str("SPDK bdev reports unhealthy state. ");
+                }
+                if stats.io_error_count > 0 {
+                    health_message.push_str(&format!("I/O errors detected: {}. ", stats.io_error_count));
+                }
+                if stats.available_bytes == 0 {
+                    health_message.push_str("Volume is full. ");
+                }
+                if stats.read_latency_us > 100000 || stats.write_latency_us > 100000 {
+                    health_message.push_str("High I/O latency detected. ");
+                }
+
+                if health_message.is_empty() {
+                    health_message = format!(
+                        "Volume healthy. IOPS: {}/{} (R/W), Latency: {}μs/{}μs (R/W)",
+                        stats.read_iops, stats.write_iops,
+                        stats.read_latency_us, stats.write_latency_us
+                    );
+                }
+
+                volume_condition = Some(VolumeCondition {
+                    abnormal: !is_healthy,
+                    message: health_message,
+                });
+            }
+            Err(e) => {
+                volume_condition = Some(VolumeCondition {
+                    abnormal: true,
+                    message: format!("Failed to get SPDK volume statistics: {}", e),
+                });
+
+                // Return minimal stats if we can't get detailed info
+                usage.push(VolumeUsage {
+                    available: 0,
+                    total: 0,
+                    used: 0,
+                    unit: volume_usage::Unit::Bytes as i32,
+                });
+            }
+        }
+
+        Ok(Response::new(NodeGetVolumeStatsResponse {
+            usage,
+            volume_condition,
+        }))
+    }
+
+    async fn node_expand_volume(
+        &self,
+        request: Request<NodeExpandVolumeRequest>,
+    ) -> Result<Response<NodeExpandVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let volume_path = req.volume_path;
+
+        if volume_id.is_empty() || volume_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and volume path are required"));
+        }
+
+        // Get the new capacity from the request
+        let new_capacity = req.capacity_range
+            .as_ref()
+            .map(|cr| cr.required_bytes)
+            .unwrap_or(0);
+
+        if new_capacity <= 0 {
+            return Err(Status::invalid_argument("New capacity must be greater than 0"));
+        }
+
+        // Get current node name
+        let node_name = std::env::var("NODE_NAME")
+            .map_err(|_| Status::internal("NODE_NAME environment variable not set"))?;
+
+        // Get the SpdkVolume CR
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+
+        // Find local replica
+        let local_replica = volume.spec.replicas.iter()
+            .find(|r| r.node == node_name && r.replica_type == "lvol")
+            .ok_or_else(|| Status::failed_precondition(
+                format!("No local replica found for volume {} on node {}", volume_id, node_name)
+            ))?;
+
+        // Expand the underlying SPDK lvol first
+        if let Some(lvol_uuid) = &local_replica.lvol_uuid {
+            let lvs_name = format!("lvs_{}", local_replica.disk_ref);
+            let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
+            
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .post(&self.spdk_rpc_url)
+                .json(&serde_json::json!({
+                    "method": "bdev_lvol_resize",
+                    "params": {
+                        "name": lvol_name,
+                        "size": new_capacity
+                    }
+                }))
+                .send()
+                .await
+                .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+            if !response.status().is_success() {
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(Status::internal(format!("Failed to resize lvol: {}", error_text)));
+            }
+        }
+
+        // For RAID volumes, we need to resize all replicas
+        if volume.spec.num_replicas > 1 {
+            // The RAID bdev should automatically detect the size change
+            // We can verify this by checking the RAID bdev size
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .post(&self.spdk_rpc_url)
+                .json(&serde_json::json!({
+                    "method": "bdev_get_bdevs",
+                    "params": { "name": volume_id }
+                }))
+                .send()
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get RAID bdev info: {}", e)))?;
+
+            if response.status().is_success() {
+                let bdev_info: serde_json::Value = response.json().await
+                    .map_err(|e| Status::internal(format!("Failed to parse RAID bdev response: {}", e)))?;
+                
+                if let Some(bdev_array) = bdev_info["result"].as_array() {
+                    if let Some(bdev) = bdev_array.first() {
+                        let actual_size = bdev["num_blocks"].as_u64().unwrap_or(0) * 
+                                        bdev["block_size"].as_u64().unwrap_or(512);
+                        
+                        if actual_size < new_capacity as u64 {
+                            return Err(Status::internal(
+                                "RAID bdev size did not update after lvol resize"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Expand the filesystem if this is a mount volume
+        if let Some(volume_capability) = req.volume_capability {
+            if let Some(volume_capability::AccessType::Mount(mount)) = volume_capability.access_type {
+                let fs_type = if mount.fs_type.is_empty() { "ext4" } else { &mount.fs_type };
+                
+                // Find the underlying device
+                let device_path = self.find_device_for_mount(&volume_path).await?;
+                
+                // Resize the filesystem
+                match fs_type {
+                    "ext4" | "ext3" | "ext2" => {
+                        let output = tokio::process::Command::new("resize2fs")
+                            .arg(&device_path)
+                            .output()
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to execute resize2fs: {}", e)))?;
+                        
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            return Err(Status::internal(format!("resize2fs failed: {}", stderr)));
+                        }
+                    }
+                    "xfs" => {
+                        let output = tokio::process::Command::new("xfs_growfs")
+                            .arg(&volume_path)
+                            .output()
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to execute xfs_growfs: {}", e)))?;
+                        
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            return Err(Status::internal(format!("xfs_growfs failed: {}", stderr)));
+                        }
+                    }
+                    _ => {
+                        return Err(Status::invalid_argument(
+                            format!("Filesystem type {} not supported for expansion", fs_type)
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(NodeExpandVolumeResponse {
+            capacity_bytes: new_capacity,
+        }))
+    }
+
+
+    async fn node_get_info(
+        &self,
+        _request: Request<NodeGetInfoRequest>,
+    ) -> Result<Response<NodeGetInfoResponse>, Status> {
+        // Get node name from environment
+        let node_id = std::env::var("NODE_NAME")
+            .map_err(|_| Status::internal("NODE_NAME environment variable not set"))?;
+
+        // Get maximum volumes per node from environment or use default
+        let max_volumes_per_node = std::env::var("MAX_VOLUMES_PER_NODE")
+            .unwrap_or("100".to_string())
+            .parse::<i64>()
+            .unwrap_or(100);
+
+        // Get topology information from environment
+        let mut topology_segments = std::collections::HashMap::new();
+        
+        // Add node-specific topology
+        topology_segments.insert("topology.spdk.io/node".to_string(), node_id.clone());
+        
+        // Add zone/region if available
+        if let Ok(zone) = std::env::var("NODE_ZONE") {
+            topology_segments.insert("topology.spdk.io/zone".to_string(), zone);
+        }
+        
+        if let Ok(region) = std::env::var("NODE_REGION") {
+            topology_segments.insert("topology.spdk.io/region".to_string(), region);
+        }
+
+        // Add rack information if available
+        if let Ok(rack) = std::env::var("NODE_RACK") {
+            topology_segments.insert("topology.spdk.io/rack".to_string(), rack);
+        }
+
+        // Check SPDK availability on this node
+        match self.check_spdk_health().await {
+            Ok(true) => {
+                topology_segments.insert("spdk.io/available".to_string(), "true".to_string());
+            }
+            Ok(false) => {
+                topology_segments.insert("spdk.io/available".to_string(), "false".to_string());
+            }
+            Err(_) => {
+                topology_segments.insert("spdk.io/available".to_string(), "unknown".to_string());
+            }
+        }
+
+        // Get NVMe device count if available
+        if let Ok(device_count) = self.get_nvme_device_count().await {
+            topology_segments.insert("spdk.io/nvme-devices".to_string(), device_count.to_string());
+        }
+
+        let accessible_topology = if !topology_segments.is_empty() {
+            Some(Topology {
+                segments: topology_segments,
+            })
+        } else {
+            None
+        };
+
+        Ok(Response::new(NodeGetInfoResponse {
+            node_id,
+            max_volumes_per_node,
+            accessible_topology,
+        }))
+    }
 
     async fn node_stage_volume(
         &self,
@@ -1784,7 +2068,7 @@ impl Node for SpdkCsiDriver {
 
     async fn node_get_capabilities(
         &self,
-        _request: Request<()>,
+        _request: Request<NodeGetCapabilitiesRequest>,
     ) -> Result<Response<NodeGetCapabilitiesResponse>, Status> {
         use csi_driver::csi::node_service_capability;
 
@@ -1816,6 +2100,342 @@ impl Node for SpdkCsiDriver {
         }))
     }
 
+
+}
+
+impl SpdkCsiDriver {
+    async fn find_vhost_device_path(&self, socket_path: &str) -> Result<String, Status> {
+        // Wait for the vhost device to appear (up to 30 seconds)
+        let max_wait = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < max_wait {
+            // Look for vhost-nvme devices in /dev
+            if let Ok(entries) = tokio::fs::read_dir("/dev").await {
+                let mut entries = entries;
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with("nvme") && self.is_vhost_device(&path, socket_path).await {
+                            return Ok(path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        Err(Status::deadline_exceeded(
+            format!("Vhost device for socket {} did not appear within timeout", socket_path)
+        ))
+    }
+
+    async fn is_vhost_device(&self, device_path: &std::path::Path, _socket_path: &str) -> bool {
+        // Check if this NVMe device is backed by vhost
+        if let Ok(output) = tokio::process::Command::new("readlink")
+            .arg("-f")
+            .arg(device_path)
+            .output()
+            .await
+        {
+            let real_path = String::from_utf8_lossy(&output.stdout);
+            return real_path.contains("vhost");
+        }
+        false
+    }
+
+    async fn format_device_if_needed(&self, device_path: &str, fs_type: &str) -> Result<(), Status> {
+        // Check if the device is already formatted
+        let output = tokio::process::Command::new("blkid")
+            .arg(device_path)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to check device format: {}", e)))?;
+
+        if output.status.success() {
+            // Device is already formatted
+            return Ok(());
+        }
+
+        // Format the device
+        let format_cmd = match fs_type {
+            "ext4" => vec!["mkfs.ext4", "-F", device_path],
+            "ext3" => vec!["mkfs.ext3", "-F", device_path],
+            "xfs" => vec!["mkfs.xfs", "-f", device_path],
+            _ => return Err(Status::invalid_argument(format!("Unsupported filesystem type: {}", fs_type))),
+        };
+
+        let output = tokio::process::Command::new(format_cmd[0])
+            .args(&format_cmd[1..])
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to format device: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("Device formatting failed: {}", stderr)));
+        }
+
+        Ok(())
+    }
+
+    async fn update_replica_published_status(
+        &self,
+        volume_id: &str,
+        node_name: &str,
+        published: bool,
+    ) -> Result<(), Status> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), "default");
+        
+        // This would update the replica's published status in the SpdkVolume CR
+        // Implementation depends on your specific CRD structure
+        println!("Updated replica published status for volume {} on node {} to {}", 
+                volume_id, node_name, published);
+        
+        Ok(())
+    }
+
+    async fn find_device_for_mount(&self, mount_path: &str) -> Result<String, Status> {
+        // Use findmnt to get the source device for the mount
+        let output = tokio::process::Command::new("findmnt")
+            .arg("-n")
+            .arg("-o")
+            .arg("SOURCE")
+            .arg(mount_path)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to find mount device: {}", e)))?;
+
+        if output.status.success() {
+            let device = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(device)
+        } else {
+            Err(Status::not_found("Could not find device for mount point"))
+        }
+    }
+
+    async fn check_spdk_health(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let http_client = reqwest::Client::new();
+        
+        match http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "spdk_get_version"
+            }))
+            .send()
+            .await
+        {
+            Ok(response) => Ok(response.status().is_success()),
+            Err(_) => Ok(false),
+        }
+    }
+
+    async fn get_nvme_device_count(&self) -> Result<u32, Box<dyn std::error::Error>> {
+        let http_client = reqwest::Client::new();
+        
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "bdev_get_bdevs"
+            }))
+            .send()
+            .await?;
+
+        let bdevs: serde_json::Value = response.json().await?;
+        
+        if let Some(bdev_list) = bdevs["result"].as_array() {
+            let nvme_count = bdev_list.iter()
+                .filter(|bdev| bdev["product_name"].as_str().unwrap_or("").contains("NVMe"))
+                .count();
+            Ok(nvme_count as u32)
+        } else {
+            Ok(0)
+        }
+    }
+
+    async fn get_pure_spdk_volume_stats(&self, volume_id: &str) -> Result<SpdkVolumeStatsDetailed, Box<dyn std::error::Error>> {
+        let http_client = reqwest::Client::new();
+        let mut stats = SpdkVolumeStatsDetailed::default();
+
+        // 1. Get basic bdev information
+        let bdev_info = self.get_bdev_info(&http_client, volume_id).await?;
+        stats.total_bytes = bdev_info.num_blocks * bdev_info.block_size;
+        stats.is_healthy = bdev_info.claimed;
+
+        // 2. Get I/O statistics
+        if let Ok(io_stats) = self.get_bdev_iostat(&http_client, volume_id).await {
+            stats.read_iops = io_stats.read_ios;
+            stats.write_iops = io_stats.write_ios;
+            stats.read_bytes = io_stats.read_bytes;
+            stats.write_bytes = io_stats.write_bytes;
+            stats.read_latency_us = io_stats.read_latency_ticks / 1000; // Convert to microseconds
+            stats.write_latency_us = io_stats.write_latency_ticks / 1000;
+            stats.io_error_count = io_stats.io_error;
+        }
+
+        // 3. For RAID volumes, get RAID-specific statistics
+        if let Ok(raid_stats) = self.get_raid_bdev_stats(&http_client, volume_id).await {
+            stats.raid_level = Some(raid_stats.raid_level);
+            
+            // Check health before moving the state
+            let is_raid_online = raid_stats.state == "online";
+            stats.raid_state = Some(raid_stats.state);
+            stats.operational_members = Some(raid_stats.num_base_bdevs_operational);
+            stats.total_members = Some(raid_stats.num_base_bdevs);
+            
+            // RAID volume health depends on member health
+            stats.is_healthy = stats.is_healthy && is_raid_online;
+        }
+
+        // 4. For lvol volumes, get lvol-specific information
+        if let Ok(lvol_stats) = self.get_lvol_stats(&http_client, volume_id).await {
+            stats.total_clusters = lvol_stats.total_data_clusters;
+            stats.used_clusters = lvol_stats.num_allocated_clusters;
+            stats.available_clusters = stats.total_clusters.saturating_sub(stats.used_clusters);
+            stats.cluster_size = lvol_stats.cluster_size;
+            
+            // More accurate byte calculations for lvols
+            stats.used_bytes = stats.used_clusters * stats.cluster_size;
+            stats.available_bytes = stats.available_clusters * stats.cluster_size;
+            
+            // Check thin provisioning status
+            stats.thin_provisioned = lvol_stats.thin_provision;
+        } else {
+            // Fallback: estimate usage based on I/O if lvol info not available
+            stats.used_bytes = stats.read_bytes + stats.write_bytes;
+            stats.available_bytes = stats.total_bytes.saturating_sub(stats.used_bytes);
+        }
+
+        Ok(stats)
+    }
+
+    async fn get_bdev_info(&self, http_client: &reqwest::Client, volume_id: &str) -> Result<BdevInfo, Box<dyn std::error::Error>> {
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "bdev_get_bdevs",
+                "params": { "name": volume_id }
+            }))
+            .send()
+            .await?;
+
+        let bdev_data: serde_json::Value = response.json().await?;
+        
+        if let Some(bdev_array) = bdev_data["result"].as_array() {
+            if let Some(bdev) = bdev_array.first() {
+                return Ok(BdevInfo {
+                    name: bdev["name"].as_str().unwrap_or("").to_string(),
+                    num_blocks: bdev["num_blocks"].as_u64().unwrap_or(0),
+                    block_size: bdev["block_size"].as_u64().unwrap_or(512),
+                    claimed: bdev["claimed"].as_bool().unwrap_or(false),
+                    driver_name: bdev["product_name"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+        
+        Err(format!("Bdev {} not found", volume_id).into())
+    }
+
+    async fn get_bdev_iostat(&self, http_client: &reqwest::Client, volume_id: &str) -> Result<BdevIoStat, Box<dyn std::error::Error>> {
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "bdev_get_iostat",
+                "params": { "name": volume_id }
+            }))
+            .send()
+            .await?;
+
+        let iostat_data: serde_json::Value = response.json().await?;
+        
+        if let Some(iostat_array) = iostat_data["result"].as_array() {
+            if let Some(iostat) = iostat_array.first() {
+                return Ok(BdevIoStat {
+                    read_ios: iostat["read_ios"].as_u64().unwrap_or(0),
+                    write_ios: iostat["write_ios"].as_u64().unwrap_or(0),
+                    read_bytes: iostat["read_bytes"].as_u64().unwrap_or(0),
+                    write_bytes: iostat["write_bytes"].as_u64().unwrap_or(0),
+                    read_latency_ticks: iostat["read_latency_ticks"].as_u64().unwrap_or(0),
+                    write_latency_ticks: iostat["write_latency_ticks"].as_u64().unwrap_or(0),
+                    io_error: iostat["io_error"].as_u64().unwrap_or(0),
+                });
+            }
+        }
+        
+        Err(format!("I/O stats for {} not found", volume_id).into())
+    }
+
+    async fn get_raid_bdev_stats(&self, http_client: &reqwest::Client, volume_id: &str) -> Result<RaidBdevStat, Box<dyn std::error::Error>> {
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "bdev_raid_get_bdevs",
+                "params": { "category": "all" }
+            }))
+            .send()
+            .await?;
+
+        let raid_data: serde_json::Value = response.json().await?;
+        
+        if let Some(raid_array) = raid_data["result"].as_array() {
+            for raid_bdev in raid_array {
+                if raid_bdev["name"].as_str() == Some(volume_id) {
+                    return Ok(RaidBdevStat {
+                        raid_level: raid_bdev["raid_level"].as_u64().unwrap_or(1),
+                        state: raid_bdev["state"].as_str().unwrap_or("unknown").to_string(),
+                        num_base_bdevs: raid_bdev["num_base_bdevs"].as_u64().unwrap_or(0),
+                        num_base_bdevs_operational: raid_bdev["num_base_bdevs_operational"].as_u64().unwrap_or(0),
+                        rebuild_progress: raid_bdev.get("rebuild_info")
+                            .and_then(|ri| ri.get("progress_percentage"))
+                            .and_then(|p| p.as_f64())
+                            .unwrap_or(0.0),
+                    });
+                }
+            }
+        }
+        
+        Err(format!("RAID bdev {} not found", volume_id).into())
+    }
+
+    async fn get_lvol_stats(&self, http_client: &reqwest::Client, volume_id: &str) -> Result<LvolStat, Box<dyn std::error::Error>> {
+        // First, get all lvol stores to find our volume
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&serde_json::json!({
+                "method": "bdev_lvol_get_lvstores"
+            }))
+            .send()
+            .await?;
+
+        let lvstores_data: serde_json::Value = response.json().await?;
+        
+        if let Some(lvstore_array) = lvstores_data["result"].as_array() {
+            for lvstore in lvstore_array {
+                if let Some(lvols) = lvstore["lvols"].as_array() {
+                    for lvol in lvols {
+                        let lvol_name = format!("{}/{}", 
+                            lvstore["name"].as_str().unwrap_or(""),
+                            lvol["name"].as_str().unwrap_or("")
+                        );
+                        
+                        if lvol_name == volume_id || lvol["name"].as_str() == Some(volume_id) {
+                            return Ok(LvolStat {
+                                total_data_clusters: lvstore["total_data_clusters"].as_u64().unwrap_or(0),
+                                free_clusters: lvstore["free_clusters"].as_u64().unwrap_or(0),
+                                num_allocated_clusters: lvol["num_allocated_clusters"].as_u64().unwrap_or(0),
+                                cluster_size: lvstore["cluster_size"].as_u64().unwrap_or(4096),
+                                thin_provision: lvol["thin_provision"].as_bool().unwrap_or(false),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(format!("Lvol {} not found in any lvstore", volume_id).into())
+    }
+
     async fn update_replica_scheduling(
         &self,
         volume_id: &str,
@@ -1829,7 +2449,7 @@ impl Node for SpdkCsiDriver {
         for replica in spdk_volume.spec.replicas.iter_mut() {
             let is_local = replica.node == pod_node;
             if replica.local_pod_scheduled != is_local
-                || replica.pod_name.as_ref() != Some(pod_name)
+                || replica.pod_name.as_ref() != Some(&pod_name.to_string())
             {
                 replica.local_pod_scheduled = is_local;
                 replica.pod_name = if is_local {
@@ -1854,9 +2474,6 @@ impl Node for SpdkCsiDriver {
 
         Ok(())
     }
-}
-
-impl SpdkCsiDriver {
 
     async fn start_vhost_user_nvme(
         &self,
@@ -1896,14 +2513,20 @@ impl SpdkCsiDriver {
         &self,
         volume_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(pid) = self.get_vhost_process_info(volume_id).await? {
-            Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()?;
-
-            self.remove_vhost_process_info(volume_id).await?;
-        }
-
+        // Extract all the async work first
+        let pid = match self.get_vhost_process_info(volume_id).await? {
+            Some(pid) => pid,
+            None => return Ok(()), // No process to stop
+        };
+        
+        // Do synchronous kill
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()?;
+        
+        // Clean up async
+        self.remove_vhost_process_info(volume_id).await?;
+        
         Ok(())
     }
 
@@ -2132,15 +2755,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kube_client = Client::try_default().await?;
     let node_id = std::env::var("NODE_ID")
         .unwrap_or_else(|_| std::env::var("HOSTNAME").unwrap_or("unknown-node".to_string()));
-
     let vhost_socket_base_path = std::env::var("VHOST_SOCKET_PATH")
         .unwrap_or("/var/lib/spdk-csi/sockets".to_string());
-
+    
     // Ensure vhost socket directory exists
     tokio::fs::create_dir_all(&vhost_socket_base_path).await?;
-
+    
     let driver = SpdkCsiDriver {
-        node_id,
+        node_id: node_id.clone(),
         kube_client,
         spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
         spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
@@ -2148,40 +2770,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_lvol_cache: Arc::new(Mutex::new(HashMap::new())),
         vhost_socket_base_path,
     };
-
+    
     let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
-
-    let addr = std::env::var("CSI_ENDPOINT")
-        .unwrap_or("unix:///csi/csi.sock".to_string())
-        .parse()?;
-
-    let mut server = Server::builder();
-
-    // The Identity service is always required
-    server = server.add_service(csi_driver::csi::identity_server::IdentityServer::new(
-        driver.clone(),
-    ));
-
+    let endpoint = std::env::var("CSI_ENDPOINT")
+        .unwrap_or("unix:///csi/csi.sock".to_string());
+    
+    // Build the router with services
+    let mut router = Server::builder()
+        .add_service(IdentityServer::new(driver.clone()));
+    
     if mode == "controller" || mode == "all" {
         println!("Starting in Controller mode...");
-        server = server.add_service(csi_driver::csi::controller_server::ControllerServer::new(
-            driver.clone(),
-        ));
+        router = router.add_service(ControllerServer::new(driver.clone()));
     }
-
+    
     if mode == "node" || mode == "all" {
         println!("Starting in Node mode...");
-        server = server.add_service(csi_driver::csi::node_server::NodeServer::new(
-            driver.clone(),
-        ));
+        router = router.add_service(NodeServer::new(driver.clone()));
     }
-
+    
     println!(
         "SPDK CSI Driver ('{}' mode) starting on {} for node {}",
-        mode, addr, driver.node_id
+        mode, endpoint, node_id
     );
-
-    server.serve(addr).await?;
-
+    
+    // Handle different endpoint types
+    if endpoint.starts_with("unix://") {
+        let socket_path = endpoint.trim_start_matches("unix://");
+        
+        // Remove existing socket file if it exists
+        if std::path::Path::new(socket_path).exists() {
+            std::fs::remove_file(socket_path)?;
+        }
+        
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = std::path::Path::new(socket_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        // Use UnixListener for Unix domain socket
+        use tokio::net::UnixListener;
+        use tokio_stream::wrappers::UnixListenerStream;
+        
+        let listener = UnixListener::bind(socket_path)?;
+        let stream = UnixListenerStream::new(listener);
+        
+        println!("Listening on unix socket: {}", socket_path);
+        router.serve_with_incoming(stream).await?;
+        
+    } else if endpoint.starts_with("tcp://") {
+        // Handle tcp:// prefix
+        let addr = endpoint.trim_start_matches("tcp://").parse()?;
+        router.serve(addr).await?;
+        
+    } else {
+        // Assume it's a direct address (e.g., "0.0.0.0:50051")
+        let addr = endpoint.parse()?;
+        router.serve(addr).await?;
+    }
+    
     Ok(())
 }
