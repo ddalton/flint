@@ -8,10 +8,8 @@ use reqwest::Client as HttpClient;
 use kube::{Client, Api, api::ListParams, CustomResource};
 use chrono::{Utc, DateTime};
 use std::env;
-use crate::models::*;
-
-// Import your existing CRD types with updated RAID status
-use spdk_csi_driver::{SpdkVolume, SpdkDisk, SpdkVolumeStatus, SpdkDiskStatus, Replica, ReplicaHealth, RaidStatus, RaidMember, RaidRebuildInfo, RaidMemberState, SpdkSnapshot, SnapshotType};
+use spdk_csi_driver::*;
+use k8s_openapi::api::core::v1::Pod;  
 
 // --- Start of New API Response Structs ---
 #[derive(Serialize, Debug, Clone)]
@@ -374,7 +372,8 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
 }
 
 fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
-    let status = volume.status.as_ref().unwrap_or(&SpdkVolumeStatus::default());
+    let default_status = SpdkVolumeStatus::default();  // Create binding first
+    let status = volume.status.as_ref().unwrap_or(&default_status);  // Use binding
     let spec = &volume.spec;
     
     // Convert RAID status from CRD
@@ -529,7 +528,8 @@ fn estimate_rebuild_time(rebuild: &RaidRebuildInfo) -> Option<String> {
 }
 
 fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> DashboardDisk {
-    let status = disk.status.as_ref().unwrap_or(&SpdkDiskStatus::default());
+    let default_status = SpdkDiskStatus::default();  // Create binding first
+    let status = disk.status.as_ref().unwrap_or(&default_status);  // Use binding
     let spec = &disk.spec;
     
     let provisioned_volumes: Vec<ProvisionedVolume> = volumes.iter()
@@ -1425,7 +1425,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
                 ).await;
 
                 // Build the nested JSON tree from the dependency map.
-                let root_snapshots = build_snapshot_tree_from_map(&Some(starting_lvol_name), &nodes_map);
+                let root_snapshots = build_snapshot_tree_from_map(&Some(starting_lvol_name.clone()), &nodes_map);
 
                 snapshot_chain_json = json!({
                     "active_lvol": starting_lvol_name,

@@ -4,6 +4,10 @@ version = "0.4.0"
 edition = "2021"
 
 [[bin]]
+name = "spdk-dashboard-backend"
+path = "src/spdk_dashboard_backend.rs"
+
+[[bin]]
 name = "csi-driver"
 path = "src/main.rs"
 
