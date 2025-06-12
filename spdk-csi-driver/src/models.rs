@@ -283,3 +283,54 @@ impl RaidStatus {
         })
     }
 }
+
+/// Create a new SpdkVolume instance with proper metadata
+impl SpdkVolume {
+    pub fn new_with_metadata(name: &str, spec: SpdkVolumeSpec) -> Self {
+        use kube::api::ObjectMeta;
+        
+        SpdkVolume {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+}
+
+/// Create a new SpdkSnapshot instance with proper metadata  
+impl SpdkSnapshot {
+    pub fn new_with_metadata(name: &str, spec: SpdkSnapshotSpec) -> Self {
+        use kube::api::ObjectMeta;
+        
+        SpdkSnapshot {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+}
+
+/// Create a new SpdkDisk instance with proper metadata
+impl SpdkDisk {
+    pub fn new_with_metadata(name: &str, spec: SpdkDiskSpec) -> Self {
+        use kube::api::ObjectMeta;
+        
+        SpdkDisk {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+}

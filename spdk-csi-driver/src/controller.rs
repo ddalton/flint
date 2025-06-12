@@ -13,14 +13,13 @@ use std::env;
 use std::sync::Arc;
 use spdk_csi_driver::models::*;
 
-use spdk_csi_driver::{SpdkVolume, SpdkDisk, Replica, SpdkVolumeStatus};
+use spdk_csi_driver::{SpdkVolume, SpdkDisk, Replica};
 
 struct Context {
     client: Client,
     spdk_rpc_url: String,
     health_interval: u64,
     rebuild_enabled: bool,
-    max_retries: u32,
     vhost_socket_base_path: String,
     // Removed rebuild tracking - SPDK handles this
 }
@@ -78,7 +77,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spdk_rpc_url: env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
         health_interval: env::var("HEALTH_CHECK_INTERVAL").unwrap_or("30".to_string()).parse().unwrap_or(30),
         rebuild_enabled: env::var("REBUILD_ENABLED").unwrap_or("true".to_string()).parse().unwrap_or(true),
-        max_retries: env::var("REBUILD_MAX_RETRIES").unwrap_or("3".to_string()).parse().unwrap_or(3),
         vhost_socket_base_path,
     });
 

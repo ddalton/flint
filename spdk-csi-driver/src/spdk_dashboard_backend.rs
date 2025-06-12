@@ -1,11 +1,11 @@
 use warp::Filter;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
-use kube::{Client, Api, api::ListParams, CustomResource};
+use kube::{Client, Api, api::ListParams};
 use chrono::{Utc, DateTime};
 use std::env;
 use spdk_csi_driver::*;
@@ -582,7 +582,7 @@ async fn enhance_with_spdk_metrics(
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
     
-    for (node, rpc_url) in spdk_nodes.iter() {
+    for (_node, rpc_url) in spdk_nodes.iter() {
         // Get real-time RAID status and update volumes
         if let Ok(response) = http_client
             .post(rpc_url)

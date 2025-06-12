@@ -151,7 +151,7 @@ impl SpdkCsiDriver {
         }
 
         // 5. Create the SpdkSnapshot CRD to persist the snapshot info.
-        let snapshot_crd = SpdkSnapshot::new(
+        let snapshot_crd = SpdkSnapshot::new_with_metadata(
             &snapshot_id,
             SpdkSnapshotSpec {
                 source_volume_id: source_volume_id.clone(),
