@@ -662,31 +662,28 @@ async fn delete_vhost_controller(
     Ok(())
 }
 
-async fn check_vhost_controller_exists(
-    ctx: &Context,
-    volume_id: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+async fn check_vhost_controller_exists(ctx: &Context, volume_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let http_client = HttpClient::new();
     let controller_name = format!("vhost_{}", volume_id);
-    
+
+    // Use get_vhost_controllers RPC
     let response = http_client
         .post(&ctx.spdk_rpc_url)
         .json(&json!({
-            "method": "vhost_get_controllers"
+            "method": "get_vhost_controllers"
         }))
         .send()
         .await?;
-    
+
     if response.status().is_success() {
         let controllers: serde_json::Value = response.json().await?;
         if let Some(controller_list) = controllers["result"].as_array() {
             return Ok(controller_list.iter().any(|c| {
-                c["ctrlr"].as_str() == Some(&controller_name) &&
-                c["backend_specific"]["type"].as_str() == Some("nvme")
+                c["ctrlr"].as_str() == Some(&controller_name)
             }));
         }
     }
-    
+
     Ok(false)
 }
 

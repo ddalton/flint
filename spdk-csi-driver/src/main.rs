@@ -239,30 +239,35 @@ impl SpdkCsiDriver {
                 // Export from remote node
                 self.export_replica_as_nvmf(&replica.node, replica, &nqn).await?;
                 
-                // Import on current node
+                // Import on current node - wait a moment for the export to be ready
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                
                 let nvmf_bdev_name = format!("nvmf_{}", replica.node.replace("-", "_"));
                 self.import_nvmf_bdev(current_node, &nqn, &remote_ip, &nvmf_bdev_name).await?;
                 
-                nvmf_bdev_name
+                // The actual bdev name will be the controller name + namespace
+                format!("{}n1", nvmf_bdev_name)
             };
             
+            // Verify the bdev exists before adding to RAID
+            if !self.check_bdev_exists(&bdev_name).await? {
+                return Err(format!("Bdev {} does not exist for RAID creation", bdev_name).into());
+            }
+            
             base_bdevs.push(bdev_name);
+            println!("Added bdev to RAID: {}", base_bdevs.last().unwrap());
         }
         
-        // Create RAID1 bdev on current node
+        // Create RAID1 with correct parameters for recent SPDK versions
         let response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
                 "method": "bdev_raid_create",
                 "params": {
                     "name": volume_id,
-                    "block_size": 4096,
-                    "raid_level": 1,
+                    "raid_level": "raid1",
                     "base_bdevs": base_bdevs,
-                    "strip_size": 64,
-                    "write_ordering": true,
-                    "superblock": true,
-                    "uuid": format!("raid-{}", uuid::Uuid::new_v4()),
+                    "strip_size_kb": 64
                 }
             }))
             .send()
@@ -273,7 +278,55 @@ impl SpdkCsiDriver {
             return Err(format!("Failed to create runtime RAID1: {}", error_text).into());
         }
 
+        // Wait for RAID to be online
+        self.wait_for_raid_online(volume_id).await?;
+
         println!("Successfully created runtime RAID1 for volume: {}", volume_id);
+        Ok(())
+    }
+
+    async fn wait_for_raid_online(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        let max_attempts = 30;
+        
+        for attempt in 0..max_attempts {
+            let response = http_client
+                .post(&self.spdk_rpc_url)
+                .json(&json!({
+                    "method": "bdev_raid_get_bdevs",
+                    "params": {
+                        "category": "all"
+                    }
+                }))
+                .send()
+                .await?;
+
+            if response.status().is_success() {
+                let raid_info: serde_json::Value = response.json().await?;
+                
+                if let Some(raid_bdevs) = raid_info["result"].as_array() {
+                    for raid_bdev in raid_bdevs {
+                        if raid_bdev["name"].as_str() == Some(volume_id) {
+                            let state = raid_bdev["state"].as_str().unwrap_or("");
+                            if state == "online" {
+                                println!("RAID {} is online", volume_id);
+                                return Ok(());
+                            } else {
+                                println!("RAID {} state: {} (attempt {}/{})", volume_id, state, attempt + 1, max_attempts);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if attempt == max_attempts - 1 {
+                return Err(format!("Timeout waiting for RAID {} to come online", volume_id).into());
+            }
+            
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        
         Ok(())
     }
 
@@ -289,49 +342,71 @@ impl SpdkCsiDriver {
         let lvol_bdev_name = format!("{}/{}", lvs_name, replica.lvol_uuid.as_ref().unwrap());
         let node_ip = self.get_node_ip(node_name).await?;
 
-        // Create NVMe-oF subsystem
-        http_client
+        // CORRECTED: Use proper nvmf_create_subsystem RPC
+        let subsystem_response = http_client
             .post(&rpc_url)
             .json(&json!({
                 "method": "nvmf_create_subsystem",
                 "params": {
                     "nqn": nqn,
+                    "allow_any_host": true,
                     "serial_number": format!("SPDK{}", uuid::Uuid::new_v4()),
-                    "allow_any_host": true
+                    "model_number": "SPDK CSI Volume"
                 }
             }))
             .send()
             .await?;
 
-        // Add namespace
-        http_client
+        if !subsystem_response.status().is_success() {
+            let error_text = subsystem_response.text().await?;
+            return Err(format!("Failed to create NVMf subsystem: {}", error_text).into());
+        }
+
+        // Add namespace - CORRECTED: Use proper nvmf_subsystem_add_ns RPC
+        let namespace_response = http_client
             .post(&rpc_url)
             .json(&json!({
                 "method": "nvmf_subsystem_add_ns",
                 "params": {
                     "nqn": nqn,
-                    "bdev_name": lvol_bdev_name,
-                    "nsid": 1
+                    "namespace": {
+                        "nsid": 1,
+                        "bdev_name": lvol_bdev_name
+                    }
                 }
             }))
             .send()
             .await?;
 
-        // Add listener
-        http_client
+        if !namespace_response.status().is_success() {
+            let error_text = namespace_response.text().await?;
+            return Err(format!("Failed to add namespace to NVMf subsystem: {}", error_text).into());
+        }
+
+        // Add listener - CORRECTED: Use proper nvmf_subsystem_add_listener RPC
+        let listener_response = http_client
             .post(&rpc_url)
             .json(&json!({
                 "method": "nvmf_subsystem_add_listener",
                 "params": {
                     "nqn": nqn,
-                    "trtype": "tcp",
-                    "traddr": node_ip,
-                    "trsvcid": "4420"
+                    "listen_address": {
+                        "trtype": "tcp",
+                        "traddr": node_ip,
+                        "trsvcid": "4420",
+                        "adrfam": "ipv4"
+                    }
                 }
             }))
             .send()
             .await?;
 
+        if !listener_response.status().is_success() {
+            let error_text = listener_response.text().await?;
+            return Err(format!("Failed to add listener to NVMf subsystem: {}", error_text).into());
+        }
+
+        println!("Successfully exported {} as NVMf subsystem {} on {}", lvol_bdev_name, nqn, node_ip);
         Ok(())
     }
 
@@ -345,14 +420,16 @@ impl SpdkCsiDriver {
         let rpc_url = self.get_rpc_url_for_node(node_name).await?;
         let http_client = HttpClient::new();
 
+        // CORRECTED: Use proper bdev_nvme_attach_controller RPC
         let response = http_client
             .post(&rpc_url)
             .json(&json!({
                 "method": "bdev_nvme_attach_controller",
                 "params": {
                     "name": bdev_name,
-                    "trtype": "tcp",
+                    "trtype": "tcp", 
                     "traddr": target_ip,
+                    "adrfam": "ipv4",
                     "trsvcid": "4420",
                     "subnqn": nqn
                 }
@@ -362,64 +439,10 @@ impl SpdkCsiDriver {
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
-            return Err(format!("Failed to import NVMe-oF bdev: {}", error_text).into());
+            return Err(format!("Failed to attach NVMf controller: {}", error_text).into());
         }
 
-        Ok(())
-    }
-
-    /// Cleanup runtime RAID when pod is terminated
-    async fn cleanup_runtime_raid(
-        &self,
-        volume_id: &str,
-        spdk_volume: &SpdkVolume,
-        current_node: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-        
-        // Delete RAID bdev
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_delete",
-                "params": { "name": volume_id }
-            }))
-            .send()
-            .await
-            .ok();
-
-        // Cleanup NVMe-oF connections
-        for replica in &spdk_volume.spec.replicas {
-            if replica.node != current_node {
-                let nqn = format!("nqn.2025-05.io.spdk:lvol-{}", replica.lvol_uuid.as_ref().unwrap());
-                
-                // Detach from current node
-                let nvmf_bdev_name = format!("nvmf_{}", replica.node.replace("-", "_"));
-                http_client
-                    .post(&self.spdk_rpc_url)
-                    .json(&json!({
-                        "method": "bdev_nvme_detach_controller",
-                        "params": { "name": nvmf_bdev_name }
-                    }))
-                    .send()
-                    .await
-                    .ok();
-
-                // Delete subsystem from remote node
-                let rpc_url = self.get_rpc_url_for_node(&replica.node).await?;
-                http_client
-                    .post(&rpc_url)
-                    .json(&json!({
-                        "method": "nvmf_delete_subsystem",
-                        "params": { "nqn": nqn }
-                    }))
-                    .send()
-                    .await
-                    .ok();
-            }
-        }
-
-        println!("Cleaned up runtime RAID1 for volume: {}", volume_id);
+        println!("Successfully imported NVMf bdev {} from {}:{}", bdev_name, target_ip, nqn);
         Ok(())
     }
 
@@ -446,6 +469,7 @@ impl SpdkCsiDriver {
         format!("{}/vhost_{}.sock", self.vhost_socket_base_path, volume_id)
     }
 
+    /// Create vhost-nvme controller 
     async fn create_vhost_controller(
         &self,
         volume_id: &str,
@@ -459,31 +483,30 @@ impl SpdkCsiDriver {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // Create vhost-nvme controller
-        let response = http_client
+        // Step 1: Create vhost NVMe controller (CORRECT RPC for spdk_tgt)
+        let controller_response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
-                "method": "vhost_create_nvme_controller",
+                "method": "construct_vhost_nvme_controller",
                 "params": {
                     "ctrlr": controller_name,
-                    "io_queues": 4,
                     "cpumask": "0x1",
-                    "max_namespaces": 32
+                    "io_queues": 4
                 }
             }))
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
+        if !controller_response.status().is_success() {
+            let error_text = controller_response.text().await?;
             return Err(format!("Failed to create vhost-nvme controller: {}", error_text).into());
         }
 
-        // Add namespace
-        http_client
+        // Step 2: Add namespace to the vhost NVMe controller
+        let namespace_response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
-                "method": "vhost_nvme_controller_add_ns",
+                "method": "add_vhost_nvme_ns",
                 "params": {
                     "ctrlr": controller_name,
                     "bdev_name": bdev_name
@@ -492,64 +515,68 @@ impl SpdkCsiDriver {
             .send()
             .await?;
 
-        // Start controller
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "vhost_start_controller",
-                "params": {
-                    "ctrlr": controller_name,
-                    "socket": socket_path
-                }
-            }))
-            .send()
-            .await?;
+        if !namespace_response.status().is_success() {
+            let error_text = namespace_response.text().await?;
+            return Err(format!("Failed to add namespace to vhost-nvme controller: {}", error_text).into());
+        }
 
-        Ok(socket_path)
+        // Step 3: Wait for the namespace to be properly attached and ready
+        self.wait_for_vhost_namespace(volume_id).await?;
+
+        // Step 4: Ensure the socket path exists and is ready
+        let actual_socket_path = format!("/var/tmp/{}", controller_name);
+        
+        // Wait for socket to be created by SPDK
+        for _ in 0..30 {
+            if tokio::fs::try_exists(&actual_socket_path).await.unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        if !tokio::fs::try_exists(&actual_socket_path).await.unwrap_or(false) {
+            return Err(format!("Vhost socket {} was not created by SPDK", actual_socket_path).into());
+        }
+
+        println!("Created vhost-nvme controller: {} -> {}", controller_name, actual_socket_path);
+        Ok(actual_socket_path)
     }
 
+    /// Delete vhost controller 
     async fn delete_vhost_controller(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let http_client = HttpClient::new();
         let controller_name = format!("vhost_{}", volume_id);
-        let socket_path = self.get_vhost_socket_path(volume_id);
 
-        // Remove namespace
-        http_client
+        // Use the correct remove_vhost_controller RPC
+        let response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
-                "method": "vhost_nvme_controller_remove_ns",
-                "params": { 
-                    "ctrlr": controller_name,
-                    "nsid": 1
+                "method": "remove_vhost_controller",
+                "params": {
+                    "ctrlr": controller_name
                 }
             }))
             .send()
-            .await
-            .ok();
+            .await;
 
-        // Stop controller
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "vhost_stop_controller",
-                "params": { "ctrlr": controller_name }
-            }))
-            .send()
-            .await
-            .ok();
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("Successfully removed vhost controller: {}", controller_name);
+                } else {
+                    let error_text = resp.text().await.unwrap_or_default();
+                    eprintln!("Failed to remove vhost controller {}: {}", controller_name, error_text);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error removing vhost controller {}: {}", controller_name, e);
+            }
+        }
 
-        // Delete controller
-        http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "vhost_delete_controller",
-                "params": { "ctrlr": controller_name }
-            }))
-            .send()
-            .await
-            .ok();
-
+        // Remove socket file (best effort)
+        let socket_path = format!("/var/tmp/{}", controller_name);
         tokio::fs::remove_file(&socket_path).await.ok();
+        
         Ok(())
     }
 }
@@ -1450,29 +1477,202 @@ impl Node for SpdkCsiDriver {
 }
 
 impl SpdkCsiDriver {
-    async fn find_vhost_device_path(&self, socket_path: &str) -> Result<String, Status> {
-        let max_wait = std::time::Duration::from_secs(30);
-        let start = std::time::Instant::now();
+    /// Helper method to check if a bdev exists
+    async fn check_bdev_exists(&self, bdev_name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        
+        // CORRECTED: Use proper bdev_get_bdevs RPC
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_get_bdevs",
+                "params": {
+                    "name": bdev_name
+                }
+            }))
+            .send()
+            .await?;
 
-        while start.elapsed() < max_wait {
-            if let Ok(entries) = tokio::fs::read_dir("/dev").await {
-                let mut entries = entries;
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("nvme") && self.is_vhost_device(&path, socket_path).await {
-                            return Ok(path.to_string_lossy().to_string());
+        if response.status().is_success() {
+            let bdevs: serde_json::Value = response.json().await?;
+            if let Some(bdev_list) = bdevs["result"].as_array() {
+                return Ok(!bdev_list.is_empty());
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Corrected RAID cleanup method
+    async fn cleanup_runtime_raid(
+        &self,
+        volume_id: &str,
+        spdk_volume: &SpdkVolume,
+        current_node: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        
+        // CORRECTED: Use proper bdev_raid_delete RPC
+        let raid_response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_raid_delete",
+                "params": {
+                    "name": volume_id
+                }
+            }))
+            .send()
+            .await;
+
+        match raid_response {
+            Ok(resp) if resp.status().is_success() => {
+                println!("Successfully deleted RAID bdev: {}", volume_id);
+            }
+            Ok(resp) => {
+                let error_text = resp.text().await.unwrap_or_default();
+                eprintln!("Failed to delete RAID bdev {}: {}", volume_id, error_text);
+            }
+            Err(e) => {
+                eprintln!("Error deleting RAID bdev {}: {}", volume_id, e);
+            }
+        }
+
+        // Cleanup NVMe-oF connections for remote replicas
+        for replica in &spdk_volume.spec.replicas {
+            if replica.node != current_node {
+                let nqn = format!("nqn.2025-05.io.spdk:lvol-{}", replica.lvol_uuid.as_ref().unwrap());
+                
+                // Detach from current node - CORRECTED: Use proper bdev_nvme_detach_controller RPC
+                let nvmf_bdev_name = format!("nvmf_{}", replica.node.replace("-", "_"));
+                let detach_response = http_client
+                    .post(&self.spdk_rpc_url)
+                    .json(&json!({
+                        "method": "bdev_nvme_detach_controller",
+                        "params": {
+                            "name": nvmf_bdev_name
+                        }
+                    }))
+                    .send()
+                    .await;
+
+                if let Ok(resp) = detach_response {
+                    if resp.status().is_success() {
+                        println!("Detached NVMf controller: {}", nvmf_bdev_name);
+                    }
+                }
+
+                // Delete subsystem from remote node - CORRECTED: Use nvmf_delete_subsystem
+                let rpc_url = self.get_rpc_url_for_node(&replica.node).await?;
+                let delete_response = http_client
+                    .post(&rpc_url)
+                    .json(&json!({
+                        "method": "nvmf_delete_subsystem",
+                        "params": {
+                            "nqn": nqn
+                        }
+                    }))
+                    .send()
+                    .await;
+
+                if let Ok(resp) = delete_response {
+                    if resp.status().is_success() {
+                        println!("Deleted NVMf subsystem: {}", nqn);
+                    }
+                }
+            }
+        }
+
+        println!("Cleaned up runtime RAID1 for volume: {}", volume_id);
+        Ok(())
+    }
+
+    /// Get vhost controller information
+    async fn get_vhost_controller_info(&self, volume_id: &str) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        let controller_name = format!("vhost_{}", volume_id);
+
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&json!({
+                "method": "get_vhost_controllers",
+                "params": {
+                    "name": controller_name
+                }
+            }))
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let controllers: serde_json::Value = response.json().await?;
+            if let Some(controller_list) = controllers["result"].as_array() {
+                return Ok(controller_list.first().cloned());
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Enhanced method to wait for vhost-nvme namespace to be ready
+    async fn wait_for_vhost_namespace(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let max_attempts = 30;
+        for attempt in 0..max_attempts {
+            if let Ok(Some(controller_info)) = self.get_vhost_controller_info(volume_id).await {
+                // Check if the controller has namespaces
+                if let Some(backend_specific) = controller_info.get("backend_specific") {
+                    if let Some(namespaces) = backend_specific.get("namespaces") {
+                        if let Some(ns_array) = namespaces.as_array() {
+                            if !ns_array.is_empty() {
+                                println!("Vhost-NVMe controller {} has {} namespace(s) ready", 
+                                        volume_id, ns_array.len());
+                                return Ok(());
+                            }
                         }
                     }
                 }
             }
+            
+            if attempt == max_attempts - 1 {
+                return Err("Timeout waiting for vhost-nvme namespace to be ready".into());
+            }
+            
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        
+        Ok(())
+    }
 
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    /// Method to find vhost device path (corrected for vhost-nvme)
+    async fn find_vhost_device_path(&self, socket_path: &str) -> Result<String, Status> {
+        let max_wait = std::time::Duration::from_secs(30);
+        let start = std::time::Instant::now();
+
+        // First wait for socket to be created
+        while start.elapsed() < max_wait {
+            if tokio::fs::try_exists(socket_path).await.unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        Err(Status::deadline_exceeded(
-            format!("Vhost device for socket {} did not appear within timeout", socket_path)
-        ))
+        if !tokio::fs::try_exists(socket_path).await.unwrap_or(false) {
+            return Err(Status::deadline_exceeded(
+                format!("Vhost socket {} never appeared", socket_path)
+            ));
+        }
+
+        // For vhost-nvme, the socket path itself is what we return
+        // The actual block device will be created by the vhost-user client (QEMU, etc.)
+        // when they connect to this socket
+        
+        // In a Kubernetes/container environment, you might need to:
+        // 1. Mount the socket into the container
+        // 2. Use a vhost-user client library to connect to the socket
+        // 3. Create a block device interface
+        
+        // For now, return the socket path - the CSI driver will need to handle
+        // the vhost-user protocol to actually expose this as a block device
+        println!("Vhost-NVMe socket ready at: {}", socket_path);
+        Ok(socket_path.to_string())
     }
 
     async fn is_vhost_device(&self, device_path: &std::path::Path, _socket_path: &str) -> bool {
