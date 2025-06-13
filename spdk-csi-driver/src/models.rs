@@ -19,9 +19,10 @@ pub struct SpdkVolumeSpec {
     pub replicas: Vec<Replica>,
     pub primary_lvol_uuid: Option<String>,
     pub write_ordering_enabled: bool,
-    pub vhost_socket: Option<String>,
     pub raid_auto_rebuild: bool,
-    // New scheduling and optimization fields
+    pub nvmeof_transport: Option<String>,
+    pub nvmeof_target_port: Option<u16>,
+    // Scheduling and optimization fields
     pub scheduling_policy: Option<String>,
     pub preferred_nodes: Option<Vec<String>>,
 }
@@ -42,7 +43,6 @@ pub struct Replica {
     pub health_status: ReplicaHealth,
     pub last_io_timestamp: Option<String>,
     pub write_sequence: u64,
-    pub vhost_socket: Option<String>,
     pub raid_member_index: usize,
     pub raid_member_state: RaidMemberState,
 }
@@ -77,8 +77,8 @@ pub struct SpdkVolumeStatus {
     pub failed_replicas: Vec<usize>,
     pub write_sequence: u64,
     pub last_successful_write: Option<String>,
-    pub vhost_device: Option<String>,
     pub raid_status: Option<RaidStatus>,
+    pub nvmeof_targets: Vec<NvmeofTarget>,
     // Scheduling and optimization tracking fields
     pub scheduled_node: Option<String>,
     pub has_local_replica: bool,
@@ -87,6 +87,17 @@ pub struct SpdkVolumeStatus {
     pub read_optimized: bool,
     pub read_policy: Option<String>,
     pub local_replica_performance: Option<LocalReplicaMetrics>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct NvmeofTarget {
+    pub nqn: String,
+    pub transport: String,
+    pub target_addr: String,
+    pub target_port: u16,
+    pub node: String,
+    pub bdev_name: String,
+    pub active: bool,
 }
 
 // ============================================================================
@@ -104,7 +115,7 @@ pub struct RaidStatus {
     pub rebuild_info: Option<RaidRebuildInfo>,
     pub superblock_version: Option<u32>,
     pub process_request_fn: Option<String>,
-    // New fields for read optimization
+    // Fields for read optimization
     pub read_policy: Option<String>,
     pub primary_member_slot: Option<u32>,
 }
@@ -116,7 +127,7 @@ pub struct RaidMember {
     pub slot: u32,
     pub uuid: Option<String>,
     pub is_configured: bool,
-    // New fields for optimization tracking
+    // Fields for optimization tracking
     pub node: Option<String>,
     pub is_local: Option<bool>,
     pub read_priority: Option<u32>,
@@ -188,6 +199,17 @@ pub struct ReplicaSnapshot {
     pub spdk_snapshot_lvol: String,
     pub source_lvol_bdev: String,
     pub disk_ref: String,
+    pub nvmeof_export: Option<NvmeofExportInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct NvmeofExportInfo {
+    pub nqn: String,
+    pub target_ip: String,
+    pub target_port: u16,
+    pub transport: String,
+    pub exported: bool,
+    pub export_time: Option<String>,
 }
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
@@ -201,6 +223,8 @@ pub struct SpdkSnapshotSpec {
     #[serde(default)]
     pub snapshot_type: SnapshotType,
     pub clone_source_snapshot_id: Option<String>,
+    pub nvmeof_access_enabled: bool,
+    pub nvmeof_transport: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
@@ -209,6 +233,8 @@ pub struct SpdkSnapshotStatus {
     pub ready_to_use: bool,
     pub size_bytes: i64,
     pub error: Option<String>,
+    pub nvmeof_targets: Vec<NvmeofExportInfo>,
+    pub accessible_nodes: Vec<String>,
 }
 
 // ============================================================================

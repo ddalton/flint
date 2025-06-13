@@ -1,880 +1,867 @@
-// Updated controller.rs leveraging SPDK's native RAID1 rebuild capabilities
-use kube::{
-    Client, Api, runtime::{Controller, watcher, controller::Action},
-    api::{PatchParams, Patch, ListParams},
-    error::ErrorResponse,
+// controller.rs - Controller service implementation
+use std::sync::Arc;
+use crate::driver::SpdkCsiDriver;
+use crate::csi_snapshotter::*;
+use crate::csi_driver::csi::csi::v1::{
+    controller_server::Controller,
+    *,
 };
-use k8s_openapi::api::core::v1::Pod;
-use tokio::time::{Duration, interval};
+use tonic::{Request, Response, Status};
+use kube::{Api, api::{ListParams, Patch, PatchParams, PostParams}};
 use reqwest::Client as HttpClient;
 use serde_json::json;
-use chrono::Utc;
-use std::env;
-use std::sync::Arc;
 use spdk_csi_driver::models::*;
 
-use spdk_csi_driver::{SpdkVolume, SpdkDisk, Replica};
-
-struct Context {
-    client: Client,
-    spdk_rpc_url: String,
-    health_interval: u64,
-    rebuild_enabled: bool,
-    vhost_socket_base_path: String,
-    // Removed rebuild tracking - SPDK handles this
+pub struct ControllerService {
+    driver: Arc<SpdkCsiDriver>,
 }
 
-// Custom error type that is Send + Sync
-#[derive(Debug, Clone)]
-pub struct ControllerError {
-    pub message: String,
-}
-
-impl std::fmt::Display for ControllerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+impl ControllerService {
+    pub fn new(driver: Arc<SpdkCsiDriver>) -> Self {
+        Self { driver }
     }
-}
 
-impl std::error::Error for ControllerError {}
+    /// Provision volume with specified number of replicas - enhanced with validation
+    async fn provision_volume(
+        &self,
+        volume_id: &str,
+        capacity: i64,
+        num_replicas: i32,
+    ) -> Result<SpdkVolume, Status> {
+        // Validate inputs
+        self.validate_volume_request(volume_id, capacity, num_replicas).await?;
+        
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let available_disks = self.get_available_disks(&disks, capacity).await?;
 
-impl From<Box<dyn std::error::Error>> for ControllerError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        ControllerError {
-            message: err.to_string(),
-        }
+        // Enhanced validation with better error messages
+        self.validate_disk_availability(&available_disks, capacity, num_replicas).await?;
+
+        let selected_disks = self.select_disks_with_node_separation(available_disks, num_replicas as usize)?;
+        let replicas = self.create_replicas(&selected_disks, capacity, volume_id).await?;
+
+        let spdk_volume = SpdkVolume::new_with_metadata(
+            volume_id,
+            SpdkVolumeSpec {
+                volume_id: volume_id.to_string(),
+                size_bytes: capacity,
+                num_replicas,
+                replicas: replicas.clone(),
+                raid_auto_rebuild: num_replicas > 1,
+                nvmeof_transport: Some(self.driver.nvmeof_transport.clone()),
+                nvmeof_target_port: Some(self.driver.nvmeof_target_port),
+                ..Default::default()
+            },
+        );
+
+        // Create CRD
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        crd_api.create(&PostParams::default(), &spdk_volume).await
+            .map_err(|e| Status::internal(format!("Failed to create SpdkVolume CRD: {}", e)))?;
+
+        // Update disk statuses
+        self.update_disk_statuses(&disks, &selected_disks, capacity, 1).await?;
+
+        Ok(spdk_volume)
     }
-}
 
-impl From<reqwest::Error> for ControllerError {
-    fn from(err: reqwest::Error) -> Self {
-        ControllerError {
-            message: err.to_string(),
+    /// Comprehensive validation for volume creation requests
+    async fn validate_volume_request(
+        &self,
+        volume_id: &str,
+        capacity: i64,
+        num_replicas: i32,
+    ) -> Result<(), Status> {
+        // Validate volume ID
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID cannot be empty"));
         }
+
+        if volume_id.len() > 63 {
+            return Err(Status::invalid_argument("Volume ID cannot exceed 63 characters"));
+        }
+
+        // Validate volume ID format (DNS-1123 subdomain)
+        let volume_id_regex = regex::Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap();
+        if !volume_id_regex.is_match(volume_id) {
+            return Err(Status::invalid_argument(
+                "Volume ID must be a valid DNS-1123 subdomain (lowercase alphanumeric and hyphens)"
+            ));
+        }
+
+        // Validate capacity
+        const MIN_CAPACITY: i64 = 1024 * 1024 * 1024; // 1GB
+        const MAX_CAPACITY: i64 = 64 * 1024 * 1024 * 1024 * 1024; // 64TB
+
+        if capacity < MIN_CAPACITY {
+            return Err(Status::invalid_argument(
+                format!("Volume capacity must be at least {} bytes (1GB)", MIN_CAPACITY)
+            ));
+        }
+
+        if capacity > MAX_CAPACITY {
+            return Err(Status::invalid_argument(
+                format!("Volume capacity cannot exceed {} bytes (64TB)", MAX_CAPACITY)
+            ));
+        }
+
+        // Validate replica count
+        if num_replicas < 1 {
+            return Err(Status::invalid_argument("Number of replicas must be at least 1"));
+        }
+
+        if num_replicas > 5 {
+            return Err(Status::invalid_argument(
+                "Number of replicas cannot exceed 5 (performance and complexity limitations)"
+            ));
+        }
+
+        // For RAID1, only support 2 replicas currently
+        if num_replicas > 2 {
+            return Err(Status::invalid_argument(
+                "Multi-replica volumes currently support only 2 replicas (RAID1)"
+            ));
+        }
+
+        // Check if volume already exists
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        if volumes_api.get(volume_id).await.is_ok() {
+            return Err(Status::already_exists(format!("Volume {} already exists", volume_id)));
+        }
+
+        Ok(())
     }
-}
 
-impl From<serde_json::Error> for ControllerError {
-    fn from(err: serde_json::Error) -> Self {
-        ControllerError {
-            message: err.to_string(),
+    /// Validate disk availability and capacity
+    async fn validate_disk_availability(
+        &self,
+        available_disks: &[SpdkDisk],
+        capacity: i64,
+        num_replicas: i32,
+    ) -> Result<(), Status> {
+        if available_disks.is_empty() {
+            return Err(Status::resource_exhausted(
+                "No healthy disks available for volume provisioning"
+            ));
         }
-    }
-}
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::try_default().await?;
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(client.clone(), "default");
-    
-    let vhost_socket_base_path = env::var("VHOST_SOCKET_PATH")
-        .unwrap_or("/var/lib/spdk-csi/sockets".to_string());
-    
-    tokio::fs::create_dir_all(&vhost_socket_base_path).await?;
-    
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-        spdk_rpc_url: env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
-        health_interval: env::var("HEALTH_CHECK_INTERVAL").unwrap_or("30".to_string()).parse().unwrap_or(30),
-        rebuild_enabled: env::var("REBUILD_ENABLED").unwrap_or("true".to_string()).parse().unwrap_or(true),
-        vhost_socket_base_path,
-    });
-
-    // Start health monitoring task
-    let health_ctx = ctx.clone();
-    tokio::spawn(async move {
-        health_monitor_task(health_ctx).await;
-    });
-
-    // Start vhost cleanup task
-    let cleanup_ctx = ctx.clone();
-    tokio::spawn(async move {
-        vhost_cleanup_task(cleanup_ctx).await;
-    });
-
-    // Fix: Use for_each instead of await, and fix reconcile function signature
-    let controller = Controller::new(spdk_volumes, watcher::Config::default())
-        .run(reconcile, error_policy, ctx);
-    
-    // Run the controller stream
-    use futures::stream::StreamExt;
-    controller.for_each(|res| async move {
-        match res {
-            Ok((obj_ref, action)) => {
-                println!("Reconciled {}: {:?}", obj_ref.name, action);
-            }
-            Err(e) => {
-                eprintln!("Controller error: {}", e);
-            }
+        if available_disks.len() < num_replicas as usize {
+            return Err(Status::resource_exhausted(
+                format!(
+                    "Insufficient healthy disks: need {}, found {} available", 
+                    num_replicas, 
+                    available_disks.len()
+                )
+            ));
         }
-    }).await;
 
-    Ok(())
-}
+        // Check if any disk has sufficient capacity
+        let disks_with_capacity = available_disks.iter()
+            .filter(|disk| {
+                disk.status.as_ref().map_or(false, |status| status.free_space >= capacity)
+            })
+            .count();
 
-async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let volume_id = spdk_volume.spec.volume_id.clone();
-    let mut status = spdk_volume.status.clone().unwrap_or_default();
-    let _spec_update_needed = false;
-    let mut status_update_needed = false;
+        if disks_with_capacity < num_replicas as usize {
+            return Err(Status::resource_exhausted(
+                format!(
+                    "Insufficient disk capacity: need {} disks with {}GB each, found {} disks with sufficient space",
+                    num_replicas,
+                    capacity / (1024 * 1024 * 1024),
+                    disks_with_capacity
+                )
+            ));
+        }
 
-    // --- Health Check Logic ---
-    if spdk_volume.spec.num_replicas > 1 {
-        // --- Multi-Replica (RAID1) Volume Health Check ---
-        let raid_status = get_raid_status(&ctx, &volume_id).await
-            .map_err(|e| kube::Error::Api(ErrorResponse {
-                status: "Failure".to_string(),
-                message: format!("Failed to get RAID status: {}", e),
-                reason: "SPDKError".to_string(),
-                code: 500,
-            }))?;
-
-        if let Some(ref raid_info) = raid_status {
-            status.raid_status = Some(raid_info.clone());
-            status.state = match raid_info.state.as_str() {
-                "online" => "Healthy".to_string(),
-                "degraded" => "Degraded".to_string(),
-                "failed" | "broken" => "Failed".to_string(),
-                _ => raid_info.state.clone(),
-            };
-            status.degraded = raid_info.state == "degraded";
-            
-            let failed_replicas: Vec<usize> = raid_info.base_bdevs_list.iter()
-                .filter(|m| m.state == "failed")
-                .map(|m| m.slot as usize)
+        // For multi-replica, validate node distribution is possible
+        if num_replicas > 1 {
+            let unique_nodes: std::collections::HashSet<_> = available_disks.iter()
+                .map(|disk| &disk.spec.node)
                 .collect();
-            
-            if !failed_replicas.is_empty() {
-                 status.failed_replicas = failed_replicas;
-            }
 
-            status_update_needed = true;
+            if unique_nodes.len() < num_replicas as usize {
+                return Err(Status::resource_exhausted(
+                    format!(
+                        "Cannot achieve node separation: need {} nodes, found {} nodes with available disks",
+                        num_replicas,
+                        unique_nodes.len()
+                    )
+                ));
+            }
         }
 
-        if ctx.rebuild_enabled && !status.failed_replicas.is_empty() {
-            for &failed_index in &status.failed_replicas {
-                if let Err(e) = handle_failed_replica_with_spdk(&spdk_volume, &ctx, failed_index, &spdk_disks).await {
-                    eprintln!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
-                    status.state = "RebuildFailed".to_string();
+        Ok(())
+    }
+
+    /// Enhanced disk selection with better node separation logic
+    fn select_disks_with_node_separation(
+        &self, 
+        available_disks: Vec<SpdkDisk>, 
+        num_replicas: usize
+    ) -> Result<Vec<SpdkDisk>, Status> {
+        let mut selected_disks = Vec::new();
+        let mut used_nodes = std::collections::HashSet::new();
+        
+        // Sort disks by free space (descending) for better selection
+        let mut sorted_disks = available_disks;
+        sorted_disks.sort_by(|a, b| {
+            let a_free = a.status.as_ref().map(|s| s.free_space).unwrap_or(0);
+            let b_free = b.status.as_ref().map(|s| s.free_space).unwrap_or(0);
+            b_free.cmp(&a_free)
+        });
+        
+        for disk in sorted_disks {
+            if !used_nodes.contains(&disk.spec.node) && selected_disks.len() < num_replicas {
+                used_nodes.insert(disk.spec.node.clone());
+                selected_disks.push(disk);
+            }
+        }
+
+        if selected_disks.len() < num_replicas {
+            return Err(Status::resource_exhausted(
+                format!(
+                    "Cannot achieve node separation: selected {} disks from {} unique nodes, need {}",
+                    selected_disks.len(),
+                    used_nodes.len(),
+                    num_replicas
+                )
+            ));
+        }
+
+        // Log selection for debugging
+        let selected_nodes: Vec<_> = selected_disks.iter()
+            .map(|d| &d.spec.node)
+            .collect();
+        println!("Selected disks on nodes: {:?}", selected_nodes);
+
+        Ok(selected_disks)
+    }
+
+    /// Validate volume expansion request
+    async fn validate_volume_expansion(
+        &self,
+        volume_id: &str,
+        new_capacity: i64,
+        current_capacity: i64,
+    ) -> Result<(), Status> {
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        if new_capacity <= current_capacity {
+            return Err(Status::invalid_argument(
+                format!(
+                    "New capacity ({} bytes) must be larger than current capacity ({} bytes)",
+                    new_capacity, current_capacity
+                )
+            ));
+        }
+
+        let expansion_size = new_capacity - current_capacity;
+        const MAX_EXPANSION: i64 = 32 * 1024 * 1024 * 1024 * 1024; // 32TB max expansion
+
+        if expansion_size > MAX_EXPANSION {
+            return Err(Status::invalid_argument(
+                format!("Expansion size cannot exceed {} bytes (32TB)", MAX_EXPANSION)
+            ));
+        }
+
+        // Validate that expansion doesn't exceed disk capacity limits
+        const MAX_VOLUME_SIZE: i64 = 64 * 1024 * 1024 * 1024 * 1024; // 64TB
+        if new_capacity > MAX_VOLUME_SIZE {
+            return Err(Status::invalid_argument(
+                format!("Volume size cannot exceed {} bytes (64TB)", MAX_VOLUME_SIZE)
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate snapshot creation request
+    async fn validate_snapshot_request(
+        &self,
+        snapshot_id: &str,
+        source_volume_id: &str,
+    ) -> Result<(), Status> {
+        if snapshot_id.is_empty() {
+            return Err(Status::invalid_argument("Snapshot ID cannot be empty"));
+        }
+
+        if source_volume_id.is_empty() {
+            return Err(Status::invalid_argument("Source volume ID cannot be empty"));
+        }
+
+        // Validate snapshot ID format (same as volume ID)
+        let id_regex = regex::Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap();
+        if !id_regex.is_match(snapshot_id) {
+            return Err(Status::invalid_argument(
+                "Snapshot ID must be a valid DNS-1123 subdomain"
+            ));
+        }
+
+        // Check if snapshot already exists
+        let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        if snapshots_api.get(snapshot_id).await.is_ok() {
+            return Err(Status::already_exists(format!("Snapshot {} already exists", snapshot_id)));
+        }
+
+        // Verify source volume exists
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        volumes_api.get(source_volume_id).await
+            .map_err(|_| Status::not_found(format!("Source volume {} not found", source_volume_id)))?;
+
+        Ok(())
+    }
+
+    async fn get_available_disks(&self, disks: &Api<SpdkDisk>, capacity: i64) -> Result<Vec<SpdkDisk>, Status> {
+        Ok(disks
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list SpdkDisks: {}", e)))?
+            .items
+            .into_iter()
+            .filter(|d| {
+                d.status.as_ref().map_or(false, |s| 
+                    s.healthy && s.blobstore_initialized && s.free_space >= capacity)
+            })
+            .collect())
+    }
+
+    async fn create_replicas(&self, disks: &[SpdkDisk], capacity: i64, volume_id: &str) -> Result<Vec<Replica>, Status> {
+        let mut replicas = Vec::new();
+
+        for (i, disk) in disks.iter().enumerate() {
+            let lvol_uuid = self.create_volume_lvol(disk, capacity, volume_id).await
+                .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
+
+            let node_ip = self.driver.get_node_ip(&disk.spec.node).await?;
+            let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
+
+            let replica = Replica {
+                node: disk.spec.node.clone(),
+                replica_type: "lvol".to_string(),
+                pcie_addr: Some(disk.spec.pcie_addr.clone()),
+                disk_ref: disk.metadata.name.clone().unwrap_or_default(),
+                lvol_uuid: Some(lvol_uuid),
+                nqn: Some(nqn),
+                ip: Some(node_ip),
+                port: Some(self.driver.nvmeof_target_port.to_string()),
+                raid_member_index: i,
+                health_status: ReplicaHealth::Healthy,
+                raid_member_state: RaidMemberState::Online,
+                ..Default::default()
+            };
+
+            replicas.push(replica);
+        }
+
+        Ok(replicas)
+    }
+
+    async fn create_volume_lvol(
+        &self,
+        disk: &SpdkDisk,
+        size_bytes: i64,
+        volume_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node).await?;
+        let http_client = HttpClient::new();
+        let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
+        let lvol_name = format!("vol_{}", volume_id);
+
+        let lvol_response = http_client
+            .post(&rpc_url)
+            .json(&json!({
+                "method": "bdev_lvol_create",
+                "params": {
+                    "lvs_name": lvs_name,
+                    "lvol_name": lvol_name,
+                    "size": size_bytes,
+                    "thin_provision": false,
+                    "clear_method": "write_zeroes"
                 }
-            }
+            }))
+            .send()
+            .await?;
+
+        if !lvol_response.status().is_success() {
+            let error_text = lvol_response.text().await?;
+            return Err(format!("Failed to create lvol: {}", error_text).into());
         }
 
-    } else {
-        // --- Single-Replica (Lvol) Volume Health Check ---
-        if let Some(replica) = spdk_volume.spec.replicas.first() {
+        let lvol_info: serde_json::Value = lvol_response.json().await?;
+        let lvol_uuid = lvol_info["result"]["uuid"]
+            .as_str()
+            .ok_or("Failed to get lvol UUID")?
+            .to_string();
+
+        Ok(lvol_uuid)
+    }
+
+    async fn update_disk_statuses(&self, disks: &Api<SpdkDisk>, selected_disks: &[SpdkDisk], capacity: i64, delta: i32) -> Result<(), Status> {
+        for disk in selected_disks {
+            let disk_name = disk.metadata.name.as_ref().unwrap();
+            let mut disk_status = disk.status.clone().unwrap_or_default();
+            
+            disk_status.free_space -= capacity * delta as i64;
+            disk_status.used_space += capacity * delta as i64;
+            disk_status.lvol_count = if delta > 0 {
+                disk_status.lvol_count + delta as u32
+            } else {
+                disk_status.lvol_count.saturating_sub((-delta) as u32)
+            };
+
+            disks.patch_status(disk_name, &PatchParams::default(), 
+                             &Patch::Merge(json!({ "status": disk_status })))
+                .await
+                .map_err(|e| Status::internal(format!("Failed to update SpdkDisk: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    async fn delete_volume_replicas(&self, volume: &SpdkVolume) -> Result<(), Status> {
+        for replica in &volume.spec.replicas {
+            // Delete NVMe-oF target if exists
+            if let Some(nqn) = &replica.nqn {
+                let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
+                let http_client = HttpClient::new();
+                
+                http_client
+                    .post(&rpc_url)
+                    .json(&json!({
+                        "method": "nvmf_delete_subsystem",
+                        "params": { "nqn": nqn }
+                    }))
+                    .send()
+                    .await
+                    .ok(); // Best effort
+            }
+
+            // Delete lvol
             if let Some(lvol_uuid) = &replica.lvol_uuid {
                 let lvs_name = format!("lvs_{}", replica.disk_ref);
-                let bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
-
-                match get_lvol_status(&ctx, &bdev_name).await {
-                    Ok(lvol_status) => {
-                        let current_state_is_healthy = status.state == "Healthy";
-                        if lvol_status.is_healthy && !current_state_is_healthy {
-                            status.state = "Healthy".to_string();
-                            status.degraded = false;
-                            status_update_needed = true;
-                        } else if !lvol_status.is_healthy && current_state_is_healthy {
-                            status.state = "Failed".to_string();
-                            status.degraded = true;
-                            eprintln!("Lvol {} is unhealthy: {:?}", bdev_name, lvol_status.error_reason);
-                            status_update_needed = true;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error checking lvol status for {}: {}", bdev_name, e);
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Manage Vhost Controllers ---
-    manage_vhost_controllers(&spdk_volume, &ctx).await
-        .map_err(|e| kube::Error::Api(ErrorResponse {
-            status: "Failure".to_string(),
-            message: format!("Vhost management error: {}", e),
-            reason: "VHostError".to_string(),
-            code: 500,
-        }))?;
-    
-    // --- Update Status if Changed ---
-    let current_time = Utc::now().to_rfc3339();
-    if status.last_checked != current_time {
-        status.last_checked = current_time;
-        status_update_needed = true;
-    }
-
-    if status_update_needed {
-        let patch = json!({ "status": status });
-        spdk_volumes.patch_status(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await?;
-    }
-
-    Ok(Action::requeue(Duration::from_secs(300)))
-}
-
-// New function to get RAID status directly from SPDK
-async fn get_raid_status(
-    ctx: &Context,
-    volume_id: &str,
-) -> Result<Option<RaidStatus>, ControllerError> {
-    let http_client = HttpClient::new();
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_raid_get_bdevs",
-            "params": {
-                "category": "all"
-            }
-        }))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        return Ok(None);
-    }
-
-    let raid_info: serde_json::Value = response.json().await?;
-    
-    if let Some(raid_bdevs) = raid_info["result"].as_array() {
-        for raid_bdev in raid_bdevs {
-            if let Some(name) = raid_bdev["name"].as_str() {
-                if name == volume_id {
-                    return Ok(Some(RaidStatus::from_spdk_response(raid_bdev)?));
-                }
-            }
-        }
-    }
-    
-    Ok(None)
-}
-
-// Updated function to handle failed replicas using SPDK's native RAID capabilities
-async fn handle_failed_replica_with_spdk(
-    spdk_volume: &SpdkVolume,
-    ctx: &Context,
-    failed_replica_index: usize,
-    spdk_disks: &Api<SpdkDisk>,
-) -> Result<(), ControllerError> {
-    let volume_id = &spdk_volume.spec.volume_id;
-    
-    // Find a suitable replacement disk
-    let replacement_disk = find_replacement_disk(
-        spdk_volume,
-        failed_replica_index,
-        spdk_disks,
-    ).await?;
-
-    // Create new lvol on replacement disk
-    let new_lvol_bdev = create_replacement_lvol(
-        ctx,
-        &replacement_disk,
-        spdk_volume.spec.size_bytes,
-        volume_id,
-    ).await?;
-
-    // Use SPDK's native RAID member replacement
-    replace_raid_member_with_spdk(
-        ctx,
-        volume_id,
-        failed_replica_index,
-        &new_lvol_bdev,
-    ).await?;
-
-    // Update the SpdkVolume CRD with new replica information
-    update_replica_after_replacement(
-        ctx,
-        spdk_volume,
-        failed_replica_index,
-        replacement_disk,
-        new_lvol_bdev,
-    ).await?;
-
-    println!("Successfully initiated SPDK native rebuild for volume {} replica {}", 
-             volume_id, failed_replica_index);
-
-    Ok(())
-}
-
-async fn replace_raid_member_with_spdk(
-    ctx: &Context,
-    volume_id: &str,
-    failed_member_slot: usize,
-    new_bdev_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-
-    // Remove failed member
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_raid_remove_base_bdev",
-            "params": {
-                "name": volume_id,
-                "slot": failed_member_slot
-            }
-        }))
-        .send()
-        .await?;
-
-    // Add replacement member - SPDK will automatically start rebuild
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_raid_add_base_bdev",
-            "params": {
-                "name": volume_id,
-                "base_bdev": new_bdev_name,
-                "slot": failed_member_slot
-            }
-        }))
-        .send()
-        .await?;
-
-    // Enable automatic rebuild if not already enabled
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_raid_start_rebuild",
-            "params": {
-                "name": volume_id,
-                "slot": failed_member_slot
-            }
-        }))
-        .send()
-        .await
-        .ok(); // This might fail if rebuild auto-starts, which is fine
-
-    Ok(())
-}
-
-/// Finds the RPC URL for the node_agent pod on a given node.
-/// This is a standalone function for use in the volume controller.
-async fn get_rpc_url_for_node_in_controller(
-    client: &Client,
-    node_name: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // Assumes node_agent pods are labeled with 'app=spdk-node-agent'.
-    let pods_api: Api<Pod> = Api::all(client.clone());
-    let lp = ListParams::default().labels("app=spdk-node-agent");
-
-    for pod in pods_api.list(&lp).await? {
-        if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
-            if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {
-                return Ok(format!("http://{}:5260", pod_ip));
-            }
-        }
-    }
-
-    Err(format!("Could not find spdk-node-agent pod on node '{}'", node_name).into())
-}
-
-/// Creates a replacement lvol on the specified disk by connecting to the correct node_agent pod.
-async fn create_replacement_lvol(
-    ctx: &Context,
-    replacement_disk: &SpdkDisk,
-    size_bytes: i64,
-    volume_id: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    let lvs_name = format!("lvs_{}", replacement_disk.metadata.name.as_ref().unwrap());
-    let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
-
-    // Discover the RPC URL for the target node.
-    let target_node_name = &replacement_disk.spec.node;
-    let rpc_url = get_rpc_url_for_node_in_controller(&ctx.client, target_node_name).await?;
-    println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
-
-    // Create the new lvol by calling the correct node's SPDK instance.
-    let res = http_client
-        .post(&rpc_url) // Use the discovered URL
-        .json(&json!({
-            "method": "bdev_lvol_create",
-            "params": {
-                "lvs_name": lvs_name,
-                "lvol_name": lvol_name,
-                "size": size_bytes,
-                "thin_provision": false,
-                "clear_method": "write_zeroes"
-            }
-        }))
-        .send()
-        .await?;
-    
-    if !res.status().is_success() {
-        let err_text = res.text().await.unwrap_or_default();
-        return Err(format!("Failed to create replacement lvol: {}", err_text).into());
-    }
-
-    Ok(format!("{}/{}", lvs_name, lvol_name))
-}
-
-async fn update_replica_after_replacement(
-    ctx: &Context,
-    spdk_volume: &SpdkVolume,
-    failed_replica_index: usize,
-    replacement_disk: SpdkDisk,
-    new_lvol_bdev: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let volume_id = &spdk_volume.spec.volume_id;
-    let lvol_uuid = get_lvol_uuid(&ctx, &new_lvol_bdev).await?;
-    
-    let mut new_spec = spdk_volume.spec.clone();
-    new_spec.replicas[failed_replica_index] = Replica {
-        node: replacement_disk.spec.node.clone(),
-        replica_type: "lvol".to_string(),
-        pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
-        disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
-        lvol_uuid: Some(lvol_uuid),
-        nqn: Some(format!("nqn.2025-05.io.spdk:lvol-{}", new_lvol_bdev.replace('/', "-"))),
-        health_status: ReplicaHealth::Rebuilding, // Will be updated by SPDK status
-        last_io_timestamp: Some(Utc::now().to_rfc3339()),
-        write_sequence: 0,
-        local_pod_scheduled: false,
-        vhost_socket: None,
-        raid_member_index: failed_replica_index,
-        raid_member_state: RaidMemberState::Rebuilding,
-        ..Default::default()
-    };
-    
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    spdk_volumes
-        .patch(volume_id, &PatchParams::default(), &Patch::Merge(json!({
-            "spec": new_spec
-        })))
-        .await?;
-
-    // Update disk status
-    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
-    let disk_name = replacement_disk.metadata.name.clone().unwrap_or_default();
-    let mut disk_status = replacement_disk.status.unwrap_or_default();
-    
-    disk_status.free_space -= spdk_volume.spec.size_bytes;
-    disk_status.used_space += spdk_volume.spec.size_bytes;
-    disk_status.lvol_count += 1;
-    
-    disks
-        .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
-            "status": disk_status
-        })))
-        .await?;
-
-    Ok(())
-}
-
-async fn get_lvol_uuid(
-    ctx: &Context,
-    lvol_name: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_get_bdevs",
-            "params": {
-                "name": lvol_name
-            }
-        }))
-        .send()
-        .await?;
-
-    let bdev_info: serde_json::Value = response.json().await?;
-    let uuid = bdev_info["result"][0]["uuid"]
-        .as_str()
-        .ok_or("Failed to get lvol UUID")?;
-
-    Ok(uuid.to_string())
-}
-
-// Keep existing helper functions with minimal changes...
-async fn find_replacement_disk(
-    spdk_volume: &SpdkVolume,
-    failed_replica_index: usize,
-    spdk_disks: &Api<SpdkDisk>,
-) -> Result<SpdkDisk, Box<dyn std::error::Error>> {
-    let required_capacity = spdk_volume.spec.size_bytes;
-    let used_nodes: Vec<String> = spdk_volume.spec.replicas
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != failed_replica_index)
-        .map(|(_, r)| r.node.clone())
-        .collect();
-    
-    let available_disks = spdk_disks.list(&ListParams::default()).await?
-        .items
-        .into_iter()
-        .filter(|d| {
-            if let Some(status) = &d.status {
-                status.healthy 
-                    && status.blobstore_initialized 
-                    && status.free_space >= required_capacity 
-                    && !used_nodes.contains(&d.spec.node)
-            } else {
-                false
-            }
-        })
-        .collect::<Vec<_>>();
-    
-    available_disks
-        .into_iter()
-        .max_by_key(|d| d.status.as_ref().unwrap().free_space)
-        .ok_or_else(|| "No suitable replacement disk found".into())
-}
-
-// Keep existing vhost management functions unchanged...
-async fn manage_vhost_controllers(
-    spdk_volume: &SpdkVolume,
-    ctx: &Context,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let volume_id = &spdk_volume.spec.volume_id;
-    
-    let controller_exists = check_vhost_controller_exists(ctx, volume_id).await?;
-    let socket_path = get_vhost_socket_path(ctx, volume_id);
-    
-    let has_local_replicas_with_pods = spdk_volume.spec.replicas.iter()
-        .any(|r| r.replica_type == "lvol" && r.local_pod_scheduled);
-    
-    if has_local_replicas_with_pods && !controller_exists {
-        create_vhost_controller_for_volume(ctx, volume_id, &socket_path).await?;
-        
-        let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-        spdk_volumes
-            .patch(volume_id, &PatchParams::default(), &Patch::Merge(json!({
-                "spec": {
-                    "vhost_socket": socket_path
-                }
-            })))
-            .await?;
-    } else if !has_local_replicas_with_pods && controller_exists {
-        delete_vhost_controller(ctx, volume_id).await?;
-    }
-    
-    Ok(())
-}
-
-async fn create_vhost_controller_for_volume(
-    ctx: &Context,
-    volume_id: &str,
-    socket_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    let controller_name = format!("vhost_{}", volume_id);
-    
-    if let Some(parent) = std::path::Path::new(socket_path).parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_create_nvme_controller",
-            "params": {
-                "ctrlr": controller_name,
-                "io_queues": 4,
-                "cpumask": "0x1",
-                "max_namespaces": 32
-            }
-        }))
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        let error_text = response.text().await?;
-        return Err(format!("Failed to create vhost-nvme controller: {}", error_text).into());
-    }
-    
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_nvme_controller_add_ns",
-            "params": {
-                "ctrlr": controller_name,
-                "bdev_name": volume_id
-            }
-        }))
-        .send()
-        .await?;
-    
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_start_controller",
-            "params": {
-                "ctrlr": controller_name,
-                "socket": socket_path
-            }
-        }))
-        .send()
-        .await?;
-    
-    println!("Created vhost-nvme controller for volume: {}", volume_id);
-    Ok(())
-}
-
-async fn delete_vhost_controller(
-    ctx: &Context,
-    volume_id: &str,
-) -> Result<(), ControllerError> {
-    let http_client = HttpClient::new();
-    let controller_name = format!("vhost_{}", volume_id);
-    let socket_path = get_vhost_socket_path(ctx, volume_id);
-    
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_nvme_controller_remove_ns",
-            "params": { 
-                "ctrlr": controller_name,
-                "nsid": 1
-            }
-        }))
-        .send()
-        .await
-        .ok();
-    
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_stop_controller",
-            "params": { "ctrlr": controller_name }
-        }))
-        .send()
-        .await
-        .ok();
-    
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_delete_controller",
-            "params": { "ctrlr": controller_name }
-        }))
-        .send()
-        .await
-        .ok();
-    
-    tokio::fs::remove_file(&socket_path).await.ok();
-    
-    println!("Deleted vhost-nvme controller for volume: {}", volume_id);
-    Ok(())
-}
-
-async fn check_vhost_controller_exists(ctx: &Context, volume_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    let controller_name = format!("vhost_{}", volume_id);
-
-    // Use get_vhost_controllers RPC
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "get_vhost_controllers"
-        }))
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        let controllers: serde_json::Value = response.json().await?;
-        if let Some(controller_list) = controllers["result"].as_array() {
-            return Ok(controller_list.iter().any(|c| {
-                c["ctrlr"].as_str() == Some(&controller_name)
-            }));
-        }
-    }
-
-    Ok(false)
-}
-
-fn get_vhost_socket_path(ctx: &Context, volume_id: &str) -> String {
-    format!("{}/vhost_{}.sock", ctx.vhost_socket_base_path, volume_id)
-}
-
-async fn vhost_cleanup_task(ctx: Arc<Context>) {
-    let mut interval = interval(Duration::from_secs(300));
-    
-    loop {
-        interval.tick().await;
-        
-        if let Err(e) = cleanup_orphaned_vhost_controllers(&ctx).await {
-            eprintln!("Vhost cleanup failed: {}", e);
-        }
-    }
-}
-
-async fn cleanup_orphaned_vhost_controllers(
-    ctx: &Context,
-) -> Result<(), ControllerError> {
-    let http_client = HttpClient::new();
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "vhost_get_controllers"
-        }))
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        return Ok(());
-    }
-    
-    let controllers: serde_json::Value = response.json().await?;
-    if let Some(controller_list) = controllers["result"].as_array() {
-        let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-        let volumes = spdk_volumes.list(&ListParams::default()).await
-            .map_err(|e| ControllerError { message: format!("Failed to list volumes: {}", e) })?;
-        
-        for controller in controller_list {
-            if let Some(controller_name) = controller["ctrlr"].as_str() {
-                if controller_name.starts_with("vhost_") {
-                    let volume_id = controller_name.strip_prefix("vhost_").unwrap();
-                    
-                    let volume_exists = volumes.items.iter()
-                        .any(|v| v.spec.volume_id == volume_id);
-                    
-                    if !volume_exists {
-                        println!("Cleaning up orphaned vhost controller: {}", controller_name);
-                        delete_vhost_controller(ctx, volume_id).await.ok();
-                    }
-                }
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-async fn health_monitor_task(ctx: Arc<Context>) {
-    let mut interval = interval(Duration::from_secs(ctx.health_interval));
-    
-    loop {
-        interval.tick().await;
-        
-        if let Err(e) = perform_periodic_health_check(&ctx).await {
-            eprintln!("Health check failed: {}", e);
-        }
-    }
-}
-
-async fn perform_periodic_health_check(ctx: &Context) -> Result<(), ControllerError> {
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    let volumes = spdk_volumes.list(&ListParams::default()).await
-        .map_err(|e| ControllerError { message: format!("Failed to list volumes: {}", e) })?;
-    
-    for volume in volumes {
-        // Get updated RAID status from SPDK
-        if let Ok(Some(raid_status)) = get_raid_status(ctx, &volume.spec.volume_id).await {
-            let mut needs_update = false;
-            let mut status = volume.status.unwrap_or_default();
-            
-            // Check if RAID status has changed
-            let status_changed = match &status.raid_status {
-                Some(existing) => {
-                    existing.state != raid_status.state ||
-                    existing.num_base_bdevs_operational != raid_status.num_base_bdevs_operational ||
-                    existing.rebuild_info.is_some() != raid_status.rebuild_info.is_some()
-                }
-                None => true,
-            };
-            
-            if status_changed {
-                status.raid_status = Some(raid_status.clone());
-                status.state = match raid_status.state.as_str() {
-                    "online" => "Healthy".to_string(),
-                    "degraded" => "Degraded".to_string(),
-                    "failed" | "broken" => "Failed".to_string(),
-                    _ => raid_status.state.clone(),
-                };
-                status.degraded = raid_status.state == "degraded";
-                status.last_checked = Utc::now().to_rfc3339();
-                needs_update = true;
-            }
-            
-            if needs_update {
-                spdk_volumes
-                    .patch_status(&volume.spec.volume_id, &PatchParams::default(), &Patch::Merge(json!({
-                        "status": status
-                    })))
+                let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
+                
+                let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
+                let http_client = HttpClient::new();
+                
+                http_client
+                    .post(&rpc_url)
+                    .json(&json!({
+                        "method": "bdev_lvol_delete",
+                        "params": { "name": lvol_bdev_name }
+                    }))
+                    .send()
                     .await
-                    .ok();
+                    .ok(); // Best effort
+            }
+        }
+        Ok(())
+    }
+
+    fn build_volume_topology(&self, replicas: &[Replica]) -> Vec<Topology> {
+        replicas.iter()
+            .map(|replica| Topology {
+                segments: [(
+                    "topology.kubernetes.io/hostname".to_string(),
+                    replica.node.clone(),
+                )].into_iter().collect(),
+            })
+            .collect()
+    }
+
+    fn build_volume_context(&self) -> std::collections::HashMap<String, String> {
+        [
+            ("storageType".to_string(), "spdk-nvmeof".to_string()),
+            ("transport".to_string(), self.driver.nvmeof_transport.clone()),
+            ("port".to_string(), self.driver.nvmeof_target_port.to_string())
+        ].into_iter().collect()
+    }
+}
+
+#[tonic::async_trait]
+impl Controller for ControllerService {
+    async fn create_volume(
+        &self,
+        request: Request<CreateVolumeRequest>,
+    ) -> Result<Response<CreateVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_name = req.name.clone();
+        let capacity = req.capacity_range.as_ref().map(|cr| cr.required_bytes).unwrap_or(0);
+        
+        if volume_name.is_empty() || capacity == 0 {
+            return Err(Status::invalid_argument("Missing name or capacity"));
+        }
+
+        let num_replicas = req.parameters
+            .get("numReplicas")
+            .and_then(|n| n.parse::<i32>().ok())
+            .unwrap_or(1);
+
+        let spdk_volume = self.provision_volume(&volume_name, capacity, num_replicas).await?;
+        let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
+
+        let volume = Volume {
+            volume_id: spdk_volume.spec.volume_id.clone(),
+            capacity_bytes: spdk_volume.spec.size_bytes,
+            volume_context: self.build_volume_context(),
+            content_source: req.volume_content_source,
+            accessible_topology,
+            ..Default::default()
+        };
+
+        Ok(Response::new(CreateVolumeResponse {
+            volume: Some(volume),
+        }))
+    }
+
+    async fn delete_volume(
+        &self,
+        request: Request<DeleteVolumeRequest>,
+    ) -> Result<Response<DeleteVolumeResponse>, Status> {
+        let volume_id = request.into_inner().volume_id;
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Missing volume ID"));
+        }
+
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let spdk_volume = match crd_api.get(&volume_id).await {
+            Ok(vol) => vol,
+            Err(_) => return Ok(Response::new(DeleteVolumeResponse {})),
+        };
+
+        // Delete replicas
+        self.delete_volume_replicas(&spdk_volume).await?;
+
+        // Update disk statuses
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let mut disk_refs = Vec::new();
+        for replica in &spdk_volume.spec.replicas {
+            if let Ok(disk) = disks.get(&replica.disk_ref).await {
+                disk_refs.push(disk);
             }
         }
         
-        // Update health check timestamp
-        let patch = json!({
-            "metadata": {
-                "annotations": {
-                    "spdk.io/last-health-check": Utc::now().to_rfc3339()
+        self.update_disk_statuses(&disks, &disk_refs, spdk_volume.spec.size_bytes, -1).await?;
+
+        // Delete CRD
+        crd_api.delete(&volume_id, &Default::default()).await.ok();
+
+        Ok(Response::new(DeleteVolumeResponse {}))
+    }
+
+    async fn controller_publish_volume(
+        &self,
+        _request: Request<ControllerPublishVolumeRequest>,
+    ) -> Result<Response<ControllerPublishVolumeResponse>, Status> {
+        Ok(Response::new(ControllerPublishVolumeResponse {
+            publish_context: std::collections::HashMap::new(),
+        }))
+    }
+
+    async fn controller_unpublish_volume(
+        &self,
+        _request: Request<ControllerUnpublishVolumeRequest>,
+    ) -> Result<Response<ControllerUnpublishVolumeResponse>, Status> {
+        Ok(Response::new(ControllerUnpublishVolumeResponse {}))
+    }
+
+    async fn validate_volume_capabilities(
+        &self,
+        request: Request<ValidateVolumeCapabilitiesRequest>,
+    ) -> Result<Response<ValidateVolumeCapabilitiesResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        match volumes_api.get(&volume_id).await {
+            Ok(_) => {
+                let confirmed_capabilities: Vec<_> = req.volume_capabilities.into_iter()
+                    .filter(|capability| {
+                        let supported_access_mode = capability.access_mode.as_ref()
+                            .map(|am| {
+                                let mode = am.mode;
+                                mode == volume_capability::access_mode::Mode::SingleNodeWriter as i32 ||
+                                mode == volume_capability::access_mode::Mode::SingleNodeReaderOnly as i32 ||
+                                mode == volume_capability::access_mode::Mode::SingleNodeSingleWriter as i32
+                            })
+                            .unwrap_or(false);
+
+                        let supported_access_type = matches!(
+                            capability.access_type,
+                            Some(volume_capability::AccessType::Block(_)) |
+                            Some(volume_capability::AccessType::Mount(_))
+                        );
+
+                        supported_access_mode && supported_access_type
+                    })
+                    .collect();
+
+                let is_confirmed = !confirmed_capabilities.is_empty();
+
+                Ok(Response::new(ValidateVolumeCapabilitiesResponse {
+                    confirmed: if is_confirmed {
+                        Some(validate_volume_capabilities_response::Confirmed { 
+                            volume_capabilities: confirmed_capabilities,
+                            volume_context: req.volume_context,
+                            parameters: req.parameters,
+                            mutable_parameters: std::collections::HashMap::new(),
+                        })
+                    } else {
+                        None
+                    },
+                    message: if is_confirmed {
+                        "Volume capabilities validated successfully".to_string()
+                    } else {
+                        "Unsupported volume capabilities".to_string()
+                    },
+                }))
+            }
+            Err(_) => Err(Status::not_found(format!("Volume {} not found", volume_id))),
+        }
+    }
+
+    async fn list_volumes(
+        &self,
+        _request: Request<ListVolumesRequest>,
+    ) -> Result<Response<ListVolumesResponse>, Status> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volume_list = volumes_api.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list volumes: {}", e)))?;
+
+        let entries = volume_list.items.iter().map(|volume| {
+            list_volumes_response::Entry {
+                volume: Some(Volume {
+                    volume_id: volume.spec.volume_id.clone(),
+                    capacity_bytes: volume.spec.size_bytes,
+                    volume_context: self.build_volume_context(),
+                    content_source: None,
+                    accessible_topology: self.build_volume_topology(&volume.spec.replicas),
+                }),
+                status: volume.status.as_ref().map(|s| list_volumes_response::VolumeStatus {
+                    published_node_ids: vec![],
+                    volume_condition: if s.degraded {
+                        Some(VolumeCondition {
+                            abnormal: true,
+                            message: "Volume is in degraded state".to_string(),
+                        })
+                    } else {
+                        None
+                    },
+                }),
+            }
+        }).collect();
+
+        Ok(Response::new(ListVolumesResponse {
+            entries,
+            next_token: String::new(),
+        }))
+    }
+
+    async fn get_capacity(
+        &self,
+        _request: Request<GetCapacityRequest>,
+    ) -> Result<Response<GetCapacityResponse>, Status> {
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disk_list = disks_api.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list disks: {}", e)))?;
+
+        let total_capacity = disk_list.items.iter()
+            .filter(|disk| disk.status.as_ref().map_or(false, |s| s.healthy && s.blobstore_initialized))
+            .map(|disk| disk.status.as_ref().unwrap().free_space)
+            .sum::<i64>();
+
+        Ok(Response::new(GetCapacityResponse {
+            available_capacity: total_capacity,
+            maximum_volume_size: Some(total_capacity),
+            minimum_volume_size: Some(1024 * 1024 * 1024), // 1GB minimum
+        }))
+    }
+
+    async fn create_snapshot(
+        &self,
+        request: Request<CreateSnapshotRequest>,
+    ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        create_snapshot_impl(&self.driver, request).await
+    }
+
+    async fn delete_snapshot(
+        &self,
+        request: Request<DeleteSnapshotRequest>,
+    ) -> Result<Response<DeleteSnapshotResponse>, Status> {
+        delete_snapshot_impl(&self.driver, request).await
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<ListSnapshotsRequest>,
+    ) -> Result<Response<ListSnapshotsResponse>, Status> {
+        list_snapshots_impl(&self.driver, request).await
+    }
+
+    async fn controller_expand_volume(
+        &self,
+        request: Request<ControllerExpandVolumeRequest>,
+    ) -> Result<Response<ControllerExpandVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let new_capacity = req.capacity_range
+            .as_ref()
+            .map(|cr| cr.required_bytes)
+            .unwrap_or(0);
+
+        if volume_id.is_empty() || new_capacity <= 0 {
+            return Err(Status::invalid_argument("Volume ID and new capacity are required"));
+        }
+
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+
+        if new_capacity <= volume.spec.size_bytes {
+            return Err(Status::invalid_argument("New capacity must be larger than current capacity"));
+        }
+
+        // Expand lvols on each replica
+        let mut failed_replicas = Vec::new();
+        for replica in &volume.spec.replicas {
+            if let Some(lvol_uuid) = &replica.lvol_uuid {
+                let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
+                let http_client = HttpClient::new();
+                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
+
+                let response = http_client
+                    .post(&rpc_url)
+                    .json(&json!({
+                        "method": "bdev_lvol_resize",
+                        "params": {
+                            "name": lvol_name,
+                            "size": new_capacity
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+                if !response.status().is_success() {
+                    let error_text = response.text().await.unwrap_or_default();
+                    failed_replicas.push(format!("Replica on node {}: {}", replica.node, error_text));
                 }
             }
-        });
-        
-        spdk_volumes
-            .patch(&volume.spec.volume_id, &PatchParams::default(), &Patch::Merge(patch))
-            .await
-            .ok();
-    }
-    
-    Ok(())
-}
+        }
 
-/// Gets the real-time status of a single lvol bdev from the SPDK RPC server.
-async fn get_lvol_status(
-    ctx: &Context,
-    bdev_name: &str,
-) -> Result<LvolStatus, ControllerError> {
-    let http_client = HttpClient::new();
-    
-    let response = http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_get_bdevs",
-            "params": { "name": bdev_name }
+        if !failed_replicas.is_empty() {
+            return Err(Status::internal(format!("Failed to expand replicas: {:?}", failed_replicas)));
+        }
+
+        // Update volume spec
+        let patch = json!({ "spec": { "size_bytes": new_capacity } });
+        volumes_api.patch(&volume_id, &PatchParams::default(), &Patch::Merge(patch)).await
+            .map_err(|e| Status::internal(format!("Failed to update volume spec: {}", e)))?;
+
+        Ok(Response::new(ControllerExpandVolumeResponse {
+            capacity_bytes: new_capacity,
+            node_expansion_required: true,
         }))
-        .send()
-        .await?;
+    }
 
-    if !response.status().is_success() {
-        return Ok(LvolStatus {
-            name: bdev_name.to_string(),
-            is_healthy: false,
-            error_reason: Some(format!("RPC failed with status: {}", response.status())),
+    async fn controller_get_volume(
+        &self,
+        request: Request<ControllerGetVolumeRequest>,
+    ) -> Result<Response<ControllerGetVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+
+        if volume_id.is_empty() {
+            return Err(Status::invalid_argument("Volume ID is required"));
+        }
+
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|_| Status::not_found(format!("Volume {} not found", volume_id)))?;
+
+        let csi_volume = Volume {
+            volume_id: volume.spec.volume_id.clone(),
+            capacity_bytes: volume.spec.size_bytes,
+            volume_context: self.build_volume_context(),
+            content_source: None,
+            accessible_topology: self.build_volume_topology(&volume.spec.replicas),
+        };
+
+        let status = volume.status.as_ref().map(|vol_status| {
+            controller_get_volume_response::VolumeStatus {
+                published_node_ids: vec![],
+                volume_condition: if vol_status.degraded {
+                    Some(VolumeCondition {
+                        abnormal: true,
+                        message: format!("Volume state: {}", vol_status.state),
+                    })
+                } else {
+                    None
+                },
+            }
         });
+
+        Ok(Response::new(ControllerGetVolumeResponse {
+            volume: Some(csi_volume),
+            status,
+        }))
     }
 
-    let bdev_info: serde_json::Value = response.json().await?;
-    
-    if let Some(bdev) = bdev_info.get("result").and_then(|r| r.as_array()).and_then(|a| a.get(0)) {
-        // A bdev is considered healthy if it supports read and write I/O.
-        let is_healthy = bdev["supported_io_types"]["read"].as_bool().unwrap_or(false) &&
-                         bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
-
-        Ok(LvolStatus {
-            name: bdev_name.to_string(),
-            is_healthy,
-            error_reason: if is_healthy { None } else { Some("Bdev does not support read/write I/O".to_string()) },
-        })
-    } else {
-        // The bdev was not found in the SPDK instance.
-        Ok(LvolStatus {
-            name: bdev_name.to_string(),
-            is_healthy: false,
-            error_reason: Some("Bdev not found in SPDK".to_string()),
-        })
+    async fn controller_modify_volume(
+        &self,
+        _request: Request<ControllerModifyVolumeRequest>,
+    ) -> Result<Response<ControllerModifyVolumeResponse>, Status> {
+        Err(Status::unimplemented("Volume modification is not supported"))
     }
-}
 
-fn error_policy(obj: Arc<SpdkVolume>, error: &kube::Error, _ctx: Arc<Context>) -> Action {
-    match error {
-        kube::Error::Api(api_error) if api_error.code == 404 => {
-            Action::await_change()
-        }
-        _ => {
-            eprintln!("Error reconciling volume {}: {}", 
-                      obj.spec.volume_id, error);
-            Action::requeue(Duration::from_secs(60))
-        }
+    async fn controller_get_capabilities(
+        &self,
+        _request: Request<ControllerGetCapabilitiesRequest>,
+    ) -> Result<Response<ControllerGetCapabilitiesResponse>, Status> {
+        Ok(Response::new(ControllerGetCapabilitiesResponse {
+            capabilities: vec![
+                ControllerServiceCapability {
+                    r#type: Some(controller_service_capability::Type::Rpc(
+                        controller_service_capability::Rpc {
+                            r#type: controller_service_capability::rpc::Type::CreateDeleteVolume as i32,
+                        },
+                    )),
+                },
+                ControllerServiceCapability {
+                    r#type: Some(controller_service_capability::Type::Rpc(
+                        controller_service_capability::Rpc {
+                            r#type: controller_service_capability::rpc::Type::CreateDeleteSnapshot as i32,
+                        },
+                    )),
+                },
+                ControllerServiceCapability {
+                    r#type: Some(controller_service_capability::Type::Rpc(
+                        controller_service_capability::Rpc {
+                            r#type: controller_service_capability::rpc::Type::ListSnapshots as i32,
+                        },
+                    )),
+                },
+                ControllerServiceCapability {
+                    r#type: Some(controller_service_capability::Type::Rpc(
+                        controller_service_capability::Rpc {
+                            r#type: controller_service_capability::rpc::Type::CloneVolume as i32,
+                        },
+                    )),
+                },
+                ControllerServiceCapability {
+                    r#type: Some(controller_service_capability::Type::Rpc(
+                        controller_service_capability::Rpc {
+                            r#type: controller_service_capability::rpc::Type::ExpandVolume as i32,
+                        },
+                    )),
+                },
+            ],
+        }))
     }
 }

@@ -35,8 +35,7 @@ struct SpdkBdevDetails {
 }
 // --- End of New API Response Structs ---
 
-
-// Enhanced dashboard API response types with native RAID status
+// Enhanced dashboard API response types with NVMe-oF instead of vhost
 #[derive(Serialize, Debug, Clone)]
 struct DashboardVolume {
     id: String,
@@ -50,13 +49,25 @@ struct DashboardVolume {
     rebuild_progress: Option<f64>,
     nodes: Vec<String>,
     replica_statuses: Vec<DashboardReplicaStatus>,
-    vhost_socket: Option<String>,
-    vhost_device: Option<String>,
-    vhost_enabled: bool,
-    vhost_type: String,
-    nvme_namespaces: Vec<VhostNvmeNamespace>,
+    // NVMe-oF fields instead of vhost
+    nvmeof_targets: Vec<NvmeofTargetInfo>,
+    nvmeof_enabled: bool,
+    transport_type: String,
+    target_port: u16,
     // Enhanced RAID status from SPDK
     raid_status: Option<DashboardRaidStatus>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct NvmeofTargetInfo {
+    nqn: String,
+    target_ip: String,
+    target_port: u16,
+    transport: String,
+    node: String,
+    bdev_name: String,
+    active: bool,
+    connection_count: u32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -94,14 +105,6 @@ struct DashboardRebuildInfo {
     progress_percentage: f64,
     estimated_time_remaining: Option<String>,
     start_time: Option<String>,
-}
-
-#[derive(Serialize, Debug, Clone)]
-struct VhostNvmeNamespace {
-    nsid: u32,
-    size: u64,
-    uuid: String,
-    bdev_name: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -221,7 +224,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_volume_details)
         )
-        // --- End of New Endpoint ---
         .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
@@ -233,10 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
-                .and(warp::path("vhost"))
+                .and(warp::path("nvmeof"))
                 .and(warp::get())
                 .and(state_filter.clone())
-                .and_then(get_vhost_details)
+                .and_then(get_nvmeof_details)
         )
         .or(
             warp::path("refresh")
@@ -372,8 +374,8 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
 }
 
 fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
-    let default_status = SpdkVolumeStatus::default();  // Create binding first
-    let status = volume.status.as_ref().unwrap_or(&default_status);  // Use binding
+    let default_status = SpdkVolumeStatus::default();
+    let status = volume.status.as_ref().unwrap_or(&default_status);
     let spec = &volume.spec;
     
     // Convert RAID status from CRD
@@ -422,21 +424,25 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     });
     
     let replica_statuses: Vec<DashboardReplicaStatus> = spec.replicas.iter().map(|replica| {
-        let nvmf_target = if replica.replica_type == "nvmf" {
+        let nvmf_target = if let (Some(nqn), Some(ip), Some(port)) = (
+            &replica.nqn,
+            &replica.ip,
+            &replica.port
+        ) {
             Some(NvmfTarget {
-                nqn: replica.nqn.clone().unwrap_or_default(),
-                target_ip: replica.ip.clone().unwrap_or_default(),
-                target_port: replica.port.clone().unwrap_or("4420".to_string()),
-                transport_type: "TCP".to_string(),
+                nqn: nqn.clone(),
+                target_ip: ip.clone(),
+                target_port: port.clone(),
+                transport_type: spec.nvmeof_transport.as_deref().unwrap_or("TCP").to_string(),
             })
         } else {
             None
         };
         
-        let access_method = match replica.replica_type.as_str() {
-            "lvol" => "local-nvme".to_string(),
-            "nvmf" => "remote-nvmf".to_string(),
-            _ => "unknown".to_string(),
+        let access_method = if replica.node == std::env::var("NODE_ID").unwrap_or_default() {
+            "local-nvmeof".to_string()
+        } else {
+            "remote-nvmeof".to_string()
         };
         
         // Get rebuild progress from RAID status if this replica is rebuilding
@@ -448,7 +454,7 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         DashboardReplicaStatus {
             node: replica.node.clone(),
             status: format!("{:?}", replica.health_status).to_lowercase(),
-            is_local: replica.replica_type == "lvol",
+            is_local: replica.node == std::env::var("NODE_ID").unwrap_or_default(),
             last_io_timestamp: replica.last_io_timestamp.clone(),
             rebuild_progress,
             rebuild_target: None,
@@ -461,27 +467,26 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     }).collect();
     
     let size_gb = spec.size_bytes / (1024 * 1024 * 1024);
-    let has_local_nvme = spec.replicas.iter().any(|r| r.replica_type == "lvol");
+    let has_local_nvme = replica_statuses.iter().any(|r| r.is_local);
     
-    let volume_access_method = "vhost-nvme".to_string();
+    // Convert NVMe-oF targets from status
+    let nvmeof_targets: Vec<NvmeofTargetInfo> = status.nvmeof_targets.iter().map(|target| {
+        NvmeofTargetInfo {
+            nqn: target.nqn.clone(),
+            target_ip: target.target_addr.clone(),
+            target_port: target.target_port,
+            transport: target.transport.clone(),
+            node: target.node.clone(),
+            bdev_name: target.bdev_name.clone(),
+            active: target.active,
+            connection_count: 0, // Could be enhanced with live data
+        }
+    }).collect();
     
     let volume_name = volume.metadata.name.clone().unwrap_or(spec.volume_id.clone());
-    let vhost_socket = spec.vhost_socket.clone().or_else(|| 
-        Some(format!("/var/lib/spdk/vhost/vhost_{}.sock", volume_name))
-    );
-    let vhost_device = status.vhost_device.clone().or_else(|| 
-        Some(format!("/dev/nvme-vhost-{}", volume_name))
-    );
-    let vhost_enabled = vhost_socket.is_some();
-    
-    let nvme_namespaces = vec![
-        VhostNvmeNamespace {
-            nsid: 1,
-            size: spec.size_bytes as u64,
-            uuid: spec.primary_lvol_uuid.clone().unwrap_or_default(),
-            bdev_name: spec.volume_id.clone(),
-        }
-    ];
+    let nvmeof_enabled = !nvmeof_targets.is_empty();
+    let transport_type = spec.nvmeof_transport.as_deref().unwrap_or("tcp").to_string();
+    let target_port = spec.nvmeof_target_port.unwrap_or(4420);
     
     // Get rebuild progress from RAID status
     let rebuild_progress = raid_status.as_ref()
@@ -496,15 +501,14 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         replicas: spec.num_replicas,
         active_replicas: status.active_replicas.len() as i32,
         local_nvme: has_local_nvme,
-        access_method: volume_access_method,
+        access_method: "nvmeof".to_string(),
         rebuild_progress,
         nodes: spec.replicas.iter().map(|r| r.node.clone()).collect(),
         replica_statuses,
-        vhost_socket,
-        vhost_device,
-        vhost_enabled,
-        vhost_type: "nvme".to_string(),
-        nvme_namespaces,
+        nvmeof_targets,
+        nvmeof_enabled,
+        transport_type,
+        target_port,
         raid_status,
     }
 }
@@ -528,8 +532,8 @@ fn estimate_rebuild_time(rebuild: &RaidRebuildInfo) -> Option<String> {
 }
 
 fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> DashboardDisk {
-    let default_status = SpdkDiskStatus::default();  // Create binding first
-    let status = disk.status.as_ref().unwrap_or(&default_status);  // Use binding
+    let default_status = SpdkDiskStatus::default();
+    let status = disk.status.as_ref().unwrap_or(&default_status);
     let spec = &disk.spec;
     
     let provisioned_volumes: Vec<ProvisionedVolume> = volumes.iter()
@@ -543,7 +547,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
                         provisioned_at: Utc::now().to_rfc3339(),
                         replica_type: format!("{} replica ({})", 
                             if replica.is_local { "Local" } else { "Remote" },
-                            if replica.is_local { "NVMe" } else { "NVMe-oF" }),
+                            "NVMe-oF"),
                         status: replica.status.clone(),
                     });
                 }
@@ -609,58 +613,37 @@ async fn enhance_with_spdk_metrics(
             }
         }
         
-        // Get vhost-nvme controller status
+        // Get NVMe-oF subsystem status instead of vhost controllers
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
-                "method": "vhost_get_controllers"
+                "method": "nvmf_get_subsystems"
             }))
             .send()
             .await
         {
-            if let Ok(vhost_info) = response.json::<serde_json::Value>().await {
-                if let Some(controllers) = vhost_info["result"].as_array() {
-                    for controller in controllers {
-                        if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
-                            let is_nvme_controller = controller["backend_specific"]["type"]
-                                .as_str() == Some("nvme");
-                            
+            if let Ok(nvmf_info) = response.json::<serde_json::Value>().await {
+                if let Some(subsystems) = nvmf_info["result"].as_array() {
+                    for subsystem in subsystems {
+                        if let Some(nqn) = subsystem["nqn"].as_str() {
                             for volume in volumes.iter_mut() {
-                                if ctrlr_name.contains(&volume.name) || 
-                                   ctrlr_name.contains(&volume.id) {
+                                // Find volumes that match this NQN
+                                if nqn.contains(&volume.id) || volume.nvmeof_targets.iter().any(|t| t.nqn == nqn) {
+                                    // Update NVMe-oF target status
+                                    let is_active = subsystem["state"].as_str() == Some("active");
                                     
-                                    if let Some(socket_path) = controller["socket"].as_str() {
-                                        volume.vhost_socket = Some(socket_path.to_string());
-                                    }
-                                    
-                                    if let Some(active) = controller["active"].as_bool() {
-                                        volume.vhost_enabled = active;
-                                    }
-                                    
-                                    volume.vhost_type = if is_nvme_controller {
-                                        "nvme".to_string()
-                                    } else {
-                                        "blk".to_string()
-                                    };
-                                    
-                                    if is_nvme_controller {
-                                        if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
-                                            volume.nvme_namespaces = namespaces.iter().map(|ns| {
-                                                VhostNvmeNamespace {
-                                                    nsid: ns["nsid"].as_u64().unwrap_or(1) as u32,
-                                                    size: ns["size"].as_u64().unwrap_or(0),
-                                                    uuid: ns["uuid"].as_str().unwrap_or("").to_string(),
-                                                    bdev_name: ns["bdev_name"].as_str().unwrap_or("").to_string(),
-                                                }
-                                            }).collect();
+                                    for target in &mut volume.nvmeof_targets {
+                                        if target.nqn == nqn {
+                                            target.active = is_active;
+                                            
+                                            // Get connection count if available
+                                            if let Some(hosts) = subsystem["hosts"].as_array() {
+                                                target.connection_count = hosts.len() as u32;
+                                            }
                                         }
                                     }
                                     
-                                    volume.access_method = if is_nvme_controller {
-                                        "vhost-nvme".to_string()
-                                    } else {
-                                        "vhost-blk".to_string()
-                                    };
+                                    volume.nvmeof_enabled = volume.nvmeof_targets.iter().any(|t| t.active);
                                 }
                             }
                         }
@@ -901,45 +884,52 @@ async fn get_volume_raid_status(volume_id: String, state: AppState) -> Result<im
     Ok(warp::reply::json(&raid_details))
 }
 
-async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+// Renamed from get_vhost_details to get_nvmeof_details
+async fn get_nvmeof_details(volume_id: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
-    let mut vhost_details = json!({
+    let mut nvmeof_details = json!({
         "volume_id": volume_id,
-        "vhost_controllers": [],
-        "controller_type": "nvme"
+        "nvmeof_subsystems": [],
+        "transport_type": "tcp"
     });
     
     for (node, rpc_url) in spdk_nodes.iter() {
         if let Ok(response) = http_client
             .post(rpc_url)
             .json(&json!({
-                "method": "vhost_get_controllers"
+                "method": "nvmf_get_subsystems"
             }))
             .send()
             .await
         {
-            if let Ok(vhost_info) = response.json::<serde_json::Value>().await {
-                if let Some(controllers) = vhost_info["result"].as_array() {
-                    for controller in controllers {
-                        if let Some(ctrlr_name) = controller["ctrlr"].as_str() {
-                            if ctrlr_name.contains(&volume_id) {
-                                let mut controller_info = controller.clone();
-                                controller_info["node"] = json!(node);
+            if let Ok(nvmf_info) = response.json::<serde_json::Value>().await {
+                if let Some(subsystems) = nvmf_info["result"].as_array() {
+                    for subsystem in subsystems {
+                        if let Some(nqn) = subsystem["nqn"].as_str() {
+                            if nqn.contains(&volume_id) {
+                                let mut subsystem_info = subsystem.clone();
+                                subsystem_info["node"] = json!(node);
                                 
-                                if controller["backend_specific"]["type"].as_str() == Some("nvme") {
-                                    controller_info["controller_type"] = json!("nvme");
-                                    if let Some(namespaces) = controller["backend_specific"]["namespaces"].as_array() {
-                                        controller_info["nvme_namespaces"] = json!(namespaces);
-                                    }
-                                } else {
-                                    controller_info["controller_type"] = json!("blk");
+                                // Add listener information
+                                if let Some(listeners) = subsystem["listen_addresses"].as_array() {
+                                    let enhanced_listeners: Vec<serde_json::Value> = listeners.iter().map(|listener| {
+                                        let mut enhanced_listener = listener.clone();
+                                        enhanced_listener["node"] = json!(node);
+                                        enhanced_listener
+                                    }).collect();
+                                    subsystem_info["listen_addresses"] = json!(enhanced_listeners);
                                 }
                                 
-                                vhost_details["vhost_controllers"]
+                                // Add namespace information
+                                if let Some(namespaces) = subsystem["namespaces"].as_array() {
+                                    subsystem_info["namespaces"] = json!(namespaces);
+                                }
+                                
+                                nvmeof_details["nvmeof_subsystems"]
                                     .as_array_mut()
                                     .unwrap()
-                                    .push(controller_info);
+                                    .push(subsystem_info);
                             }
                         }
                     }
@@ -948,7 +938,7 @@ async fn get_vhost_details(volume_id: String, state: AppState) -> Result<impl wa
         }
     }
     
-    Ok(warp::reply::json(&vhost_details))
+    Ok(warp::reply::json(&nvmeof_details))
 }
 
 async fn trigger_refresh(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
@@ -989,15 +979,15 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
             }
         }
         
-        // Get vhost-nvme controllers
+        // Get NVMe-oF subsystems instead of vhost controllers
         if let Ok(response) = http_client
             .post(rpc_url)
-            .json(&json!({"method": "vhost_get_controllers"}))
+            .json(&json!({"method": "nvmf_get_subsystems"}))
             .send()
             .await
         {
-            if let Ok(vhost_controllers) = response.json::<serde_json::Value>().await {
-                metrics["vhost_controllers"] = vhost_controllers;
+            if let Ok(nvmf_subsystems) = response.json::<serde_json::Value>().await {
+                metrics["nvmf_subsystems"] = nvmf_subsystems;
             }
         }
         
@@ -1022,18 +1012,6 @@ async fn get_node_metrics(node: String, state: AppState) -> Result<impl warp::Re
         {
             if let Ok(iostat) = response.json::<serde_json::Value>().await {
                 metrics["iostat"] = iostat;
-            }
-        }
-        
-        // Get NVMe-oF subsystems
-        if let Ok(response) = http_client
-            .post(rpc_url)
-            .json(&json!({"method": "nvmf_get_subsystems"}))
-            .send()
-            .await
-        {
-            if let Ok(nvmf_subsystems) = response.json::<serde_json::Value>().await {
-                metrics["nvmf_subsystems"] = nvmf_subsystems;
             }
         }
         
@@ -1192,7 +1170,7 @@ async fn get_all_snapshots(state: AppState) -> Result<impl warp::Reply, warp::Re
             size_bytes: status.size_bytes,
             snapshot_type: snapshot_crd.spec.snapshot_type,
             clone_source_snapshot_id: snapshot_crd.spec.clone_source_snapshot_id,
-            replica_bdev_details: bdev_details_list, // Use the populated list.
+            replica_bdev_details: bdev_details_list,
         });
     }
 
@@ -1291,7 +1269,6 @@ fn build_snapshot_tree_from_map(
                 "children": build_snapshot_tree_from_map(&Some(node.bdev_name.clone()), nodes)
             });
 
-            // --- Start of New Code ---
             // Calculate and include the storage consumed by this specific snapshot/lvol.
             if let Some(lvol_details) = node.details.get("driver_specific").and_then(|ds| ds.get("lvol")) {
                 let cluster_size = lvol_details["cluster_size"].as_u64().unwrap_or(0);
@@ -1304,15 +1281,12 @@ fn build_snapshot_tree_from_map(
                     "allocated_clusters": allocated_clusters
                 });
             }
-            // --- End of New Code ---
-
 
             // Add CRD info if we can find it
             if let Some(aliases) = node.details["aliases"].as_array() {
                 for alias in aliases {
                      if let Some(alias_str) = alias.as_str() {
                         // The alias often corresponds to the SpdkSnapshot CRD name
-                        // A real implementation would need a more robust mapping
                         if alias_str.starts_with("snap_") {
                              node_json["snapshot_id"] = json!(alias_str);
                         }
@@ -1324,7 +1298,6 @@ fn build_snapshot_tree_from_map(
     }
     tree
 }
-
 
 /// Connects to a node and traces the snapshot chain for a given starting lvol.
 async fn trace_snapshot_chain_on_node(
@@ -1413,8 +1386,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
                 spdk_nodes.get(&replica_to_trace.node),
             ) {
                 // The name of the active lvol bdev for this replica. This is the head of the chain.
-                // The SpdkDiskStatus contains the lvs_name. We can construct it.
-                let lvs_name = format!("lvs_{}", replica_to_trace.disk_ref); //
+                let lvs_name = format!("lvs_{}", replica_to_trace.disk_ref);
                 let starting_lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
                 // Trace the entire chain on the node where the replica resides.
@@ -1438,7 +1410,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
         tree[volume_id] = json!({
             "volume_name": volume_name,
             "volume_id": volume_id,
-            "volume_size": volume.spec.size_bytes, //
+            "volume_size": volume.spec.size_bytes,
             "snapshot_chain": snapshot_chain_json,
         });
     }

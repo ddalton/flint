@@ -1,0 +1,1039 @@
+// node.rs - CSI Node service implementation with dynamic RAID1 creation via NVMe-oF
+use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::Path;
+use crate::driver::SpdkCsiDriver;
+use crate::csi_driver::csi::csi::v1::{
+    node_server::Node,
+    *,
+};
+use tonic::{Request, Response, Status};
+use kube::{Api, api::{Patch, PatchParams}};
+use reqwest::Client as HttpClient;
+use serde_json::json;
+use spdk_csi_driver::models::*;
+use chrono::Utc;
+use tokio::fs;
+use tokio::process::Command;
+
+pub struct NodeService {
+    driver: Arc<SpdkCsiDriver>,
+}
+
+impl NodeService {
+    pub fn new(driver: Arc<SpdkCsiDriver>) -> Self {
+        Self { driver }
+    }
+
+    /// Creates a RAID1 bdev dynamically when a multi-replica volume is staged
+    async fn create_raid1_bdev_for_volume(&self, volume: &SpdkVolume) -> Result<String, Status> {
+        if volume.spec.num_replicas <= 1 {
+            return Err(Status::invalid_argument("Cannot create RAID1 for single replica volume"));
+        }
+
+        let http_client = HttpClient::new();
+        let raid_name = &volume.spec.volume_id;
+        let mut base_bdevs = Vec::new();
+
+        // Prepare base bdevs for RAID1 creation
+        for replica in &volume.spec.replicas {
+            let base_bdev_name = if replica.node == self.driver.node_id {
+                // Local replica: use direct lvol access for better performance
+                if let Some(lvol_uuid) = &replica.lvol_uuid {
+                    let lvs_name = format!("lvs_{}", replica.disk_ref);
+                    format!("{}/{}", lvs_name, lvol_uuid)
+                } else {
+                    return Err(Status::internal(format!("Local replica missing lvol_uuid")));
+                }
+            } else {
+                // Remote replica: use NVMe-oF
+                if let Some(nqn) = &replica.nqn {
+                    let nvmf_bdev_name = format!("nvmf_{}", replica.raid_member_index);
+                    
+                    // Connect to remote NVMe-oF target
+                    self.connect_nvmeof_target(
+                        &nvmf_bdev_name,
+                        nqn,
+                        replica.ip.as_deref().unwrap_or("unknown"),
+                        replica.port.as_deref().unwrap_or("4420"),
+                        &volume.spec.nvmeof_transport.as_deref().unwrap_or("tcp"),
+                    ).await?;
+                    
+                    nvmf_bdev_name
+                } else {
+                    return Err(Status::internal(format!("Remote replica missing NQN")));
+                }
+            };
+            
+            base_bdevs.push(base_bdev_name);
+        }
+
+        // Create RAID1 bdev
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_raid_create",
+                "params": {
+                    "name": raid_name,
+                    "raid_level": 1,
+                    "base_bdevs": base_bdevs,
+                    "strip_size_kb": 64,
+                    "superblock": true
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Status::internal(format!("Failed to create RAID1 bdev: {}", error_text)));
+        }
+
+        println!("Created RAID1 bdev '{}' with base bdevs: {:?}", raid_name, base_bdevs);
+        Ok(raid_name.clone())
+    }
+
+    /// Connects to a remote NVMe-oF target
+    async fn connect_nvmeof_target(
+        &self,
+        bdev_name: &str,
+        nqn: &str,
+        target_ip: &str,
+        target_port: &str,
+        transport: &str,
+    ) -> Result<(), Status> {
+        let http_client = HttpClient::new();
+        
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_nvme_attach_controller",
+                "params": {
+                    "name": bdev_name,
+                    "trtype": transport.to_uppercase(),
+                    "traddr": target_ip,
+                    "trsvcid": target_port,
+                    "subnqn": nqn,
+                    "adrfam": "ipv4"
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to connect NVMe-oF: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Status::internal(format!("Failed to attach NVMe-oF controller: {}", error_text)));
+        }
+
+        println!("Connected to NVMe-oF target: {} -> {}", nqn, bdev_name);
+        Ok(())
+    }
+
+    /// Deletes the RAID1 bdev and disconnects NVMe-oF targets
+    async fn cleanup_raid1_bdev(&self, volume: &SpdkVolume) -> Result<(), Status> {
+        let http_client = HttpClient::new();
+        let raid_name = &volume.spec.volume_id;
+
+        // Delete RAID1 bdev
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_raid_delete",
+                "params": { "name": raid_name }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            eprintln!("Warning: Failed to delete RAID1 bdev {}: {}", raid_name, error_text);
+        } else {
+            println!("Deleted RAID1 bdev: {}", raid_name);
+        }
+
+        // Disconnect remote NVMe-oF targets
+        for replica in &volume.spec.replicas {
+            if replica.node != self.driver.node_id {
+                let nvmf_bdev_name = format!("nvmf_{}", replica.raid_member_index);
+                
+                let response = http_client
+                    .post(&self.driver.spdk_rpc_url)
+                    .json(&json!({
+                        "method": "bdev_nvme_detach_controller",
+                        "params": { "name": nvmf_bdev_name }
+                    }))
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("Disconnected NVMe-oF target: {}", nvmf_bdev_name);
+                    }
+                    Ok(resp) => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        eprintln!("Warning: Failed to disconnect NVMe-oF {}: {}", nvmf_bdev_name, error_text);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Error disconnecting NVMe-oF {}: {}", nvmf_bdev_name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Creates an NVMe-oF target and exports the bdev
+    async fn create_nvmeof_export(&self, bdev_name: &str, nqn: &str, target_port: u16) -> Result<(), Status> {
+        let http_client = HttpClient::new();
+
+        // Create NVMe-oF subsystem
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "nvmf_create_subsystem",
+                "params": {
+                    "nqn": nqn,
+                    "allow_any_host": true,
+                    "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64),
+                    "max_namespaces": 32
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            // Ignore if subsystem already exists
+            if !error_text.contains("already exists") {
+                return Err(Status::internal(format!("Failed to create NVMe-oF subsystem: {}", error_text)));
+            }
+        }
+
+        // Add namespace to subsystem
+        http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "nvmf_subsystem_add_ns",
+                "params": {
+                    "nqn": nqn,
+                    "namespace": {
+                        "nsid": 1,
+                        "bdev_name": bdev_name
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to add namespace: {}", e)))?;
+
+        // Add listener
+        http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "nvmf_subsystem_add_listener",
+                "params": {
+                    "nqn": nqn,
+                    "listen_address": {
+                        "trtype": self.driver.nvmeof_transport.to_uppercase(),
+                        "traddr": "0.0.0.0",
+                        "trsvcid": target_port.to_string(),
+                        "adrfam": "ipv4"
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to add listener: {}", e)))?;
+
+        println!("Created NVMe-oF export: {} -> {} on port {}", bdev_name, nqn, target_port);
+        Ok(())
+    }
+
+    /// Updates the SpdkVolume CRD to mark pod as scheduled on this node
+    async fn update_volume_scheduling_status(&self, volume_id: &str, pod_scheduled: bool) -> Result<(), Status> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        
+        match volumes_api.get(volume_id).await {
+            Ok(mut volume) => {
+                let mut needs_update = false;
+                
+                // Update replicas on this node
+                for replica in &mut volume.spec.replicas {
+                    if replica.node == self.driver.node_id {
+                        if replica.local_pod_scheduled != pod_scheduled {
+                            replica.local_pod_scheduled = pod_scheduled;
+                            replica.last_io_timestamp = Some(Utc::now().to_rfc3339());
+                            needs_update = true;
+                        }
+                    }
+                }
+
+                if needs_update {
+                    let patch = json!({ "spec": volume.spec });
+                    volumes_api
+                        .patch(volume_id, &PatchParams::default(), &Patch::Merge(patch))
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to update volume CRD: {}", e)))?;
+                }
+            }
+            Err(e) => {
+                return Err(Status::not_found(format!("Volume {} not found: {}", volume_id, e)));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Connects to the appropriate target device (RAID1 or single lvol via NVMe-oF)
+    async fn connect_to_target_device(&self, volume: &SpdkVolume) -> Result<String, Status> {
+        let target_port = volume.spec.nvmeof_target_port.unwrap_or(self.driver.nvmeof_target_port);
+        
+        let target_device = if volume.spec.num_replicas > 1 {
+            // Multi-replica: Create RAID1 bdev and expose via NVMe-oF
+            let raid_nqn = format!("nqn.2025-05.io.spdk:raid-{}", volume.spec.volume_id);
+            let raid_bdev = &volume.spec.volume_id;
+            
+            // Export RAID1 bdev via NVMe-oF
+            self.create_nvmeof_export(raid_bdev, &raid_nqn, target_port).await?;
+            
+            // Connect to it locally via NVMe-oF
+            let local_target_name = format!("local_raid_{}", volume.spec.volume_id);
+            let node_ip = self.driver.get_node_ip(&self.driver.node_id).await?;
+            
+            self.connect_nvmeof_target(
+                &local_target_name,
+                &raid_nqn,
+                &node_ip,
+                &target_port.to_string(),
+                &self.driver.nvmeof_transport,
+            ).await?;
+            
+            format!("/dev/nvme-{}n1", local_target_name.replace("_", "-"))
+        } else {
+            // Single replica: Always expose via NVMe-oF for consistency
+            let replica = volume.spec.replicas.first()
+                .ok_or_else(|| Status::internal("No replicas found"))?;
+            
+            if replica.node == self.driver.node_id {
+                // Local replica: Export the specific lvol as NVMe-oF target
+                if let Some(lvol_uuid) = &replica.lvol_uuid {
+                    let lvs_name = format!("lvs_{}", replica.disk_ref);
+                    let lvol_bdev = format!("{}/{}", lvs_name, lvol_uuid);
+                    let local_nqn = format!("nqn.2025-05.io.spdk:volume-{}", volume.spec.volume_id);
+                    
+                    // Export the lvol as NVMe-oF target
+                    self.create_nvmeof_export(&lvol_bdev, &local_nqn, target_port).await?;
+                    
+                    // Connect to it locally via NVMe-oF (loopback)
+                    let local_target_name = format!("local_{}", volume.spec.volume_id);
+                    
+                    self.connect_nvmeof_target(
+                        &local_target_name,
+                        &local_nqn,
+                        "127.0.0.1",  // Loopback for local connection
+                        &target_port.to_string(),
+                        &self.driver.nvmeof_transport,
+                    ).await?;
+                    
+                    format!("/dev/nvme-{}n1", local_target_name.replace("_", "-"))
+                } else {
+                    return Err(Status::internal("Local replica missing lvol_uuid"));
+                }
+            } else {
+                // Remote replica: Connect via NVMe-oF to remote target
+                let remote_target_name = format!("remote_{}", volume.spec.volume_id);
+                
+                if let (Some(nqn), Some(ip), Some(port)) = (
+                    &replica.nqn,
+                    &replica.ip, 
+                    &replica.port
+                ) {
+                    self.connect_nvmeof_target(
+                        &remote_target_name,
+                        nqn,
+                        ip,
+                        port,
+                        &self.driver.nvmeof_transport,
+                    ).await?;
+                    
+                    format!("/dev/nvme-{}n1", remote_target_name.replace("_", "-"))
+                } else {
+                    return Err(Status::internal("Remote replica missing connection details"));
+                }
+            }
+        };
+
+        // Wait for device to appear
+        self.wait_for_device(&target_device).await?;
+        
+        println!("Connected to target device: {} for volume {}", target_device, volume.spec.volume_id);
+        Ok(target_device)
+    }
+
+    /// Waits for a device to appear in the filesystem
+    async fn wait_for_device(&self, device_path: &str) -> Result<(), Status> {
+        let max_retries = 30; // 30 seconds
+        
+        for i in 0..max_retries {
+            if Path::new(device_path).exists() {
+                println!("Device {} is ready", device_path);
+                return Ok(());
+            }
+            
+            if i < max_retries - 1 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+        
+        Err(Status::deadline_exceeded(format!("Device {} did not appear within timeout", device_path)))
+    }
+
+    /// Formats a device if needed
+    async fn format_device_if_needed(&self, device_path: &str, fs_type: &str) -> Result<(), Status> {
+        // Check if device is already formatted
+        let output = Command::new("blkid")
+            .arg(device_path)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to check device format: {}", e)))?;
+
+        if output.status.success() {
+            // Device is already formatted
+            println!("Device {} is already formatted", device_path);
+            return Ok(());
+        }
+
+        // Format the device
+        let format_cmd = match fs_type {
+            "ext4" => vec!["mkfs.ext4", "-F", device_path],
+            "xfs" => vec!["mkfs.xfs", "-f", device_path],
+            _ => return Err(Status::invalid_argument(format!("Unsupported filesystem: {}", fs_type))),
+        };
+
+        let output = Command::new(format_cmd[0])
+            .args(&format_cmd[1..])
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to format device: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("Format failed: {}", stderr)));
+        }
+
+        println!("Formatted device {} with {} filesystem", device_path, fs_type);
+        Ok(())
+    }
+
+    /// Mounts a device to the target path
+    async fn mount_device(&self, device_path: &str, target_path: &str, fs_type: &str, mount_options: &[String]) -> Result<(), Status> {
+        // Create target directory
+        if let Some(parent) = Path::new(target_path).parent() {
+            fs::create_dir_all(parent).await
+                .map_err(|e| Status::internal(format!("Failed to create mount directory: {}", e)))?;
+        }
+
+        // Prepare mount command
+        let mut cmd_args = vec![device_path, target_path];
+        
+        if !fs_type.is_empty() {
+            cmd_args.extend_from_slice(&["-t", fs_type]);
+        }
+        
+        let mount_opts;
+        if !mount_options.is_empty() {
+            mount_opts = mount_options.join(",");
+            cmd_args.extend_from_slice(&["-o", &mount_opts]);
+        }
+
+        let output = Command::new("mount")
+            .args(&cmd_args)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to mount device: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("Mount failed: {}", stderr)));
+        }
+
+        println!("Mounted {} to {} ({})", device_path, target_path, fs_type);
+        Ok(())
+    }
+
+    /// Unmounts a device
+    async fn unmount_device(&self, mount_path: &str) -> Result<(), Status> {
+        let output = Command::new("umount")
+            .arg(mount_path)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to unmount: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("not mounted") {
+                return Err(Status::internal(format!("Unmount failed: {}", stderr)));
+            }
+        }
+
+        println!("Unmounted {}", mount_path);
+        Ok(())
+    }
+
+    /// Cleans up NVMe-oF exports for a volume
+    async fn cleanup_nvmeof_exports(&self, volume: &SpdkVolume) -> Result<(), Status> {
+        let http_client = HttpClient::new();
+        
+        // Determine NQN based on volume type
+        let nqn = if volume.spec.num_replicas > 1 {
+            format!("nqn.2025-05.io.spdk:raid-{}", volume.spec.volume_id)
+        } else {
+            format!("nqn.2025-05.io.spdk:volume-{}", volume.spec.volume_id)
+        };
+
+        // Remove NVMe-oF subsystem
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "nvmf_delete_subsystem",
+                "params": {
+                    "nqn": nqn
+                }
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                println!("Cleaned up NVMe-oF subsystem: {}", nqn);
+            }
+            Ok(resp) => {
+                let error_text = resp.text().await.unwrap_or_default();
+                eprintln!("Warning: Failed to clean up NVMe-oF subsystem {}: {}", nqn, error_text);
+            }
+            Err(e) => {
+                eprintln!("Warning: Error cleaning up NVMe-oF subsystem {}: {}", nqn, e);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[tonic::async_trait]
+impl Node for NodeService {
+    async fn node_stage_volume(
+        &self,
+        request: Request<NodeStageVolumeRequest>,
+    ) -> Result<Response<NodeStageVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let staging_target_path = req.staging_target_path;
+
+        if volume_id.is_empty() || staging_target_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and staging target path are required"));
+        }
+
+        println!("Staging volume {} to {}", volume_id, staging_target_path);
+
+        // Get volume information from CRD
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volume = volumes_api.get(&volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+
+        // Update scheduling status
+        self.update_volume_scheduling_status(&volume_id, true).await?;
+
+        // Create RAID1 bdev if this is a multi-replica volume
+        if volume.spec.num_replicas > 1 {
+            self.create_raid1_bdev_for_volume(&volume).await?;
+        }
+
+        // Connect to the target device (RAID1 or single replica)
+        let device_path = self.connect_to_target_device(&volume).await?;
+
+        // For filesystem volumes, format and mount
+        if let Some(volume_capability) = req.volume_capability {
+            if let Some(access_type) = volume_capability.access_type {
+                match access_type {
+                    volume_capability::AccessType::Mount(mount_config) => {
+                        let fs_type = mount_config.fs_type;
+                        let mount_flags = mount_config.mount_flags;
+
+                        // Format device if needed
+                        self.format_device_if_needed(&device_path, &fs_type).await?;
+
+                        // Mount device to staging path
+                        self.mount_device(&device_path, &staging_target_path, &fs_type, &mount_flags).await?;
+                    }
+                    volume_capability::AccessType::Block(_) => {
+                        // For block volumes, just create a bind mount of the device
+                        fs::create_dir_all(&staging_target_path).await
+                            .map_err(|e| Status::internal(format!("Failed to create staging directory: {}", e)))?;
+
+                        // Create a bind mount
+                        let output = Command::new("mount")
+                            .args(["--bind", &device_path, &staging_target_path])
+                            .output()
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to create bind mount: {}", e)))?;
+
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            return Err(Status::internal(format!("Bind mount failed: {}", stderr)));
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("Successfully staged volume {} at {}", volume_id, staging_target_path);
+        Ok(Response::new(NodeStageVolumeResponse {}))
+    }
+
+    async fn node_unstage_volume(
+        &self,
+        request: Request<NodeUnstageVolumeRequest>,
+    ) -> Result<Response<NodeUnstageVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let staging_target_path = req.staging_target_path;
+
+        if volume_id.is_empty() || staging_target_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and staging target path are required"));
+        }
+
+        println!("Unstaging volume {} from {}", volume_id, staging_target_path);
+
+        // Unmount the staging path
+        self.unmount_device(&staging_target_path).await.ok();
+
+        // Get volume information
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        if let Ok(volume) = volumes_api.get(&volume_id).await {
+            // Clean up RAID1 bdev if it exists
+            if volume.spec.num_replicas > 1 {
+                self.cleanup_raid1_bdev(&volume).await.ok();
+            }
+            
+            // Clean up NVMe-oF exports
+            self.cleanup_nvmeof_exports(&volume).await.ok();
+        }
+
+        // Update scheduling status
+        self.update_volume_scheduling_status(&volume_id, false).await.ok();
+
+        println!("Successfully unstaged volume {}", volume_id);
+        Ok(Response::new(NodeUnstageVolumeResponse {}))
+    }
+
+    async fn node_publish_volume(
+        &self,
+        request: Request<NodePublishVolumeRequest>,
+    ) -> Result<Response<NodePublishVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let staging_target_path = req.staging_target_path;
+        let target_path = req.target_path;
+
+        if volume_id.is_empty() || target_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and target path are required"));
+        }
+
+        println!("Publishing volume {} from {} to {}", volume_id, staging_target_path, target_path);
+
+        // Create target directory
+        if let Some(parent) = Path::new(&target_path).parent() {
+            fs::create_dir_all(parent).await
+                .map_err(|e| Status::internal(format!("Failed to create target directory: {}", e)))?;
+        }
+
+        // Determine if this is a block or filesystem volume
+        let is_block_volume = req.volume_capability
+            .as_ref()
+            .and_then(|vc| vc.access_type.as_ref())
+            .map(|at| matches!(at, volume_capability::AccessType::Block(_)))
+            .unwrap_or(false);
+
+        if is_block_volume {
+            // For block volumes, create a bind mount from staging to target
+            let output = Command::new("mount")
+                .args(["--bind", &staging_target_path, &target_path])
+                .output()
+                .await
+                .map_err(|e| Status::internal(format!("Failed to bind mount: {}", e)))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(Status::internal(format!("Bind mount failed: {}", stderr)));
+            }
+        } else {
+            // For filesystem volumes, bind mount the staged filesystem
+            let mount_options = req.volume_capability
+                .and_then(|vc| match vc.access_type? {
+                    volume_capability::AccessType::Mount(mount_config) => Some(mount_config.mount_flags),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let mut cmd_args = vec!["--bind", &staging_target_path, &target_path];
+            let mount_opts;
+            if !mount_options.is_empty() {
+                mount_opts = mount_options.join(",");
+                cmd_args.extend_from_slice(&["-o", &mount_opts]);
+            }
+
+            let output = Command::new("mount")
+                .args(&cmd_args)
+                .output()
+                .await
+                .map_err(|e| Status::internal(format!("Failed to publish volume: {}", e)))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(Status::internal(format!("Publish mount failed: {}", stderr)));
+            }
+        }
+
+        println!("Successfully published volume {} to {}", volume_id, target_path);
+        Ok(Response::new(NodePublishVolumeResponse {}))
+    }
+
+    async fn node_unpublish_volume(
+        &self,
+        request: Request<NodeUnpublishVolumeRequest>,
+    ) -> Result<Response<NodeUnpublishVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let target_path = req.target_path;
+
+        if volume_id.is_empty() || target_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and target path are required"));
+        }
+
+        println!("Unpublishing volume {} from {}", volume_id, target_path);
+
+        // Unmount the target path
+        self.unmount_device(&target_path).await.ok();
+
+        // Remove the target directory if it's empty
+        fs::remove_dir(&target_path).await.ok();
+
+        println!("Successfully unpublished volume {} from {}", volume_id, target_path);
+        Ok(Response::new(NodeUnpublishVolumeResponse {}))
+    }
+
+    async fn node_get_volume_stats(
+        &self,
+        request: Request<NodeGetVolumeStatsRequest>,
+    ) -> Result<Response<NodeGetVolumeStatsResponse>, Status> {
+        let req = request.into_inner();
+        let volume_path = req.volume_path;
+
+        if volume_path.is_empty() {
+            return Err(Status::invalid_argument("Volume path is required"));
+        }
+
+        // Get filesystem statistics
+        let output = Command::new("df")
+            .args(["-B1", &volume_path])
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get volume stats: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("df command failed: {}", stderr)));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        
+        if lines.len() < 2 {
+            return Err(Status::internal("Invalid df output"));
+        }
+
+        let stats_line = lines[1];
+        let parts: Vec<&str> = stats_line.split_whitespace().collect();
+        
+        if parts.len() < 4 {
+            return Err(Status::internal("Cannot parse df output"));
+        }
+
+        let total_bytes: i64 = parts[1].parse().unwrap_or(0);
+        let used_bytes: i64 = parts[2].parse().unwrap_or(0);
+        let available_bytes: i64 = parts[3].parse().unwrap_or(0);
+
+        let volume_usage = vec![VolumeUsage {
+            available: available_bytes,
+            total: total_bytes,
+            used: used_bytes,
+            unit: volume_usage::Unit::Bytes as i32,
+        }];
+
+        let volume_condition = VolumeCondition {
+            abnormal: false,
+            message: "Volume is healthy".to_string(),
+        };
+
+        Ok(Response::new(NodeGetVolumeStatsResponse {
+            usage: volume_usage,
+            volume_condition: Some(volume_condition),
+        }))
+    }
+
+    async fn node_expand_volume(
+        &self,
+        request: Request<NodeExpandVolumeRequest>,
+    ) -> Result<Response<NodeExpandVolumeResponse>, Status> {
+        let req = request.into_inner();
+        let volume_id = req.volume_id;
+        let volume_path = req.volume_path;
+        let capacity_range = req.capacity_range;
+
+        if volume_id.is_empty() || volume_path.is_empty() {
+            return Err(Status::invalid_argument("Volume ID and volume path are required"));
+        }
+
+        println!("Expanding volume {} at path {}", volume_id, volume_path);
+
+        // Get the new capacity
+        let new_capacity = capacity_range
+            .as_ref()
+            .map(|cr| cr.required_bytes)
+            .unwrap_or(0);
+
+        if new_capacity <= 0 {
+            return Err(Status::invalid_argument("New capacity must be positive"));
+        }
+
+        // For filesystem volumes, we need to resize the filesystem
+        // First, let's determine the filesystem type
+        let output = Command::new("findmnt")
+            .args(["-n", "-o", "FSTYPE", &volume_path])
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to determine filesystem type: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(Status::internal("Could not determine filesystem type"));
+        }
+
+        let fs_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Resize the filesystem based on its type
+        match fs_type.as_str() {
+            "ext4" | "ext3" | "ext2" => {
+                let output = Command::new("resize2fs")
+                    .arg(&volume_path)
+                    .output()
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to resize ext filesystem: {}", e)))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(Status::internal(format!("resize2fs failed: {}", stderr)));
+                }
+            }
+            "xfs" => {
+                let output = Command::new("xfs_growfs")
+                    .arg(&volume_path)
+                    .output()
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to resize XFS filesystem: {}", e)))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(Status::internal(format!("xfs_growfs failed: {}", stderr)));
+                }
+            }
+            _ => {
+                return Err(Status::unimplemented(format!("Filesystem resize not supported for: {}", fs_type)));
+            }
+        }
+
+        println!("Successfully expanded {} filesystem for volume {}", fs_type, volume_id);
+
+        Ok(Response::new(NodeExpandVolumeResponse {
+            capacity_bytes: new_capacity,
+        }))
+    }
+
+    async fn node_get_capabilities(
+        &self,
+        _request: Request<NodeGetCapabilitiesRequest>,
+    ) -> Result<Response<NodeGetCapabilitiesResponse>, Status> {
+        let capabilities = vec![
+            NodeServiceCapability {
+                r#type: Some(node_service_capability::Type::Rpc(
+                    node_service_capability::Rpc {
+                        r#type: node_service_capability::rpc::Type::StageUnstageVolume as i32,
+                    },
+                )),
+            },
+            NodeServiceCapability {
+                r#type: Some(node_service_capability::Type::Rpc(
+                    node_service_capability::Rpc {
+                        r#type: node_service_capability::rpc::Type::GetVolumeStats as i32,
+                    },
+                )),
+            },
+            NodeServiceCapability {
+                r#type: Some(node_service_capability::Type::Rpc(
+                    node_service_capability::Rpc {
+                        r#type: node_service_capability::rpc::Type::ExpandVolume as i32,
+                    },
+                )),
+            },
+            NodeServiceCapability {
+                r#type: Some(node_service_capability::Type::Rpc(
+                    node_service_capability::Rpc {
+                        r#type: node_service_capability::rpc::Type::VolumeCondition as i32,
+                    },
+                )),
+            },
+        ];
+
+        Ok(Response::new(NodeGetCapabilitiesResponse { capabilities }))
+    }
+
+    async fn node_get_info(
+        &self,
+        _request: Request<NodeGetInfoRequest>,
+    ) -> Result<Response<NodeGetInfoResponse>, Status> {
+        // Get node topology information
+        let mut topology = HashMap::new();
+        topology.insert("topology.kubernetes.io/hostname".to_string(), self.driver.node_id.clone());
+
+        // Try to get zone information
+        if let Ok(zone) = std::env::var("NODE_ZONE") {
+            topology.insert("topology.kubernetes.io/zone".to_string(), zone);
+        }
+
+        // Try to get region information
+        if let Ok(region) = std::env::var("NODE_REGION") {
+            topology.insert("topology.kubernetes.io/region".to_string(), region);
+        }
+
+        // Add SPDK-specific topology
+        topology.insert("spdk.io/nvme-transport".to_string(), self.driver.nvmeof_transport.clone());
+        topology.insert("spdk.io/nvme-port".to_string(), self.driver.nvmeof_target_port.to_string());
+
+        // Get available capacity from local disks
+        let mut max_volumes_per_node = 0i64;
+        
+        // Query local SPDK disks to determine maximum volumes
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        if let Ok(disk_list) = disks_api.list(&kube::api::ListParams::default()).await {
+            let local_disks: Vec<_> = disk_list.items.iter()
+                .filter(|disk| disk.spec.node == self.driver.node_id)
+                .collect();
+            
+            // Estimate max volumes based on disk capacity and typical volume sizes
+            let total_capacity: i64 = local_disks.iter()
+                .filter_map(|disk| disk.status.as_ref())
+                .map(|status| status.free_space)
+                .sum();
+            
+            // Assume 10GB average volume size for estimation
+            max_volumes_per_node = total_capacity / (10 * 1024 * 1024 * 1024);
+        }
+
+        Ok(Response::new(NodeGetInfoResponse {
+            node_id: self.driver.node_id.clone(),
+            max_volumes_per_node,
+            accessible_topology: Some(Topology {
+                segments: topology,
+            }),
+        }))
+    }
+}
+
+// Helper functions for the NodeService
+impl NodeService {
+    /// Checks if a mount point is already mounted
+    async fn is_mounted(&self, mount_path: &str) -> bool {
+        let output = Command::new("findmnt")
+            .arg(mount_path)
+            .output()
+            .await;
+
+        match output {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Gets the device path for a mount point
+    async fn get_device_for_mount(&self, mount_path: &str) -> Option<String> {
+        let output = Command::new("findmnt")
+            .args(["-n", "-o", "SOURCE", mount_path])
+            .output()
+            .await
+            .ok()?;
+
+        if output.status.success() {
+            let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !source.is_empty() {
+                return Some(source);
+            }
+        }
+        None
+    }
+
+    /// Ensures a directory exists
+    async fn ensure_directory(&self, path: &str) -> Result<(), Status> {
+        if !Path::new(path).exists() {
+            fs::create_dir_all(path).await
+                .map_err(|e| Status::internal(format!("Failed to create directory {}: {}", path, e)))?;
+        }
+        Ok(())
+    }
+
+    /// Cleans up orphaned mount points
+    async fn cleanup_mount_point(&self, mount_path: &str) -> Result<(), Status> {
+        // Try to unmount if mounted
+        if self.is_mounted(mount_path).await {
+            self.unmount_device(mount_path).await?;
+        }
+
+        // Remove the directory if it exists and is empty
+        if Path::new(mount_path).exists() {
+            fs::remove_dir(mount_path).await
+                .map_err(|e| Status::internal(format!("Failed to remove mount directory: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Gets SPDK metrics for the local node
+    async fn get_local_spdk_metrics(&self) -> Result<serde_json::Value, Status> {
+        let http_client = HttpClient::new();
+        
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_get_iostat"
+            }))
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get SPDK metrics: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(Status::internal("Failed to retrieve SPDK metrics"));
+        }
+
+        let metrics = response.json::<serde_json::Value>().await
+            .map_err(|e| Status::internal(format!("Failed to parse SPDK metrics: {}", e)))?;
+
+        Ok(metrics)
+    }
+}
