@@ -286,48 +286,44 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
       </div>
       
       <div className="text-center relative">
-        {/* NVMe-oF Access Layer */}
-        {hasNvmeof && (
-          <>
-            <div className="mb-6">
-              <h4 className="text-lg font-semibold mb-4 text-gray-700">Application Access Layer</h4>
-              <div className="flex justify-center items-center gap-4">
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-purple-300">
-                    <Monitor className="w-8 h-8 text-purple-600" />
-                  </div>
-                  <p className="font-medium text-sm">Pod/Application</p>
-                  <p className="text-xs text-gray-500">User Process</p>
-                </div>
-                
-                <div className="flex items-center">
-                  <div className="w-8 h-1 bg-purple-400"></div>
-                  <Cable className="w-5 h-5 text-purple-600 mx-2" />
-                  <div className="w-8 h-1 bg-purple-400"></div>
-                </div>
-                
-                <VolumeAccessTooltip 
-                  targets={selectedVolumeInfo.nvmeof_targets} 
-                  raidLevel={raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : undefined}
-                >
-                  <div className="text-center cursor-help">
-                    <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-indigo-300">
-                      <Network className="w-8 h-8 text-indigo-600" />
-                    </div>
-                    <p className="font-medium text-sm">NVMe-oF</p>
-                    <p className="text-xs text-gray-500">Network Fabric</p>
-                    <Info className="w-3 h-3 text-gray-400 mx-auto mt-1" />
-                  </div>
-                </VolumeAccessTooltip>
+        {/* Application Access Layer - Always show with ublk */}
+        <div className="mb-6">
+          <h4 className="text-lg font-semibold mb-4 text-gray-700">Application Access Layer</h4>
+          <div className="flex justify-center items-center gap-4">
+            <div className="text-center">
+              <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-purple-300">
+                <Monitor className="w-8 h-8 text-purple-600" />
               </div>
+              <p className="font-medium text-sm">Pod/Application</p>
+              <p className="text-xs text-gray-500">User Process</p>
             </div>
-
-            <div className="flex justify-center mb-6">
-              <div className="w-1 h-8 bg-indigo-400"></div>
+            
+            <div className="flex items-center">
+              <div className="w-8 h-1 bg-purple-400"></div>
+              <Cable className="w-5 h-5 text-purple-600 mx-2" />
+              <div className="w-8 h-1 bg-purple-400"></div>
             </div>
-          </>
-        )}
+            
+            <VolumeAccessTooltip 
+              ublkDevice={selectedVolumeInfo.ublk_device}
+              raidLevel={raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : undefined}
+            >
+              <div className="text-center cursor-help">
+                <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-indigo-300">
+                  <HardDrive className="w-8 h-8 text-indigo-600" />
+                </div>
+                <p className="font-medium text-sm">ublk</p>
+                <p className="text-xs text-gray-500">Block Device</p>
+                <Info className="w-3 h-3 text-gray-400 mx-auto mt-1" />
+              </div>
+            </VolumeAccessTooltip>
+          </div>
+        </div>
         
+        <div className="flex justify-center mb-6">
+          <div className="w-1 h-8 bg-indigo-400"></div>
+        </div>
+              
         {/* SPDK RAID Layer */}
         <div className="mb-8">
           <h4 className="text-xl font-semibold mb-6">SPDK Storage Architecture: {selectedVolumeInfo.name}</h4>
@@ -495,6 +491,19 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
               </div>
               
               {/* RAID Technical Information */}
+              {selectedVolumeInfo.ublk_device && (
+                <div className="mt-3 p-2 bg-green-50 rounded">
+                  <h6 className="font-medium text-gray-700 mb-1">ublk Device Info:</h6>
+                  <div className="text-xs space-y-1">
+                    <p>• Device Path: {selectedVolumeInfo.ublk_device.device_path}</p>
+                    <p>• ublk ID: {selectedVolumeInfo.ublk_device.id}</p>
+                    <p>• Kernel Module: ublk_drv</p>
+                    <p>• Min Kernel Version: 6.0+</p>
+                    <p>• Volume Type: {raidStatus ? `${getRaidLevelDisplayName(raidStatus.raid_level)} (${selectedVolumeInfo.replicas} replicas)` : 'Single Replica'}</p>
+                  </div>
+                </div>
+              )}
+
               {showTechnicalDetails && raidStatus && (
                 <div className="mt-6 p-4 bg-white rounded-lg border border-gray-200">
                   <h6 className="font-medium text-gray-800 mb-2 flex items-center gap-2">

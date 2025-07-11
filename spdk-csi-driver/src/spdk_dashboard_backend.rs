@@ -56,6 +56,7 @@ struct DashboardVolume {
     target_port: u16,
     // Enhanced RAID status from SPDK
     raid_status: Option<DashboardRaidStatus>,
+    ublk_device: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -492,6 +493,14 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
     let rebuild_progress = raid_status.as_ref()
         .and_then(|rs| rs.rebuild_info.as_ref())
         .map(|ri| ri.progress_percentage);
+
+    // Add ublk device info if available
+    let ublk_device = status.ublk_device.as_ref().map(|ublk| {
+        json!({
+            "id": ublk.id,
+            "device_path": ublk.device_path
+        })
+    });
     
     DashboardVolume {
         id: spec.volume_id.clone(),
@@ -510,6 +519,7 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         transport_type,
         target_port,
         raid_status,
+        ublk_device,
     }
 }
 

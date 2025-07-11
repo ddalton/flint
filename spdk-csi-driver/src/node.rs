@@ -404,45 +404,6 @@ impl NodeService {
         Ok(())
     }
 
-    /// Cleans up NVMe-oF exports for a volume
-    async fn cleanup_nvmeof_exports(&self, volume: &SpdkVolume) -> Result<(), Status> {
-        let http_client = HttpClient::new();
-        
-        // Determine NQN based on volume type
-        let nqn = if volume.spec.num_replicas > 1 {
-            format!("nqn.2025-05.io.spdk:raid-{}", volume.spec.volume_id)
-        } else {
-            format!("nqn.2025-05.io.spdk:volume-{}", volume.spec.volume_id)
-        };
-
-        // Remove NVMe-oF subsystem
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_delete_subsystem",
-                "params": {
-                    "nqn": nqn
-                }
-            }))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                println!("Cleaned up NVMe-oF subsystem: {}", nqn);
-            }
-            Ok(resp) => {
-                let error_text = resp.text().await.unwrap_or_default();
-                eprintln!("Warning: Failed to clean up NVMe-oF subsystem {}: {}", nqn, error_text);
-            }
-            Err(e) => {
-                eprintln!("Warning: Error cleaning up NVMe-oF subsystem {}: {}", nqn, e);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Clean up all SPDK resources for a volume
     async fn cleanup_spdk_resources(&self, volume: &SpdkVolume) -> Result<(), Status> {
         if volume.spec.num_replicas > 1 {
@@ -527,6 +488,15 @@ impl Node for NodeService {
         // Connect to the target device using ublk (instead of NVMe-oF loopback)
         let device_path = self.connect_to_target_device(&volume).await?;
 
+        // Update volume status with ublk device info
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        self.update_volume_ublk_status(&volume_id, Some(UblkDevice {
+            id: ublk_id,
+            device_path: device_path.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            node: self.driver.node_id.clone(),
+        })).await?;
+
         // For filesystem volumes, format and mount
         if let Some(volume_capability) = req.volume_capability {
             if let Some(access_type) = volume_capability.access_type {
@@ -587,6 +557,9 @@ impl Node for NodeService {
                 
                 // Step 5: Update scheduling status
                 self.update_volume_scheduling_status(&volume_id, false).await?;
+
+                // Clear ublk device status
+                self.update_volume_ublk_status(&volume_id, None).await?;
             }
             Err(e) => {
                 println!("Volume {} not found during unstage, skipping cleanup: {}", volume_id, e);
@@ -922,81 +895,30 @@ impl Node for NodeService {
 
 // Helper functions for the NodeService
 impl NodeService {
-    /// Checks if a mount point is already mounted
-    async fn is_mounted(&self, mount_path: &str) -> bool {
-        let output = Command::new("findmnt")
-            .arg(mount_path)
-            .output()
-            .await;
 
-        match output {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
-    }
-
-    /// Gets the device path for a mount point
-    async fn get_device_for_mount(&self, mount_path: &str) -> Option<String> {
-        let output = Command::new("findmnt")
-            .args(["-n", "-o", "SOURCE", mount_path])
-            .output()
-            .await
-            .ok()?;
-
-        if output.status.success() {
-            let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !source.is_empty() {
-                return Some(source);
-            }
-        }
-        None
-    }
-
-    /// Ensures a directory exists
-    async fn ensure_directory(&self, path: &str) -> Result<(), Status> {
-        if !Path::new(path).exists() {
-            fs::create_dir_all(path).await
-                .map_err(|e| Status::internal(format!("Failed to create directory {}: {}", path, e)))?;
-        }
-        Ok(())
-    }
-
-    /// Cleans up orphaned mount points
-    async fn cleanup_mount_point(&self, mount_path: &str) -> Result<(), Status> {
-        // Try to unmount if mounted
-        if self.is_mounted(mount_path).await {
-            self.unmount_device(mount_path).await?;
-        }
-
-        // Remove the directory if it exists and is empty
-        if Path::new(mount_path).exists() {
-            fs::remove_dir(mount_path).await
-                .map_err(|e| Status::internal(format!("Failed to remove mount directory: {}", e)))?;
-        }
-
-        Ok(())
-    }
-
-    /// Gets SPDK metrics for the local node
-    async fn get_local_spdk_metrics(&self) -> Result<serde_json::Value, Status> {
-        let http_client = HttpClient::new();
+    // Add method to update ublk device status
+    async fn update_volume_ublk_status(
+        &self,
+        volume_id: &str,
+        ublk_device: Option<UblkDevice>,
+    ) -> Result<(), Status> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
         
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_get_iostat"
-            }))
-            .send()
+        // Get current volume
+        let volume = volumes_api.get(volume_id).await
+            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+        
+        // Update status
+        let mut status = volume.status.unwrap_or_default();
+        status.ublk_device = ublk_device;
+        
+        // Patch the status
+        let patch = json!({ "status": status });
+        volumes_api
+            .patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch))
             .await
-            .map_err(|e| Status::internal(format!("Failed to get SPDK metrics: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(Status::internal("Failed to retrieve SPDK metrics"));
-        }
-
-        let metrics = response.json::<serde_json::Value>().await
-            .map_err(|e| Status::internal(format!("Failed to parse SPDK metrics: {}", e)))?;
-
-        Ok(metrics)
+            .map_err(|e| Status::internal(format!("Failed to update volume status: {}", e)))?;
+        
+        Ok(())
     }
 }

@@ -68,6 +68,8 @@ pub enum ReplicaHealth {
     Syncing,
 }
 
+// models.rs - Add ublk device info to SpdkVolumeStatus
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
 pub struct SpdkVolumeStatus {
     pub state: String,
@@ -79,7 +81,11 @@ pub struct SpdkVolumeStatus {
     pub last_successful_write: Option<String>,
     pub raid_status: Option<RaidStatus>,
     pub nvmeof_targets: Vec<NvmeofTarget>,
-    // Scheduling and optimization tracking fields
+    
+    // Add ublk device information
+    pub ublk_device: Option<UblkDevice>,
+    
+    // Existing scheduling and optimization tracking fields
     pub scheduled_node: Option<String>,
     pub has_local_replica: bool,
     pub scheduling_policy: Option<String>,
@@ -87,6 +93,15 @@ pub struct SpdkVolumeStatus {
     pub read_optimized: bool,
     pub read_policy: Option<String>,
     pub local_replica_performance: Option<LocalReplicaMetrics>,
+}
+
+// Add new struct for ublk device information
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct UblkDevice {
+    pub id: u32,
+    pub device_path: String,
+    pub created_at: String,
+    pub node: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]

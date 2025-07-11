@@ -14,7 +14,6 @@ export interface NvmeofTargetInfo {
   connection_count: number;
 }
 
-// Enhanced types to match the backend API exactly
 export interface Volume {
   id: string;
   name: string;
@@ -27,11 +26,15 @@ export interface Volume {
   rebuild_progress: number | null;
   nodes: string[];
   replica_statuses: ReplicaStatus[];
-  // NVMe-oF fields instead of vhost
   nvmeof_targets: NvmeofTargetInfo[];
   nvmeof_enabled: boolean;
-  // Enhanced RAID status from backend
   raid_status?: RaidStatus;
+  
+  // Add ublk device information
+  ublk_device?: {
+    id: number;
+    device_path: string;  // e.g., "/dev/ublkb42"
+  };
 }
 
 // --- End of new/updated interfaces ---
@@ -172,19 +175,15 @@ const mockData: DashboardData = {
       access_method: "nvmeof", // Set to nvmeof
       rebuild_progress: null,
       nodes: ["worker-node-1"],
-      nvmeof_enabled: true,
-      nvmeof_targets: [
-        {
-          nqn: "nqn.2016-06.io.spdk:single-replica-volume",
-          target_ip: "192.168.1.101",
-          target_port: 4420,
-          transport: "TCP",
-          node: "worker-node-1",
-          bdev_name: "pvc-single-replica-volume",
-          active: true,
-          connection_count: 1
-        }
-      ],
+      // Add ublk device info
+      ublk_device: {
+        id: 42,
+        device_path: "/dev/ublkb42"
+      },
+      
+      // Remove or keep nvmeof_targets for backward compatibility
+      nvmeof_enabled: false,
+      nvmeof_targets: [],
       replica_statuses: [
         {
           node: "worker-node-1",
@@ -214,19 +213,14 @@ const mockData: DashboardData = {
       access_method: "nvmeof",
       rebuild_progress: null,
       nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      nvmeof_enabled: true,
-      nvmeof_targets: [
-        {
-          nqn: "nqn.2016-06.io.spdk:postgres-data-pvc",
-          target_ip: "192.168.1.101",
-          target_port: 4420,
-          transport: "TCP",
-          node: "worker-node-1",
-          bdev_name: "pvc-12345678-1234-1234-1234-123456789abc",
-          active: true,
-          connection_count: 3
-        }
-      ],
+      // Add ublk device info
+      ublk_device: {
+        id: 123,
+        device_path: "/dev/ublkb123"
+      },
+      
+      nvmeof_enabled: false,
+      nvmeof_targets: [],
       raid_status: {
         raid_level: 1,
         state: "online",
@@ -340,19 +334,14 @@ const mockData: DashboardData = {
       access_method: "nvmeof",
       rebuild_progress: 75.5,
       nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      nvmeof_enabled: true,
-      nvmeof_targets: [
-         {
-          nqn: "nqn.2016-06.io.spdk:redis-cache-pvc",
-          target_ip: "192.168.1.101",
-          target_port: 4420,
-          transport: "TCP",
-          node: "worker-node-1",
-          bdev_name: "pvc-87654321-4321-4321-4321-cba987654321",
-          active: true,
-          connection_count: 1
-        }
-      ],
+      // Add ublk device info
+      ublk_device: {
+        id: 12,
+        device_path: "/dev/ublkb12"
+      },
+      
+      nvmeof_enabled: false,
+      nvmeof_targets: [],
       raid_status: {
         raid_level: 1,
         state: "degraded",

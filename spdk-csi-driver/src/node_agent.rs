@@ -814,9 +814,6 @@ struct NvmeDevice {
     pcie_addr: String,
     capacity: i64,
     model: String,
-    serial: String,
-    firmware_version: String,
-    numa_node: Option<u32>,
 }
 
 fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
@@ -834,9 +831,6 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
         pcie_addr: pcie_addr.to_string(),
         capacity,
         model: controller["model"].as_str().unwrap_or("Unknown").to_string(),
-        serial: controller["serial"].as_str().unwrap_or("Unknown").to_string(),
-        firmware_version: controller["fw_rev"].as_str().unwrap_or("Unknown").to_string(),
-        numa_node: controller["numa_node"].as_u64().map(|n| n as u32),
     })
 }
 
@@ -874,7 +868,7 @@ async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std
     let vendor_path = format!("/sys/bus/pci/devices/{}/vendor", pcie_addr);
     let device_path = format!("/sys/bus/pci/devices/{}/device", pcie_addr);
     
-    let vendor = fs::read_to_string(vendor_path).unwrap_or_default().trim().to_string();
+    let _vendor = fs::read_to_string(vendor_path).unwrap_or_default().trim().to_string();
     let device = fs::read_to_string(device_path).unwrap_or_default().trim().to_string();
     
     // Estimate capacity (this would need more sophisticated detection in production)
@@ -885,9 +879,6 @@ async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std
         pcie_addr: pcie_addr.to_string(),
         capacity,
         model: format!("Unbound NVMe Device {}", device),
-        serial: "Unknown".to_string(),
-        firmware_version: "Unknown".to_string(),
-        numa_node: None,
     })
 }
 

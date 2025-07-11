@@ -2,7 +2,6 @@
 use kube::{
     Client, Api, runtime::{Controller, watcher, controller::Action},
     api::{PatchParams, Patch, ListParams},
-    error::ErrorResponse,
 };
 use k8s_openapi::api::core::v1::Pod;
 use tokio::time::Duration;
