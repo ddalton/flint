@@ -108,6 +108,80 @@ impl SpdkCsiDriver {
         Ok(false)
     }
 
+    /// Create ublk device for a bdev
+    pub async fn create_ublk_device(
+        &self,
+        bdev_name: &str,
+        ublk_id: u32,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        
+        println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
+        
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_ublk_create",
+                "params": {
+                    "bdev_name": bdev_name,
+                    "ublk_id": ublk_id
+                }
+            }))
+            .send()
+            .await?;
+            
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Failed to create ublk device: {}", error_text).into());
+        }
+        
+        // ublk devices appear as /dev/ublkb{id}
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        println!("Successfully created ublk device: {} -> {}", bdev_name, device_path);
+        Ok(device_path)
+    }
+    
+    /// Delete ublk device
+    pub async fn delete_ublk_device(
+        &self,
+        ublk_id: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let http_client = HttpClient::new();
+        
+        println!("Deleting ublk device with ID {}", ublk_id);
+        
+        let response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_ublk_delete",
+                "params": {
+                    "ublk_id": ublk_id
+                }
+            }))
+            .send()
+            .await?;
+            
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            // Ignore "does not exist" errors
+            if !error_text.contains("does not exist") {
+                return Err(format!("Failed to delete ublk device: {}", error_text).into());
+            }
+        }
+        
+        println!("Deleted ublk device with ID {}", ublk_id);
+        Ok(())
+    }
+    
+    /// Generate a unique ublk ID based on volume ID
+    pub fn generate_ublk_id(&self, volume_id: &str) -> u32 {
+        // Simple hash-based ID generation (0-1023 range for ublk)
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        volume_id.hash(&mut hasher);
+        (hasher.finish() % 1024) as u32
+    }
+
     /// Create NVMe-oF target for a volume
     pub async fn create_nvmeof_target(
         &self,

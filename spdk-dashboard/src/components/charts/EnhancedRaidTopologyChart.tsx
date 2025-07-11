@@ -4,7 +4,7 @@ import {
   Cable, Monitor, Shield, HardDrive, Clock, CheckCircle, Search, ChevronDown
 } from 'lucide-react';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
-import { VHostNvmeTooltip } from '../ui/VHostNvmeTooltip';
+import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
 import type { Volume, RaidStatus, RaidMember, RebuildInfo } from '../../hooks/useDashboardData';
 
 interface EnhancedRaidTopologyChartProps {
@@ -127,11 +127,10 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     return <Network className="w-4 h-4 text-purple-600" />;
   };
 
-  // Check if volume has vhost-nvme configuration
-  const hasVHostNvme = selectedVolumeInfo.vhost_socket || 
-                       selectedVolumeInfo.vhost_enabled || 
-                       selectedVolumeInfo.access_method === 'vhost-nvme' ||
-                       selectedVolumeInfo.vhost_type === 'nvme';
+  // Check if volume has nvmeof configuration
+  const hasNvmeof = selectedVolumeInfo.nvmeof_enabled || 
+                    (selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0) ||
+                    selectedVolumeInfo.access_method === 'nvmeof';
 
   const raidStatus = selectedVolumeInfo.raid_status;
 
@@ -287,8 +286,8 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
       </div>
       
       <div className="text-center relative">
-        {/* VHost-NVMe Access Layer */}
-        {hasVHostNvme && (
+        {/* NVMe-oF Access Layer */}
+        {hasNvmeof && (
           <>
             <div className="mb-6">
               <h4 className="text-lg font-semibold mb-4 text-gray-700">Application Access Layer</h4>
@@ -307,21 +306,19 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   <div className="w-8 h-1 bg-purple-400"></div>
                 </div>
                 
-                <VHostNvmeTooltip 
-                  vhostSocket={selectedVolumeInfo.vhost_socket} 
-                  vhostDevice={selectedVolumeInfo.vhost_device}
-                  vhostType={selectedVolumeInfo.vhost_type}
+                <VolumeAccessTooltip 
+                  targets={selectedVolumeInfo.nvmeof_targets} 
                   raidLevel={raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : undefined}
                 >
                   <div className="text-center cursor-help">
                     <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-indigo-300">
-                      <Cable className="w-8 h-8 text-indigo-600" />
+                      <Network className="w-8 h-8 text-indigo-600" />
                     </div>
-                    <p className="font-medium text-sm">VHost-NVMe</p>
-                    <p className="text-xs text-gray-500">Unix Socket</p>
+                    <p className="font-medium text-sm">NVMe-oF</p>
+                    <p className="text-xs text-gray-500">Network Fabric</p>
                     <Info className="w-3 h-3 text-gray-400 mx-auto mt-1" />
                   </div>
-                </VHostNvmeTooltip>
+                </VolumeAccessTooltip>
               </div>
             </div>
 
@@ -569,16 +566,13 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   
                   <div className={`border-2 rounded-lg p-4 ${getReplicaStatusColor(replica.status)}`}>
                     <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
+                        {getReplicaIcon(replica)}
                         {replica.is_local ? (
-                          <div className="flex items-center gap-1">
-                            {getReplicaIcon(replica)}
-                            <span className="font-medium text-sm">Local Replica</span>
-                          </div>
+                          <span className="font-medium text-sm">Local Replica</span>
                         ) : (
                           <NVMFTooltip target={replica.nvmf_target}>
                             <div className="flex items-center gap-1">
-                              {getReplicaIcon(replica)}
                               <span className="font-medium text-sm">Remote Replica</span>
                               <Info className="w-3 h-3 text-gray-400" />
                             </div>
@@ -692,10 +686,10 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
             </span>
           )}
           
-          {hasVHostNvme && (
+          {hasNvmeof && (
             <span className="px-4 py-2 rounded-full text-sm font-medium bg-indigo-100 text-indigo-800 flex items-center gap-1">
-              <Cable className="w-4 h-4" />
-              VHost-NVMe Enabled
+              <Network className="w-4 h-4" />
+              NVMe-oF Enabled
             </span>
           )}
           
@@ -745,43 +739,42 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   </div>
                 )}
               </div>
-              {hasVHostNvme && (
+              {hasNvmeof && (
                 <div className="text-xs text-blue-600 mt-2">
-                  VHost-NVMe access remains available during rebuild operations
+                  NVMe-oF access remains available during rebuild operations
                 </div>
               )}
             </div>
           </div>
         )}
         
-        {/* VHost-NVMe Technology Info */}
-        {hasVHostNvme && (
+        {/* NVMe-oF Technology Info */}
+        {hasNvmeof && (
           <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
             <h5 className="font-medium text-gray-800 mb-2 flex items-center gap-2">
               <Info className="w-5 h-5 text-blue-600" />
-              VHost-NVMe Technology
+              NVMe-oF Technology
             </h5>
             <div className="text-sm text-gray-600 text-left space-y-2">
               <p>
-                <strong>VHost-NVMe</strong> provides a high-performance interface between user applications and SPDK storage.
-                The {raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : 'volume'} is exposed as a virtual NVMe device through a Unix domain socket with native NVMe namespace support.
+                <strong>NVMe-oF (NVMe over Fabrics)</strong> provides a high-performance interface for accessing storage over a network. 
+                The {raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : 'volume'} is exposed as one or more NVMe-oF targets.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
                 <div>
                   <h6 className="font-medium text-gray-700 mb-1">Benefits:</h6>
                   <ul className="text-xs space-y-1 text-gray-600">
-                    <li>• Zero-copy data access</li>
-                    <li>• Native NVMe command support</li>
-                    <li>• Multiple namespace capability</li>
+                    <li>• High throughput and low latency network access</li>
+                    <li>• Efficiently utilizes RDMA or TCP/IP networks</li>
+                    <li>• Scales to a large number of clients</li>
                     <li>• Bypasses kernel for I/O operations</li>
-                    <li>• Ultra-low latency and high IOPS</li>
                     {raidStatus && <li>• Transparent RAID management</li>}
                   </ul>
                 </div>
                 <div>
                   <h6 className="font-medium text-gray-700 mb-1">Access Pattern:</h6>
                   <ul className="text-xs space-y-1 text-gray-600">
-                    <li>• Pod mounts volume via vhost-nvme device</li>
+                    <li>• Client connects to NVMe-oF target via NQN</li>
                     <li>• Native NVMe namespace presentation</li>
                     <li>• SPDK handles all replica management</li>
                     <li>• Transparent failover on replica failure</li>
@@ -791,52 +784,16 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 </div>
               </div>
               
-              {selectedVolumeInfo.nvme_namespaces && selectedVolumeInfo.nvme_namespaces.length > 0 && (
+              {selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0 && (
                 <div className="mt-3 p-2 bg-blue-50 rounded">
-                  <h6 className="font-medium text-gray-700 mb-1">NVMe Namespaces:</h6>
+                  <h6 className="font-medium text-gray-700 mb-1">NVMe-oF Targets:</h6>
                   <div className="text-xs space-y-1">
-                    {selectedVolumeInfo.nvme_namespaces.map((ns, idx) => (
+                    {selectedVolumeInfo.nvmeof_targets.map((target, idx) => (
                       <div key={idx} className="flex justify-between">
-                        <span>NSID {ns.nsid}:</span>
-                        <span>{Math.round(ns.size / 1024 / 1024 / 1024)}GB ({ns.bdev_name})</span>
+                        <span>{target.nqn}:</span>
+                        <span>{target.target_ip}:{target.target_port} ({target.transport})</span>
                       </div>
                     ))}
-                  </div>
-                </div>
-              )}
-              
-              {showTechnicalDetails && (
-                <div className="mt-3 p-2 bg-gray-100 rounded">
-                  <h6 className="font-medium text-gray-700 mb-1">Technical Details:</h6>
-                  <div className="text-xs space-y-1">
-                    {selectedVolumeInfo.vhost_socket && (
-                      <div>
-                        <span className="text-gray-600">Socket Path:</span>
-                        <div className="font-mono text-xs break-all text-gray-500 ml-2">
-                          {selectedVolumeInfo.vhost_socket}
-                        </div>
-                      </div>
-                    )}
-                    {selectedVolumeInfo.vhost_device && (
-                      <div>
-                        <span className="text-gray-600">Device Path:</span>
-                        <div className="font-mono text-xs break-all text-gray-500 ml-2">
-                          {selectedVolumeInfo.vhost_device}
-                        </div>
-                      </div>
-                    )}
-                    <div>
-                      <span className="text-gray-600">Controller Type:</span>
-                      <span className="font-medium text-indigo-700 ml-1 uppercase">
-                        {selectedVolumeInfo.vhost_type || 'NVMe'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">Access Method:</span>
-                      <span className="font-medium text-indigo-700 ml-1">
-                        {selectedVolumeInfo.access_method}
-                      </span>
-                    </div>
                   </div>
                 </div>
               )}

@@ -186,77 +186,6 @@ impl NodeService {
         Ok(())
     }
 
-    /// Creates an NVMe-oF target and exports the bdev
-    async fn create_nvmeof_export(&self, bdev_name: &str, nqn: &str, target_port: u16) -> Result<(), Status> {
-        let http_client = HttpClient::new();
-
-        // Create NVMe-oF subsystem
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_create_subsystem",
-                "params": {
-                    "nqn": nqn,
-                    "allow_any_host": true,
-                    "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos() as u64),
-                    "max_namespaces": 32
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            // Ignore if subsystem already exists
-            if !error_text.contains("already exists") {
-                return Err(Status::internal(format!("Failed to create NVMe-oF subsystem: {}", error_text)));
-            }
-        }
-
-        // Add namespace to subsystem
-        http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_ns",
-                "params": {
-                    "nqn": nqn,
-                    "namespace": {
-                        "nsid": 1,
-                        "bdev_name": bdev_name
-                    }
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to add namespace: {}", e)))?;
-
-        // Add listener
-        http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_listener",
-                "params": {
-                    "nqn": nqn,
-                    "listen_address": {
-                        "trtype": self.driver.nvmeof_transport.to_uppercase(),
-                        "traddr": "0.0.0.0",
-                        "trsvcid": target_port.to_string(),
-                        "adrfam": "ipv4"
-                    }
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to add listener: {}", e)))?;
-
-        println!("Created NVMe-oF export: {} -> {} on port {}", bdev_name, nqn, target_port);
-        Ok(())
-    }
-
     /// Updates the SpdkVolume CRD to mark pod as scheduled on this node
     async fn update_volume_scheduling_status(&self, volume_id: &str, pod_scheduled: bool) -> Result<(), Status> {
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
@@ -292,64 +221,39 @@ impl NodeService {
         Ok(())
     }
 
-    /// Connects to the appropriate target device (RAID1 or single lvol via NVMe-oF)
+
     async fn connect_to_target_device(&self, volume: &SpdkVolume) -> Result<String, Status> {
-        let target_port = volume.spec.nvmeof_target_port.unwrap_or(self.driver.nvmeof_target_port);
+        let ublk_id = self.driver.generate_ublk_id(&volume.spec.volume_id);
         
         let target_device = if volume.spec.num_replicas > 1 {
-            // Multi-replica: Create RAID1 bdev and expose via NVMe-oF
-            let raid_nqn = format!("nqn.2025-05.io.spdk:raid-{}", volume.spec.volume_id);
+            // Multi-replica: Create RAID1 bdev and expose via ublk
+            self.create_raid1_bdev_for_volume(volume).await?;
             let raid_bdev = &volume.spec.volume_id;
             
-            // Export RAID1 bdev via NVMe-oF
-            self.create_nvmeof_export(raid_bdev, &raid_nqn, target_port).await?;
-            
-            // Connect to it locally via NVMe-oF
-            let local_target_name = format!("local_raid_{}", volume.spec.volume_id);
-            let node_ip = self.driver.get_node_ip(&self.driver.node_id).await?;
-            
-            self.connect_nvmeof_target(
-                &local_target_name,
-                &raid_nqn,
-                &node_ip,
-                &target_port.to_string(),
-                &self.driver.nvmeof_transport,
-            ).await?;
-            
-            format!("/dev/nvme-{}n1", local_target_name.replace("_", "-"))
+            // Create ublk device for RAID bdev
+            self.driver.create_ublk_device(raid_bdev, ublk_id).await
+                .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
         } else {
-            // Single replica: Always expose via NVMe-oF for consistency
+            // Single replica: Expose lvol via ublk
             let replica = volume.spec.replicas.first()
                 .ok_or_else(|| Status::internal("No replicas found"))?;
             
             if replica.node == self.driver.node_id {
-                // Local replica: Export the specific lvol as NVMe-oF target
+                // Local replica: Direct ublk exposure
                 if let Some(lvol_uuid) = &replica.lvol_uuid {
                     let lvs_name = format!("lvs_{}", replica.disk_ref);
                     let lvol_bdev = format!("{}/{}", lvs_name, lvol_uuid);
-                    let local_nqn = format!("nqn.2025-05.io.spdk:volume-{}", volume.spec.volume_id);
                     
-                    // Export the lvol as NVMe-oF target
-                    self.create_nvmeof_export(&lvol_bdev, &local_nqn, target_port).await?;
-                    
-                    // Connect to it locally via NVMe-oF (loopback)
-                    let local_target_name = format!("local_{}", volume.spec.volume_id);
-                    
-                    self.connect_nvmeof_target(
-                        &local_target_name,
-                        &local_nqn,
-                        "127.0.0.1",  // Loopback for local connection
-                        &target_port.to_string(),
-                        &self.driver.nvmeof_transport,
-                    ).await?;
-                    
-                    format!("/dev/nvme-{}n1", local_target_name.replace("_", "-"))
+                    // Create ublk device for lvol
+                    self.driver.create_ublk_device(&lvol_bdev, ublk_id).await
+                        .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
                 } else {
                     return Err(Status::internal("Local replica missing lvol_uuid"));
                 }
             } else {
-                // Remote replica: Connect via NVMe-oF to remote target
-                let remote_target_name = format!("remote_{}", volume.spec.volume_id);
+                // Remote replica: Still need NVMe-oF for remote access
+                // First connect to remote NVMe-oF target as bdev
+                let remote_bdev_name = format!("nvmf_remote_{}", volume.spec.volume_id);
                 
                 if let (Some(nqn), Some(ip), Some(port)) = (
                     &replica.nqn,
@@ -357,14 +261,16 @@ impl NodeService {
                     &replica.port
                 ) {
                     self.connect_nvmeof_target(
-                        &remote_target_name,
+                        &remote_bdev_name,
                         nqn,
                         ip,
                         port,
                         &self.driver.nvmeof_transport,
                     ).await?;
                     
-                    format!("/dev/nvme-{}n1", remote_target_name.replace("_", "-"))
+                    // Then expose the NVMe-oF bdev via ublk
+                    self.driver.create_ublk_device(&remote_bdev_name, ublk_id).await
+                        .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
                 } else {
                     return Err(Status::internal("Remote replica missing connection details"));
                 }
@@ -376,6 +282,16 @@ impl NodeService {
         
         println!("Connected to target device: {} for volume {}", target_device, volume.spec.volume_id);
         Ok(target_device)
+    }
+    
+    /// Clean up ublk devices on unpublish
+    async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
+        let ublk_id = self.driver.generate_ublk_id(volume_id);
+        
+        self.driver.delete_ublk_device(ublk_id).await
+            .map_err(|e| Status::internal(format!("Failed to delete ublk device: {}", e)))?;
+            
+        Ok(())
     }
 
     /// Waits for a device to appear in the filesystem
@@ -526,6 +442,57 @@ impl NodeService {
 
         Ok(())
     }
+
+    /// Clean up all SPDK resources for a volume
+    async fn cleanup_spdk_resources(&self, volume: &SpdkVolume) -> Result<(), Status> {
+        if volume.spec.num_replicas > 1 {
+            // Multi-replica: Clean up RAID and remote connections
+            self.cleanup_raid1_bdev(volume).await?;
+        } else if volume.spec.num_replicas == 1 {
+            // Single replica: Clean up remote NVMe-oF connection if needed
+            if let Some(replica) = volume.spec.replicas.first() {
+                if replica.node != self.driver.node_id {
+                    // Remote replica: disconnect NVMe-oF
+                    let remote_bdev_name = format!("nvmf_remote_{}", volume.spec.volume_id);
+                    self.disconnect_nvmeof_bdev(&remote_bdev_name).await?;
+                }
+                // Local replica: no additional cleanup needed (lvol remains for future use)
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Disconnect from a remote NVMe-oF bdev
+    async fn disconnect_nvmeof_bdev(&self, bdev_name: &str) -> Result<(), Status> {
+        let http_client = HttpClient::new();
+        
+        println!("Disconnecting NVMe-oF bdev: {}", bdev_name);
+        
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&json!({
+                "method": "bdev_nvme_detach_controller",
+                "params": {
+                    "name": bdev_name
+                }
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if !resp.status().is_success() => {
+                let error_text = resp.text().await.unwrap_or_default();
+                if !error_text.contains("No such device") {
+                    eprintln!("Warning: Failed to detach NVMe-oF controller {}: {}", bdev_name, error_text);
+                }
+            }
+            Err(e) => eprintln!("Warning: Failed to detach NVMe-oF controller {}: {}", bdev_name, e),
+            _ => println!("Successfully disconnected NVMe-oF bdev: {}", bdev_name),
+        }
+        
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -557,7 +524,7 @@ impl Node for NodeService {
             self.create_raid1_bdev_for_volume(&volume).await?;
         }
 
-        // Connect to the target device (RAID1 or single replica)
+        // Connect to the target device using ublk (instead of NVMe-oF loopback)
         let device_path = self.connect_to_target_device(&volume).await?;
 
         // For filesystem volumes, format and mount
@@ -575,21 +542,13 @@ impl Node for NodeService {
                         self.mount_device(&device_path, &staging_target_path, &fs_type, &mount_flags).await?;
                     }
                     volume_capability::AccessType::Block(_) => {
-                        // For block volumes, just create a bind mount of the device
+                        // For block volumes, just create symlink to device
                         fs::create_dir_all(&staging_target_path).await
                             .map_err(|e| Status::internal(format!("Failed to create staging directory: {}", e)))?;
 
-                        // Create a bind mount
-                        let output = Command::new("mount")
-                            .args(["--bind", &device_path, &staging_target_path])
-                            .output()
-                            .await
-                            .map_err(|e| Status::internal(format!("Failed to create bind mount: {}", e)))?;
-
-                        if !output.status.success() {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            return Err(Status::internal(format!("Bind mount failed: {}", stderr)));
-                        }
+                        // Create symlink instead of bind mount for block devices
+                        fs::symlink(&device_path, &format!("{}/device", staging_target_path)).await
+                            .map_err(|e| Status::internal(format!("Failed to create device symlink: {}", e)))?;
                     }
                 }
             }
@@ -613,27 +572,31 @@ impl Node for NodeService {
 
         println!("Unstaging volume {} from {}", volume_id, staging_target_path);
 
-        // Unmount the staging path
+        // Step 1: Unmount the staging path
         self.unmount_device(&staging_target_path).await.ok();
 
-        // Get volume information
+        // Step 2: Get volume information for cleanup decisions
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
-        if let Ok(volume) = volumes_api.get(&volume_id).await {
-            // Clean up RAID1 bdev if it exists
-            if volume.spec.num_replicas > 1 {
-                self.cleanup_raid1_bdev(&volume).await.ok();
+        match volumes_api.get(&volume_id).await {
+            Ok(volume) => {
+                // Step 3: Clean up ublk device (replaces NVMe-oF loopback cleanup)
+                self.cleanup_ublk_device(&volume_id).await?;
+                
+                // Step 4: Clean up SPDK resources
+                self.cleanup_spdk_resources(&volume).await?;
+                
+                // Step 5: Update scheduling status
+                self.update_volume_scheduling_status(&volume_id, false).await?;
             }
-            
-            // Clean up NVMe-oF exports
-            self.cleanup_nvmeof_exports(&volume).await.ok();
+            Err(e) => {
+                println!("Volume {} not found during unstage, skipping cleanup: {}", volume_id, e);
+            }
         }
-
-        // Update scheduling status
-        self.update_volume_scheduling_status(&volume_id, false).await.ok();
 
         println!("Successfully unstaged volume {}", volume_id);
         Ok(Response::new(NodeUnstageVolumeResponse {}))
     }
+
 
     async fn node_publish_volume(
         &self,
@@ -721,7 +684,7 @@ impl Node for NodeService {
 
         println!("Unpublishing volume {} from {}", volume_id, target_path);
 
-        // Unmount the target path
+        // Just unmount the target path - that's all!
         self.unmount_device(&target_path).await.ok();
 
         // Remove the target directory if it's empty

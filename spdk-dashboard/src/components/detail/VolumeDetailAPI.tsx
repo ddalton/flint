@@ -13,7 +13,7 @@ interface VolumeDetailAPIProps {
 interface VolumeDetails {
   volume: any;
   raidDetails: any;
-  vhostDetails: any;
+  nvmeofDetails: any; // Changed from vhostDetails
   metrics: any;
 }
 
@@ -42,12 +42,9 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         replicas: 3,
         active_replicas: 3,
         local_nvme: true,
-        access_method: "vhost-nvme",
+        access_method: "nvmeof",
         rebuild_progress: null,
-        vhost_enabled: true,
-        vhost_socket: "/var/lib/spdk/vhost/vhost_" + volumeName.replace(/[^a-zA-Z0-9]/g, '_') + ".sock",
-        vhost_device: "/dev/nvme-vhost-" + volumeName.replace(/[^a-zA-Z0-9]/g, '_'),
-        vhost_type: "nvme",
+        nvmeof_enabled: true,
         replica_statuses: [
           {
             node: "worker-node-1",
@@ -61,7 +58,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
             status: "healthy",
             is_local: false,
             last_io_timestamp: new Date().toISOString(),
-            access_method: "remote-nvmf",
+            access_method: "remote-nvmeof",
             nvmf_target: {
               nqn: "nqn.2016-06.io.spdk:cnode2",
               target_ip: "192.168.1.102",
@@ -91,19 +88,19 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         ]
       };
 
-      const mockVHostData = {
+      const mockNvmeofData = { // Changed from mockVHostData
         volume_id: volumeId,
-        vhost_controllers: [
+        nvmeof_subsystems: [
           {
-            ctrlr: "vhost_" + volumeName.replace(/[^a-zA-Z0-9]/g, '_'),
-            socket: "/var/lib/spdk/vhost/vhost_" + volumeName.replace(/[^a-zA-Z0-9]/g, '_') + ".sock",
-            active: true,
-            controller_type: "nvme",
+            nqn: "nqn.2016-06.io.spdk:" + volumeName.replace(/[^a-zA-Z0-9]/g, '_'),
+            state: "active",
             node: "worker-node-1",
-            nvme_namespaces: [
+            listen_addresses: [
+              { transport: "TCP", traddr: "192.168.1.101", trsvcid: "4420" }
+            ],
+            namespaces: [
               {
                 nsid: 1,
-                size: 107374182400,
                 bdev_name: "raid-bdev-" + volumeName.replace(/[^a-zA-Z0-9]/g, '_')
               }
             ]
@@ -113,15 +110,15 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
       // Try to fetch from API endpoints, but fall back to mock data
       try {
-        const [volumeResponse, raidResponse, vhostResponse] = await Promise.allSettled([
+        const [volumeResponse, raidResponse, nvmeofResponse] = await Promise.allSettled([
           fetch(`/api/volumes/${volumeId}`),
           fetch(`/api/volumes/${volumeId}/raid`),
-          fetch(`/api/volumes/${volumeId}/vhost`)
+          fetch(`/api/volumes/${volumeId}/nvmeof`) // Changed from /vhost
         ]);
 
         let volumeData = mockVolumeData;
         let raidData = mockRaidData;
-        let vhostData = mockVHostData;
+        let nvmeofData = mockNvmeofData;
 
         // Only use API data if the response is successful and returns JSON
         if (volumeResponse.status === 'fulfilled' && volumeResponse.value.ok) {
@@ -146,21 +143,21 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           }
         }
 
-        if (vhostResponse.status === 'fulfilled' && vhostResponse.value.ok) {
+        if (nvmeofResponse.status === 'fulfilled' && nvmeofResponse.value.ok) {
           try {
-            const text = await vhostResponse.value.text();
+            const text = await nvmeofResponse.value.text();
             if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-              vhostData = JSON.parse(text);
+              nvmeofData = JSON.parse(text);
             }
           } catch (parseError) {
-            console.warn('Failed to parse VHost response, using mock data');
+            console.warn('Failed to parse NVMe-oF response, using mock data');
           }
         }
 
         setDetails({
           volume: volumeData,
           raidDetails: raidData,
-          vhostDetails: vhostData,
+          nvmeofDetails: nvmeofData,
           metrics: null
         });
 
@@ -170,7 +167,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         setDetails({
           volume: mockVolumeData,
           raidDetails: mockRaidData,
-          vhostDetails: mockVHostData,
+          nvmeofDetails: mockNvmeofData,
           metrics: null
         });
       }
@@ -235,7 +232,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
   const tabs = [
     { id: 'overview', name: 'Overview', icon: Database },
     { id: 'raid', name: 'RAID Status', icon: Shield },
-    { id: 'vhost', name: 'VHost-NVMe', icon: Cable },
+    { id: 'nvmeof', name: 'NVMe-oF', icon: Network }, // Changed from VHost-NVMe
     { id: 'replicas', name: 'Replicas', icon: Network }
   ];
 
@@ -304,13 +301,13 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
           <div className="bg-white border rounded-lg p-4">
             <div className="flex items-center">
-              <Cable className="w-8 h-8 text-indigo-600 mr-3" />
+              <Network className="w-8 h-8 text-indigo-600 mr-3" />
               <div>
-                <p className="text-sm font-medium">VHost-NVMe</p>
+                <p className="text-sm font-medium">NVMe-oF</p>
                 <p className={`text-lg font-bold ${
-                  volume.vhost_enabled ? 'text-green-600' : 'text-gray-400'
+                  volume.nvmeof_enabled ? 'text-green-600' : 'text-gray-400'
                 }`}>
-                  {volume.vhost_enabled ? 'Enabled' : 'Disabled'}
+                  {volume.nvmeof_enabled ? 'Enabled' : 'Disabled'}
                 </p>
               </div>
             </div>
@@ -394,53 +391,49 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
     );
   };
 
-  const renderVHostTab = () => {
-    const vhostData = details?.vhostDetails;
-    if (!vhostData?.vhost_controllers?.length) {
+  const renderNvmeofTab = () => { // Renamed from renderVHostTab
+    const nvmeofData = details?.nvmeofDetails;
+    if (!nvmeofData?.nvmeof_subsystems?.length) {
       return (
         <div className="text-center py-8">
-          <Cable className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <p className="text-gray-600">No VHost-NVMe controllers found</p>
+          <Network className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <p className="text-gray-600">No NVMe-oF subsystems found</p>
         </div>
       );
     }
 
     return (
       <div className="space-y-6">
-        {vhostData.vhost_controllers.map((controller: any, index: number) => (
+        {nvmeofData.nvmeof_subsystems.map((subsystem: any, index: number) => (
           <div key={index} className="bg-gray-50 rounded-lg p-6">
             <div className="flex items-center justify-between mb-4">
               <h4 className="text-lg font-semibold flex items-center gap-2">
-                <Cable className="w-5 h-5 text-indigo-600" />
-                VHost Controller: {controller.ctrlr}
+                <Network className="w-5 h-5 text-indigo-600" />
+                Subsystem: {subsystem.nqn}
               </h4>
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                controller.active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                subsystem.state === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
               }`}>
-                {controller.active ? 'Active' : 'Inactive'}
+                {subsystem.state ? subsystem.state.toUpperCase() : 'UNKNOWN'}
               </span>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div>
-                <p className="text-sm text-gray-600">Controller Type</p>
-                <p className="font-medium">{controller.controller_type?.toUpperCase() || 'NVMe'}</p>
-              </div>
-              <div>
-                <p className="text-sm text-gray-600">Socket Path</p>
-                <p className="font-mono text-sm break-all">{controller.socket}</p>
-              </div>
-              <div>
                 <p className="text-sm text-gray-600">Node</p>
-                <p className="font-medium">{controller.node}</p>
+                <p className="font-medium">{subsystem.node}</p>
               </div>
               <div>
-                <p className="text-sm text-gray-600">Status</p>
-                <p className={`font-medium ${
-                  controller.active ? 'text-green-600' : 'text-gray-500'
-                }`}>
-                  {controller.active ? 'Active' : 'Inactive'}
-                </p>
+                <p className="text-sm text-gray-600">Subtype</p>
+                <p className="font-medium">{subsystem.subtype?.toUpperCase()}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Allow Any Host</p>
+                <p className="font-medium">{subsystem.allow_any_host ? 'Yes' : 'No'}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Namespaces</p>
+                <p className="font-medium">{subsystem.namespaces?.length || 0}</p>
               </div>
             </div>
           </div>
@@ -562,7 +555,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         <div className="flex-1 overflow-auto p-6">
           {activeTab === 'overview' && renderOverviewTab()}
           {activeTab === 'raid' && renderRaidTab()}
-          {activeTab === 'vhost' && renderVHostTab()}
+          {activeTab === 'nvmeof' && renderNvmeofTab()}
           {activeTab === 'replicas' && renderReplicasTab()}
         </div>
       </div>

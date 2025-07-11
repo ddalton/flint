@@ -49,7 +49,7 @@ data:
     RUN git clone https://github.com/spdk/spdk --recurse-submodules /opt/spdk && \
         cd /opt/spdk && \
         git checkout v24.01 && \
-        ./configure --with-vhost --with-virtio --enable-debug && \
+        ./configure --with-ublk && \
         make -j$(nproc)
 
     # Set up SPDK environment

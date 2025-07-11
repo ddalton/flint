@@ -1,24 +1,23 @@
 import React, { useState } from 'react';
+import type { NvmeofTargetInfo } from '../../hooks/useDashboardData';
 
-interface VHostNvmeTooltipProps {
-  vhostSocket?: string;
-  vhostDevice?: string;
-  vhostType?: string;
+interface VolumeAccessTooltipProps {
+  targets: NvmeofTargetInfo[];
   raidLevel?: string;
   children: React.ReactNode;
 }
 
-export const VHostNvmeTooltip: React.FC<VHostNvmeTooltipProps> = ({ 
-  vhostSocket, 
-  vhostDevice, 
-  vhostType = 'nvme',
+export const VolumeAccessTooltip: React.FC<VolumeAccessTooltipProps> = ({ 
+  targets,
   raidLevel,
   children 
 }) => {
   const [showTooltip, setShowTooltip] = useState(false);
   
-  if (!vhostSocket) return <>{children}</>;
+  if (!targets || targets.length === 0) return <>{children}</>;
   
+  const primaryTarget = targets[0];
+
   return (
     <div className="relative inline-block">
       <div
@@ -31,16 +30,14 @@ export const VHostNvmeTooltip: React.FC<VHostNvmeTooltipProps> = ({
       {showTooltip && (
         <div className="absolute z-50 bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg shadow-lg whitespace-nowrap max-w-md">
           <div className="space-y-1 text-left">
-            <div><strong>VHost Type:</strong> {vhostType.toUpperCase()}</div>
-            <div><strong>Socket:</strong> {vhostSocket}</div>
-            {vhostDevice && (
-              <div><strong>Device Path:</strong> {vhostDevice}</div>
-            )}
+            <div><strong>Access Method:</strong> NVMe-oF ({primaryTarget.transport})</div>
+            <div><strong>NQN:</strong> {primaryTarget.nqn}</div>
+            <div><strong>Target:</strong> {primaryTarget.target_ip}:{primaryTarget.target_port}</div>
             {raidLevel && (
               <div><strong>RAID Level:</strong> {raidLevel}</div>
             )}
             <div className="text-gray-300 mt-2">
-              VHost-NVMe exposes the {raidLevel || 'bdev'} volume as a single NVMe namespace (NSID 1)
+              Volume exposed as an NVMe-oF target for network access.
             </div>
           </div>
           <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>

@@ -1,5 +1,19 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 
+// --- Start of new/updated interfaces ---
+
+// Represents NVMe-oF target information from the backend
+export interface NvmeofTargetInfo {
+  nqn: string;
+  target_ip: string;
+  target_port: number;
+  transport: string;
+  node: string;
+  bdev_name: string;
+  active: boolean;
+  connection_count: number;
+}
+
 // Enhanced types to match the backend API exactly
 export interface Volume {
   id: string;
@@ -13,15 +27,15 @@ export interface Volume {
   rebuild_progress: number | null;
   nodes: string[];
   replica_statuses: ReplicaStatus[];
-  // VHost-NVMe related fields from backend
-  vhost_socket?: string;
-  vhost_device?: string;
-  vhost_enabled?: boolean;
-  vhost_type?: string; // "nvme" for vhost-nvme, "blk" for vhost-blk
-  nvme_namespaces?: VhostNvmeNamespace[];
+  // NVMe-oF fields instead of vhost
+  nvmeof_targets: NvmeofTargetInfo[];
+  nvmeof_enabled: boolean;
   // Enhanced RAID status from backend
   raid_status?: RaidStatus;
 }
+
+// --- End of new/updated interfaces ---
+
 
 export interface RaidStatus {
   raid_level: number;
@@ -52,16 +66,10 @@ export interface RebuildInfo {
   source_slot: number;
   blocks_remaining: number;
   blocks_total: number;
+
   progress_percentage: number;
   estimated_time_remaining?: string;
   start_time?: string;
-}
-
-export interface VhostNvmeNamespace {
-  nsid: number;
-  size: number;
-  uuid: string;
-  bdev_name: string;
 }
 
 export interface ReplicaStatus {
@@ -150,7 +158,7 @@ export type VolumeFilter =
 export type DiskFilter = string | null;
 export type VolumeReplicaFilter = string | null;
 
-// Enhanced mock data with RAID status and VHost-NVMe details
+// Enhanced mock data with RAID status and NVMe-oF details
 const mockData: DashboardData = {
   volumes: [
     {
@@ -161,23 +169,22 @@ const mockData: DashboardData = {
       replicas: 1,
       active_replicas: 1,
       local_nvme: true,
-      access_method: "vhost-nvme", // Set to vhost-nvme
+      access_method: "nvmeof", // Set to nvmeof
       rebuild_progress: null,
       nodes: ["worker-node-1"],
-      // Added VHost properties to ensure the access layer is displayed
-      vhost_socket: "/var/lib/spdk/vhost/vhost_single-replica-volume.sock",
-      vhost_device: "/dev/nvme-vhost-single-replica-volume",
-      vhost_enabled: true,
-      vhost_type: "nvme",
-      nvme_namespaces: [
+      nvmeof_enabled: true,
+      nvmeof_targets: [
         {
-          nsid: 1,
-          size: 21474836480,
-          uuid: "77777777-7777-7777-7777-777777777777",
-          bdev_name: "pvc-single-replica-volume"
+          nqn: "nqn.2016-06.io.spdk:single-replica-volume",
+          target_ip: "192.168.1.101",
+          target_port: 4420,
+          transport: "TCP",
+          node: "worker-node-1",
+          bdev_name: "pvc-single-replica-volume",
+          active: true,
+          connection_count: 1
         }
       ],
-      // No raid_status for this volume
       replica_statuses: [
         {
           node: "worker-node-1",
@@ -204,19 +211,20 @@ const mockData: DashboardData = {
       replicas: 3,
       active_replicas: 3,
       local_nvme: true,
-      access_method: "vhost-nvme",
+      access_method: "nvmeof",
       rebuild_progress: null,
       nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      vhost_socket: "/var/lib/spdk/vhost/vhost_postgres-data-pvc.sock",
-      vhost_device: "/dev/nvme-vhost-postgres-data-pvc",
-      vhost_enabled: true,
-      vhost_type: "nvme",
-      nvme_namespaces: [
+      nvmeof_enabled: true,
+      nvmeof_targets: [
         {
-          nsid: 1,
-          size: 107374182400,
-          uuid: "12345678-1234-1234-1234-123456789abc",
-          bdev_name: "pvc-12345678-1234-1234-1234-123456789abc"
+          nqn: "nqn.2016-06.io.spdk:postgres-data-pvc",
+          target_ip: "192.168.1.101",
+          target_port: 4420,
+          transport: "TCP",
+          node: "worker-node-1",
+          bdev_name: "pvc-12345678-1234-1234-1234-123456789abc",
+          active: true,
+          connection_count: 3
         }
       ],
       raid_status: {
@@ -329,19 +337,20 @@ const mockData: DashboardData = {
       replicas: 3,
       active_replicas: 2,
       local_nvme: true,
-      access_method: "vhost-nvme",
+      access_method: "nvmeof",
       rebuild_progress: 75.5,
       nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      vhost_socket: "/var/lib/spdk/vhost/vhost_redis-cache-pvc.sock",
-      vhost_device: "/dev/nvme-vhost-redis-cache-pvc",
-      vhost_enabled: true,
-      vhost_type: "nvme",
-      nvme_namespaces: [
-        {
-          nsid: 1,
-          size: 53687091200,
-          uuid: "87654321-4321-4321-4321-cba987654321",
-          bdev_name: "pvc-87654321-4321-4321-4321-cba987654321"
+      nvmeof_enabled: true,
+      nvmeof_targets: [
+         {
+          nqn: "nqn.2016-06.io.spdk:redis-cache-pvc",
+          target_ip: "192.168.1.101",
+          target_port: 4420,
+          transport: "TCP",
+          node: "worker-node-1",
+          bdev_name: "pvc-87654321-4321-4321-4321-cba987654321",
+          active: true,
+          connection_count: 1
         }
       ],
       raid_status: {
@@ -665,7 +674,7 @@ const transformBackendData = (backendData: any): DashboardData => {
       // Ensure all fields are properly mapped
       raid_level: vol.raid_status?.raid_level ? `RAID-${vol.raid_status.raid_level}` : undefined,
       primary_replica_uuid: vol.primary_lvol_uuid,
-      nvme_namespaces: vol.nvme_namespaces || []
+      nvmeof_targets: vol.nvmeof_targets || [],
     })) || [],
     disks: backendData.disks?.map((disk: any) => ({
       ...disk,
@@ -754,39 +763,30 @@ export const filterVolumesByType = (volumes: Volume[], filter: VolumeFilter): Vo
   }
 };
 
-export const getVHostNvmeStatus = (volume: Volume): {
+export const getNvmeofStatus = (volume: Volume): {
   enabled: boolean;
-  socket?: string;
-  device?: string;
-  method: string;
-  type: string;
-  namespaces?: VhostNvmeNamespace[];
+  targets: NvmeofTargetInfo[];
 } => {
   const enabled = Boolean(
-    volume.vhost_enabled || 
-    volume.vhost_socket || 
-    volume.access_method === 'vhost-nvme' ||
-    volume.vhost_type === 'nvme'
+    volume.nvmeof_enabled ||
+    (volume.nvmeof_targets && volume.nvmeof_targets.length > 0) ||
+    volume.access_method === 'nvmeof'
   );
   
   return {
     enabled,
-    socket: volume.vhost_socket,
-    device: volume.vhost_device,
-    method: volume.access_method || 'unknown',
-    type: volume.vhost_type || 'nvme',
-    namespaces: volume.nvme_namespaces
+    targets: volume.nvmeof_targets || []
   };
 };
 
 export const getAccessMethodDisplayName = (accessMethod: string): string => {
   switch (accessMethod) {
-    case 'vhost-nvme':
-      return 'VHost-NVMe';
-    case 'vhost':
-      return 'VHost-NVMe'; // Default vhost to NVMe
-    case 'nvmf':
+    case 'nvmeof':
       return 'NVMe-oF';
+    case 'remote-nvmeof':
+      return 'Remote NVMe-oF';
+    case 'local-nvmeof':
+      return 'Local NVMe-oF';
     case 'local-nvme':
       return 'Local NVMe';
     case 'iscsi':
@@ -798,10 +798,8 @@ export const getAccessMethodDisplayName = (accessMethod: string): string => {
 
 export const hasHighPerformanceAccess = (volume: Volume): boolean => {
   return volume.local_nvme && (
-    volume.access_method === 'vhost-nvme' || 
-    volume.vhost_enabled ||
-    volume.vhost_socket ||
-    volume.vhost_type === 'nvme'
+    volume.access_method === 'nvmeof' || 
+    volume.nvmeof_enabled
   );
 };
 

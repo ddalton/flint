@@ -10,12 +10,11 @@ interface NodeMetricsAPIProps {
 }
 
 interface NodeMetrics {
-  bdevs: any[];
-  lvol_stores: any[];
-  vhost_controllers: any[];
+  bdevs: any;
+  lvol_stores: any;
+  nvmf_subsystems: any; // Changed from vhost_controllers
   raid_bdevs: any[];
   iostat: any;
-  nvmf_subsystems: any[];
 }
 
 export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClose }) => {
@@ -32,7 +31,7 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
       setError(null);
 
       // Provide mock data for development/demo when API is not available
-      const mockMetrics = {
+      const mockMetrics: NodeMetrics = {
         bdevs: {
           result: [
             {
@@ -63,41 +62,7 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
             }
           ]
         },
-        vhost_controllers: {
-          result: [
-            {
-              ctrlr: "vhost_controller_1",
-              socket: "/var/lib/spdk/vhost/vhost_controller_1.sock",
-              active: true,
-              cpumask: "0x1",
-              backend_specific: {
-                type: "nvme",
-                namespaces: [
-                  {
-                    nsid: 1,
-                    bdev_name: "lvol_1",
-                    size: 107374182400
-                  }
-                ]
-              }
-            }
-          ]
-        },
-        raid_bdevs: [],
-        iostat: {
-          result: [
-            {
-              name: "nvme0n1",
-              read_ios: 125000,
-              write_ios: 95000,
-              read_latency_ticks: 120,
-              write_latency_ticks: 180,
-              bytes_read: 5368709120,
-              bytes_written: 3221225472
-            }
-          ]
-        },
-        nvmf_subsystems: {
+        nvmf_subsystems: { // Changed from vhost_controllers
           result: [
             {
               nqn: "nqn.2016-06.io.spdk:" + nodeName.replace(/[^a-zA-Z0-9]/g, '_'),
@@ -118,6 +83,20 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
                   trsvcid: "4420"
                 }
               ]
+            }
+          ]
+        },
+        raid_bdevs: [],
+        iostat: {
+          result: [
+            {
+              name: "nvme0n1",
+              read_ios: 125000,
+              write_ios: 95000,
+              read_latency_ticks: 120,
+              write_latency_ticks: 180,
+              bytes_read: 5368709120,
+              bytes_written: 3221225472
             }
           ]
         }
@@ -238,9 +217,8 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
   const tabs = [
     { id: 'overview', name: 'Overview', icon: Server },
     { id: 'storage', name: 'Storage Devices', icon: HardDrive },
-    { id: 'vhost', name: 'VHost Controllers', icon: Cable },
+    { id: 'nvmf', name: 'NVMe-oF Subsystems', icon: Network }, // Changed from VHost
     { id: 'raid', name: 'RAID Status', icon: Shield },
-    { id: 'nvmf', name: 'NVMe-oF', icon: Network },
     { id: 'performance', name: 'Performance', icon: Activity }
   ];
 
@@ -249,9 +227,8 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
 
     const totalBdevs = metrics.bdevs?.result?.length || 0;
     const lvstoreCount = metrics.lvol_stores?.result?.length || 0;
-    const vhostCount = metrics.vhost_controllers?.result?.length || 0;
-    const raidCount = metrics.raid_bdevs?.length || 0;
     const nvmfCount = metrics.nvmf_subsystems?.result?.length || 0;
+    const raidCount = metrics.raid_bdevs?.length || 0;
 
     return (
       <div className="space-y-6">
@@ -260,7 +237,7 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
             <Server className="w-5 h-5 text-blue-600" />
             Node Summary: {nodeName}
           </h4>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-white rounded-lg p-4 text-center">
               <HardDrive className="w-8 h-8 text-gray-600 mx-auto mb-2" />
               <p className="text-2xl font-bold text-gray-900">{totalBdevs}</p>
@@ -272,19 +249,14 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
               <p className="text-sm text-gray-600">LVol Stores</p>
             </div>
             <div className="bg-white rounded-lg p-4 text-center">
-              <Cable className="w-8 h-8 text-indigo-600 mx-auto mb-2" />
-              <p className="text-2xl font-bold text-indigo-900">{vhostCount}</p>
-              <p className="text-sm text-gray-600">VHost Controllers</p>
+              <Network className="w-8 h-8 text-purple-600 mx-auto mb-2" />
+              <p className="text-2xl font-bold text-purple-900">{nvmfCount}</p>
+              <p className="text-sm text-gray-600">NVMe-oF Subsystems</p>
             </div>
             <div className="bg-white rounded-lg p-4 text-center">
               <Shield className="w-8 h-8 text-green-600 mx-auto mb-2" />
               <p className="text-2xl font-bold text-green-900">{raidCount}</p>
               <p className="text-sm text-gray-600">RAID Devices</p>
-            </div>
-            <div className="bg-white rounded-lg p-4 text-center">
-              <Network className="w-8 h-8 text-purple-600 mx-auto mb-2" />
-              <p className="text-2xl font-bold text-purple-900">{nvmfCount}</p>
-              <p className="text-sm text-gray-600">NVMe-oF Subsystems</p>
             </div>
           </div>
         </div>
@@ -399,12 +371,12 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
     );
   };
 
-  const renderVHostTab = () => {
-    if (!metrics?.vhost_controllers?.result?.length) {
+  const renderNvmfTab = () => { // Renamed from renderVHostTab
+    if (!metrics?.nvmf_subsystems?.result?.length) {
       return (
         <div className="text-center py-8">
-          <Cable className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <p className="text-gray-600">No VHost controllers found on this node</p>
+          <Network className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <p className="text-gray-600">No NVMe-oF subsystems found on this node</p>
         </div>
       );
     }
@@ -414,63 +386,81 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-2">
             <Info className="w-5 h-5 text-blue-600" />
-            <h4 className="font-medium text-blue-800">VHost Controllers</h4>
+            <h4 className="font-medium text-blue-800">NVMe-oF Subsystems</h4>
           </div>
           <p className="text-sm text-blue-700">
-            VHost controllers expose SPDK storage to virtual machines and containers through high-performance interfaces.
+            NVMe-oF subsystems expose SPDK block devices over a network fabric (like TCP or RDMA) for remote access.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {metrics.vhost_controllers.result.map((controller: any, index: number) => (
-            <div key={index} className="bg-white rounded-lg border p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h4 className="text-lg font-semibold flex items-center gap-2">
-                  <Cable className="w-5 h-5 text-indigo-600" />
-                  {controller.ctrlr}
-                </h4>
-                <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                  controller.active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                }`}>
-                  {controller.active ? 'Active' : 'Inactive'}
-                </span>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Socket:</span>
-                  <span className="font-mono text-sm">{controller.socket}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Backend Type:</span>
-                  <span className="font-medium">{controller.backend_specific?.type || 'Unknown'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">CPUMASK:</span>
-                  <span className="font-mono text-sm">{controller.cpumask || 'N/A'}</span>
-                </div>
-              </div>
-
-              {controller.backend_specific?.namespaces && (
-                <div className="mt-4 p-3 bg-gray-50 rounded">
-                  <h5 className="font-medium text-gray-800 mb-2">NVMe Namespaces</h5>
-                  <div className="space-y-1 text-sm">
-                    {controller.backend_specific.namespaces.map((ns: any, nsIndex: number) => (
-                      <div key={nsIndex} className="flex justify-between">
-                        <span>NSID {ns.nsid}:</span>
-                        <span>{ns.bdev_name} ({Math.round(ns.size / (1024 * 1024 * 1024))}GB)</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+        {metrics.nvmf_subsystems.result.map((subsystem: any, index: number) => (
+          <div key={index} className="bg-white rounded-lg border p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-lg font-semibold flex items-center gap-2">
+                <Network className="w-5 h-5 text-purple-600" />
+                {subsystem.nqn}
+              </h4>
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                subsystem.state === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+              }`}>
+                {subsystem.state || 'Unknown'}
+              </span>
             </div>
-          ))}
-        </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div>
+                <p className="text-sm text-gray-600">Subsystem Type</p>
+                <p className="font-medium">{subsystem.subtype}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Allow Any Host</p>
+                <p className="font-medium">{subsystem.allow_any_host ? 'Yes' : 'No'}</p>
+              </div>
+              <div>
+                <p className="text-sm text-gray-600">Namespaces</p>
+                <p className="font-medium">{subsystem.namespaces?.length || 0}</p>
+              </div>
+            </div>
+
+            {subsystem.listen_addresses && (
+              <div className="mb-4">
+                <h5 className="font-medium text-gray-800 mb-2">Listen Addresses</h5>
+                <div className="space-y-1">
+                  {subsystem.listen_addresses.map((addr: any, addrIndex: number) => (
+                    <div key={addrIndex} className="text-sm bg-gray-50 rounded p-2">
+                      {addr.transport} - {addr.traddr}:{addr.trsvcid}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {subsystem.namespaces && (
+              <div>
+                <h5 className="font-medium text-gray-800 mb-2">Namespaces</h5>
+                <div className="space-y-2">
+                  {subsystem.namespaces.map((ns: any, nsIndex: number) => (
+                    <div key={nsIndex} className="text-sm border rounded p-2">
+                      <div className="flex justify-between">
+                        <span>NSID {ns.nsid}:</span>
+                        <span>{ns.bdev_name}</span>
+                      </div>
+                      {ns.uuid && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          UUID: {ns.uuid}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     );
   };
-
+  
   const renderRaidTab = () => {
     if (!metrics?.raid_bdevs?.length) {
       return (
@@ -573,86 +563,6 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
                         <div>Name: {member.name}</div>
                         <div>Node: {member.node}</div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    );
-  };
-
-  const renderNvmfTab = () => {
-    if (!metrics?.nvmf_subsystems?.result?.length) {
-      return (
-        <div className="text-center py-8">
-          <Network className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <p className="text-gray-600">No NVMe-oF subsystems found on this node</p>
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-6">
-        {metrics.nvmf_subsystems.result.map((subsystem: any, index: number) => (
-          <div key={index} className="bg-white rounded-lg border p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h4 className="text-lg font-semibold flex items-center gap-2">
-                <Network className="w-5 h-5 text-purple-600" />
-                {subsystem.nqn}
-              </h4>
-              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                subsystem.state === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-              }`}>
-                {subsystem.state || 'Unknown'}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <div>
-                <p className="text-sm text-gray-600">Subsystem Type</p>
-                <p className="font-medium">{subsystem.subtype}</p>
-              </div>
-              <div>
-                <p className="text-sm text-gray-600">Allow Any Host</p>
-                <p className="font-medium">{subsystem.allow_any_host ? 'Yes' : 'No'}</p>
-              </div>
-              <div>
-                <p className="text-sm text-gray-600">Namespaces</p>
-                <p className="font-medium">{subsystem.namespaces?.length || 0}</p>
-              </div>
-            </div>
-
-            {subsystem.listen_addresses && (
-              <div className="mb-4">
-                <h5 className="font-medium text-gray-800 mb-2">Listen Addresses</h5>
-                <div className="space-y-1">
-                  {subsystem.listen_addresses.map((addr: any, addrIndex: number) => (
-                    <div key={addrIndex} className="text-sm bg-gray-50 rounded p-2">
-                      {addr.transport} - {addr.traddr}:{addr.trsvcid}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {subsystem.namespaces && (
-              <div>
-                <h5 className="font-medium text-gray-800 mb-2">Namespaces</h5>
-                <div className="space-y-2">
-                  {subsystem.namespaces.map((ns: any, nsIndex: number) => (
-                    <div key={nsIndex} className="text-sm border rounded p-2">
-                      <div className="flex justify-between">
-                        <span>NSID {ns.nsid}:</span>
-                        <span>{ns.bdev_name}</span>
-                      </div>
-                      {ns.uuid && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          UUID: {ns.uuid}
-                        </div>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -779,9 +689,8 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
         <div className="flex-1 overflow-auto p-6">
           {activeTab === 'overview' && renderOverviewTab()}
           {activeTab === 'storage' && renderStorageTab()}
-          {activeTab === 'vhost' && renderVHostTab()}
-          {activeTab === 'raid' && renderRaidTab()}
           {activeTab === 'nvmf' && renderNvmfTab()}
+          {activeTab === 'raid' && renderRaidTab()}
           {activeTab === 'performance' && renderPerformanceTab()}
         </div>
       </div>
