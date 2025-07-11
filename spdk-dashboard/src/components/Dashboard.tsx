@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Filter } from 'lucide-react';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
@@ -201,6 +202,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return (
           <VolumesTable 
             volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
+            disks={data.disks}
             activeFilter={volumeFilter}
             diskFilter={diskFilter}
             onClearFilter={handleClearFilter}
@@ -219,6 +221,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             volumeReplicaFilter={volumeReplicaFilter}
             onDiskClick={handleDiskClick}
             onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
+            onDiskVolumeFilter={handleDiskClick}
           />
         );
 
@@ -288,22 +291,55 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         )}
 
-        <StatCards 
-          stats={stats} 
-          activeFilter={volumeFilter}
-          onFilterClick={handleFilterClick}
-        />
-
-        <div className="bg-white rounded-lg shadow mb-6">
-          <TabNavigation 
-            activeTab={activeTab} 
-            onTabChange={handleTabChange} 
+        {/* Filter Cards Section - Enhanced with Gradient */}
+        <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 rounded-lg p-6 mb-8 border border-indigo-200 shadow-md">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white rounded-lg shadow-sm">
+                <Filter className="w-5 h-5 text-indigo-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Quick Filters</h3>
+                <p className="text-sm text-gray-600">Click any card to filter volumes</p>
+              </div>
+              {volumeFilter !== 'all' && (
+                <span className="px-3 py-1 text-sm bg-indigo-100 text-indigo-800 rounded-full font-medium ml-4">
+                  Active: {getFilterDisplayInfo(volumeFilter).name}
+                </span>
+              )}
+            </div>
+            {volumeFilter !== 'all' && (
+              <button
+                onClick={() => setVolumeFilter('all')}
+                className="px-4 py-2 bg-white text-indigo-600 rounded-lg shadow-sm hover:shadow-md transition-shadow font-medium text-sm"
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+          
+          <StatCards 
+            stats={stats} 
+            activeFilter={volumeFilter}
+            onFilterClick={handleFilterClick}
           />
+        </div>
+
+        {/* Main Content Panel */}
+        <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+          {/* Tab Navigation with Background */}
+          <div className="bg-gray-50 border-b border-gray-200">
+            <TabNavigation 
+              activeTab={activeTab} 
+              onTabChange={handleTabChange} 
+            />
+          </div>
           
           <div className="p-6">
             {renderTabContent()}
           </div>
         </div>
+
       </div>
     </div>
   );

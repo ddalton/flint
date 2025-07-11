@@ -33,7 +33,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   volumeFilter, 
   volumeReplicaFilter,
   onDiskClick,
-  onClearVolumeReplicaFilter 
+  onClearVolumeReplicaFilter,
+  onDiskVolumeFilter
 }) => {
   // Disk-specific filters
   const [searchTerm, setSearchTerm] = useState('');

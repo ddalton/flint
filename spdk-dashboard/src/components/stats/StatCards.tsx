@@ -80,7 +80,7 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
       {cards.map((card) => {
         const isActive = activeFilter === card.id;
         const Icon = card.icon;

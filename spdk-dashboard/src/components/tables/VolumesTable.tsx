@@ -1,10 +1,11 @@
 import React, { useState, useMemo } from 'react';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
-import type { Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
+import type { Disk, Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
 
 interface VolumesTableProps {
   volumes: Volume[];
+  disks?: Disk[];
   activeFilter?: VolumeFilter;
   diskFilter?: DiskFilter;
   onClearFilter?: () => void;
@@ -13,6 +14,7 @@ interface VolumesTableProps {
 }
 
 export const VolumesTable: React.FC<VolumesTableProps> = ({ 
+  disks,
   volumes, 
   activeFilter, 
   diskFilter,
@@ -61,21 +63,20 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
     // Apply disk filter if present
     if (diskFilter) {
-      result = result.filter(volume => {
-        // Check if any replica of this volume is on the specified disk
-        // This would require matching volume IDs with disk's provisioned_volumes
-        // For now, we'll use a simpler approach based on volume naming
-        return volume.replica_statuses.some(replica => {
-          // We need to find if this volume exists on the specified disk
-          // This is a simplified check - in reality, we'd need to cross-reference
-          // the volume ID with the disk's provisioned_volumes
-          return true; // Placeholder - will be refined based on actual data structure
+      // Find the disk object
+      const selectedDisk = disks.find(d => d.id === diskFilter);
+      if (selectedDisk) {
+        result = result.filter(volume => {
+          // Check if this volume is in the disk's provisioned_volumes
+          return selectedDisk.provisioned_volumes.some(pv => 
+            pv.volume_id === volume.id
+          );
         });
-      });
+      }
     }
 
     return result;
-  }, [volumes, activeFilter, diskFilter]);
+  }, [volumes, activeFilter, diskFilter, disks]);
 
   // Calculate pagination
   const totalPages = Math.ceil(filteredVolumes.length / pageSize);
