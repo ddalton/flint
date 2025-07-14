@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Database, Activity, Settings, Cable, Shield, Network, 
   RefreshCw, AlertTriangle, CheckCircle, Clock, Info, X
 } from 'lucide-react';
+import type { Volume } from '../../hooks/useDashboardData';
 
 interface VolumeDetailAPIProps {
   volumeId: string;
   volumeName: string;
+  volumeData?: Volume;
   onClose: () => void;
 }
 
@@ -18,8 +20,8 @@ interface VolumeDetails {
 }
 
 export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({ 
-  volumeId, 
   volumeName, 
+  volumeData,
   onClose 
 }) => {
   const [details, setDetails] = useState<VolumeDetails | null>(null);
@@ -28,148 +30,22 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchVolumeDetails = async () => {
+  const fetchVolumeDetails = useCallback(async () => {
     try {
       setRefreshing(true);
       setError(null);
 
-      // For development/demo, provide mock data when API is not available
-      const mockVolumeData = {
-        id: volumeId,
-        name: volumeName,
-        size: "100GB",
-        state: "Healthy",
-        replicas: 3,
-        active_replicas: 3,
-        local_nvme: true,
-        access_method: "nvmeof",
-        rebuild_progress: null,
-        nvmeof_enabled: true,
-        replica_statuses: [
-          {
-            node: "worker-node-1",
-            status: "healthy",
-            is_local: true,
-            last_io_timestamp: new Date().toISOString(),
-            access_method: "local-nvme"
-          },
-          {
-            node: "worker-node-2", 
-            status: "healthy",
-            is_local: false,
-            last_io_timestamp: new Date().toISOString(),
-            access_method: "remote-nvmeof",
-            nvmf_target: {
-              nqn: "nqn.2016-06.io.spdk:cnode2",
-              target_ip: "192.168.1.102",
-              target_port: "4420",
-              transport_type: "TCP"
-            }
-          }
-        ]
-      };
-
-      const mockRaidData = {
-        volume_id: volumeId,
-        raid_bdevs: [
-          {
-            name: "raid-bdev-" + volumeName.replace(/[^a-zA-Z0-9]/g, '_'),
-            state: "online",
-            raid_level: 1,
-            num_base_bdevs: 3,
-            num_base_bdevs_operational: 3,
-            node: "worker-node-1",
-            base_bdevs: [
-              { slot: 0, name: "nvme0n1", state: "online", node: "worker-node-1" },
-              { slot: 1, name: "nvme1n1", state: "online", node: "worker-node-2" },
-              { slot: 2, name: "nvme2n1", state: "online", node: "worker-node-3" }
-            ]
-          }
-        ]
-      };
-
-      const mockNvmeofData = { // Changed from mockVHostData
-        volume_id: volumeId,
-        nvmeof_subsystems: [
-          {
-            nqn: "nqn.2016-06.io.spdk:" + volumeName.replace(/[^a-zA-Z0-9]/g, '_'),
-            state: "active",
-            node: "worker-node-1",
-            listen_addresses: [
-              { transport: "TCP", traddr: "192.168.1.101", trsvcid: "4420" }
-            ],
-            namespaces: [
-              {
-                nsid: 1,
-                bdev_name: "raid-bdev-" + volumeName.replace(/[^a-zA-Z0-9]/g, '_')
-              }
-            ]
-          }
-        ]
-      };
-
-      // Try to fetch from API endpoints, but fall back to mock data
-      try {
-        const [volumeResponse, raidResponse, nvmeofResponse] = await Promise.allSettled([
-          fetch(`/api/volumes/${volumeId}`),
-          fetch(`/api/volumes/${volumeId}/raid`),
-          fetch(`/api/volumes/${volumeId}/nvmeof`) // Changed from /vhost
-        ]);
-
-        let volumeData = mockVolumeData;
-        let raidData = mockRaidData;
-        let nvmeofData = mockNvmeofData;
-
-        // Only use API data if the response is successful and returns JSON
-        if (volumeResponse.status === 'fulfilled' && volumeResponse.value.ok) {
-          try {
-            const text = await volumeResponse.value.text();
-            if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-              volumeData = JSON.parse(text);
-            }
-          } catch (parseError) {
-            console.warn('Failed to parse volume response, using mock data');
-          }
-        }
-
-        if (raidResponse.status === 'fulfilled' && raidResponse.value.ok) {
-          try {
-            const text = await raidResponse.value.text();
-            if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-              raidData = JSON.parse(text);
-            }
-          } catch (parseError) {
-            console.warn('Failed to parse RAID response, using mock data');
-          }
-        }
-
-        if (nvmeofResponse.status === 'fulfilled' && nvmeofResponse.value.ok) {
-          try {
-            const text = await nvmeofResponse.value.text();
-            if (text.trim().startsWith('{') || text.trim().startsWith('[')) {
-              nvmeofData = JSON.parse(text);
-            }
-          } catch (parseError) {
-            console.warn('Failed to parse NVMe-oF response, using mock data');
-          }
-        }
-
+      // Use the real volume data that was passed in
+      if (volumeData) {
         setDetails({
-          volume: volumeData,
-          raidDetails: raidData,
-          nvmeofDetails: nvmeofData,
+          volume: volumeData, // Use the real volume data
+          raidDetails: volumeData.raid_status || null,
+          nvmeofDetails: volumeData.nvmeof_targets || null,
           metrics: null
         });
-
-      } catch (apiError) {
-        console.warn('API not available, using mock data:', apiError);
-        // Use mock data when API is completely unavailable
-        setDetails({
-          volume: mockVolumeData,
-          raidDetails: mockRaidData,
-          nvmeofDetails: mockNvmeofData,
-          metrics: null
-        });
+      } else {
+        // Fallback to API or mock data only if no volumeData provided
+        throw new Error('No volume data provided');
       }
 
     } catch (err) {
@@ -178,11 +54,11 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [volumeData]);
 
   useEffect(() => {
     fetchVolumeDetails();
-  }, [volumeId]);
+  }, [fetchVolumeDetails]);
 
   const handleRefresh = () => {
     fetchVolumeDetails();

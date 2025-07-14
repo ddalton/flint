@@ -22,7 +22,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onClearDiskFilter,
   onReplicaClick
 }) => {
-  const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<{id: string, name: string} | null>(null);
+  const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<Volume | null>(null);
   
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -147,7 +147,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   };
 
   const handleVolumeNameClick = (volume: Volume) => {
-    setSelectedVolumeDetail({ id: volume.id, name: volume.name });
+    setSelectedVolumeDetail(volume);
   };
 
   const goToPage = (page: number) => {
@@ -485,8 +485,10 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       {/* Volume Detail Modal */}
       {selectedVolumeDetail && (
         <VolumeDetailAPI
+          key={selectedVolumeDetail.id}
           volumeId={selectedVolumeDetail.id}
           volumeName={selectedVolumeDetail.name}
+          volumeData={selectedVolumeDetail} // Pass the full volume
           onClose={() => setSelectedVolumeDetail(null)}
         />
       )}
