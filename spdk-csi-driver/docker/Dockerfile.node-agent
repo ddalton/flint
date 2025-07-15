@@ -1,14 +1,31 @@
 FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
 
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-COPY build.rs ./
+# --- System-level setup ---
+# Switch to root to install build dependencies.
+# - perl: Required by the openssl-sys crate.
+# - protobuf-dev: Provides standard Google .proto files.
+USER root
+RUN apk add --no-cache perl protobuf-dev
 
+# Switch back to the unprivileged user for the actual build process.
+USER 65532
+
+# --- Application build ---
+WORKDIR /app
+
+# Copy all necessary source files with the correct ownership (UID 65532).
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
+
+# Build the node-agent binary
 RUN cargo build --release --bin node-agent
 
+# --- Runtime image ---
 FROM ubuntu:22.04
 
+# Install runtime dependencies for the node-agent
 RUN apt-get update && apt-get install -y \
     pciutils \
     util-linux \
@@ -16,6 +33,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/node-agent /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/node-agent"]

@@ -1,17 +1,32 @@
 # Multi-stage build for CSI driver
 FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
 
+# --- System-level setup ---
+# Switch to root to install build dependencies.
+# - perl: Required by the openssl-sys crate.
+# - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
+USER root
+RUN apk add --no-cache perl protobuf-dev
+
+# Switch back to the unprivileged user for the actual build process.
+USER 65532
+
+# --- Application build ---
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-COPY build.rs ./
+
+# Copy all necessary source files with the correct ownership (UID 65532).
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
 
 # Build the CSI driver binary
 RUN cargo build --release --bin csi-driver
 
-# Runtime image
+# --- Runtime image ---
 FROM ubuntu:22.04
 
+# Install runtime dependencies for the CSI driver
 RUN apt-get update && apt-get install -y \
     nvme-cli \
     util-linux \
@@ -20,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     mount \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/csi-driver /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/csi-driver"]
