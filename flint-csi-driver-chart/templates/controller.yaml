@@ -1,12 +1,15 @@
+# This YAML file defines the Flint CSI controller and related resources.
+# The controller is responsible for managing the lifecycle of Flint volumes.
+
+# The Deployment for the Flint CSI controller.
+# This Deployment ensures that a single instance of the Flint CSI controller is running in the cluster.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: flint-csi-controller
   namespace: {{ .Release.Namespace }}
-  labels:
-    app: flint-csi-controller
 spec:
-  replicas: {{ .Values.controller.replicas }}
+  replicas: 1
   selector:
     matchLabels:
       app: flint-csi-controller
@@ -15,58 +18,24 @@ spec:
       labels:
         app: flint-csi-controller
     spec:
-      serviceAccountName: {{ .Values.controller.serviceAccount }}
+      serviceAccountName: flint-csi-controller
       containers:
-        - name: flint-csi-driver
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: CSI_MODE
-              value: "controller"
-            - name: CSI_ENDPOINT
-              value: "unix:///csi/csi.sock"
-            # Add any other necessary environment variables for the controller
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+        - name: flint-csi-controller
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
+          imagePullPolicy: Always
+          args:
+            - "--v={{ .Values.logLevel }}"
+            - "--csi-address=/csi/csi.sock"
+            - "--timeout=1m"
+            - "--leader-election"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-        - name: csi-provisioner
-          image: "{{ .Values.sidecars.csi_provisioner.repository }}:{{ .Values.sidecars.csi_provisioner.tag }}"
+        - name: liveness-probe
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
+          imagePullPolicy: Always
           args:
-            - "--v=5"
-            - "--csi-address=$(ADDRESS)"
-            - "--feature-gates=Topology=true"
-            - "--leader-election"
-          env:
-            - name: ADDRESS
-              value: "/csi/csi.sock"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: csi-snapshotter
-          image: "{{ .Values.sidecars.csi_snapshotter.repository }}:{{ .Values.sidecars.csi_snapshotter.tag }}"
-          args:
-            - "--v=5"
-            - "--csi-address=$(ADDRESS)"
-            - "--leader-election"
-          env:
-            - name: ADDRESS
-              value: "/csi/csi.sock"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: csi-resizer
-          image: "{{ .Values.sidecars.csi_resizer.repository }}:{{ .Values.sidecars.csi_resizer.tag }}"
-          args:
-            - "--v=5"
-            - "--csi-address=$(ADDRESS)"
-            - "--leader-election"
-          env:
-            - name: ADDRESS
-              value: "/csi/csi.sock"
+            - "--csi-address=/csi/csi.sock"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

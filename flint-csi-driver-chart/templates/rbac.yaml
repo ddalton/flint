@@ -1,93 +1,95 @@
-{{- if .Values.rbac.create -}}
----
-{{- if .Values.serviceAccount.controller.create -}}
+# This YAML file defines all the RBAC resources for the Flint CSI driver.
+
+# Service account for the controller components
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "flint-csi-driver-chart.serviceAccountName.controller" . }}
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-{{- end -}}
+  name: flint-csi-controller
+  namespace: {{ .Release.Namespace }}
+
 ---
-kind: ClusterRole
+
+# ClusterRole for the controller components
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-controller-role
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+  name: flint-csi-controller
 rules:
   - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["create", "delete", "get", "list", "watch", "update"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "update"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["csinodes"]
+    resources: ["storageclasses", "csinodes", "volumeattachments"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["list", "watch", "create", "update", "patch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
-    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments/status"]
     verbs: ["patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses", "volumesnapshotcontents"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents/status"]
+    verbs: ["update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+
 ---
-kind: ClusterRoleBinding
+
+# ClusterRoleBinding for the controller components
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
 metadata:
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-controller-binding
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+  name: flint-csi-controller
 subjects:
   - kind: ServiceAccount
-    name: {{ include "flint-csi-driver-chart.serviceAccountName.controller" . }}
+    name: flint-csi-controller
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-controller-role
+  name: flint-csi-controller
   apiGroup: rbac.authorization.k8s.io
+
 ---
-{{- if .Values.serviceAccount.node.create -}}
+
+# Service account for the node components
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "flint-csi-driver-chart.serviceAccountName.node" . }}
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-{{- end -}}
+  name: flint-csi-node
+  namespace: {{ .Release.Namespace }}
+
 ---
-kind: ClusterRole
+# ClusterRole for the node components
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-node-role
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+  name: flint-csi-node
 rules:
   - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "delete"]
 ---
-kind: ClusterRoleBinding
+
+# ClusterRoleBinding for the node components
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
 metadata:
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-node-binding
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+  name: flint-csi-node
 subjects:
   - kind: ServiceAccount
-    name: {{ include "flint-csi-driver-chart.serviceAccountName.node" . }}
+    name: flint-csi-node
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "flint-csi-driver-chart.fullname" . }}-node-role
+  name: flint-csi-node
   apiGroup: rbac.authorization.k8s.io
-{{- end }}

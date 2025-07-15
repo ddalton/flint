@@ -1,0 +1,25 @@
+# This YAML file defines the common snapshot controller.
+# This controller is responsible for managing the lifecycle of snapshot objects.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snapshot-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: snapshot-controller
+  template:
+    metadata:
+      labels:
+        app: snapshot-controller
+    spec:
+      serviceAccountName: flint-csi-controller # Re-using the same service account
+      containers:
+        - name: snapshot-controller
+          image: "{{ .Values.csiSidecars.repository }}/snapshot-controller:{{ .Values.csiSidecars.externalSnapshotter.tag }}" # Note: The tag is often the same as the snapshotter
+          imagePullPolicy: Always
+          args:
+            - "--v=5"
+            - "--leader-election=true"
