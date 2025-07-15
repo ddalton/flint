@@ -1,3 +1,13 @@
+# Build the docker images 
+
+docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-controller:0.0.1 . -f docker/Dockerfile.controller --push
+docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-driver:0.0.1 . -f docker/Dockerfile.csi --push
+docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-node-agent:0.0.1 . -f docker/Dockerfile.node-agent --push
+docker build -t docker-sandbox.infra.cloudera.com/ddalton/spdk-tgt:0.0.1 . -f docker/Dockerfile.spdk --push
+
+
+
+
 # In your DaemonSet or Pod definition for the node agent pods
 apiVersion: apps/v1
 kind: DaemonSet
