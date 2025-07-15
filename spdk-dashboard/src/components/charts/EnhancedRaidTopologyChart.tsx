@@ -1,17 +1,19 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Database, Activity, X, Settings, Zap, Network, Info, AlertTriangle, 
-  Cable, Monitor, Shield, HardDrive, Clock, CheckCircle, Search, ChevronDown
+  Cable, Monitor, Shield, HardDrive, Search, ChevronDown
 } from 'lucide-react';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
-import type { Volume, RaidMember } from '../../hooks/useDashboardData';
+import type { Volume, RaidMember, Disk} from '../../hooks/useDashboardData';
+import { EnhancedRaidMemberCard, RaidArrayPerformanceOverview } from './EnhancedRaidMemberCard';
 
 interface EnhancedRaidTopologyChartProps {
   volumes: Volume[];
+  disks: Disk[];
 }
 
-export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps> = ({ volumes }) => {
+export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps> = ({ volumes, disks }) => {
   const [selectedVolume, setSelectedVolume] = useState(volumes[0]?.id || '');
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
@@ -86,30 +88,6 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     }
   };
 
-  const getRaidMemberStateColor = (state: string) => {
-    switch (state.toLowerCase()) {
-      case 'online': return 'bg-green-100 text-green-800 border-green-200';
-      case 'degraded': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-      case 'failed': return 'bg-red-100 text-red-800 border-red-200';
-      case 'rebuilding': return 'bg-orange-100 text-orange-800 border-orange-200';
-      case 'spare': return 'bg-blue-100 text-blue-800 border-blue-200';
-      case 'removing': return 'bg-purple-100 text-purple-800 border-purple-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
-
-  const getRaidMemberIcon = (state: string) => {
-    switch (state.toLowerCase()) {
-      case 'online': return <CheckCircle className="w-4 h-4 text-green-600" />;
-      case 'failed': return <X className="w-4 h-4 text-red-600" />;
-      case 'rebuilding': return <Settings className="w-4 h-4 text-orange-600 animate-spin" />;
-      case 'degraded': return <AlertTriangle className="w-4 h-4 text-yellow-600" />;
-      case 'spare': return <Shield className="w-4 h-4 text-blue-600" />;
-      case 'removing': return <Clock className="w-4 h-4 text-purple-600" />;
-      default: return <HardDrive className="w-4 h-4 text-gray-600" />;
-    }
-  };
-
   const getReplicaStatusColor = (status: string) => {
     switch (status) {
       case 'healthy': return 'bg-green-100 text-green-800 border-green-200';
@@ -133,6 +111,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                     selectedVolumeInfo.access_method === 'nvmeof';
 
   const raidStatus = selectedVolumeInfo.raid_status;
+  const hasDiskRefs = selectedVolumeInfo.replica_statuses.every(r => r.disk_ref);
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
@@ -384,7 +363,35 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
             </div>
           </div>
         </div>
-        
+
+        {/* Data Availability Status */}
+        {(!raidStatus || !hasDiskRefs) && (
+          <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <AlertTriangle className="h-5 w-5 text-yellow-400" />
+              </div>
+              <div className="ml-3">
+                <p className="text-sm text-yellow-700">
+                  Live metrics are not available for this volume because required data is missing:
+                </p>
+                <ul className="mt-2 list-disc list-inside text-sm text-yellow-700">
+                  {!raidStatus && <li>RAID status information is not defined.</li>}
+                  {!hasDiskRefs && <li>One or more replicas are not linked to a physical disk (`disk_ref` is missing).</li>}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {raidStatus && (
+          <RaidArrayPerformanceOverview 
+            raidStatus={raidStatus}
+            replicaStatuses={selectedVolumeInfo.replica_statuses}
+            disks={disks}
+          />
+        )}
+                
         {/* Enhanced RAID Members Visualization */}
         {raidStatus && raidStatus.members && (
           <div className="mb-8">
@@ -392,6 +399,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
               RAID Member Architecture ({getRaidLevelDisplayName(raidStatus.raid_level)})
             </h5>
             <div className="bg-gray-50 rounded-lg p-6">
+
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
                 {raidStatus.members.map((member: RaidMember, index: number) => {
                   const correspondingReplica = selectedVolumeInfo.replica_statuses.find(
@@ -399,93 +407,13 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   );
                   
                   return (
-                    <div key={`${member.slot}-${index}`} className="text-center">
-                      {/* RAID Member Header */}
-                      <div className="mb-4">
-                        <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-gray-300">
-                          <span className="font-bold text-gray-700">#{member.slot}</span>
-                        </div>
-                        <p className="font-medium text-gray-800">{member.node || 'Unknown Node'}</p>
-                        <p className="text-xs text-gray-500">RAID Slot {member.slot}</p>
-                      </div>
-                      
-                      {/* RAID Member Status Card */}
-                      <div className={`border-2 rounded-lg p-4 ${getRaidMemberStateColor(member.state)}`}>
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            {getRaidMemberIcon(member.state)}
-                            <span className="font-medium text-sm">{member.name}</span>
-                          </div>
-                          {member.is_configured && (
-                            <span className="text-xs bg-blue-500 text-white px-2 py-1 rounded-full">
-                              CFG
-                            </span>
-                          )}
-                        </div>
-                        
-                        <div className="text-xs space-y-1">
-                          <div className="flex justify-between">
-                            <span>RAID State:</span>
-                            <span className="font-medium capitalize">{member.state}</span>
-                          </div>
-                          
-                          <div className="flex justify-between">
-                            <span>Health:</span>
-                            <span className={`font-medium ${
-                              member.health_status === 'healthy' ? 'text-green-600' :
-                              member.health_status === 'rebuilding' ? 'text-orange-600' :
-                              'text-red-600'
-                            }`}>
-                              {member.health_status}
-                            </span>
-                          </div>
-                          
-                          {member.uuid && (
-                            <div className="mt-2">
-                              <span className="text-gray-600">UUID:</span>
-                              <div className="font-mono text-xs break-all text-gray-500">
-                                {member.uuid.substring(0, 8)}...
-                              </div>
-                            </div>
-                          )}
-                          
-                          {correspondingReplica && (
-                            <div className="mt-2 p-2 bg-white bg-opacity-50 rounded">
-                              <div className="text-xs">
-                                <div><strong>Access:</strong> {correspondingReplica.access_method}</div>
-                                {correspondingReplica.nvmf_target && (
-                                  <div><strong>NVMe-oF:</strong> {correspondingReplica.nvmf_target.target_ip}</div>
-                                )}
-                                {correspondingReplica.last_io_timestamp && (
-                                  <div><strong>Last I/O:</strong> {new Date(correspondingReplica.last_io_timestamp).toLocaleTimeString()}</div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          
-                          {member.state === 'rebuilding' && raidStatus.rebuild_info && 
-                           raidStatus.rebuild_info.target_slot === member.slot && (
-                            <div className="mt-2">
-                              <div className="flex justify-between text-xs mb-1">
-                                <span>Rebuild Progress:</span>
-                                <span>{raidStatus.rebuild_info.progress_percentage.toFixed(1)}%</span>
-                              </div>
-                              <div className="w-full bg-gray-200 rounded-full h-2">
-                                <div 
-                                  className="bg-orange-500 h-2 rounded-full transition-all duration-300" 
-                                  style={{ width: `${raidStatus.rebuild_info.progress_percentage}%` }}
-                                />
-                              </div>
-                              {raidStatus.rebuild_info.estimated_time_remaining && (
-                                <div className="text-xs text-orange-600 mt-1">
-                                  ETA: {raidStatus.rebuild_info.estimated_time_remaining}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                    <EnhancedRaidMemberCard
+                      key={`${member.slot}-${index}`}
+                      member={member}
+                      correspondingReplica={correspondingReplica}
+                      raidStatus={raidStatus}
+                      disks={disks} // Pass disks data for metrics
+                    />
                   );
                 })}
               </div>
