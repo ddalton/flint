@@ -1,12 +1,28 @@
 FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
 
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
-COPY build.rs ./
+# --- System-level setup ---
+# Switch to root to install build dependencies.
+# - perl: Required by the openssl-sys crate.
+# - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
+USER root
+RUN apk add --no-cache perl protobuf-dev
 
+# Switch back to the unprivileged user for the actual build process.
+USER 65532
+
+# --- Application build ---
+WORKDIR /app
+
+# COPY all necessary source files with the correct ownership.
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
+
+# The build will now have all necessary system dependencies.
 RUN cargo build --release --bin controller
 
+# --- Final Stage ---
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y \
