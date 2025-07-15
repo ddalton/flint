@@ -1,10 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { 
-  BarChart3, PieChart, TrendingUp, TrendingDown, AlertTriangle, 
-  Info, HardDrive, Database, Layers, Filter, Search
+  BarChart3, PieChart, TrendingUp, AlertTriangle, 
+  Info, HardDrive, Database, Layers, Search
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart as RechartsPieChart, Cell, Pie } from 'recharts';
-import type { SnapshotDetails, SnapshotTreeNode, SnapshotStorageViewProps } from './types';
+import type { SnapshotStorageViewProps } from './types';
 
 interface StorageAnalysisCard {
   volumeId: string;

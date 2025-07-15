@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap, Cable } from 'lucide-react';
+import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap } from 'lucide-react';
 import type { VolumeFilter } from '../../hooks/useDashboardData';
 
 interface StatCardsProps {

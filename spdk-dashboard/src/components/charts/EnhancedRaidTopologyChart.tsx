@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
-import type { Volume, RaidStatus, RaidMember, RebuildInfo } from '../../hooks/useDashboardData';
+import type { Volume, RaidMember } from '../../hooks/useDashboardData';
 
 interface EnhancedRaidTopologyChartProps {
   volumes: Volume[];
@@ -46,7 +46,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
   }, []);
 
   // Handle volume selection
-  const handleVolumeSelect = (volumeId: string, volumeName: string) => {
+  const handleVolumeSelect = (volumeId: string) => {
     setSelectedVolume(volumeId);
     setIsDropdownOpen(false);
     setSearchTerm('');
@@ -195,7 +195,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                     filteredVolumes.map((volume) => (
                       <button
                         key={volume.id}
-                        onClick={() => handleVolumeSelect(volume.id, volume.name)}
+                        onClick={() => handleVolumeSelect(volume.id)}
                         className={`w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0 transition-colors ${
                           selectedVolume === volume.id ? 'bg-blue-50 border-blue-200' : ''
                         }`}

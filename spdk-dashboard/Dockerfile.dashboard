@@ -1,0 +1,49 @@
+# Stage 1: Build the React application
+#----------------------------------------------------------------
+FROM node:20-alpine AS build
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy package.json and package-lock.json (or yarn.lock)
+# This leverages Docker's layer caching.
+COPY package*.json ./
+# If you are using yarn, uncomment the line below and comment out the npm line
+# COPY yarn.lock .
+
+# Install dependencies
+# Using "npm ci" is generally recommended for CI/CD environments as it provides faster, more reliable builds.
+RUN npm ci
+# If you are using yarn, uncomment the line below and comment out the npm line
+# RUN yarn install --frozen-lockfile
+
+# Copy the rest of the application source code
+COPY . .
+
+# Build the application for production
+# This command will transpile the TypeScript/React code and bundle it with Vite.
+RUN npm run build
+
+# Stage 2: Serve the application with Nginx
+#----------------------------------------------------------------
+FROM nginx:1.27.0-alpine-slim AS production
+
+# Set working directory
+WORKDIR /usr/share/nginx/html
+
+# Remove the default Nginx static assets
+RUN rm -rf ./*
+
+# Copy the built static files from the "build" stage
+COPY --from=build /app/dist .
+
+# Copy the custom Nginx configuration file
+# This is crucial for handling client-side routing in a Single Page Application (SPA).
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Expose the port Nginx will listen on
+EXPOSE 80
+
+# The default command for the nginx image is to start the server.
+# You can also be explicit with the command below if you prefer.
+# CMD ["nginx", "-g", "daemon off;"]

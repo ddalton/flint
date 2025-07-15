@@ -306,7 +306,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
 
   const filteredVolumes = getFilteredVolumes();
   const totalNodes = data.nodes.length;
-  const severityInfo = getFilterSeverityInfo(activeFilter);
+  const severityInfo = getFilterSeverityInfo(activeFilter || 'all');
   const hasSearch = searchTerm.trim().length > 0;
   const hasVolumeFilter = activeFilter && activeFilter !== 'all';
 

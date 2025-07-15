@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Info } from 'lucide-react';
+import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
 import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
-  Database, Activity, Settings, Cable, Shield, Network, 
-  RefreshCw, AlertTriangle, CheckCircle, Clock, Info, X
+  Database, Settings, Shield, Network, 
+  RefreshCw, AlertTriangle, X
 } from 'lucide-react';
 import type { Volume } from '../../hooks/useDashboardData';
 

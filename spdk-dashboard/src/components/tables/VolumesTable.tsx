@@ -62,7 +62,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     }
 
     // Apply disk filter if present
-    if (diskFilter) {
+    if (diskFilter && disks) {
       // Find the disk object
       const selectedDisk = disks.find(d => d.id === diskFilter);
       if (selectedDisk) {
@@ -306,6 +306,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                           <StateIcon className="w-3 h-3 mr-1" />
                           {volume.state}
                         </span>
+
                         {stateInfo.tooltip && (
                           <span className="text-xs text-gray-400" title={stateInfo.tooltip}>
                             <Info className="w-3 h-3" />

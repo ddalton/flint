@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Server, Activity, Database, HardDrive, Network, Cable, 
+  Server, Activity, Database, HardDrive, Network, 
   RefreshCw, AlertTriangle, Info, X, Shield, Settings
 } from 'lucide-react';
 

@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import { 
-  GitBranch, ChevronDown, ChevronRight, Database, Server, Layers, 
+  GitBranch, ChevronDown, ChevronRight, Database, Layers, 
   HardDrive, BarChart3, TrendingUp, AlertCircle, Info, Zap
 } from 'lucide-react';
 import type { SnapshotTreeNode, SnapshotChainItem, VolumeStorageAnalytics } from './types';
@@ -273,8 +273,6 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
   expandedVolumes,
   onToggleVolumeExpansion,
   formatSize,
-  formatTime,
-  getSnapshotTypeIcon
 }) => {
   if (Object.entries(snapshotTree).length === 0) {
     return (
@@ -313,7 +311,6 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                   </p>
                 </div>
               </div>
-              
               {/* Quick Storage Summary */}
               <div className="flex items-center gap-4">
                 {volumeData.storage_analytics && (
@@ -328,11 +325,17 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                     </div>
                     <div className="flex items-center">
                       {volumeData.storage_analytics.snapshot_efficiency_ratio < 0.1 ? (
-                        <Zap className="w-5 h-5 text-green-500" title="Efficient storage usage" />
+                        <span title="Efficient storage usage">
+                          <Zap className="w-5 h-5 text-green-500" />
+                        </span>
                       ) : volumeData.storage_analytics.snapshot_efficiency_ratio < 0.3 ? (
-                        <BarChart3 className="w-5 h-5 text-yellow-500" title="Moderate overhead" />
+                        <span title="Moderate overhead">
+                          <BarChart3 className="w-5 h-5 text-yellow-500" />
+                        </span>
                       ) : (
-                        <AlertCircle className="w-5 h-5 text-red-500" title="High storage overhead" />
+                        <span title="High storage overhead">
+                          <AlertCircle className="w-5 h-5 text-red-500" />
+                        </span>
                       )}
                     </div>
                   </>
@@ -341,6 +344,7 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                   {volumeData.snapshot_chain.snapshots.length} snapshot{volumeData.snapshot_chain.snapshots.length !== 1 ? 's' : ''}
                 </span>
               </div>
+              
             </div>
           </div>
 

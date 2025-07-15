@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  HardDrive, Settings, AlertTriangle, CheckCircle, X, RefreshCw, 
-  Play, Database, Server, Shield, Info, ChevronLeft, ChevronRight,
-  Search, Filter, Monitor, Grid, List, Download, Upload
+  HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, 
+  Play, Database, Shield, Info, ChevronLeft, ChevronRight,
+  Search, Filter, Monitor, Grid, List,  
 } from 'lucide-react';
 import { 
   useDiskSetup, 
@@ -22,7 +22,7 @@ interface CompactDiskCardProps {
   nodeName: string;
 }
 
-const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSelect, nodeName }) => {
+const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSelect }) => {
   const sizeGB = Math.round(disk.size_bytes / (1024 * 1024 * 1024));
   const needsUnmount = disk.mounted_partitions.length > 0;
   const canSelect = !disk.is_system_disk;
@@ -97,7 +97,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
   );
 };
 
-const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSelect, nodeName }) => {
+const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSelect }) => {
   const sizeGB = Math.round(disk.size_bytes / (1024 * 1024 * 1024));
   const needsUnmount = disk.mounted_partitions.length > 0;
   const canSelect = !disk.is_system_disk;
@@ -155,7 +155,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 };
 
 export const DiskSetupTab: React.FC = () => {
-  const { nodeData, refreshNodeDisks, setupDisksOnNode, resetDisksOnNode, setNodeData } = useDiskSetup();
+  const { nodeData, refreshNodeDisks, setupDisksOnNode, setNodeData } = useDiskSetup();
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -299,12 +299,6 @@ export const DiskSetupTab: React.FC = () => {
         return newSelection;
       });
     }
-  };
-
-  const getSelectedDisksForNode = (nodeName: string) => {
-    return Array.from(selectedDisks)
-      .filter(diskKey => diskKey.startsWith(`${nodeName}:`))
-      .map(diskKey => diskKey.split(':')[1]);
   };
 
   const setupSelectedDisks = async () => {

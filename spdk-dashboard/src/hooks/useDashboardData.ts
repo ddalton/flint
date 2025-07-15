@@ -668,7 +668,7 @@ const transformBackendData = (backendData: any): DashboardData => {
     disks: backendData.disks?.map((disk: any) => ({
       ...disk,
       // Ensure compatibility with existing frontend code
-      lvol_store_initialized: disk.blobstore_initialized
+      blobstore_initialized: disk.blobstore_initialized
     })) || [],
     nodes: backendData.nodes || []
   };

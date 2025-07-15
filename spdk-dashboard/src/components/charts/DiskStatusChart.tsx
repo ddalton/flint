@@ -13,7 +13,7 @@ export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
       acc[disk.node] = { total: 0, initialized: 0, healthy: 0 };
     }
     acc[disk.node].total++;
-    if (disk.lvol_store_initialized) acc[disk.node].initialized++;
+    if (disk.blobstore_initialized) acc[disk.node].initialized++;
     if (disk.healthy) acc[disk.node].healthy++;
     return acc;
   }, {} as Record<string, { total: number; initialized: number; healthy: number }>);

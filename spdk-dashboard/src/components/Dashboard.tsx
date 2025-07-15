@@ -92,7 +92,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     setVolumeReplicaFilter(null);
   };
 
-  const handleReplicaClick = (volumeId: string, volumeName: string) => {
+  const handleReplicaClick = (volumeId: string) => {
     // Set volume replica filter and switch to disks tab
     setVolumeReplicaFilter(volumeId);
     setActiveTab('disks');
