@@ -33,10 +33,6 @@ RUN apt-get update && apt-get install -y \
 # Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/
 
-# Create non-root user
-RUN groupadd -g 1000001 cloudera-cdp  && useradd -u 1000001 -r -g cloudera-cdp cloudera-cdp
-USER cloudera-cdp
-
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/spdk-dashboard-backend"] 
