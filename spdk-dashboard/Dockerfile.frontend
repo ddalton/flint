@@ -31,18 +31,18 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Create non-root user for nginx
-RUN addgroup -g 101 -S nginx-user && \
-    adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx-user -g nginx-user nginx-user
+RUN groupadd -g 1000001 cloudera-cdp  && useradd -u 1000001 -r -g cloudera-cdp cloudera-cdp
+
 
 # Change ownership of nginx directories
-RUN chown -R nginx-user:nginx-user /var/cache/nginx && \
-    chown -R nginx-user:nginx-user /var/log/nginx && \
-    chown -R nginx-user:nginx-user /etc/nginx/conf.d && \
+RUN chown -R cloudera-cdp:cloudera-cdp /var/cache/nginx && \
+    chown -R cloudera-cdp:cloudera-cdp /var/log/nginx && \
+    chown -R cloudera-cdp:cloudera-cdp /etc/nginx/conf.d && \
     touch /var/run/nginx.pid && \
-    chown -R nginx-user:nginx-user /var/run/nginx.pid
+    chown -R cloudera-cdp:cloudera-cdp /var/run/nginx.pid
 
 # Switch to non-root user
-USER nginx-user
+USER cloudera-cdp
 
 EXPOSE 3000
 
