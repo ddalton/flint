@@ -42,6 +42,12 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
+  - apiGroups: ["flint.csi.storage.io"]
+    resources: ["spdkvolumes", "spdkdisks", "spdksnapshots"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["flint.csi.storage.io"]
+    resources: ["spdkvolumes/status", "spdkdisks/status", "spdksnapshots/status"]
+    verbs: ["get", "update", "patch"]
 
 ---
 
@@ -76,8 +82,14 @@ metadata:
   name: flint-csi-node
 rules:
   - apiGroups: [""]
-    resources: ["configmaps"]
+    resources: ["configmaps", "nodes", "pods"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["flint.csi.storage.io"]
+    resources: ["spdkdisks", "spdkvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["flint.csi.storage.io"]
+    resources: ["spdkdisks/status", "spdkvolumes/status"]
+    verbs: ["get", "update", "patch"]
 ---
 
 # ClusterRoleBinding for the node components

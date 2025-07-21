@@ -23,17 +23,31 @@ spec:
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
-          args:
-            - "--v={{ .Values.logLevel }}"
-            - "--csi-address=$(ADDRESS)"
-            - "--node-id=$(KUBE_NODE_NAME)"
           env:
-            - name: ADDRESS
-              value: /csi/csi.sock
-            - name: KUBE_NODE_NAME
+            - name: CSI_MODE
+              value: "node"
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
+            - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: SPDK_RPC_URL
+              value: "http://localhost:5260"
+          securityContext:
+            privileged: true
+          ports:
+            - name: healthz
+              containerPort: 9809
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
           volumeMounts:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
@@ -65,14 +79,29 @@ spec:
         - name: node-agent
           image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
           imagePullPolicy: Always
-          args:
-            - "--csi-address=$(ADDRESS)"
           env:
-            - name: ADDRESS
-              value: /csi/csi.sock
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SPDK_RPC_URL
+              value: "http://localhost:5260"
+            - name: AUTO_INITIALIZE_BLOBSTORE
+              value: "true"
+            - name: API_PORT
+              value: "8081"
+          securityContext:
+            privileged: true
+          ports:
+            - name: api-port
+              containerPort: 8081
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
+            - name: device-dir
+              mountPath: /dev
+            - name: sys-dir
+              mountPath: /sys
         - name: spdk-tgt
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTgt.name }}:{{ .Values.images.spdkTgt.tag }}"
           imagePullPolicy: Always
@@ -99,6 +128,10 @@ spec:
         - name: device-dir
           hostPath:
             path: /dev
+            type: Directory
+        - name: sys-dir
+          hostPath:
+            path: /sys
             type: Directory
         - name: hugepages
           emptyDir:

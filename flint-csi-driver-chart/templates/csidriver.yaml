@@ -9,3 +9,4 @@ spec:
   podInfoOnMount: true
   volumeLifecycleModes:
     - Persistent
+  fsGroupPolicy: ReadWriteOnceWithFSType

@@ -7,9 +7,12 @@ metadata:
     {{- if .Values.storageClass.isDefaultClass }}
     storageclass.kubernetes.io/is-default-class: "true"
     {{- end }}
-provisioner: flint.csi.storage.io
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+provisioner: {{ .Values.driver.name }}
 reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
 allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+volumeBindingMode: WaitForFirstConsumer
 parameters:
   numReplicas: "{{ .Values.storageClass.parameters.numReplicas }}"
   autoRebuild: "{{ .Values.storageClass.parameters.autoRebuild }}"

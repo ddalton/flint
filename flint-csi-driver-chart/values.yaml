@@ -7,19 +7,19 @@ crds:
   install: true
 
 images:
-  repository: docker-sandbox.infra.cloudera.com/ddalton
+  repository: flint  # Change this to your actual registry for production
   flintCsiController:
     name: flint-controller
-    tag: 0.0.1
+    tag: latest
   flintCsiDriver:
     name: flint-driver
-    tag: 0.0.1
+    tag: latest
   nodeAgent:
     name: flint-node-agent
-    tag: 0.0.1
+    tag: latest
   spdkTgt:
     name: spdk-tgt
-    tag: 0.0.1
+    tag: latest
 
 csiSidecars:
   repository: registry.k8s.io/sig-storage
@@ -48,3 +48,18 @@ logLevel: 5
 
 # Allow overriding the controller's pod priority class.
 priorityClassName: ""
+
+# CSI Driver configuration
+driver:
+  name: "flint.csi.storage.io"
+
+# Storage class configuration
+storageClass:
+  create: true
+  name: "flint"
+  isDefaultClass: false
+  reclaimPolicy: "Delete"
+  allowVolumeExpansion: true
+  parameters:
+    numReplicas: "2"
+    autoRebuild: "true"

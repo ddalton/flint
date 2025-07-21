@@ -205,3 +205,344 @@ spec:
     subresources:
       status: {}
 {{- end }}
+---
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdkvolumes.flint.csi.storage.io
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  group: flint.csi.storage.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - volume_id
+            - size_bytes
+            - num_replicas
+            - replicas
+            properties:
+              volume_id:
+                type: string
+              size_bytes:
+                type: integer
+                format: int64
+              num_replicas:
+                type: integer
+              replicas:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - node
+                  - replica_type
+                  - disk_ref
+                  - health_status
+                  - raid_member_index
+                  - raid_member_state
+                  properties:
+                    node:
+                      type: string
+                    replica_type:
+                      type: string
+                    pcie_addr:
+                      type: string
+                    nqn:
+                      type: string
+                    ip:
+                      type: string
+                    port:
+                      type: string
+                    local_pod_scheduled:
+                      type: boolean
+                    pod_name:
+                      type: string
+                    disk_ref:
+                      type: string
+                    lvol_uuid:
+                      type: string
+                    health_status:
+                      type: string
+                      enum: ["Healthy", "Degraded", "Failed", "Rebuilding", "Syncing"]
+                    last_io_timestamp:
+                      type: string
+                    write_sequence:
+                      type: integer
+                      format: int64
+                    raid_member_index:
+                      type: integer
+                    raid_member_state:
+                      type: string
+                      enum: ["Online", "Degraded", "Failed", "Rebuilding", "Spare", "Removing"]
+              primary_lvol_uuid:
+                type: string
+              write_ordering_enabled:
+                type: boolean
+              raid_auto_rebuild:
+                type: boolean
+              nvmeof_transport:
+                type: string
+              nvmeof_target_port:
+                type: integer
+              scheduling_policy:
+                type: string
+              preferred_nodes:
+                type: array
+                items:
+                  type: string
+          status:
+            type: object
+            properties:
+              state:
+                type: string
+              degraded:
+                type: boolean
+              last_checked:
+                type: string
+              active_replicas:
+                type: array
+                items:
+                  type: integer
+              failed_replicas:
+                type: array
+                items:
+                  type: integer
+              write_sequence:
+                type: integer
+                format: int64
+              last_successful_write:
+                type: string
+              scheduled_node:
+                type: string
+              has_local_replica:
+                type: boolean
+              scheduling_policy:
+                type: string
+              replica_nodes:
+                type: array
+                items:
+                  type: string
+              read_optimized:
+                type: boolean
+              read_policy:
+                type: string
+    additionalPrinterColumns:
+    - name: State
+      type: string
+      jsonPath: .status.state
+    - name: Replicas
+      type: integer
+      jsonPath: .spec.num_replicas
+    - name: Size
+      type: string
+      jsonPath: .spec.size_bytes
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: spdkvolumes
+    singular: spdkvolume
+    kind: SpdkVolume
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdkdisks.flint.csi.storage.io
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  group: flint.csi.storage.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - node
+            - pcie_addr
+            - capacity
+            properties:
+              node:
+                type: string
+              pcie_addr:
+                type: string
+              capacity:
+                type: integer
+                format: int64
+              blobstore_uuid:
+                type: string
+              nvme_controller_id:
+                type: string
+          status:
+            type: object
+            properties:
+              total_capacity:
+                type: integer
+                format: int64
+              free_space:
+                type: integer
+                format: int64
+              used_space:
+                type: integer
+                format: int64
+              healthy:
+                type: boolean
+              last_checked:
+                type: string
+              lvol_count:
+                type: integer
+              blobstore_initialized:
+                type: boolean
+              lvs_name:
+                type: string
+              io_stats:
+                type: object
+                properties:
+                  read_iops:
+                    type: integer
+                    format: int64
+                  write_iops:
+                    type: integer
+                    format: int64
+                  read_latency_us:
+                    type: integer
+                    format: int64
+                  write_latency_us:
+                    type: integer
+                    format: int64
+                  error_count:
+                    type: integer
+                    format: int64
+    additionalPrinterColumns:
+    - name: Node
+      type: string
+      jsonPath: .spec.node
+    - name: Capacity
+      type: string
+      jsonPath: .spec.capacity
+    - name: Free
+      type: string
+      jsonPath: .status.free_space
+    - name: Healthy
+      type: boolean
+      jsonPath: .status.healthy
+    - name: LVols
+      type: integer
+      jsonPath: .status.lvol_count
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: spdkdisks
+    singular: spdkdisk
+    kind: SpdkDisk
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdksnapshots.flint.csi.storage.io
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  group: flint.csi.storage.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - source_volume_id
+            - snapshot_id
+            - replica_snapshots
+            properties:
+              source_volume_id:
+                type: string
+              snapshot_id:
+                type: string
+              replica_snapshots:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - node_name
+                  - spdk_snapshot_lvol
+                  - source_lvol_bdev
+                  - disk_ref
+                  properties:
+                    node_name:
+                      type: string
+                    spdk_snapshot_lvol:
+                      type: string
+                    source_lvol_bdev:
+                      type: string
+                    disk_ref:
+                      type: string
+              snapshot_type:
+                type: string
+                enum: ["Bdev", "LvolClone", "External"]
+                default: "Bdev"
+              clone_source_snapshot_id:
+                type: string
+              nvmeof_access_enabled:
+                type: boolean
+              nvmeof_transport:
+                type: string
+          status:
+            type: object
+            properties:
+              state:
+                type: string
+              creation_time:
+                type: string
+              ready_to_use:
+                type: boolean
+              restore_size:
+                type: integer
+                format: int64
+              error:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  time:
+                    type: string
+    additionalPrinterColumns:
+    - name: State
+      type: string
+      jsonPath: .status.state
+    - name: Source
+      type: string
+      jsonPath: .spec.source_volume_id
+    - name: Ready
+      type: boolean
+      jsonPath: .status.ready_to_use
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: spdksnapshots
+    singular: spdksnapshot
+    kind: SpdkSnapshot
+{{- end }}

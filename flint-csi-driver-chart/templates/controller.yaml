@@ -1,13 +1,16 @@
 # This YAML file defines the Flint CSI controller and related resources.
 # The controller is responsible for managing the lifecycle of Flint volumes.
 
-# The Deployment for the Flint CSI controller.
+# The Deployment for the Flint CSI controller with all required sidecars.
 # This Deployment ensures that a single instance of the Flint CSI controller is running in the cluster.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: flint-csi-controller
   namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: controller
 spec:
   replicas: 1
   selector:
@@ -17,17 +20,71 @@ spec:
     metadata:
       labels:
         app: flint-csi-controller
+        component: controller
     spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: flint-csi-controller
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
           imagePullPolicy: Always
+          env:
+            - name: CSI_MODE
+              value: "controller"
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
           args:
             - "--v={{ .Values.logLevel }}"
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalProvisioner.name }}:{{ .Values.csiSidecars.externalProvisioner.tag }}"
+          imagePullPolicy: Always
+          args:
             - "--csi-address=/csi/csi.sock"
-            - "--timeout=1m"
-            - "--leader-election"
+            - "--feature-gates=Topology=true"
+            - "--strict-topology"
+            - "--immediate-topology=false"
+            - "--v=5"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalAttacher.name }}:{{ .Values.csiSidecars.externalAttacher.tag }}"
+          imagePullPolicy: Always
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalResizer.name }}:{{ .Values.csiSidecars.externalResizer.tag }}"
+          imagePullPolicy: Always
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalSnapshotter.name }}:{{ .Values.csiSidecars.externalSnapshotter.tag }}"
+          imagePullPolicy: Always
+          args:
+            - "--csi-address=/csi/csi.sock"
+            - "--v=5"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
