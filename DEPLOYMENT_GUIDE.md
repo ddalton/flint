@@ -16,30 +16,48 @@ This guide provides instructions for building, deploying, and testing the SPDK C
 # Navigate to the CSI driver source
 cd spdk-csi-driver
 
-# Build all container images
-./scripts/build.sh
+# Build all images (CSI driver + dashboard)
+./scripts/build-all.sh [REGISTRY] [TAG]
+
+# Or build just dashboard images
+./scripts/build-dashboard.sh [REGISTRY] [TAG]
+
+# Examples:
+./scripts/build-all.sh flint latest
+./scripts/build-all.sh your-registry.com/flint v1.0.0
 
 # Or build individually:
+# CSI Driver images
 docker build -t flint/flint-controller:latest -f docker/Dockerfile.controller .
 docker build -t flint/flint-driver:latest -f docker/Dockerfile.csi .
 docker build -t flint/flint-node-agent:latest -f docker/Dockerfile.node-agent .
 docker build -t flint/spdk-tgt:latest -f docker/Dockerfile.spdk .
+
+# Dashboard images
+docker build -t flint/spdk-dashboard-backend:latest -f docker/Dockerfile.dashboard-backend .
+cd ../spdk-dashboard && docker build -t flint/spdk-dashboard-frontend:latest -f Dockerfile.frontend .
 ```
 
 ### 2. Push Images to Registry
 
 ```bash
-# Tag and push to your registry
-docker tag flint/flint-controller:latest your-registry.com/flint/flint-controller:latest
-docker tag flint/flint-driver:latest your-registry.com/flint/flint-driver:latest
-docker tag flint/flint-node-agent:latest your-registry.com/flint/flint-node-agent:latest
-docker tag flint/spdk-tgt:latest your-registry.com/flint/spdk-tgt:latest
+# If you built with a specific registry, push all images:
+REGISTRY="your-registry.com/flint"
+TAG="latest"
 
-# Push to registry
-docker push your-registry.com/flint/flint-controller:latest
-docker push your-registry.com/flint/flint-driver:latest
-docker push your-registry.com/flint/flint-node-agent:latest
-docker push your-registry.com/flint/spdk-tgt:latest
+# Push CSI driver images
+docker push ${REGISTRY}/flint-controller:${TAG}
+docker push ${REGISTRY}/flint-driver:${TAG}
+docker push ${REGISTRY}/flint-node-agent:${TAG}
+docker push ${REGISTRY}/spdk-tgt:${TAG}
+
+# Push dashboard images
+docker push ${REGISTRY}/spdk-dashboard-backend:${TAG}
+docker push ${REGISTRY}/spdk-dashboard-frontend:${TAG}
+
+# Or use the build script which shows push commands:
+./scripts/build-all.sh your-registry.com/flint latest
+# Then copy and run the push commands it outputs
 ```
 
 ### 3. Prepare Nodes
