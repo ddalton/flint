@@ -28,12 +28,12 @@ impl SpdkCsiDriver {
             return Ok(url.clone());
         }
 
-        println!("Discovering spdk-node-agent pod for node '{}'...", node_name);
+        println!("Discovering flint-csi-node pod for node '{}'...", node_name);
         let pods_api: Api<Pod> = Api::all(self.kube_client.clone());
-        let lp = kube::api::ListParams::default().labels("app=spdk-node-agent");
+        let lp = kube::api::ListParams::default().labels("app=flint-csi-node");
 
         let pods = pods_api.list(&lp).await
-            .map_err(|e| Status::internal(format!("Failed to list spdk-node-agent pods: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to list flint-csi-node pods: {}", e)))?;
 
         for pod in pods {
             let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
@@ -46,7 +46,7 @@ impl SpdkCsiDriver {
         }
 
         cache.get(node_name).cloned()
-            .ok_or_else(|| Status::not_found(format!("Could not find spdk-node-agent pod on node '{}'", node_name)))
+            .ok_or_else(|| Status::not_found(format!("Could not find flint-csi-node pod on node '{}'", node_name)))
     }
 
     /// Get node IP address from Kubernetes API

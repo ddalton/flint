@@ -349,7 +349,7 @@ async fn get_rpc_url_for_node(
     node_name: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let pods_api: Api<Pod> = Api::all(client.clone());
-    let lp = ListParams::default().labels("app=spdk-node-agent");
+    let lp = ListParams::default().labels("app=flint-csi-node");
 
     for pod in pods_api.list(&lp).await? {
         if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
@@ -359,7 +359,7 @@ async fn get_rpc_url_for_node(
         }
     }
 
-    Err(format!("Could not find spdk-node-agent pod on node '{}'", node_name).into())
+    Err(format!("Could not find flint-csi-node pod on node '{}'", node_name).into())
 }
 
 async fn create_replacement_lvol(

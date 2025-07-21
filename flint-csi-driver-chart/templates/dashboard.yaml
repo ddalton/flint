@@ -1,0 +1,219 @@
+{{- if .Values.dashboard.enabled }}
+# Dashboard Deployment for SPDK CSI Driver
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spdk-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-dashboard
+      component: dashboard
+  template:
+    metadata:
+      labels:
+        app: spdk-dashboard
+        component: dashboard
+    spec:
+      serviceAccountName: flint-csi-controller
+      containers:
+        - name: dashboard-backend
+          image: "{{ .Values.images.repository }}/{{ .Values.dashboard.image.name }}:{{ .Values.dashboard.image.tag }}"
+          imagePullPolicy: Always
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | default "info" | quote }}
+            - name: KUBE_NAMESPACE
+              value: {{ .Release.Namespace }}
+            - name: SPDK_NODE_URLS
+              value: ""  # Will auto-discover via K8s API
+          ports:
+            - name: api
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/dashboard
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/dashboard
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.dashboard.resources.backend | nindent 12 }}
+        - name: dashboard-frontend
+          image: "{{ .Values.images.repository }}/{{ .Values.dashboard.frontend.name }}:{{ .Values.dashboard.frontend.tag }}"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: REACT_APP_API_BASE_URL
+              value: "http://localhost:8080"
+            - name: NODE_ENV
+              value: "production"
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.dashboard.resources.frontend | nindent 12 }}
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: spdk-dashboard-nginx-config
+      {{- with .Values.dashboard.nodeSelector | default .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.tolerations | default .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.affinity | default .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+---
+# Dashboard Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: spdk-dashboard-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: dashboard
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: api
+      port: 8080
+      targetPort: api
+      protocol: TCP
+  selector:
+    app: spdk-dashboard
+    component: dashboard
+---
+# Optional: Ingress for external access
+{{- if .Values.dashboard.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: spdk-dashboard-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: dashboard
+  {{- with .Values.dashboard.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.dashboard.ingress.tls }}
+  tls:
+    {{- range .Values.dashboard.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.dashboard.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: spdk-dashboard-service
+                port:
+                  number: 80
+          {{- end }}
+    {{- end }}
+{{- end }}
+---
+# ConfigMap for nginx configuration (frontend proxy)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spdk-dashboard-nginx-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: dashboard
+data:
+  default.conf: |
+    server {
+        listen 3000;
+        server_name localhost;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Serve static files
+        location / {
+            try_files $uri $uri/ /index.html;
+            add_header Cache-Control "public, max-age=3600";
+        }
+
+        # Proxy API requests to backend
+        location /api/ {
+            proxy_pass http://localhost:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_timeout 60s;
+            proxy_read_timeout 60s;
+            proxy_send_timeout 60s;
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+{{- end }} 

@@ -46,17 +46,25 @@ docker push your-registry.com/flint/spdk-tgt:latest
 
 Follow the [Node Setup Guide](NODE_SETUP.md) to prepare your Kubernetes nodes.
 
-### 4. Deploy CSI Driver
+### 4. Deploy CSI Driver with Dashboard
 
 ```bash
-# Install using Helm
+# Navigate to the Helm chart directory
 cd flint-csi-driver-chart
 
-# Deploy with default configuration
+# Deploy with dashboard enabled (recommended)
 helm install flint-csi . \
   --namespace spdk-system \
   --create-namespace \
-  --set images.repository=your-registry.com/flint
+  --set images.repository=your-registry.com/flint \
+  --set dashboard.enabled=true
+
+# Deploy without dashboard
+helm install flint-csi . \
+  --namespace spdk-system \
+  --create-namespace \
+  --set images.repository=your-registry.com/flint \
+  --set dashboard.enabled=false
 
 # Or deploy with custom values
 helm install flint-csi . \
@@ -64,6 +72,12 @@ helm install flint-csi . \
   --create-namespace \
   --values custom-values.yaml
 ```
+
+The dashboard is **integrated into the main CSI driver chart** and shares:
+- Service account (`flint-csi-controller`) with proper RBAC permissions
+- Node selectors, tolerations, and affinity rules
+- Log levels and resource configurations
+- Namespace and cluster access
 
 ### 5. Verify Installation
 
@@ -79,6 +93,10 @@ kubectl get storageclass flint
 
 # Verify CRDs are installed
 kubectl get crd | grep flint.csi.storage.io
+
+# If dashboard is enabled, check dashboard deployment
+kubectl get deployment spdk-dashboard -n spdk-system
+kubectl get service spdk-dashboard-service -n spdk-system
 ```
 
 ## Custom Values Configuration
@@ -359,5 +377,54 @@ Follow the cleanup section in [Node Setup Guide](NODE_SETUP.md).
    - Optimize hugepage allocation
    - Tune SPDK configuration parameters
    - Monitor and adjust replica placement
+
+## Accessing the Dashboard
+
+If the dashboard is enabled, you can access it via port-forwarding:
+
+```bash
+# Port-forward to access the dashboard locally
+kubectl port-forward -n spdk-system service/spdk-dashboard-service 8080:80
+
+# Access the dashboard in your browser
+open http://localhost:8080
+```
+
+**Default login credentials:**
+- Username: `admin`
+- Password: `spdk-admin-2025`
+
+### Dashboard Features
+
+The dashboard provides:
+- **Volume Management**: View, create, and monitor SPDK volumes
+- **RAID Status**: Real-time RAID health and rebuild progress
+- **Disk Management**: NVMe device discovery and setup
+- **Node Metrics**: SPDK daemon performance metrics
+- **Snapshot Management**: Volume snapshot creation and tree visualization
+- **NVMe-oF Monitoring**: Target status and connection details
+
+### External Access via Ingress
+
+For production access, enable ingress in your values:
+
+```yaml
+dashboard:
+  enabled: true
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: nginx
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: spdk-dashboard.yourdomain.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: spdk-dashboard-tls
+        hosts:
+          - spdk-dashboard.yourdomain.com
+```
 
 For more detailed configuration options, refer to the Helm chart values and SPDK documentation. 

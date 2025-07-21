@@ -297,11 +297,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Discovers SPDK nodes by finding running node_agent pods via the Kubernetes API.
 async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-    println!("Discovering SPDK nodes by listing 'spdk-node-agent' pods...");
+    println!("Discovering SPDK nodes by listing 'flint-csi-node' pods...");
     let mut nodes = HashMap::new();
-    // Assumes node_agent pods are labeled with 'app=spdk-node-agent'.
+    // Assumes node_agent pods are labeled with 'app=flint-csi-node'.
     let pods_api: Api<Pod> = Api::all(client.clone());
-    let lp = ListParams::default().labels("app=spdk-node-agent");
+    let lp = ListParams::default().labels("app=flint-csi-node");
 
     let pods = pods_api.list(&lp).await?;
 
