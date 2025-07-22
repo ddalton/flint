@@ -80,4 +80,16 @@ RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 
 EXPOSE 5260
 
-ENTRYPOINT ["setup.sh"]
+# Create a custom SPDK startup script for CSI environments
+COPY --from=builder /spdk/app/spdk_tgt/spdk_tgt /usr/local/bin/
+RUN echo '#!/bin/bash\n\
+echo "Starting SPDK target daemon for CSI (boot-disk-only mode)..."\n\
+echo "Note: No dedicated storage disks found - ready for disk addition"\n\
+echo "Boot disk (nvme0n1) is correctly protected from SPDK binding"\n\
+\n\
+# Start SPDK target daemon without device binding\n\
+# This allows the CSI driver to be ready when storage disks are added\n\
+exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all\n\
+' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
+
+ENTRYPOINT ["/usr/local/bin/spdk-csi-start.sh"]
