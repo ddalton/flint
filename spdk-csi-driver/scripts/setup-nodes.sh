@@ -145,17 +145,23 @@ main() {
     echo "=== Setting up hugepages ==="
     echo "Setting up hugepages for SPDK..."
     
-    # Calculate reasonable hugepage allocation (1GB or 25% of RAM, whichever is smaller)
+    # Calculate SPDK-optimized hugepage allocation (2GB minimum, up to 4GB for large systems)
     total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     total_mem_gb=$((total_mem_kb / 1024 / 1024))
     
-    if [ $total_mem_gb -gt 4 ]; then
-        hugepage_gb=$(( total_mem_gb / 4 ))
-        if [ $hugepage_gb -gt 1 ]; then
-            hugepage_gb=1
-        fi
+    if [ $total_mem_gb -ge 128 ]; then
+        # Large production systems (≥128GB): allocate 4GB for optimal SPDK performance
+        hugepage_gb=4
+    elif [ $total_mem_gb -ge 64 ]; then
+        # Medium-large systems: allocate 3GB 
+        hugepage_gb=3
+    elif [ $total_mem_gb -ge 32 ]; then
+        # Medium systems: allocate 2GB (SPDK minimum recommended)
+        hugepage_gb=2
     else
+        # Smaller systems: allocate 1GB (may impact performance)
         hugepage_gb=1
+        echo "⚠️  Warning: Only ${total_mem_gb}GB RAM detected. 2GB hugepages recommended for SPDK."
     fi
     
     hugepages_2m=$((hugepage_gb * 512))  # 2MB pages

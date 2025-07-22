@@ -1561,15 +1561,17 @@ impl NodeAgent {
             return Ok(result);
         }
 
-        // Setup huge pages if requested
-        if let Some(huge_pages_mb) = request.huge_pages_mb {
-            match self.setup_huge_pages(huge_pages_mb).await {
-                Ok(configured) => {
-                    result.huge_pages_configured = Some(configured);
+        // Setup huge pages (always configure for SPDK optimization)
+        let hugepage_mb = request.huge_pages_mb.unwrap_or(0); // 0 will trigger auto-calculation
+        match self.setup_huge_pages(hugepage_mb).await {
+            Ok(configured) => {
+                result.huge_pages_configured = Some(configured);
+                if hugepage_mb == 0 {
+                    result.warnings.push(format!("Auto-configured {}MB hugepages for optimal SPDK performance", configured));
                 }
-                Err(e) => {
-                    result.warnings.push(format!("Huge pages setup warning: {}", e));
-                }
+            }
+            Err(e) => {
+                result.warnings.push(format!("Huge pages setup warning: {}", e));
             }
         }
 
@@ -1922,7 +1924,16 @@ impl NodeAgent {
     }
 
     async fn setup_huge_pages(&self, huge_pages_mb: u32) -> Result<u32, Box<dyn std::error::Error>> {
-        let huge_pages_2m = huge_pages_mb / 2; // 2MB pages
+        // Calculate optimal hugepage allocation for SPDK if not specified or too small
+        let optimal_mb = if huge_pages_mb == 0 || huge_pages_mb < 2048 {
+            self.calculate_optimal_hugepages().await?
+        } else {
+            huge_pages_mb
+        };
+        
+        let huge_pages_2m = optimal_mb / 2; // 2MB pages
+        
+        println!("Setting up {}MB ({}x2MB) hugepages for SPDK", optimal_mb, huge_pages_2m);
         
         // Set number of huge pages
         fs::write("/proc/sys/vm/nr_hugepages", huge_pages_2m.to_string())?;
@@ -1939,6 +1950,38 @@ impl NodeAgent {
             .unwrap_or(0) * 2;
 
         Ok(configured)
+    }
+
+    /// Calculate optimal hugepage allocation based on system memory for SPDK workloads
+    async fn calculate_optimal_hugepages(&self) -> Result<u32, Box<dyn std::error::Error>> {
+        // Read total system memory
+        let meminfo = fs::read_to_string("/proc/meminfo")?;
+        let total_mem_kb = meminfo
+            .lines()
+            .find(|line| line.starts_with("MemTotal:"))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(4 * 1024 * 1024); // Default to 4GB if parsing fails
+
+        let total_mem_gb = total_mem_kb / (1024 * 1024);
+        
+        let hugepage_mb = if total_mem_gb >= 128 {
+            // Large production systems (≥128GB): allocate 4GB for optimal SPDK performance
+            4096
+        } else if total_mem_gb >= 64 {
+            // Medium-large systems: allocate 3GB
+            3072
+        } else if total_mem_gb >= 32 {
+            // Medium systems: allocate 2GB (SPDK minimum recommended)
+            2048
+        } else {
+            // Smaller systems: allocate 1GB (may impact performance)
+            println!("⚠️  Warning: Only {}GB RAM detected. 2GB hugepages recommended for SPDK.", total_mem_gb);
+            1024
+        };
+
+        println!("Auto-calculated hugepages: {}MB for system with {}GB RAM", hugepage_mb, total_mem_gb);
+        Ok(hugepage_mb)
     }
 
     async fn reset_disks_to_kernel(&self, pci_addresses: Vec<String>) -> Result<DiskSetupResult, Box<dyn std::error::Error + Send + Sync>> {
