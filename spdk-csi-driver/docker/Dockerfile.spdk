@@ -59,6 +59,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pciutils \
     grep \
     util-linux \
+    openssl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled SPDK binaries from the builder stage
@@ -72,8 +74,11 @@ COPY --from=builder /spdk/scripts/setup.sh /usr/local/bin/
 COPY --from=builder /spdk/build/include/ /usr/local/include/
 COPY --from=builder /spdk/include/ /usr/local/include/
 
-# Create the runtime directories, just like in your working Dockerfile
-RUN mkdir -p /var/tmp /etc/spdk
+# Create the runtime directories and fix OpenSSL configuration
+RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
+    if [ ! -f /usr/lib/ssl/openssl.cnf ] && [ -f /etc/ssl/openssl.cnf ]; then \
+        ln -sf /etc/ssl/openssl.cnf /usr/lib/ssl/openssl.cnf; \
+    fi
 
 # Make the scripts executable
 RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
