@@ -29,7 +29,14 @@ async fn call_spdk_rpc(
         let socket_path = spdk_rpc_url.trim_start_matches("unix://");
         let mut stream = UnixStream::connect(socket_path)?;
         
-        let message = format!("{}\n", rpc_request.to_string());
+        // Convert to proper JSON-RPC 2.0 format
+        let jsonrpc_request = json!({
+            "jsonrpc": "2.0",
+            "method": rpc_request["method"],
+            "params": rpc_request.get("params").unwrap_or(&json!({})),
+            "id": 1
+        });
+        let message = format!("{}\n", jsonrpc_request.to_string());
         stream.write_all(message.as_bytes())?;
         
         let mut buffer = [0; 8192];
