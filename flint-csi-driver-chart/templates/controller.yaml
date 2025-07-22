@@ -38,7 +38,7 @@ spec:
             - "--v={{ .Values.logLevel }}"
           ports:
             - name: healthz
-              containerPort: 9808
+              containerPort: 9809
               protocol: TCP
           livenessProbe:
             httpGet:
