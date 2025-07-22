@@ -414,7 +414,8 @@ async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std:
             Ok(())
         }
         Err(e) => {
-        Err("Global blobstore sync failed".into())
+            Err("Global blobstore sync failed".into())
+        }
     }
 }
 
