@@ -57,6 +57,16 @@ priorityClassName: ""
 # CSI Driver configuration
 driver:
   name: "flint.csi.storage.io"
+  
+  # Topology configuration
+  # Set to true for self-managed clusters that allow topology.kubernetes.io/hostname labels
+  # Set to false for managed clusters (Rancher, EKS, GKE, AKS) that protect these labels
+  useHostnameTopology: false
+  
+  # Examples:
+  # Self-managed clusters (kubeadm, etc.): useHostnameTopology: true
+  # Rancher-managed clusters: useHostnameTopology: false
+  # EKS/GKE/AKS: useHostnameTopology: false
 
 # Storage class configuration
 storageClass:

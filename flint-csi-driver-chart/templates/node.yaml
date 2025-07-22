@@ -34,6 +34,8 @@ spec:
                   fieldPath: spec.nodeName
             - name: SPDK_RPC_URL
               value: "http://localhost:5260"
+            - name: USE_HOSTNAME_TOPOLOGY
+              value: "{{ .Values.driver.useHostnameTopology }}"
           securityContext:
             privileged: true
           ports:

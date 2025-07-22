@@ -32,6 +32,8 @@ spec:
               value: "controller"
             - name: CSI_ENDPOINT
               value: "unix:///csi/csi.sock"
+            - name: USE_HOSTNAME_TOPOLOGY
+              value: "{{ .Values.driver.useHostnameTopology }}"
           args:
             - "--v={{ .Values.logLevel }}"
           ports:

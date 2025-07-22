@@ -847,7 +847,20 @@ impl Node for NodeService {
     ) -> Result<Response<NodeGetInfoResponse>, Status> {
         // Get node topology information
         let mut topology = HashMap::new();
-        topology.insert("topology.kubernetes.io/hostname".to_string(), self.driver.node_id.clone());
+        
+        // Check if hostname topology is enabled via environment variable
+        // Set USE_HOSTNAME_TOPOLOGY=true for self-managed clusters
+        // Leave unset/false for managed clusters (Rancher, EKS, GKE, AKS)
+        let use_hostname_topology = std::env::var("USE_HOSTNAME_TOPOLOGY")
+            .unwrap_or_default()
+            .to_lowercase() == "true";
+            
+        if use_hostname_topology {
+            topology.insert("topology.kubernetes.io/hostname".to_string(), self.driver.node_id.clone());
+        } else {
+            // Safe fallback for managed clusters that protect topology.kubernetes.io labels
+            topology.insert("spdk.csi.storage.io/node".to_string(), self.driver.node_id.clone());
+        }
 
         // Try to get zone information
         if let Ok(zone) = std::env::var("NODE_ZONE") {

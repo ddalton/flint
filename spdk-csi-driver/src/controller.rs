@@ -384,10 +384,21 @@ impl ControllerService {
     }
 
     fn build_volume_topology(&self, replicas: &[Replica]) -> Vec<Topology> {
+        // Check if hostname topology is enabled via environment variable
+        let use_hostname_topology = std::env::var("USE_HOSTNAME_TOPOLOGY")
+            .unwrap_or_default()
+            .to_lowercase() == "true";
+            
+        let topology_key = if use_hostname_topology {
+            "topology.kubernetes.io/hostname"
+        } else {
+            "spdk.csi.storage.io/node"  // Safe for managed clusters
+        };
+        
         replicas.iter()
             .map(|replica| Topology {
                 segments: [(
-                    "topology.kubernetes.io/hostname".to_string(),
+                    topology_key.to_string(),
                     replica.node.clone(),
                 )].into_iter().collect(),
             })
