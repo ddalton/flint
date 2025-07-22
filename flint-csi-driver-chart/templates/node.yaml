@@ -107,6 +107,11 @@ spec:
           imagePullPolicy: Always
           securityContext:
             privileged: true
+          resources:
+            requests:
+              hugepages-2Mi: "1Gi"
+            limits:
+              hugepages-2Mi: "1Gi"
           volumeMounts:
             - name: device-dir
               mountPath: /dev
