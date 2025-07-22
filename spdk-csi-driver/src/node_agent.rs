@@ -845,9 +845,9 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         }
     }
     
-    // Also check for unbound NVMe devices that could be attached to SPDK
-    let unbound_devices = discover_unbound_nvme_devices().await?;
-    devices.extend(unbound_devices);
+    // Note: Unbound devices are NOT included in automatic discovery
+    // They are only available through the setup API via discover_all_disks()
+    // This prevents invalid SpdkDisk CRD creation for unbound devices
     
     Ok(devices)
 }
@@ -1262,17 +1262,35 @@ impl NodeAgent {
         // Get current driver
         let driver = self.get_current_driver(pci_addr).await?;
         
-        // Find associated block device
-        let device_name = self.find_nvme_device_name(pci_addr).await?;
-        
-        // Get device details
-        let (size_bytes, model, serial, firmware_version) = self.get_nvme_details(&device_name).await?;
-        
-        // Check for mounted partitions
-        let mounted_partitions = self.get_mounted_partitions(&device_name).await?;
-        
-        // Check if it's a system disk
-        let is_system_disk = self.is_system_disk(&device_name, &mounted_partitions).await?;
+        // Get device information - for unbound devices, use PCI info and reasonable defaults
+        let (device_name, size_bytes, model, serial, firmware_version, mounted_partitions, is_system_disk) = 
+            if driver == "unbound" {
+                // For unbound devices, use PCI address as device identifier
+                let device_name = format!("nvme-{}", pci_addr.replace(":", "-"));
+                
+                // Get estimated size from PCI config or use reasonable default for NVMe
+                let estimated_size = self.estimate_nvme_size_from_pci(pci_addr).await.unwrap_or(1_000_000_000_000); // 1TB default
+                
+                // Get model name from vendor/device ID lookup
+                let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+                
+                (
+                    device_name,
+                    estimated_size,
+                    model,
+                    "Unknown".to_string(), // Serial not available without binding
+                    "Unknown".to_string(), // Firmware not available without binding
+                    Vec::new(), // No mounted partitions for unbound devices
+                    false, // Unbound devices are never system disks
+                )
+            } else {
+                // For bound devices, get the actual block device information
+                let device_name = self.find_nvme_device_name(pci_addr).await?;
+                let (size_bytes, model, serial, firmware_version) = self.get_nvme_details(&device_name).await?;
+                let mounted_partitions = self.get_mounted_partitions(&device_name).await?;
+                let is_system_disk = self.is_system_disk(&device_name, &mounted_partitions).await?;
+                (device_name, size_bytes, model, serial, firmware_version, mounted_partitions, is_system_disk)
+            };
         
         // Determine if SPDK ready
         let spdk_ready = self.is_spdk_compatible_driver(&driver);
@@ -1393,6 +1411,52 @@ impl NodeAgent {
 
         let size_str = String::from_utf8(output.stdout)?;
         Ok(size_str.trim().parse()?)
+    }
+
+    async fn estimate_nvme_size_from_pci(&self, pci_addr: &str) -> Result<u64, Box<dyn std::error::Error>> {
+        // Try to get size information from PCI configuration or use lspci
+        let output = Command::new("lspci")
+            .args(["-v", "-s", pci_addr])
+            .output()?;
+
+        let stdout = String::from_utf8(output.stdout)?;
+        
+        // Look for memory regions that might indicate device size
+        // This is a rough estimation since NVMe size isn't directly in PCI config
+        for line in stdout.lines() {
+            if line.contains("Memory at") && line.contains("size=") {
+                // Extract size if available, but for NVMe this is typically not the storage size
+                // Fall back to common NVMe sizes
+                return Ok(1_000_000_000_000); // 1TB default
+            }
+        }
+        
+        // For AWS EBS NVMe devices, try to use common sizes
+        if stdout.contains("Amazon") {
+            // This could be enhanced to detect EBS volume sizes
+            return Ok(1_000_000_000_000); // 1TB default for unbound EBS volumes
+        }
+        
+        Ok(1_000_000_000_000) // 1TB default
+    }
+
+    async fn get_model_from_pci_ids(&self, vendor_id: &str, device_id: &str) -> String {
+        // Convert hex IDs to model names for common vendors
+        match (vendor_id.trim(), device_id.trim()) {
+            ("0x1d0f", "0x8061") => "Amazon Elastic Block Store".to_string(),
+            ("0x144d", _) => "Samsung NVMe SSD".to_string(),
+            ("0x15b7", _) => "SanDisk NVMe SSD".to_string(),
+            ("0x1344", _) => "Micron NVMe SSD".to_string(),
+            ("0x1179", _) => "Toshiba NVMe SSD".to_string(),
+            ("0x1c5c", _) => "SK Hynix NVMe SSD".to_string(),
+            ("0x1987", _) => "Phison NVMe SSD".to_string(),
+            ("0x1bb1", _) => "Seagate NVMe SSD".to_string(),
+            ("0x1f40", _) => "NETAC NVMe SSD".to_string(),
+            ("0x10ec", _) => "Realtek NVMe SSD".to_string(),
+            ("0x8086", _) => "Intel NVMe SSD".to_string(),
+            ("0x1cc1", _) => "ADATA NVMe SSD".to_string(),
+            _ => format!("NVMe SSD ({}:{})", vendor_id.trim(), device_id.trim()),
+        }
     }
 
     async fn get_mounted_partitions(&self, device_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -1551,29 +1615,43 @@ impl NodeAgent {
     async fn setup_single_disk(&self, pci_addr: &str, request: &DiskSetupRequest) -> Result<(), Box<dyn std::error::Error>> {
         let disk_info = self.get_disk_info(pci_addr).await?;
 
-        // Step 1: Backup data if requested
-        if request.backup_data && !disk_info.mounted_partitions.is_empty() {
-            self.backup_disk_data(&disk_info).await?;
+        // Validate the disk can be set up
+        if disk_info.is_system_disk {
+            return Err("Cannot setup system disk for SPDK".into());
         }
 
-        // Step 2: Unmount all partitions
-        if !disk_info.mounted_partitions.is_empty() {
+        if disk_info.spdk_ready {
+            return Err("Disk is already setup for SPDK".into());
+        }
+
+        // Step 1: If device is bound to nvme and has mounted partitions, handle them
+        if disk_info.driver == "nvme" && !disk_info.mounted_partitions.is_empty() {
+            if !request.force_unmount {
+                return Err(format!("Disk has mounted partitions: {:?}. Use force_unmount=true to proceed", disk_info.mounted_partitions).into());
+            }
+
+            // Backup data if requested
+            if request.backup_data {
+                self.backup_disk_data(&disk_info).await?;
+            }
+
+            // Unmount all partitions
             self.unmount_disk_partitions(&disk_info).await?;
         }
 
-        // Step 3: Unbind from current driver
+        // Step 2: Unbind from current driver (if bound)
         if disk_info.driver != "unbound" {
             self.unbind_from_driver(pci_addr, &disk_info.driver).await?;
         }
 
-        // Step 4: Load target driver module
-        let target_driver = request.driver_override.as_deref().unwrap_or(&"vfio-pci");
+        // Step 3: Load target driver module
+        let target_driver = request.driver_override.as_deref().unwrap_or("vfio-pci");
         self.load_driver_module(target_driver).await?;
 
-        // Step 5: Bind to new driver
+        // Step 4: Bind to SPDK-compatible driver
         self.bind_to_driver(pci_addr, target_driver).await?;
 
-        // Step 6: Verify setup
+        // Step 5: Verify setup
         tokio::time::sleep(Duration::from_secs(2)).await;
         self.verify_spdk_setup(pci_addr).await?;
 
