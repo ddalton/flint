@@ -17,20 +17,20 @@ detect_virtualization() {
            [[ $product == *"qemu"* ]] || \
            [[ $product == *"kvm"* ]] || \
            [[ $product == *"xen"* ]] || \
-           [[ $product == *"amazon ec2"* ]]; then
+           [[ $product == *"amazon ec2"* ]] || \
+           [[ $product == *"microsoft corporation"* ]]; then
             is_virtual=true
         fi
     fi
     
-    # Check for hypervisor flag in CPU
-    if grep -q "hypervisor" /proc/cpuinfo 2>/dev/null; then
+    # Check hypervisor presence
+    if [ -d /proc/xen ] || [ -e /sys/hypervisor/type ] || [ -d /sys/bus/vmbus/devices ]; then
         is_virtual=true
     fi
     
     # Check systemd-detect-virt if available
     if command -v systemd-detect-virt >/dev/null 2>&1; then
-        local virt_type=$(systemd-detect-virt 2>/dev/null || echo "none")
-        if [ "$virt_type" != "none" ]; then
+        if systemd-detect-virt -q; then
             is_virtual=true
         fi
     fi
@@ -38,122 +38,245 @@ detect_virtualization() {
     echo $is_virtual
 }
 
-# Function to check and install SPDK userspace drivers for bare metal
-setup_bare_metal_drivers() {
-    echo "=== Bare Metal SPDK Driver Setup ==="
-    echo "On bare metal, IOMMU is NOT required for SPDK!"
-    echo "We'll set up optimal userspace drivers..."
+# Function to build and install igb_uio
+setup_igb_uio() {
+    echo "🔧 Setting up igb_uio driver for bare metal SPDK..."
     
-    # 1. Check for uio_pci_generic (most common)
-    echo "Checking uio_pci_generic availability..."
-    if modprobe --dry-run uio_pci_generic >/dev/null 2>&1; then
-        echo "✅ uio_pci_generic is available (no IOMMU required)"
-        modprobe uio_pci_generic
+    # Install build dependencies
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "Installing build dependencies (Debian/Ubuntu)..."
+        apt-get update
+        apt-get install -y build-essential linux-headers-$(uname -r) git
+    elif command -v yum >/dev/null 2>&1; then
+        echo "Installing build dependencies (RHEL/CentOS)..."
+        yum groupinstall -y "Development Tools"
+        yum install -y kernel-devel-$(uname -r) git
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "Installing build dependencies (Fedora)..."
+        dnf groupinstall -y "Development Tools"
+        dnf install -y kernel-devel-$(uname -r) git
+    fi
+    
+    # Create temporary build directory
+    local build_dir="/tmp/spdk-drivers-$$"
+    mkdir -p "$build_dir"
+    cd "$build_dir"
+    
+    # Try community-maintained igb_uio first
+    echo "📦 Downloading community-maintained igb_uio..."
+    if git clone https://github.com/wkozaczuk/igb_uio.git; then
+        cd igb_uio
+        echo "🔨 Building igb_uio module..."
+        if make; then
+            echo "✅ Installing igb_uio module..."
+            make install
+            depmod -a
+            echo "✅ igb_uio installed successfully"
+            cd "$build_dir"
+        else
+            echo "⚠️  Failed to build community igb_uio, trying legacy DPDK..."
+            cd "$build_dir"
+            build_legacy_dpdk_igb_uio
+        fi
     else
-        echo "❌ uio_pci_generic not available in this kernel"
+        echo "⚠️  Failed to clone community igb_uio, trying legacy DPDK..."
+        build_legacy_dpdk_igb_uio
     fi
     
-    # 2. Check for igb_uio (better compatibility)
-    echo "Checking igb_uio availability..."
-    if modprobe --dry-run igb_uio >/dev/null 2>&1; then
-        echo "✅ igb_uio is available (no IOMMU required)"
-        modprobe igb_uio
-    else
-        echo "❌ igb_uio not available - can be installed from dpdk-kmods"
-        echo "To install igb_uio:"
-        echo "  git clone https://github.com/DPDK/dpdk-kmods.git"
-        echo "  cd dpdk-kmods/linux/igb_uio && make && sudo insmod igb_uio.ko"
-    fi
-    
-    # 3. Set up vfio with no-IOMMU mode as fallback
-    echo "Setting up VFIO no-IOMMU mode as fallback..."
-    if modprobe vfio-pci >/dev/null 2>&1; then
-        echo "1" > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
-        echo "✅ VFIO no-IOMMU mode enabled"
-    fi
-    
-    echo ""
-    echo "🎯 BARE METAL RECOMMENDATIONS:"
-    echo "1. Primary choice: uio_pci_generic (no IOMMU needed)"
-    echo "2. Alternative: igb_uio (better device compatibility)" 
-    echo "3. Fallback: vfio-pci no-IOMMU mode"
-    echo "4. Flint will auto-select the best available driver"
-    echo ""
+    # Clean up
+    cd /
+    rm -rf "$build_dir"
 }
 
-# Function to set up IOMMU for virtualized environments
-setup_virtualized_iommu() {
-    echo "=== Virtualized Environment IOMMU Setup ==="
-    echo "In VMs, IOMMU provides security isolation for SPDK"
+# Function to build igb_uio from legacy DPDK
+build_legacy_dpdk_igb_uio() {
+    echo "📦 Downloading DPDK 20.08 (last version with igb_uio)..."
     
-    # Check current IOMMU configuration
-    echo "Checking IOMMU configuration..."
-    if [ -d "/sys/kernel/iommu_groups" ]; then
-        iommu_groups=$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)
-        if [ $iommu_groups -gt 0 ]; then
-            echo "✅ IOMMU is already enabled ($iommu_groups groups)"
-            return 0
+    if wget -q https://fast.dpdk.org/rel/dpdk-20.08.tar.xz; then
+        tar xf dpdk-20.08.tar.xz
+        cd dpdk-20.08
+        
+        echo "🔨 Building DPDK with igb_uio..."
+        # Use legacy build system
+        make config T=x86_64-native-linux-gcc
+        make -j$(nproc)
+        
+        # Install the igb_uio module
+        if [ -f "x86_64-native-linux-gcc/kmod/igb_uio.ko" ]; then
+            cp x86_64-native-linux-gcc/kmod/igb_uio.ko /lib/modules/$(uname -r)/kernel/drivers/uio/
+            depmod -a
+            echo "✅ igb_uio from DPDK 20.08 installed successfully"
+        else
+            echo "❌ Failed to build igb_uio from DPDK"
+            return 1
+        fi
+    else
+        echo "❌ Failed to download DPDK 20.08"
+        return 1
+    fi
+}
+
+# Function to setup userspace drivers based on environment
+setup_userspace_drivers() {
+    local is_virtual=$(detect_virtualization)
+    
+    echo "🔍 Environment Detection:"
+    if [ "$is_virtual" = "true" ]; then
+        echo "   📱 Virtualized environment detected"
+        echo "   🔧 Will prioritize vfio-pci (requires IOMMU)"
+        setup_vfio_drivers
+    else
+        echo "   🖥️  Bare metal environment detected"
+        echo "   🔧 Will setup optimal drivers for bare metal"
+        setup_bare_metal_drivers
+    fi
+}
+
+# Function to setup VFIO drivers for virtualized environments
+setup_vfio_drivers() {
+    echo "🔧 Setting up VFIO drivers for virtualized environment..."
+    
+    # Load vfio modules
+    modprobe vfio-pci 2>/dev/null || echo "⚠️  vfio-pci module load failed"
+    modprobe vfio 2>/dev/null || echo "⚠️  vfio module load failed"
+    
+    # Check IOMMU groups
+    local iommu_groups=$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)
+    echo "   📊 IOMMU groups available: $iommu_groups"
+    
+    if [ "$iommu_groups" -eq 0 ]; then
+        echo "   ⚠️  Warning: No IOMMU groups found - vfio-pci may not work"
+        echo "   💡 Consider enabling IOMMU in BIOS/hypervisor settings"
+    fi
+}
+
+# Function to setup drivers for bare metal
+setup_bare_metal_drivers() {
+    echo "🔧 Setting up userspace drivers for bare metal..."
+    
+    # Try to load uio_pci_generic (preferred for bare metal)
+    if modprobe uio_pci_generic 2>/dev/null; then
+        echo "   ✅ uio_pci_generic loaded successfully (no IOMMU required)"
+    else
+        echo "   ⚠️  uio_pci_generic not available, building igb_uio..."
+        
+        # Build and install igb_uio for bare metal
+        if ! lsmod | grep -q igb_uio; then
+            setup_igb_uio
+        fi
+        
+        # Load igb_uio
+        if modprobe igb_uio 2>/dev/null; then
+            echo "   ✅ igb_uio loaded successfully"
+        else
+            echo "   ❌ Failed to load igb_uio, falling back to vfio-pci"
+            setup_vfio_drivers
         fi
     fi
     
-    echo "IOMMU is not enabled"
-    echo "IOMMU is required for SPDK vfio-pci driver in virtualized environments."
-    
-    # Configure IOMMU based on CPU type
-    echo "Configuring IOMMU..."
-    
-    # Detect CPU vendor
-    if grep -q "Intel" /proc/cpuinfo; then
-        IOMMU_PARAMS="intel_iommu=on iommu=pt"
-        echo "Detected Intel CPU - will configure with: $IOMMU_PARAMS"
-    elif grep -q "AMD" /proc/cpuinfo; then
-        IOMMU_PARAMS="amd_iommu=on iommu=pt"
-        echo "Detected AMD CPU - will configure with: $IOMMU_PARAMS"
-    else
-        IOMMU_PARAMS="iommu=pt"
-        echo "Unknown CPU - will configure with: $IOMMU_PARAMS"
-    fi
-    
-    # Update GRUB configuration
-    echo "Adding IOMMU parameters to GRUB configuration..."
-    if ! grep -q "$IOMMU_PARAMS" /etc/default/grub; then
-        sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/&$IOMMU_PARAMS /" /etc/default/grub
-        update-grub
-        echo "GRUB configuration updated successfully"
-        echo ""
-        echo "⚠️  REBOOT REQUIRED to enable IOMMU"
-        echo "After reboot, verify with: ls /sys/kernel/iommu_groups/ | wc -l"
-    else
-        echo "IOMMU parameters already present in GRUB configuration"
-    fi
+    # Also make vfio-pci available as fallback
+    modprobe vfio-pci 2>/dev/null || echo "   ⚠️  vfio-pci fallback not available"
 }
 
-# Main setup logic
-main() {
-    local is_virtual=$(detect_virtualization)
+# Function to detect CPU vendor and configure IOMMU if needed
+setup_iommu_if_needed() {
+    echo "🔍 Checking IOMMU configuration..."
     
-    echo "Environment detection:"
-    if [ "$is_virtual" = "true" ]; then
-        echo "🖥️  Detected: Virtualized environment"
-        setup_virtualized_iommu
-    else
-        echo "🔧 Detected: Bare metal environment"
-        setup_bare_metal_drivers
+    # Check if IOMMU is already enabled
+    local iommu_groups=$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)
+    
+    if [ "$iommu_groups" -gt 0 ]; then
+        echo "   ✅ IOMMU is already enabled ($iommu_groups groups)"
+        return 0
     fi
     
-    # Set up hugepages (required for both environments)
-    echo "=== Setting up hugepages ==="
-    echo "Setting up hugepages for SPDK..."
+    # Check if we're in a virtualized environment
+    local is_virtual=$(detect_virtualization)
+    if [ "$is_virtual" = "true" ]; then
+        echo "   🔍 Virtualized environment - IOMMU may be controlled by hypervisor"
+        
+        # Check if IOMMU parameters are in kernel command line
+        if grep -q "intel_iommu=on\|amd_iommu=on" /proc/cmdline; then
+            echo "   ⚠️  IOMMU parameters present but no groups - hypervisor may be blocking"
+        else
+            echo "   💡 Consider adding IOMMU parameters to kernel command line"
+        fi
+        return 0
+    fi
     
-    # Calculate SPDK-optimized hugepage allocation (2GB minimum, up to 4GB for large systems)
-    total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    total_mem_gb=$((total_mem_kb / 1024 / 1024))
+    echo "   ⚠️  IOMMU not enabled - configuring for bare metal..."
+    
+    # Detect CPU vendor
+    local cpu_vendor=$(lscpu | grep "Vendor ID" | awk '{print $3}')
+    local iommu_params=""
+    
+    case $cpu_vendor in
+        "GenuineIntel")
+            iommu_params="intel_iommu=on iommu=pt"
+            echo "   🔧 Detected Intel CPU - will configure with: $iommu_params"
+            ;;
+        "AuthenticAMD")
+            iommu_params="amd_iommu=on iommu=pt"
+            echo "   🔧 Detected AMD CPU - will configure with: $iommu_params"
+            ;;
+        *)
+            echo "   ❓ Unknown CPU vendor: $cpu_vendor - using Intel parameters"
+            iommu_params="intel_iommu=on iommu=pt"
+            ;;
+    esac
+    
+    # Check if IOMMU parameters are already in GRUB
+    if grep -q "$iommu_params" /etc/default/grub; then
+        echo "   ✅ IOMMU parameters already configured in GRUB"
+        echo "   💡 Reboot required to activate IOMMU"
+        return 0
+    fi
+    
+    echo "   🔧 Adding IOMMU parameters to GRUB configuration..."
+    
+    # Backup GRUB configuration
+    cp /etc/default/grub /etc/default/grub.backup.$(date +%Y%m%d_%H%M%S)
+    
+    # Add IOMMU parameters to GRUB_CMDLINE_LINUX_DEFAULT
+    if grep -q "GRUB_CMDLINE_LINUX_DEFAULT.*$iommu_params" /etc/default/grub; then
+        echo "   ✅ IOMMU parameters already present"
+    else
+        # Add parameters to existing GRUB_CMDLINE_LINUX_DEFAULT
+        sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 $iommu_params\"/" /etc/default/grub
+        echo "   ✅ IOMMU parameters added to GRUB configuration"
+    fi
+    
+    # Update GRUB
+    if command -v update-grub >/dev/null 2>&1; then
+        echo "   🔄 Updating GRUB configuration..."
+        update-grub
+    elif command -v grub2-mkconfig >/dev/null 2>&1; then
+        echo "   🔄 Updating GRUB2 configuration..."
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+    else
+        echo "   ⚠️  Could not find GRUB update command"
+        echo "   💡 Please manually update GRUB configuration"
+    fi
+    
+    echo "   ✅ GRUB configuration updated successfully"
+    echo ""
+    echo "   🔄 REBOOT REQUIRED to enable IOMMU"
+    echo "   💡 After reboot, IOMMU groups should be available for vfio-pci"
+}
+
+# Calculate SPDK-optimized hugepage allocation (2GB minimum, up to 4GB for large systems)
+setup_hugepages() {
+    echo "🔧 Setting up hugepages for SPDK..."
+    
+    # Get total memory in GB
+    local total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local total_mem_gb=$((total_mem_kb / 1024 / 1024))
     
     if [ $total_mem_gb -ge 128 ]; then
         # Large production systems (≥128GB): allocate 4GB for optimal SPDK performance
         hugepage_gb=4
     elif [ $total_mem_gb -ge 64 ]; then
-        # Medium-large systems: allocate 3GB 
+        # Medium-large systems: allocate 3GB
         hugepage_gb=3
     elif [ $total_mem_gb -ge 32 ]; then
         # Medium systems: allocate 2GB (SPDK minimum recommended)
@@ -161,43 +284,86 @@ main() {
     else
         # Smaller systems: allocate 1GB (may impact performance)
         hugepage_gb=1
-        echo "⚠️  Warning: Only ${total_mem_gb}GB RAM detected. 2GB hugepages recommended for SPDK."
+        echo "   ⚠️  Warning: Only ${total_mem_gb}GB RAM detected. 2GB hugepages recommended for SPDK."
     fi
     
-    hugepages_2m=$((hugepage_gb * 512))  # 2MB pages
+    echo "   📊 System RAM: ${total_mem_gb}GB"
+    echo "   🎯 Allocating: ${hugepage_gb}GB hugepages (~$(( hugepage_gb * 100 / total_mem_gb ))% of RAM)"
     
-    echo "Allocating ${hugepage_gb}GB (${hugepages_2m} x 2MB pages) for hugepages"
-    echo $hugepages_2m > /proc/sys/vm/nr_hugepages
+    # Calculate 2MB hugepages needed
+    local hugepages_needed=$((hugepage_gb * 1024 / 2))
+    
+    # Set hugepages
+    echo $hugepages_needed > /proc/sys/vm/nr_hugepages
     
     # Mount hugepages
-    if ! mount | grep -q hugetlbfs; then
-        mkdir -p /dev/hugepages
-        mount -t hugetlbfs hugetlbfs /dev/hugepages
-        echo "Hugepages mounted at /dev/hugepages"
+    mkdir -p /dev/hugepages
+    mount -t hugetlbfs hugetlbfs /dev/hugepages 2>/dev/null || echo "   ℹ️  Hugepages already mounted"
+    
+    # Verify hugepages
+    local configured_hugepages=$(cat /proc/sys/vm/nr_hugepages)
+    local configured_gb=$((configured_hugepages * 2 / 1024))
+    
+    echo "   ✅ Configured ${configured_hugepages} hugepages (${configured_gb}GB)"
+    
+    # Make hugepages persistent
+    if ! grep -q "vm.nr_hugepages" /etc/sysctl.conf; then
+        echo "vm.nr_hugepages=${hugepages_needed}" >> /etc/sysctl.conf
+        echo "   ✅ Made hugepages persistent across reboots"
     fi
     
-    # Verify allocation
-    actual_hugepages=$(cat /proc/sys/vm/nr_hugepages)
-    echo "Allocated hugepages: $actual_hugepages"
-    
+    # Add hugepages mount to fstab
+    if ! grep -q hugetlbfs /etc/fstab; then
+        echo "hugetlbfs /dev/hugepages hugetlbfs defaults 0 0" >> /etc/fstab
+        echo "   ✅ Added hugepages mount to fstab"
+    fi
+}
+
+# Main setup flow
+main() {
     echo ""
-    echo "🎉 SPDK CSI node setup completed!"
+    echo "🚀 SPDK CSI Node Setup"
+    echo "======================"
+    echo ""
+    
+    # Check if running as root
+    if [ "$EUID" -ne 0 ]; then
+        echo "❌ This script must be run as root"
+        exit 1
+    fi
+    
+    # Setup userspace drivers based on environment
+    setup_userspace_drivers
+    echo ""
+    
+    # Setup IOMMU if needed (mainly for bare metal)
+    setup_iommu_if_needed
+    echo ""
+    
+    # Setup hugepages
+    setup_hugepages
+    echo ""
+    
+    echo "✅ SPDK CSI node setup completed!"
     echo ""
     echo "📋 Summary:"
-    if [ "$is_virtual" = "true" ]; then
-        echo "- Environment: Virtualized (IOMMU recommended)"
-        echo "- Driver: vfio-pci (with IOMMU for security)"
-    else
-        echo "- Environment: Bare metal (IOMMU not required)"
-        echo "- Drivers: uio_pci_generic, igb_uio, or vfio-pci no-IOMMU"
-    fi
-    echo "- Hugepages: ${hugepage_gb}GB allocated"
-    echo "- Auto-detection: Flint will select optimal driver"
+    echo "   🔧 Userspace drivers configured for $([ "$(detect_virtualization)" = "true" ] && echo "virtualized" || echo "bare metal") environment"
+    echo "   📊 Hugepages: $(cat /proc/sys/vm/nr_hugepages) x 2MB = $(($(cat /proc/sys/vm/nr_hugepages) * 2 / 1024))GB"
+    echo "   🔍 IOMMU groups: $(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)"
     echo ""
-    echo "Next steps:"
-    echo "1. Deploy Flint CSI driver to Kubernetes"
-    echo "2. Flint will automatically choose the best SPDK driver"
-    echo "3. No manual driver selection needed!"
+    
+    # Check if reboot is needed
+    if [ "$(detect_virtualization)" = "false" ] && [ "$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)" -eq 0 ]; then
+        if grep -q "intel_iommu=on\|amd_iommu=on" /etc/default/grub; then
+            echo "🔄 REBOOT REQUIRED to activate IOMMU configuration"
+            echo ""
+        fi
+    fi
+    
+    echo "🎯 Next steps:"
+    echo "   1. If reboot required, reboot now: sudo reboot"
+    echo "   2. Deploy SPDK CSI driver: kubectl apply -f flint-csi-driver-chart/"
+    echo "   3. Verify driver status: kubectl get pods -n flint-system"
 }
 
 # Run main function
