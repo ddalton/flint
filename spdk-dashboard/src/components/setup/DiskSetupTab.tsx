@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { 
   useDiskSetup, 
+  useDashboardData,
   type UnimplementedDisk,
   type DiskSetupRequest,
   type DiskSetupResult
@@ -156,6 +157,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, setNodeData } = useDiskSetup();
+  const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -180,7 +182,12 @@ export const DiskSetupTab: React.FC = () => {
   const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult>>({});
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
-  const knownNodes = ['worker-node-1', 'worker-node-2', 'worker-node-3'];
+  // Get node names from dashboard API, fallback to mock node names for mock data alignment
+  const knownNodes = dashboardData?.nodes || [
+    'worker-node-1', 
+    'worker-node-2', 
+    'worker-node-3'
+  ];
 
   useEffect(() => {
     const initialData: Record<string, any> = {};
@@ -189,7 +196,7 @@ export const DiskSetupTab: React.FC = () => {
     });
     setNodeData(initialData);
     refreshAllNodes();
-  }, []);
+  }, [knownNodes]);
 
   const refreshAllNodes = async () => {
     setGlobalRefreshing(true);
