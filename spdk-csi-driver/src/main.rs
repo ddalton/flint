@@ -33,18 +33,10 @@ use csi_driver::csi::csi::v1::{
 async fn start_health_server(driver: Arc<SpdkCsiDriver>) {
     let health = warp::path("healthz")
         .and(warp::get())
-        .and_then(move || {
-            let driver_clone = driver.clone();
-            async move {
-                // Simple health check - verify we can connect to Kubernetes API
-                match driver_clone.kube_client.apiserver_version().await {
-                    Ok(_) => Ok(warp::reply::with_status("OK", warp::http::StatusCode::OK)),
-                    Err(_) => Ok(warp::reply::with_status(
-                        "Service Unavailable", 
-                        warp::http::StatusCode::SERVICE_UNAVAILABLE
-                    )),
-                }
-            }
+        .map(move || {
+            // Simple health check - always return OK for liveness probe
+            // The fact that the container is running means it's healthy
+            warp::reply::with_status("OK", warp::http::StatusCode::OK)
         });
 
     println!("Starting health server on port 9809");
