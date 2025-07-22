@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::transport::Server;
 use kube::Client;
+use warp::Filter;
 
 mod controller;
 mod node;
@@ -27,6 +28,30 @@ use csi_driver::csi::csi::v1::{
     identity_server::IdentityServer,
     node_server::NodeServer,
 };
+
+/// Simple health check endpoint for Kubernetes liveness probes
+async fn start_health_server(driver: Arc<SpdkCsiDriver>) {
+    let health = warp::path("healthz")
+        .and(warp::get())
+        .and_then(move || {
+            let driver_clone = driver.clone();
+            async move {
+                // Simple health check - verify we can connect to Kubernetes API
+                match driver_clone.kube_client.apiserver_version().await {
+                    Ok(_) => Ok(warp::reply::with_status("OK", warp::http::StatusCode::OK)),
+                    Err(_) => Ok(warp::reply::with_status(
+                        "Service Unavailable", 
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE
+                    )),
+                }
+            }
+        });
+
+    println!("Starting health server on port 9808");
+    warp::serve(health)
+        .run(([0, 0, 0, 0], 9808))
+        .await;
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,6 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
+    });
+    
+    // Start health server for Kubernetes liveness probes
+    let health_driver = driver.clone();
+    tokio::spawn(async move {
+        start_health_server(health_driver).await;
     });
     
     let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
