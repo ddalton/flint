@@ -469,7 +469,7 @@ async fn start_api_server(agent: NodeAgent) {
     let agent_filter = warp::any().map(move || agent.clone());
 
     let api = warp::path("api").and(
-        // Get all uninitialized disks
+        // Get all available disks for disk setup management
         warp::path("disks")
             .and(warp::path("uninitialized"))
             .and(warp::get())
@@ -555,7 +555,7 @@ async fn start_api_server(agent: NodeAgent) {
 
 // HTTP API handlers for disk setup operations
 async fn get_uninitialized_disks(agent: NodeAgent) -> Result<impl warp::Reply, warp::Rejection> {
-    match agent.discover_uninitialized_disks().await {
+    match agent.discover_all_disks().await {
         Ok(disks) => Ok(warp::reply::json(&json!({
             "success": true,
             "disks": disks,
@@ -1209,22 +1209,21 @@ async fn update_lvol_store_statistics(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
-    async fn discover_uninitialized_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut uninitialized_disks = Vec::new();
+    async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut all_disks = Vec::new();
         
         // Get all NVMe PCI devices
         let pci_devices = self.get_nvme_pci_devices().await?;
         
         for pci_addr in pci_devices {
-            if let Ok(disk_info) = self.get_uninitialized_disk_info(&pci_addr).await {
-                // Only include disks that are not already setup for SPDK and not system disks
-                if !disk_info.spdk_ready && !disk_info.is_system_disk {
-                    uninitialized_disks.push(disk_info);
-                }
+            if let Ok(disk_info) = self.get_disk_info(&pci_addr).await {
+                // Include ALL disks - the frontend will handle filtering and display based on disk type
+                // System disks will be shown but marked as non-selectable
+                all_disks.push(disk_info);
             }
         }
         
-        Ok(uninitialized_disks)
+        Ok(all_disks)
     }
 
     async fn get_nvme_pci_devices(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1244,7 +1243,7 @@ impl NodeAgent {
         Ok(devices)
     }
 
-    async fn get_uninitialized_disk_info(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error>> {
+    async fn get_disk_info(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error>> {
         let sysfs_path = format!("/sys/bus/pci/devices/{}", pci_addr);
         
         // Read PCI device information
@@ -1532,7 +1531,7 @@ impl NodeAgent {
     }
 
     async fn validate_disk_for_setup(&self, pci_addr: &str, force_unmount: bool) -> Result<(), Box<dyn std::error::Error>> {
-        let disk_info = self.get_uninitialized_disk_info(pci_addr).await?;
+        let disk_info = self.get_disk_info(pci_addr).await?;
 
         if disk_info.is_system_disk {
             return Err("Cannot setup system disk for SPDK".into());
@@ -1550,7 +1549,7 @@ impl NodeAgent {
     }
 
     async fn setup_single_disk(&self, pci_addr: &str, request: &DiskSetupRequest) -> Result<(), Box<dyn std::error::Error>> {
-        let disk_info = self.get_uninitialized_disk_info(pci_addr).await?;
+        let disk_info = self.get_disk_info(pci_addr).await?;
 
         // Step 1: Backup data if requested
         if request.backup_data && !disk_info.mounted_partitions.is_empty() {
@@ -1805,7 +1804,7 @@ impl NodeAgent {
         let mut disk_statuses = Vec::new();
 
         for pci_addr in all_pci_devices {
-            if let Ok(disk_info) = self.get_uninitialized_disk_info(&pci_addr).await {
+            if let Ok(disk_info) = self.get_disk_info(&pci_addr).await {
                 disk_statuses.push(json!({
                     "pci_address": disk_info.pci_address,
                     "device_name": disk_info.device_name,
