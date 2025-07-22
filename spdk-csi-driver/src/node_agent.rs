@@ -1424,6 +1424,20 @@ impl NodeAgent {
             }
         }
 
+        // Check for containerized system file bind mounts (common in Kubernetes)
+        let container_system_mounts = [
+            "/etc/resolv.conf", "/etc/hosts", "/etc/hostname", 
+            "/etc/passwd", "/etc/group", "/etc/shadow",
+            "/dev/termination-log"
+        ];
+        
+        for mount in mounted_partitions {
+            if container_system_mounts.contains(&mount.as_str()) {
+                println!("Detected system disk {} due to container system mount: {}", device_name, mount);
+                return Ok(true);
+            }
+        }
+
         // Check if device contains the root filesystem
         let output = Command::new("findmnt")
             .args(["-n", "-o", "SOURCE", "/"])
@@ -1432,6 +1446,26 @@ impl NodeAgent {
         let root_device = String::from_utf8(output.stdout)?;
         if root_device.contains(device_name) {
             return Ok(true);
+        }
+
+        // Additional check: see if this device is mounted to critical system paths
+        // by examining all mounts of this device
+        let mount_output = Command::new("mount")
+            .output()?;
+        
+        if mount_output.status.success() {
+            let mount_info = String::from_utf8(mount_output.stdout)?;
+            for line in mount_info.lines() {
+                if line.contains(device_name) {
+                    // Check if this device is mounted to any critical system location
+                    for critical_mount in &critical_mounts {
+                        if line.contains(&format!(" on {} ", critical_mount)) {
+                            println!("Detected system disk {} mounted on critical path: {}", device_name, critical_mount);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(false)
