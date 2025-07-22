@@ -20,7 +20,7 @@ use tokio::process::Command;
 async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &serde_json::Value,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     if spdk_rpc_url.starts_with("unix://") {
         // Unix socket connection
         use std::os::unix::net::UnixStream;
@@ -108,7 +108,7 @@ impl NodeService {
         }
 
         // Create RAID1 bdev
-        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+        call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
             "method": "bdev_raid_create",
             "params": {
                 "name": raid_name,
@@ -133,7 +133,7 @@ impl NodeService {
         target_port: &str,
         transport: &str,
     ) -> Result<(), Status> {
-        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+        call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": bdev_name,

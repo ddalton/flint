@@ -21,7 +21,7 @@ use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
 async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &serde_json::Value,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     if spdk_rpc_url.starts_with("unix://") {
         // Unix socket connection
         use std::os::unix::net::UnixStream;
@@ -113,7 +113,7 @@ struct NodeAgent {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let kube_client = Client::try_default().await?;
     let node_name = env::var("NODE_NAME")
         .or_else(|_| env::var("HOSTNAME"))
@@ -185,7 +185,7 @@ async fn run_metadata_sync_loop(agent: NodeAgent) {
 }
 
 /// Correctly sync blob metadata by directly accessing blobstores
-async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Starting direct blobstore metadata sync for node: {}", agent.node_name);
     
     // Step 1: Get all blobstores directly (not through bdevs)
@@ -240,7 +240,7 @@ async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std
 }
 
 // Fallback method if direct blobstore access isn't available
-async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Using fallback blobstore sync methods");
     
     // Method 1: Global blobstore sync (if available)
@@ -269,7 +269,7 @@ async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn st
 }
 
 // Sync lvol store metadata (which indirectly syncs underlying blobstores)
-async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
+async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let lvstores = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await {
         Ok(result) => result,
         Err(_) => return Ok(0),
@@ -321,7 +321,7 @@ async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::
 }
 
 // Last resort: Find blobstores through their underlying bdevs
-async fn sync_blobstores_via_bdevs(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
+async fn sync_blobstores_via_bdevs(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let bdevs = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await {
         Ok(result) => result,
         Err(_) => return Ok(0),
@@ -378,7 +378,7 @@ fn extract_blobstore_name(bdev: &serde_json::Value) -> Option<String> {
 }
 
 // Most robust approach: Try multiple methods in order of preference
-async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Starting robust blobstore metadata sync for node: {}", agent.node_name);
     
     // Try methods in order of preference:
@@ -405,7 +405,7 @@ async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error:
     sync_blob_metadata_fallback(agent).await
 }
 
-async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method": "blobstore_sync_all"})).await;
         
     match result {
@@ -413,7 +413,7 @@ async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std:
             println!("✓ Global blobstore sync successful");
             Ok(())
         }
-        Err(e) => {
+        Err(_e) => {
             Err("Global blobstore sync failed".into())
         }
     }
@@ -421,7 +421,7 @@ async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std:
 
 
 /// Enhanced shutdown handler that performs final metadata sync before exit
-async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Performing graceful shutdown with final metadata sync...");
     
     // Perform final metadata sync before shutdown
@@ -709,7 +709,7 @@ async fn proxy_spdk_rpc(
     }
 }
 
-async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let max_retries = 30; // 5 minutes
     
     for attempt in 1..=max_retries {
@@ -730,13 +730,13 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
                             let mut buffer = [0; 4096];
                             match stream.read(&mut buffer) {
                                 Ok(_) => Ok(()),
-                                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
                             }
                         }
-                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
                     }
                 }
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             }
         } else {
             // HTTP connection
@@ -749,7 +749,7 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
             {
                 Ok(response) if response.status().is_success() => Ok(()),
                 Ok(_) => Err("HTTP request failed".into()),
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             }
         };
         
@@ -771,7 +771,7 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut interval = interval(Duration::from_secs(agent.discovery_interval));
     
     // Run initial discovery immediately
@@ -788,7 +788,7 @@ async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::
     }
 }
 
-async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Discovering NVMe devices on node {}", agent.node_name);
     
     // Discover local NVMe devices
@@ -823,7 +823,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     Ok(())
 }
 
-async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error>> {
+async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
     // Get all NVMe controllers from local SPDK
     let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_nvme_get_controllers"
@@ -871,7 +871,7 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
     })
 }
 
-async fn discover_unbound_nvme_devices() -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error>> {
+async fn discover_unbound_nvme_devices() -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Command;
     
     // Use lspci to find NVMe devices
@@ -919,7 +919,7 @@ async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std
     })
 }
 
-async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error>> {
+async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let disk_name = format!("{}-{}", agent.node_name, device.controller_id);
     
     let spdk_disk = SpdkDisk::new_with_metadata(&disk_name, SpdkDiskSpec {
@@ -958,7 +958,7 @@ async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Res
     Ok(())
 }
 
-async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
+async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
@@ -999,7 +999,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     Ok(())
 }
 
-async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error>> {
+async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
     let disk_name = disk.metadata.name.as_ref().unwrap();
     
@@ -1054,7 +1054,7 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     Ok(())
 }
 
-async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error>> {
+async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Check if device is accessible via SPDK
     let bdev_name = format!("{}n1", device.controller_id);
     let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
@@ -1081,7 +1081,7 @@ async fn update_disk_blobstore_status(
     disk: &SpdkDisk, 
     initialized: bool,
     lvs_name: Option<String>
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
     let disk_name = disk.metadata.name.as_ref().unwrap();
     
@@ -1099,7 +1099,7 @@ async fn update_disk_blobstore_status(
     Ok(())
 }
 
-async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
+async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get I/O statistics from SPDK
     let iostat = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_get_iostat"
@@ -1150,7 +1150,7 @@ async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std:
 async fn update_lvol_store_statistics(
     agent: &NodeAgent,
     spdk_disks: &Api<SpdkDisk>
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get lvol store information
     let lvstores = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_get_lvstores"
@@ -1202,7 +1202,7 @@ async fn update_lvol_store_statistics(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
-    async fn discover_uninitialized_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error>> {
+    async fn discover_uninitialized_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
         let mut uninitialized_disks = Vec::new();
         
         // Get all NVMe PCI devices
@@ -1220,7 +1220,7 @@ impl NodeAgent {
         Ok(uninitialized_disks)
     }
 
-    async fn get_nvme_pci_devices(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    async fn get_nvme_pci_devices(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let output = Command::new("lspci")
             .args(["-D", "-d", "::0108"]) // NVMe class code
             .output()?;
@@ -1434,7 +1434,7 @@ impl NodeAgent {
         matches!(driver, "vfio-pci" | "uio_pci_generic" | "igb_uio")
     }
 
-    async fn setup_disks_for_spdk(&self, request: DiskSetupRequest) -> Result<DiskSetupResult, Box<dyn std::error::Error>> {
+    async fn setup_disks_for_spdk(&self, request: DiskSetupRequest) -> Result<DiskSetupResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = DiskSetupResult {
             success: true,
             setup_disks: Vec::new(),
@@ -1707,7 +1707,7 @@ impl NodeAgent {
         Ok(configured)
     }
 
-    async fn reset_disks_to_kernel(&self, pci_addresses: Vec<String>) -> Result<DiskSetupResult, Box<dyn std::error::Error>> {
+    async fn reset_disks_to_kernel(&self, pci_addresses: Vec<String>) -> Result<DiskSetupResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = DiskSetupResult {
             success: true,
             setup_disks: Vec::new(),
@@ -1759,7 +1759,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn get_all_disk_status(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    async fn get_all_disk_status(&self) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
         let all_pci_devices = self.get_nvme_pci_devices().await?;
         let mut disk_statuses = Vec::new();
 
