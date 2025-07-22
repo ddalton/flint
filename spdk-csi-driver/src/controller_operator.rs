@@ -354,7 +354,7 @@ async fn get_rpc_url_for_node(
     for pod in pods_api.list(&lp).await? {
         if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
             if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {
-                return Ok(format!("http://{}:5260", pod_ip));
+                return Ok(format!("http://{}:8081/api/spdk/rpc", pod_ip));
             }
         }
     }

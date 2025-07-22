@@ -547,6 +547,15 @@ async fn start_api_server(agent: NodeAgent) {
                 .and(agent_filter.clone())
                 .and_then(get_metadata_sync_status)
         )
+        .or(
+            // Generic SPDK RPC proxy for cross-node communication
+            warp::path("spdk")
+                .and(warp::path("rpc"))
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(agent_filter.clone())
+                .and_then(proxy_spdk_rpc)
+        )
     );
 
     let routes = api.with(cors);
@@ -696,6 +705,48 @@ async fn get_metadata_sync_status(agent: NodeAgent) -> Result<impl Reply, Reject
         "checked_at": Utc::now().to_rfc3339()
     }));
     Ok(reply::with_status(reply, StatusCode::OK))
+}
+
+/// Generic SPDK RPC proxy for cross-node communication
+/// Forwards JSON-RPC calls to the local SPDK instance via Unix socket
+async fn proxy_spdk_rpc(
+    rpc_request: serde_json::Value,
+    agent: NodeAgent
+) -> Result<impl Reply, Rejection> {
+    let http_client = HttpClient::new();
+    
+    // Forward the RPC call to local SPDK
+    match http_client
+        .post(&agent.spdk_rpc_url)
+        .json(&rpc_request)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            match response.json::<serde_json::Value>().await {
+                Ok(json_result) => {
+                    let reply = reply::json(&json_result);
+                    Ok(reply::with_status(reply, StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK)))
+                }
+                Err(e) => {
+                    let reply = reply::json(&json!({
+                        "error": format!("Failed to parse SPDK response: {}", e),
+                        "node": agent.node_name
+                    }));
+                    Ok(reply::with_status(reply, StatusCode::BAD_GATEWAY))
+                }
+            }
+        }
+        Err(e) => {
+            let reply = reply::json(&json!({
+                "error": format!("Failed to connect to SPDK: {}", e),
+                "node": agent.node_name,
+                "spdk_url": agent.spdk_rpc_url
+            }));
+            Ok(reply::with_status(reply, StatusCode::SERVICE_UNAVAILABLE))
+        }
+    }
 }
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {

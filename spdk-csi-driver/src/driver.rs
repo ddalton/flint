@@ -40,7 +40,7 @@ impl SpdkCsiDriver {
             let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref());
 
             if let (Some(p_node), Some(p_ip)) = (pod_node, pod_ip) {
-                let url = format!("http://{}:5260", p_ip);
+                let url = format!("http://{}:8081/api/spdk/rpc", p_ip);
                 cache.insert(p_node.to_string(), url);
             }
         }

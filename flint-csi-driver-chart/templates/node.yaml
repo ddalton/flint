@@ -33,7 +33,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: SPDK_RPC_URL
-              value: "http://localhost:5260"
+              value: "unix:///var/tmp/spdk.sock"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
           securityContext:
@@ -58,6 +58,8 @@ spec:
               mountPath: /csi
             - name: device-dir
               mountPath: /dev
+            - name: spdk-socket
+              mountPath: /var/tmp
         - name: node-driver-registrar
           image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
           imagePullPolicy: Always
@@ -87,7 +89,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: SPDK_RPC_URL
-              value: "http://localhost:5260"
+              value: "unix:///var/tmp/spdk.sock"
             - name: AUTO_INITIALIZE_BLOBSTORE
               value: "true"
             - name: API_PORT
@@ -104,6 +106,8 @@ spec:
               mountPath: /dev
             - name: sys-dir
               mountPath: /sys
+            - name: spdk-socket
+              mountPath: /var/tmp
         - name: spdk-tgt
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTgt.name }}:{{ .Values.images.spdkTgt.tag }}"
           imagePullPolicy: Always
@@ -123,6 +127,8 @@ spec:
               mountPath: /dev
             - name: hugepages
               mountPath: /dev/hugepages
+            - name: spdk-socket
+              mountPath: /var/tmp
       volumes:
         - name: kubelet-dir
           hostPath:
@@ -147,3 +153,5 @@ spec:
         - name: hugepages
           emptyDir:
             medium: HugePages
+        - name: spdk-socket
+          emptyDir: {}

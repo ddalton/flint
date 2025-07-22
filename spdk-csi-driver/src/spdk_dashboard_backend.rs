@@ -310,7 +310,7 @@ async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>,
         let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.clone());
 
         if let (Some(name), Some(ip)) = (node_name, pod_ip) {
-            let url = format!("http://{}:5260", ip);
+            let url = format!("http://{}:8081/api/spdk/rpc", ip);
             println!("Discovered SPDK node '{}' at '{}'", name, url);
             nodes.insert(name, url);
         }
