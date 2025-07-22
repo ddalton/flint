@@ -11,6 +11,7 @@ use chrono::Utc;
 use std::env;
 use std::sync::Arc;
 use spdk_csi_driver::models::*;
+use warp::Filter;
 
 struct Context {
     client: Client,
@@ -710,4 +711,67 @@ fn error_policy(obj: Arc<SpdkVolume>, error: &kube::Error, _ctx: Arc<Context>) -
             Action::requeue(Duration::from_secs(60))
         }
     }
+}
+
+/// Simple health check endpoint for Kubernetes liveness probes
+async fn start_health_server() {
+    let health = warp::path("healthz")
+        .and(warp::get())
+        .map(|| {
+            // Simple health check - always return OK for liveness probe
+            // The fact that the container is running means it's healthy
+            warp::reply::with_status("OK", warp::http::StatusCode::OK)
+        });
+
+    println!("Starting health server on port 9809");
+    warp::serve(health)
+        .run(([0, 0, 0, 0], 9809))
+        .await;
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let kube_client = Client::try_default().await?;
+    
+    let ctx = Arc::new(Context {
+        client: kube_client.clone(),
+        spdk_rpc_url: env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
+        health_interval: env::var("HEALTH_CHECK_INTERVAL")
+            .unwrap_or("30".to_string())
+            .parse()
+            .unwrap_or(30),
+        rebuild_enabled: env::var("REBUILD_ENABLED")
+            .unwrap_or("true".to_string())
+            .parse()
+            .unwrap_or(true),
+    });
+
+    // Start health server for Kubernetes liveness probes
+    tokio::spawn(async move {
+        start_health_server().await;
+    });
+
+    println!("Starting SPDK Volume Controller Operator...");
+
+    // Create the controller for SpdkVolume resources  
+    let api: Api<SpdkVolume> = Api::all(kube_client.clone());
+    let controller = Controller::new(api, watcher::Config::default())
+        .run(reconcile, error_policy, ctx.clone())
+        .for_each(|res| async move {
+            match res {
+                Ok(_) => {},
+                Err(e) => eprintln!("Controller error: {}", e),
+            }
+        });
+
+    // Start health monitoring task
+    let health_ctx = ctx.clone();
+    tokio::spawn(async move {
+        health_monitor_task(health_ctx).await;
+    });
+
+    // Run controller indefinitely
+    controller.await;
+    
+    Ok(())
 }
