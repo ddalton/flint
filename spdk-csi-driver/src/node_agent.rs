@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = NodeAgent {
         node_name: node_name.clone(),
         kube_client,
-        spdk_rpc_url: env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
+        spdk_rpc_url: env::var("SPDK_RPC_URL").unwrap_or("unix:///var/tmp/spdk.sock".to_string()),
         discovery_interval: env::var("DISK_DISCOVERY_INTERVAL")
             .unwrap_or("300".to_string())
             .parse()

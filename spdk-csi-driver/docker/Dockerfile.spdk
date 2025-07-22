@@ -70,6 +70,9 @@ COPY --from=builder /spdk/build/bin/ /usr/local/bin/
 COPY --from=builder /spdk/scripts/ /usr/local/scripts/
 COPY --from=builder /spdk/scripts/setup.sh /usr/local/bin/
 
+# Copy SPDK Python modules for RPC scripts
+COPY --from=builder /spdk/python/ /usr/local/lib/python3.12/dist-packages/
+
 # Copy SPDK headers and include files needed by setup.sh
 COPY --from=builder /spdk/build/include/ /usr/local/include/
 COPY --from=builder /spdk/include/ /usr/local/include/
@@ -93,8 +96,7 @@ echo "Note: No dedicated storage disks found - ready for disk addition"\n\
 echo "Boot disk (nvme0n1) is correctly protected from SPDK binding"\n\
 \n\
 # Start SPDK target daemon without device binding\n\
-# This allows the CSI driver to be ready when storage disks are added\n\
-# Use Unix socket for RPC (node-agent provides HTTP proxy for cross-node access)\n\
+# Use Unix socket only - node-agent provides HTTP proxy for remote access\n\
 exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 

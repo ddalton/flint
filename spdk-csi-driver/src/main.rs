@@ -47,9 +47,9 @@ async fn start_health_server(driver: Arc<SpdkCsiDriver>) {
             }
         });
 
-    println!("Starting health server on port 9808");
+    println!("Starting health server on port 9809");
     warp::serve(health)
-        .run(([0, 0, 0, 0], 9808))
+        .run(([0, 0, 0, 0], 9809))
         .await;
 }
 
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let driver = Arc::new(SpdkCsiDriver {
         node_id: node_id.clone(),
         kube_client,
-        spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("http://localhost:5260".to_string()),
+        spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("unix:///var/tmp/spdk.sock".to_string()),
         spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
