@@ -750,17 +750,51 @@ async fn proxy_spdk_rpc(
 }
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
     let max_retries = 30; // 5 minutes
     
     for attempt in 1..=max_retries {
-        match http_client
-            .post(&agent.spdk_rpc_url)
-            .json(&json!({"method": "spdk_get_version"}))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
+        // Check if we're using Unix socket or HTTP
+        let result = if agent.spdk_rpc_url.starts_with("unix://") {
+            // Unix socket connection
+            use std::os::unix::net::UnixStream;
+            use std::io::{Write, Read};
+            
+            let socket_path = agent.spdk_rpc_url.trim_start_matches("unix://");
+            match UnixStream::connect(socket_path) {
+                Ok(mut stream) => {
+                    let rpc_call = json!({"jsonrpc": "2.0", "method": "spdk_get_version", "id": 1});
+                    let message = format!("{}\n", rpc_call.to_string());
+                    
+                    match stream.write_all(message.as_bytes()) {
+                        Ok(_) => {
+                            let mut buffer = [0; 4096];
+                            match stream.read(&mut buffer) {
+                                Ok(_) => Ok(()),
+                                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                            }
+                        }
+                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+                    }
+                }
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+            }
+        } else {
+            // HTTP connection
+            let http_client = HttpClient::new();
+            match http_client
+                .post(&agent.spdk_rpc_url)
+                .json(&json!({"method": "spdk_get_version"}))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => Ok(()),
+                Ok(_) => Err("HTTP request failed".into()),
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error>)
+            }
+        };
+        
+        match result {
+            Ok(_) => {
                 println!("SPDK is ready on node {}", agent.node_name);
                 return Ok(());
             }
