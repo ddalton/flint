@@ -185,10 +185,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut spdk_nodes = HashMap::new();
     
     if let Ok(node_urls) = env::var("SPDK_NODE_URLS") {
-        for pair in node_urls.split(',') {
-            if let Some((node, url)) = pair.split_once('=') {
-                spdk_nodes.insert(node.to_string(), url.to_string());
+        if !node_urls.trim().is_empty() {
+            for pair in node_urls.split(',') {
+                if let Some((node, url)) = pair.split_once('=') {
+                    spdk_nodes.insert(node.to_string(), url.to_string());
+                }
             }
+        } else {
+            spdk_nodes = discover_spdk_nodes(&kube_client).await?;
         }
     } else {
         spdk_nodes = discover_spdk_nodes(&kube_client).await?;
