@@ -414,6 +414,12 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
     
     enhance_with_spdk_metrics(&mut dashboard_volumes, &mut dashboard_disks, state).await?;
     
+    // Include all discovered nodes, not just those with volumes/disks
+    let spdk_nodes = state.spdk_nodes.read().await;
+    for discovered_node in spdk_nodes.keys() {
+        nodes.insert(discovered_node.clone());
+    }
+    
     let dashboard_data = DashboardData {
         volumes: dashboard_volumes,
         disks: dashboard_disks,
