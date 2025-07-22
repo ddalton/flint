@@ -24,7 +24,7 @@ COPY --chown=65532:65532 proto/ ./proto/
 RUN cargo build --release --bin csi-driver
 
 # --- Runtime image ---
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Install runtime dependencies for the CSI driver
 RUN apt-get update && apt-get install -y \

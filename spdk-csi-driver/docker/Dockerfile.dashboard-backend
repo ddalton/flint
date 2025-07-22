@@ -23,7 +23,7 @@ COPY --chown=65532:65532 proto/ ./proto/
 RUN cargo build --release --bin spdk-dashboard-backend
 
 # --- Final Stage ---
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     curl \

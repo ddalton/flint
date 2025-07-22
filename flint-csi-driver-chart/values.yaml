@@ -4,7 +4,12 @@
 
 crds:
   # Set to false if you have already installed the snapshot CRDs in your cluster
-  install: true
+  # (they are often installed by RKE2, EKS, or other snapshot controllers)
+  installSnapshotCRDs: true
+  
+  # SPDK-specific CRDs are always needed for this CSI driver
+  # Set to false only if you've manually installed them already
+  installSpdkCRDs: true
 
 images:
   repository: flint  # Change this to your actual registry for production
