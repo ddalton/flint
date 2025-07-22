@@ -1644,18 +1644,134 @@ impl NodeAgent {
             self.unbind_from_driver(pci_addr, &disk_info.driver).await?;
         }
 
-        // Step 3: Load target driver module
-        let target_driver = request.driver_override.as_deref().unwrap_or("vfio-pci");
-        self.load_driver_module(target_driver).await?;
+        // Step 3: Choose optimal driver for environment
+        let target_driver = if let Some(override_driver) = &request.driver_override {
+            override_driver.clone()
+        } else {
+            self.select_optimal_spdk_driver().await?
+        };
 
-        // Step 4: Bind to SPDK-compatible driver
-        self.bind_to_driver(pci_addr, target_driver).await?;
+        // Step 4: Load target driver module
+        self.load_driver_module(&target_driver).await?;
 
-        // Step 5: Verify setup
+        // Step 5: Bind to SPDK-compatible driver
+        self.bind_to_driver(pci_addr, &target_driver).await?;
+
+        // Step 6: Verify setup
         tokio::time::sleep(Duration::from_secs(2)).await;
         self.verify_spdk_setup(pci_addr).await?;
 
         Ok(())
+    }
+
+    /// Select the optimal SPDK userspace driver for the current environment
+    async fn select_optimal_spdk_driver(&self) -> Result<String, Box<dyn std::error::Error>> {
+        // Check if we're in a virtualized environment
+        let is_virtualized = self.is_virtualized_environment().await?;
+        
+        if is_virtualized {
+            // In VMs, prefer vfio-pci for security isolation
+            if self.is_driver_available("vfio-pci").await? {
+                return Ok("vfio-pci".to_string());
+            }
+        } else {
+            // On bare metal, prioritize non-IOMMU drivers for performance
+            
+            // 1st choice: uio_pci_generic (most common, no IOMMU needed)
+            if self.is_driver_available("uio_pci_generic").await? {
+                println!("Using uio_pci_generic for bare metal SPDK (no IOMMU required)");
+                return Ok("uio_pci_generic".to_string());
+            }
+            
+            // 2nd choice: igb_uio (better compatibility than uio_pci_generic)
+            if self.is_driver_available("igb_uio").await? {
+                println!("Using igb_uio for bare metal SPDK (no IOMMU required)");
+                return Ok("igb_uio".to_string());
+            }
+            
+            // 3rd choice: vfio-pci with no-IOMMU mode
+            if self.is_vfio_noiommu_available().await? {
+                println!("Using vfio-pci in no-IOMMU mode for bare metal");
+                return Ok("vfio-pci".to_string());
+            }
+        }
+
+        // Fallback to vfio-pci (will likely fail if no IOMMU)
+        Ok("vfio-pci".to_string())
+    }
+
+    /// Check if we're running in a virtualized environment
+    async fn is_virtualized_environment(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        // Check common virtualization indicators
+        
+        // 1. Check DMI system information
+        if let Ok(product_name) = fs::read_to_string("/sys/class/dmi/id/product_name") {
+            let product = product_name.trim().to_lowercase();
+            if product.contains("virtualbox") || 
+               product.contains("vmware") || 
+               product.contains("qemu") ||
+               product.contains("kvm") ||
+               product.contains("xen") ||
+               product.contains("amazon ec2") {
+                return Ok(true);
+            }
+        }
+
+        // 2. Check for hypervisor flag in CPU
+        if let Ok(output) = Command::new("grep")
+            .args(["-q", "hypervisor", "/proc/cpuinfo"])
+            .output() {
+            if output.status.success() {
+                return Ok(true);
+            }
+        }
+
+        // 3. Check for virtualization in systemd-detect-virt
+        if let Ok(output) = Command::new("systemd-detect-virt")
+            .output() {
+            if output.status.success() {
+                let virt_type = String::from_utf8_lossy(&output.stdout).trim();
+                return Ok(virt_type != "none");
+            }
+        }
+
+        // Default to bare metal if detection fails
+        Ok(false)
+    }
+
+    /// Check if a specific kernel driver is available
+    async fn is_driver_available(&self, driver: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        // Try to load the module (won't load if already loaded)
+        let output = Command::new("modprobe")
+            .arg("--dry-run")
+            .arg(driver)
+            .output()?;
+
+        Ok(output.status.success())
+    }
+
+    /// Check if VFIO no-IOMMU mode is available
+    async fn is_vfio_noiommu_available(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        // Check if vfio-pci is available
+        if !self.is_driver_available("vfio-pci").await? {
+            return Ok(false);
+        }
+
+        // Check if no-IOMMU mode can be enabled
+        let noiommu_path = "/sys/module/vfio/parameters/enable_unsafe_noiommu_mode";
+        if Path::new(noiommu_path).exists() {
+            // Try to enable no-IOMMU mode
+            if fs::write(noiommu_path, "1").is_ok() {
+                return Ok(true);
+            }
+        }
+
+        // Try loading vfio with no-IOMMU parameter
+        let output = Command::new("modprobe")
+            .args(["vfio", "enable_unsafe_noiommu_mode=1"])
+            .output()?;
+
+        Ok(output.status.success())
     }
 
     async fn backup_disk_data(&self, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error>> {
