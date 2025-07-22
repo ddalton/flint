@@ -109,9 +109,13 @@ spec:
             privileged: true
           resources:
             requests:
-              hugepages-2Mi: "1Gi"
+              memory: "1Gi"
+              cpu: "500m"
+              hugepages-2Mi: "2Gi"
             limits:
-              hugepages-2Mi: "1Gi"
+              memory: "2Gi"
+              cpu: "1000m"
+              hugepages-2Mi: "2Gi"
           volumeMounts:
             - name: device-dir
               mountPath: /dev

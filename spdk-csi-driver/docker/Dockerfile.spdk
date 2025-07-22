@@ -60,14 +60,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the compiled SPDK binaries from the builder stage
 COPY --from=builder /spdk/build/bin/ /usr/local/bin/
 
-# Copy the setup script from the builder stage
+# Copy the setup script and entire scripts directory from the builder stage
+COPY --from=builder /spdk/scripts/ /usr/local/scripts/
 COPY --from=builder /spdk/scripts/setup.sh /usr/local/bin/
 
 # Create the runtime directories, just like in your working Dockerfile
 RUN mkdir -p /var/tmp /etc/spdk
 
-# Make the script executable
-RUN chmod +x /usr/local/bin/setup.sh
+# Make the scripts executable
+RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 
 EXPOSE 5260
 
