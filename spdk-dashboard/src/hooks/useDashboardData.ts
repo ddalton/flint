@@ -960,7 +960,7 @@ export const useDiskSetup = () => {
       }));
 
       try {
-        const response = await fetch(`http://localhost:8081/api/disks/uninitialized?node=${nodeName}`);
+        const response = await fetch(`/api/nodes/${nodeName}/disks/uninitialized`);
         if (response.ok) {
           const data = await response.json();
           if (data.success && data.disks) {
@@ -1015,10 +1015,10 @@ export const useDiskSetup = () => {
     request: DiskSetupRequest
   ): Promise<DiskSetupResult> => {
     try {
-      const response = await fetch(`http://localhost:8081/api/disks/setup`, {
+      const response = await fetch(`/api/nodes/${nodeName}/disks/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...request, node: nodeName })
+        body: JSON.stringify(request)
       });
 
       if (response.ok) {
@@ -1082,10 +1082,10 @@ export const useDiskSetup = () => {
     pciAddresses: string[]
   ): Promise<DiskSetupResult> => {
     try {
-      const response = await fetch(`http://localhost:8081/api/disks/reset`, {
+      const response = await fetch(`/api/nodes/${nodeName}/disks/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pci_addresses: pciAddresses, node: nodeName })
+        body: JSON.stringify({ pci_addresses: pciAddresses })
       });
 
       if (response.ok) {

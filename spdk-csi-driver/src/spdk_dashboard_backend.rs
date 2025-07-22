@@ -264,6 +264,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_node_raid_status)
         )
         .or(
+            // Disk setup APIs - proxy to node-agents
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("disks"))
+                .and(warp::path("uninitialized"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_node_uninitialized_disks)
+        )
+        .or(
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("disks"))
+                .and(warp::path("setup"))
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(setup_node_disks)
+        )
+        .or(
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("disks"))
+                .and(warp::path("reset"))
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(reset_node_disks)
+        )
+        .or(
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("disks"))
+                .and(warp::path("status"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_node_disk_status)
+        )
+        .or(
+            // Get all nodes disk info for setup page
+            warp::path("disks")
+                .and(warp::path("setup"))
+                .and(warp::path("nodes"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_all_nodes_disk_setup)
+        )
+        .or(
             warp::path("snapshots")
                 .and(warp::get())
                 .and(state_filter.clone())
@@ -1426,4 +1474,221 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
     }
 
     Ok(warp::reply::json(&tree))
+}
+
+// Disk setup proxy handlers - forward requests to node-agents
+async fn get_node_uninitialized_disks(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
+        let http_client = HttpClient::new();
+        
+        match http_client
+            .get(&format!("{}/api/disks/uninitialized", node_agent_url))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(data) => Ok(warp::reply::json(&data)),
+                        Err(_) => Ok(warp::reply::json(&json!({
+                            "success": false,
+                            "error": "Failed to parse node-agent response",
+                            "node": node
+                        })))
+                    }
+                } else {
+                    Ok(warp::reply::json(&json!({
+                        "success": false,
+                        "error": format!("Node-agent returned status: {}", response.status()),
+                        "node": node
+                    })))
+                }
+            }
+            Err(e) => Ok(warp::reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to node-agent: {}", e),
+                "node": node
+            })))
+        }
+    } else {
+        Ok(warp::reply::json(&json!({
+            "success": false,
+            "error": "Node-agent not found",
+            "node": node
+        })))
+    }
+}
+
+async fn setup_node_disks(node: String, request: serde_json::Value, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
+        let http_client = HttpClient::new();
+        
+        match http_client
+            .post(&format!("{}/api/disks/setup", node_agent_url))
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => Ok(warp::reply::json(&data)),
+                    Err(_) => Ok(warp::reply::json(&json!({
+                        "success": false,
+                        "error": "Failed to parse node-agent response",
+                        "node": node
+                    })))
+                }
+            }
+            Err(e) => Ok(warp::reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to node-agent: {}", e),
+                "node": node
+            })))
+        }
+    } else {
+        Ok(warp::reply::json(&json!({
+            "success": false,
+            "error": "Node-agent not found", 
+            "node": node
+        })))
+    }
+}
+
+async fn reset_node_disks(node: String, request: serde_json::Value, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
+        let http_client = HttpClient::new();
+        
+        match http_client
+            .post(&format!("{}/api/disks/reset", node_agent_url))
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => Ok(warp::reply::json(&data)),
+                    Err(_) => Ok(warp::reply::json(&json!({
+                        "success": false,
+                        "error": "Failed to parse node-agent response",
+                        "node": node
+                    })))
+                }
+            }
+            Err(e) => Ok(warp::reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to node-agent: {}", e),
+                "node": node
+            })))
+        }
+    } else {
+        Ok(warp::reply::json(&json!({
+            "success": false,
+            "error": "Node-agent not found",
+            "node": node
+        })))
+    }
+}
+
+async fn get_node_disk_status(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
+        let http_client = HttpClient::new();
+        
+        match http_client
+            .get(&format!("{}/api/disks/status", node_agent_url))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(data) => Ok(warp::reply::json(&data)),
+                        Err(_) => Ok(warp::reply::json(&json!({
+                            "success": false,
+                            "error": "Failed to parse node-agent response",
+                            "node": node
+                        })))
+                    }
+                } else {
+                    Ok(warp::reply::json(&json!({
+                        "success": false,
+                        "error": format!("Node-agent returned status: {}", response.status()),
+                        "node": node
+                    })))
+                }
+            }
+            Err(e) => Ok(warp::reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to node-agent: {}", e),
+                "node": node
+            })))
+        }
+    } else {
+        Ok(warp::reply::json(&json!({
+            "success": false,
+            "error": "Node-agent not found",
+            "node": node
+        })))
+    }
+}
+
+async fn get_all_nodes_disk_setup(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let http_client = HttpClient::new();
+    let mut all_nodes_data = json!({});
+    
+    for (node_name, node_agent_url) in spdk_nodes.iter() {
+        let node_agent_base = get_node_agent_url(&spdk_nodes, node_name).unwrap_or_default();
+        
+        // Get uninitialized disks for this node
+        match http_client
+            .get(&format!("{}/api/disks/uninitialized", node_agent_base))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        all_nodes_data[node_name] = data;
+                    }
+                    Err(_) => {
+                        all_nodes_data[node_name] = json!({
+                            "success": false,
+                            "error": "Failed to parse response",
+                            "node": node_name,
+                            "disks": []
+                        });
+                    }
+                }
+            }
+            _ => {
+                all_nodes_data[node_name] = json!({
+                    "success": false,
+                    "error": "Failed to connect to node-agent",
+                    "node": node_name,
+                    "disks": []
+                });
+            }
+        }
+    }
+    
+    Ok(warp::reply::json(&json!({
+        "success": true,
+        "nodes": all_nodes_data
+    })))
+}
+
+// Helper function to get node-agent URL from SPDK RPC URL
+fn get_node_agent_url(spdk_nodes: &HashMap<String, String>, node: &str) -> Option<String> {
+    if let Some(spdk_rpc_url) = spdk_nodes.get(node) {
+        // spdk_rpc_url is like "http://10.42.1.15:8081/api/spdk/rpc"
+        // We need "http://10.42.1.15:8081" for node-agent APIs
+        if let Some(base_url) = spdk_rpc_url.split("/api/spdk/rpc").next() {
+            return Some(base_url.to_string());
+        }
+    }
+    None
 }
