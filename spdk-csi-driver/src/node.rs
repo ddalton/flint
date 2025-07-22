@@ -16,6 +16,46 @@ use chrono::Utc;
 use tokio::fs;
 use tokio::process::Command;
 
+/// Unified SPDK RPC helper that works with both Unix sockets and HTTP
+async fn call_spdk_rpc(
+    spdk_rpc_url: &str,
+    rpc_request: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if spdk_rpc_url.starts_with("unix://") {
+        // Unix socket connection
+        use std::os::unix::net::UnixStream;
+        use std::io::{Write, Read};
+        
+        let socket_path = spdk_rpc_url.trim_start_matches("unix://");
+        let mut stream = UnixStream::connect(socket_path)?;
+        
+        let message = format!("{}\n", rpc_request.to_string());
+        stream.write_all(message.as_bytes())?;
+        
+        let mut buffer = [0; 8192];
+        let bytes_read = stream.read(&mut buffer)?;
+        let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+        
+        let response: serde_json::Value = serde_json::from_str(&response_str)?;
+        Ok(response)
+    } else {
+        // HTTP connection
+        let http_client = HttpClient::new();
+        let response = http_client
+            .post(spdk_rpc_url)
+            .json(rpc_request)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Err(format!("HTTP request failed with status: {}", response.status()).into());
+        }
+        
+        let json_response: serde_json::Value = response.json().await?;
+        Ok(json_response)
+    }
+}
+
 pub struct NodeService {
     driver: Arc<SpdkCsiDriver>,
 }
@@ -31,7 +71,6 @@ impl NodeService {
             return Err(Status::invalid_argument("Cannot create RAID1 for single replica volume"));
         }
 
-        let http_client = HttpClient::new();
         let raid_name = &volume.spec.volume_id;
         let mut base_bdevs = Vec::new();
 
@@ -69,26 +108,17 @@ impl NodeService {
         }
 
         // Create RAID1 bdev
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_create",
-                "params": {
-                    "name": raid_name,
-                    "raid_level": 1,
-                    "base_bdevs": base_bdevs,
-                    "strip_size_kb": 64,
-                    "superblock": true
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(Status::internal(format!("Failed to create RAID1 bdev: {}", error_text)));
-        }
+        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+            "method": "bdev_raid_create",
+            "params": {
+                "name": raid_name,
+                "raid_level": 1,
+                "base_bdevs": base_bdevs,
+                "strip_size_kb": 64,
+                "superblock": true
+            }
+        })).await
+        .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
 
         println!("Created RAID1 bdev '{}' with base bdevs: {:?}", raid_name, base_bdevs);
         Ok(raid_name.clone())
@@ -103,29 +133,18 @@ impl NodeService {
         target_port: &str,
         transport: &str,
     ) -> Result<(), Status> {
-        let http_client = HttpClient::new();
-        
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_nvme_attach_controller",
-                "params": {
-                    "name": bdev_name,
-                    "trtype": transport.to_uppercase(),
-                    "traddr": target_ip,
-                    "trsvcid": target_port,
-                    "subnqn": nqn,
-                    "adrfam": "ipv4"
-                }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to connect NVMe-oF: {}", e)))?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(Status::internal(format!("Failed to attach NVMe-oF controller: {}", error_text)));
-        }
+        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": bdev_name,
+                "trtype": transport.to_uppercase(),
+                "traddr": target_ip,
+                "trsvcid": target_port,
+                "subnqn": nqn,
+                "adrfam": "ipv4"
+            }
+        })).await
+        .map_err(|e| Status::internal(format!("Failed to connect NVMe-oF: {}", e)))?;
 
         println!("Connected to NVMe-oF target: {} -> {}", nqn, bdev_name);
         Ok(())
@@ -133,25 +152,17 @@ impl NodeService {
 
     /// Deletes the RAID1 bdev and disconnects NVMe-oF targets
     async fn cleanup_raid1_bdev(&self, volume: &SpdkVolume) -> Result<(), Status> {
-        let http_client = HttpClient::new();
         let raid_name = &volume.spec.volume_id;
 
         // Delete RAID1 bdev
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_raid_delete",
-                "params": { "name": raid_name }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
+        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+            "method": "bdev_raid_delete",
+            "params": { "name": raid_name }
+        })).await;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            eprintln!("Warning: Failed to delete RAID1 bdev {}: {}", raid_name, error_text);
-        } else {
-            println!("Deleted RAID1 bdev: {}", raid_name);
+        match result {
+            Ok(_) => println!("Successfully deleted RAID1 bdev: {}", raid_name),
+            Err(e) => eprintln!("Warning: Failed to delete RAID1 bdev {}: {}", raid_name, e),
         }
 
         // Disconnect remote NVMe-oF targets
@@ -159,22 +170,14 @@ impl NodeService {
             if replica.node != self.driver.node_id {
                 let nvmf_bdev_name = format!("nvmf_{}", replica.raid_member_index);
                 
-                let response = http_client
-                    .post(&self.driver.spdk_rpc_url)
-                    .json(&json!({
-                        "method": "bdev_nvme_detach_controller",
-                        "params": { "name": nvmf_bdev_name }
-                    }))
-                    .send()
-                    .await;
+                let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+                    "method": "bdev_nvme_detach_controller",
+                    "params": { "name": nvmf_bdev_name }
+                })).await;
 
-                match response {
-                    Ok(resp) if resp.status().is_success() => {
+                match result {
+                    Ok(_) => {
                         println!("Disconnected NVMe-oF target: {}", nvmf_bdev_name);
-                    }
-                    Ok(resp) => {
-                        let error_text = resp.text().await.unwrap_or_default();
-                        eprintln!("Warning: Failed to disconnect NVMe-oF {}: {}", nvmf_bdev_name, error_text);
                     }
                     Err(e) => {
                         eprintln!("Warning: Error disconnecting NVMe-oF {}: {}", nvmf_bdev_name, e);
@@ -426,30 +429,23 @@ impl NodeService {
 
     /// Disconnect from a remote NVMe-oF bdev
     async fn disconnect_nvmeof_bdev(&self, bdev_name: &str) -> Result<(), Status> {
-        let http_client = HttpClient::new();
-        
         println!("Disconnecting NVMe-oF bdev: {}", bdev_name);
         
-        let response = http_client
-            .post(&self.driver.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_nvme_detach_controller",
-                "params": {
-                    "name": bdev_name
-                }
-            }))
-            .send()
-            .await;
+        let result = call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+            "method": "bdev_nvme_detach_controller",
+            "params": {
+                "name": bdev_name
+            }
+        })).await;
 
-        match response {
-            Ok(resp) if !resp.status().is_success() => {
-                let error_text = resp.text().await.unwrap_or_default();
-                if !error_text.contains("No such device") {
-                    eprintln!("Warning: Failed to detach NVMe-oF controller {}: {}", bdev_name, error_text);
+        match result {
+            Ok(_) => println!("Successfully disconnected NVMe-oF bdev: {}", bdev_name),
+            Err(e) => {
+                let error_msg = e.to_string();
+                if !error_msg.contains("No such device") {
+                    eprintln!("Warning: Failed to detach NVMe-oF controller {}: {}", bdev_name, error_msg);
                 }
             }
-            Err(e) => eprintln!("Warning: Failed to detach NVMe-oF controller {}: {}", bdev_name, e),
-            _ => println!("Successfully disconnected NVMe-oF bdev: {}", bdev_name),
         }
         
         Ok(())

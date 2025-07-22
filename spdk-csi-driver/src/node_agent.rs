@@ -17,6 +17,46 @@ use warp::{http::StatusCode, reply, Rejection, Reply};
 
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
 
+/// Unified SPDK RPC helper that works with both Unix sockets and HTTP
+async fn call_spdk_rpc(
+    spdk_rpc_url: &str,
+    rpc_request: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if spdk_rpc_url.starts_with("unix://") {
+        // Unix socket connection
+        use std::os::unix::net::UnixStream;
+        use std::io::{Write, Read};
+        
+        let socket_path = spdk_rpc_url.trim_start_matches("unix://");
+        let mut stream = UnixStream::connect(socket_path)?;
+        
+        let message = format!("{}\n", rpc_request.to_string());
+        stream.write_all(message.as_bytes())?;
+        
+        let mut buffer = [0; 8192];
+        let bytes_read = stream.read(&mut buffer)?;
+        let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+        
+        let response: serde_json::Value = serde_json::from_str(&response_str)?;
+        Ok(response)
+    } else {
+        // HTTP connection
+        let http_client = HttpClient::new();
+        let response = http_client
+            .post(spdk_rpc_url)
+            .json(rpc_request)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Err(format!("HTTP request failed with status: {}", response.status()).into());
+        }
+        
+        let json_response: serde_json::Value = response.json().await?;
+        Ok(json_response)
+    }
+}
+
 // Disk setup functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnimplementedDisk {
@@ -146,25 +186,18 @@ async fn run_metadata_sync_loop(agent: NodeAgent) {
 
 /// Correctly sync blob metadata by directly accessing blobstores
 async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     println!("Starting direct blobstore metadata sync for node: {}", agent.node_name);
     
     // Step 1: Get all blobstores directly (not through bdevs)
-    let blobstores_response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_get_blobstores"
-        }))
-        .send()
-        .await?;
-        
-    if !blobstores_response.status().is_success() {
-        println!("No blobstores found or RPC not available, trying alternative methods");
-        return sync_blob_metadata_fallback(agent).await;
-    }
-    
-    let blobstores: serde_json::Value = blobstores_response.json().await?;
+    let blobstores = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_blobstores"
+    })).await {
+        Ok(result) => result,
+        Err(_) => {
+            println!("No blobstores found or RPC not available, trying alternative methods");
+            return sync_blob_metadata_fallback(agent).await;
+        }
+    };
     let mut synced_count = 0;
     
     if let Some(blobstore_list) = blobstores["result"].as_array() {
@@ -173,25 +206,17 @@ async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std
                 println!("Syncing blobstore: {}", blobstore_name);
                 
                 // Direct blobstore sync - this is the correct approach
-                let sync_response = http_client
-                    .post(&agent.spdk_rpc_url)
-                    .json(&json!({
-                        "method": "blobstore_sync",
-                        "params": {
-                            "name": blobstore_name
-                        }
-                    }))
-                    .send()
-                    .await;
+                let sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+                    "method": "blobstore_sync",
+                    "params": {
+                        "name": blobstore_name
+                    }
+                })).await;
                     
-                match sync_response {
-                    Ok(resp) if resp.status().is_success() => {
+                match sync_result {
+                    Ok(_) => {
                         synced_count += 1;
                         println!("✓ Successfully synced blobstore: {}", blobstore_name);
-                    }
-                    Ok(resp) => {
-                        let error_text = resp.text().await.unwrap_or_default();
-                        eprintln!("✗ Failed to sync blobstore {}: {}", blobstore_name, error_text);
                     }
                     Err(e) => {
                         eprintln!("✗ Error syncing blobstore {}: {}", blobstore_name, e);
@@ -205,7 +230,7 @@ async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std
     }
     
     // Step 2: Also sync lvol stores (which are built on top of blobstores)
-    let lvol_synced = sync_lvol_stores_metadata(&http_client, &agent.spdk_rpc_url).await
+    let lvol_synced = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
         .unwrap_or(0);
     
     println!("Metadata sync completed: {} blobstores, {} lvol stores", 
@@ -216,21 +241,15 @@ async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std
 
 // Fallback method if direct blobstore access isn't available
 async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     println!("Using fallback blobstore sync methods");
     
     // Method 1: Global blobstore sync (if available)
-    let global_sync_result = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "blobstore_sync_all"
-        }))
-        .send()
-        .await;
+    let global_sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "blobstore_sync_all"
+    })).await;
         
     match global_sync_result {
-        Ok(resp) if resp.status().is_success() => {
+        Ok(_) => {
             println!("✓ Global blobstore sync successful");
             return Ok(());
         }
@@ -238,11 +257,11 @@ async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn st
     }
     
     // Method 2: Sync through lvol stores (most common case)
-    let lvol_count = sync_lvol_stores_metadata(&http_client, &agent.spdk_rpc_url).await
+    let lvol_count = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
         .unwrap_or(0);
     
     // Method 3: Find blobstores through their underlying bdevs
-    let bdev_count = sync_blobstores_via_bdevs(&http_client, &agent.spdk_rpc_url).await
+    let bdev_count = sync_blobstores_via_bdevs(&agent.spdk_rpc_url).await
         .unwrap_or(0);
     
     println!("Fallback sync completed: {} lvol stores, {} bdevs", lvol_count, bdev_count);
@@ -250,18 +269,11 @@ async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn st
 }
 
 // Sync lvol store metadata (which indirectly syncs underlying blobstores)
-async fn sync_lvol_stores_metadata(http_client: &HttpClient, rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
-    let response = http_client
-        .post(rpc_url)
-        .json(&json!({"method": "bdev_lvol_get_lvstores"}))
-        .send()
-        .await?;
-        
-    if !response.status().is_success() {
-        return Ok(0);
-    }
-    
-    let lvstores: serde_json::Value = response.json().await?;
+async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let lvstores = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await {
+        Ok(result) => result,
+        Err(_) => return Ok(0),
+    };
     let mut synced_count = 0;
     
     if let Some(stores) = lvstores["result"].as_array() {
@@ -270,43 +282,34 @@ async fn sync_lvol_stores_metadata(http_client: &HttpClient, rpc_url: &str) -> R
                 println!("Syncing lvol store metadata: {}", lvs_name);
                 
                 // This syncs the lvol store's metadata, which includes blob metadata
-                let sync_result = http_client
-                    .post(rpc_url)
-                    .json(&json!({
-                        "method": "bdev_lvol_sync_metadata",
-                        "params": {
-                            "lvs_name": lvs_name
-                        }
-                    }))
-                    .send()
-                    .await;
+                let sync_result = call_spdk_rpc(rpc_url, &json!({
+                    "method": "bdev_lvol_sync_metadata",
+                    "params": {
+                        "lvs_name": lvs_name
+                    }
+                })).await;
                     
                 match sync_result {
-                    Ok(resp) if resp.status().is_success() => {
+                    Ok(_) => {
                         synced_count += 1;
                         println!("✓ Synced lvol store: {}", lvs_name);
                     }
-                    Ok(_) => {
+                    Err(_) => {
                         // Try alternative RPC method
-                        let alt_result = http_client
-                            .post(rpc_url)
-                            .json(&json!({
-                                "method": "spdk_blob_sync_md",
-                                "params": {
-                                    "lvs_name": lvs_name
-                                }
-                            }))
-                            .send()
-                            .await;
+                        let alt_result = call_spdk_rpc(rpc_url, &json!({
+                            "method": "spdk_blob_sync_md",
+                            "params": {
+                                "lvs_name": lvs_name
+                            }
+                        })).await;
                             
-                        if alt_result.map_or(false, |r| r.status().is_success()) {
+                        if alt_result.is_ok() {
                             synced_count += 1;
                             println!("✓ Synced lvol store (alt method): {}", lvs_name);
                         } else {
                             println!("✗ Failed to sync lvol store: {}", lvs_name);
                         }
                     }
-                    Err(e) => println!("✗ Error syncing lvol store {}: {}", lvs_name, e),
                 }
                 
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -318,18 +321,11 @@ async fn sync_lvol_stores_metadata(http_client: &HttpClient, rpc_url: &str) -> R
 }
 
 // Last resort: Find blobstores through their underlying bdevs
-async fn sync_blobstores_via_bdevs(http_client: &HttpClient, rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
-    let response = http_client
-        .post(rpc_url)
-        .json(&json!({"method": "bdev_get_bdevs"}))
-        .send()
-        .await?;
-        
-    if !response.status().is_success() {
-        return Ok(0);
-    }
-    
-    let bdevs: serde_json::Value = response.json().await?;
+async fn sync_blobstores_via_bdevs(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let bdevs = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await {
+        Ok(result) => result,
+        Err(_) => return Ok(0),
+    };
     let mut synced_count = 0;
     
     if let Some(bdev_list) = bdevs["result"].as_array() {
@@ -341,18 +337,14 @@ async fn sync_blobstores_via_bdevs(http_client: &HttpClient, rpc_url: &str) -> R
                     
                     // Try to get the blobstore name from the bdev
                     if let Some(blobstore_name) = extract_blobstore_name(bdev) {
-                        let sync_result = http_client
-                            .post(rpc_url)
-                            .json(&json!({
-                                "method": "blobstore_sync",
-                                "params": {
-                                    "name": blobstore_name
-                                }
-                            }))
-                            .send()
-                            .await;
+                        let sync_result = call_spdk_rpc(rpc_url, &json!({
+                            "method": "blobstore_sync",
+                            "params": {
+                                "name": blobstore_name
+                            }
+                        })).await;
                             
-                        if sync_result.map_or(false, |r| r.status().is_success()) {
+                        if sync_result.is_ok() {
                             synced_count += 1;
                             println!("✓ Synced blobstore via bdev: {} -> {}", bdev_name, blobstore_name);
                         }
@@ -402,7 +394,7 @@ async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error:
     }
     
     // 3. Lvol store sync (common case)
-    if let Ok(count) = sync_lvol_stores_metadata(&HttpClient::new(), &agent.spdk_rpc_url).await {
+    if let Ok(count) = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await {
         if count > 0 {
             println!("Successfully synced {} lvol stores", count);
             return Ok(());
@@ -414,18 +406,14 @@ async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error:
 }
 
 async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({"method": "blobstore_sync_all"}))
-        .send()
-        .await?;
+    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method": "blobstore_sync_all"})).await;
         
-    if response.status().is_success() {
-        println!("✓ Global blobstore sync successful");
-        Ok(())
-    } else {
+    match result {
+        Ok(_) => {
+            println!("✓ Global blobstore sync successful");
+            Ok(())
+        }
+        Err(e) => {
         Err("Global blobstore sync failed".into())
     }
 }
@@ -446,25 +434,15 @@ async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Bo
     }
     
     // Then proceed with normal SPDK shutdown
-    let http_client = HttpClient::new();
-    
     println!("Initiating SPDK application shutdown...");
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "spdk_app_stop",
-            "params": {}
-        }))
-        .send()
-        .await;
+    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "spdk_app_stop",
+        "params": {}
+    })).await;
 
-    match response {
-        Ok(res) if res.status().is_success() => {
+    match result {
+        Ok(_) => {
             println!("SPDK shutdown initiated successfully");
-        }
-        Ok(res) => {
-            let error_text = res.text().await.unwrap_or_default();
-            eprintln!("SPDK shutdown RPC failed: {}", error_text);
         }
         Err(e) => {
             eprintln!("Failed to send SPDK shutdown RPC: {}", e);
@@ -713,30 +691,11 @@ async fn proxy_spdk_rpc(
     rpc_request: serde_json::Value,
     agent: NodeAgent
 ) -> Result<impl Reply, Rejection> {
-    let http_client = HttpClient::new();
-    
     // Forward the RPC call to local SPDK
-    match http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&rpc_request)
-        .send()
-        .await
-    {
-        Ok(response) => {
-            let status = response.status();
-            match response.json::<serde_json::Value>().await {
-                Ok(json_result) => {
-                    let reply = reply::json(&json_result);
-                    Ok(reply::with_status(reply, StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK)))
-                }
-                Err(e) => {
-                    let reply = reply::json(&json!({
-                        "error": format!("Failed to parse SPDK response: {}", e),
-                        "node": agent.node_name
-                    }));
-                    Ok(reply::with_status(reply, StatusCode::BAD_GATEWAY))
-                }
-            }
+    match call_spdk_rpc(&agent.spdk_rpc_url, &rpc_request).await {
+        Ok(json_result) => {
+            let reply = reply::json(&json_result);
+            Ok(reply::with_status(reply, StatusCode::OK))
         }
         Err(e) => {
             let reply = reply::json(&json!({
@@ -864,18 +823,10 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
 }
 
 async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     // Get all NVMe controllers from local SPDK
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_nvme_get_controllers"
-        }))
-        .send()
-        .await?;
-
-    let controllers: serde_json::Value = response.json().await?;
+    let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_nvme_get_controllers"
+    })).await?;
     let mut devices = Vec::new();
     
     if let Some(controller_list) = controllers["result"].as_array() {
@@ -1007,50 +958,37 @@ async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Res
 }
 
 async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
     let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
     let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
-    let _attach_result = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_nvme_attach_controller",
-            "params": {
-                "name": controller_id,
-                "trtype": "PCIe",
-                "traddr": disk.spec.pcie_addr
-            }
-        }))
-        .send()
-        .await;
+    let _attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_nvme_attach_controller",
+        "params": {
+            "name": controller_id,
+            "trtype": "PCIe",
+            "traddr": disk.spec.pcie_addr
+        }
+    })).await;
     
     // Wait a moment for the device to be ready
     tokio::time::sleep(Duration::from_secs(1)).await;
     
     // Create lvol store (which serves as our blobstore)
     let bdev_name = format!("{}n1", controller_id);
-    let lvol_store_result = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_lvol_create_lvstore",
-            "params": {
-                "bdev_name": bdev_name,
-                "lvs_name": lvs_name,
-                "cluster_sz": 65536 // 64KB clusters for good performance
-            }
-        }))
-        .send()
-        .await;
+    let lvol_store_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_lvol_create_lvstore",
+        "params": {
+            "bdev_name": bdev_name,
+            "lvs_name": lvs_name,
+            "cluster_sz": 65536 // 64KB clusters for good performance
+        }
+    })).await;
     
     match lvol_store_result {
-        Ok(resp) if resp.status().is_success() => {
+        Ok(_) => {
             update_disk_blobstore_status(agent, disk, true, Some(lvs_name)).await?;
             println!("Initialized lvol store on disk: {}", disk.metadata.name.as_ref().unwrap());
-        }
-        Ok(resp) => {
-            let error_text = resp.text().await.unwrap_or_default();
-            eprintln!("Failed to create lvol store on {}: {}", disk.spec.pcie_addr, error_text);
         }
         Err(e) => {
             eprintln!("Failed to create lvol store on {}: {}", disk.spec.pcie_addr, e);
@@ -1116,22 +1054,16 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
 }
 
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     // Check if device is accessible via SPDK
     let bdev_name = format!("{}n1", device.controller_id);
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_get_bdevs",
-            "params": {
-                "name": bdev_name
-            }
-        }))
-        .send()
-        .await?;
+    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_bdevs",
+        "params": {
+            "name": bdev_name
+        }
+    })).await;
     
-    if !response.status().is_success() {
+    if result.is_err() {
         return Ok(false);
     }
     
@@ -1167,22 +1099,13 @@ async fn update_disk_blobstore_status(
 }
 
 async fn update_disk_io_statistics(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     // Get I/O statistics from SPDK
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_get_iostat"
-        }))
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        return Ok(()); // Skip if iostat not available
-    }
-    
-    let iostat: serde_json::Value = response.json().await?;
+    let iostat = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_iostat"
+    })).await {
+        Ok(result) => result,
+        Err(_) => return Ok(()), // Skip if iostat not available
+    };
     
     if let Some(bdevs) = iostat["result"]["bdevs"].as_array() {
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
@@ -1227,22 +1150,13 @@ async fn update_lvol_store_statistics(
     agent: &NodeAgent,
     spdk_disks: &Api<SpdkDisk>
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let http_client = HttpClient::new();
-    
     // Get lvol store information
-    let response = http_client
-        .post(&agent.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_lvol_get_lvstores"
-        }))
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        return Ok(());
-    }
-    
-    let lvstores: serde_json::Value = response.json().await?;
+    let lvstores = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_lvol_get_lvstores"
+    })).await {
+        Ok(result) => result,
+        Err(_) => return Ok(()),
+    };
     
     if let Some(stores) = lvstores["result"].as_array() {
         for store in stores {
