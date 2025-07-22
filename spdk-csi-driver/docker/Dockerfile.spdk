@@ -81,7 +81,7 @@ RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 EXPOSE 5260
 
 # Create a custom SPDK startup script for CSI environments
-COPY --from=builder /spdk/app/spdk_tgt/spdk_tgt /usr/local/bin/
+# Note: spdk_tgt is already copied via the main binary copy above
 RUN echo '#!/bin/bash\n\
 echo "Starting SPDK target daemon for CSI (boot-disk-only mode)..."\n\
 echo "Note: No dedicated storage disks found - ready for disk addition"\n\
