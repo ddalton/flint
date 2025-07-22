@@ -30,7 +30,7 @@ use csi_driver::csi::csi::v1::{
 };
 
 /// Simple health check endpoint for Kubernetes liveness probes
-async fn start_health_server(driver: Arc<SpdkCsiDriver>) {
+async fn start_health_server() {
     let health = warp::path("healthz")
         .and(warp::get())
         .map(move || {
@@ -73,9 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     
     // Start health server for Kubernetes liveness probes
-    let health_driver = driver.clone();
     tokio::spawn(async move {
-        start_health_server(health_driver).await;
+        start_health_server().await;
     });
     
     let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
