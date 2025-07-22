@@ -44,7 +44,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
 #--------------------------------------------------------------------
 FROM ubuntu:24.04
 
-# Install only the RUNTIME dependencies
+# Install runtime dependencies including system utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio1t64 \
     libnuma1 \
@@ -55,6 +55,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-3 \
     libuuid1 \
     python3 \
+    kmod \
+    pciutils \
+    grep \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled SPDK binaries from the builder stage
@@ -63,6 +67,10 @@ COPY --from=builder /spdk/build/bin/ /usr/local/bin/
 # Copy the setup script and entire scripts directory from the builder stage
 COPY --from=builder /spdk/scripts/ /usr/local/scripts/
 COPY --from=builder /spdk/scripts/setup.sh /usr/local/bin/
+
+# Copy SPDK headers and include files needed by setup.sh
+COPY --from=builder /spdk/build/include/ /usr/local/include/
+COPY --from=builder /spdk/include/ /usr/local/include/
 
 # Create the runtime directories, just like in your working Dockerfile
 RUN mkdir -p /var/tmp /etc/spdk
