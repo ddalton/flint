@@ -94,7 +94,8 @@ echo "Boot disk (nvme0n1) is correctly protected from SPDK binding"\n\
 \n\
 # Start SPDK target daemon without device binding\n\
 # This allows the CSI driver to be ready when storage disks are added\n\
-exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all\n\
+# Listen on HTTP for cross-node communication\n\
+exec /usr/local/bin/spdk_tgt -p 5260 -L all\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 
 ENTRYPOINT ["/usr/local/bin/spdk-csi-start.sh"]
