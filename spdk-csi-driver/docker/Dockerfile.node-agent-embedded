@@ -51,7 +51,7 @@ RUN apk add --no-cache \
     perl \
     linux-headers \
     openssl-dev \
-    pkgconfig \
+    pkgconf \
     && rm -rf /var/cache/apk/*
 
 # Copy SPDK build artifacts from spdk-builder stage
