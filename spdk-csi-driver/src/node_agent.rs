@@ -897,9 +897,9 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
                     capacity: disk_info.size_bytes as i64,
                     model: disk_info.model.clone(),
                 };
-                devices.push(device);
                 println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
                          device.controller_id, device.pcie_addr);
+                devices.push(device);
             }
         }
     }
