@@ -144,11 +144,11 @@ logLevel: 9
 
 # Node selector to run only on SPDK-enabled nodes
 nodeSelector:
-  spdk.csi.storage.io/nvme: "enabled"
+  flint.csi.storage.io/nvme: "enabled"
 
 # Tolerations for dedicated SPDK nodes
 tolerations:
-  - key: "spdk.csi.storage.io/dedicated"
+  - key: "flint.csi.storage.io/dedicated"
     operator: "Equal"
     value: "true"
     effect: "NoSchedule"

@@ -113,8 +113,8 @@ echo 0000:01:00.0 | sudo tee /sys/bus/pci/drivers/vfio-pci/bind
 
 Label nodes with SPDK capability:
 ```bash
-kubectl label node <node-name> spdk.csi.storage.io/nvme=enabled
-kubectl label node <node-name> spdk.csi.storage.io/hugepages=1G
+kubectl label node <node-name> flint.csi.storage.io/nvme=enabled
+kubectl label node <node-name> flint.csi.storage.io/hugepages=1G
 ```
 
 ## 3. Installation and Verification

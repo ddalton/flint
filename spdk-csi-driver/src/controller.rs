@@ -410,7 +410,7 @@ impl ControllerService {
         let topology_key = if use_hostname_topology {
             "topology.kubernetes.io/hostname"
         } else {
-            "spdk.csi.storage.io/node"  // Safe for managed clusters
+            "flint.csi.storage.io/node"  // Safe for managed clusters
         };
         
         replicas.iter()

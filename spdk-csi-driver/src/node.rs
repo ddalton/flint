@@ -862,7 +862,7 @@ impl Node for NodeService {
             topology.insert("topology.kubernetes.io/hostname".to_string(), self.driver.node_id.clone());
         } else {
             // Safe fallback for managed clusters that protect topology.kubernetes.io labels
-            topology.insert("spdk.csi.storage.io/node".to_string(), self.driver.node_id.clone());
+            topology.insert("flint.csi.storage.io/node".to_string(), self.driver.node_id.clone());
         }
 
         // Try to get zone information
