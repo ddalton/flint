@@ -14,10 +14,10 @@ crds:
 images:
   repository: flint  # Change this to your actual registry for production
   flintCsiController:
-    name: flint-controller
+    name: flint-controller  # SPDK Controller Operator binary
     tag: latest
   flintCsiDriver:
-    name: flint-driver
+    name: flint-driver      # CSI Driver binary (controller + node modes)
     tag: latest
   nodeAgent:
     name: flint-node-agent
@@ -67,6 +67,13 @@ driver:
   # Self-managed clusters (kubeadm, etc.): useHostnameTopology: true
   # Rancher-managed clusters: useHostnameTopology: false
   # EKS/GKE/AKS: useHostnameTopology: false
+
+# SPDK Controller Operator configuration
+# The operator manages SPDK custom resources (SpdkVolume, SpdkDisk, etc.)
+spdkOperator:
+  enabled: true
+  healthCheckInterval: 30
+  rebuildEnabled: true
 
 # Storage class configuration
 storageClass:

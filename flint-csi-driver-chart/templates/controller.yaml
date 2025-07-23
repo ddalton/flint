@@ -10,7 +10,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-    component: controller
+    component: csi-controller
 spec:
   replicas: 1
   selector:
@@ -20,12 +20,12 @@ spec:
     metadata:
       labels:
         app: flint-csi-controller
-        component: controller
+        component: csi-controller
     spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: flint-csi-controller
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE

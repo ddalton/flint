@@ -9,6 +9,7 @@ use crate::csi_driver::csi::csi::v1::{
     PluginCapability, plugin_capability,
 };
 use tonic::{Request, Response, Status};
+use kube;
 
 const PLUGIN_NAME: &str = "spdk.csi.storage.io";
 const PLUGIN_VERSION: &str = "1.0.0";
@@ -41,28 +42,40 @@ impl IdentityService {
             Err(_) => false,
         }
     }
+
+    /// Check if Kubernetes API is accessible (for controller mode)
+    async fn check_kubernetes_api_readiness(&self) -> bool {
+        // Quick check to see if we can reach the Kubernetes API
+        // This is what the controller actually needs to work
+        match kube::Client::try_default().await {
+            Ok(_) => {
+                println!("Kubernetes API is accessible");
+                true
+            }
+            Err(e) => {
+                println!("Kubernetes API not accessible: {}", e);
+                false
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
 impl Identity for IdentityService {
     async fn get_plugin_info(
-        &self,
-        _request: Request<GetPluginInfoRequest>,
+        &self, 
+        _request: Request<GetPluginInfoRequest>
     ) -> Result<Response<GetPluginInfoResponse>, Status> {
-        let mut manifest = std::collections::HashMap::new();
-        manifest.insert("description".to_string(), "SPDK CSI Driver with NVMe-oF support".to_string());
-        manifest.insert("repository".to_string(), "https://github.com/your-org/spdk-csi-driver".to_string());
-
         Ok(Response::new(GetPluginInfoResponse {
             name: PLUGIN_NAME.to_string(),
             vendor_version: PLUGIN_VERSION.to_string(),
-            manifest,
+            manifest: Default::default(),
         }))
     }
 
     async fn get_plugin_capabilities(
-        &self,
-        _request: Request<GetPluginCapabilitiesRequest>,
+        &self, 
+        _request: Request<GetPluginCapabilitiesRequest>
     ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
         let capabilities = vec![
             // Controller service capability
@@ -100,11 +113,21 @@ impl Identity for IdentityService {
         &self, 
         _request: Request<ProbeRequest>
     ) -> Result<Response<ProbeResponse>, Status> {
-        // Perform actual health check instead of always returning true
-        let is_ready = self.check_spdk_health().await;
+        // Check if we're running in controller mode by checking CSI_MODE environment variable
+        let csi_mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
+        
+        let is_ready = if csi_mode == "controller" {
+            // Controller mode: ready if we can connect to Kubernetes API
+            // Controllers work through K8s APIs, not direct SPDK access
+            println!("Controller mode: checking Kubernetes API readiness...");
+            self.check_kubernetes_api_readiness().await
+        } else {
+            // Node mode or all mode: check SPDK health
+            self.check_spdk_health().await
+        };
 
         if !is_ready {
-            println!("SPDK health check failed during probe");
+            println!("Health check failed during probe (mode: {})", csi_mode);
         }
 
         Ok(Response::new(ProbeResponse {
