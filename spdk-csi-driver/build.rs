@@ -55,9 +55,9 @@ fn build_spdk_bindings() {
     // Link SPDK libraries
     println!("cargo:rustc-link-search=native={}", spdk_lib);
     
-    // Core SPDK libraries
+    // Core SPDK libraries (verified against SPDK v24.01.x)
     let spdk_libs = [
-        "spdk_env_dpdk", "spdk_env", "spdk_util", "spdk_log", "spdk_thread",
+        "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread",
         "spdk_bdev", "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_bdev_aio",
     ];
     
