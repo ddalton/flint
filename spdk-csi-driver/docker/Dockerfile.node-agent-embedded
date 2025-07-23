@@ -93,6 +93,9 @@ USER 65532
 
 WORKDIR /app
 
+# Force cache invalidation for Rust build with current timestamp
+RUN echo "Build timestamp: $(date)" > /tmp/build_timestamp
+
 # Copy Rust source files
 COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
 COPY --chown=65532:65532 src/ ./src/
