@@ -85,9 +85,8 @@ fn build_spdk_bindings() {
     ];
     
     // ISA-L library (built as part of SPDK submodules) 
-    // Link statically but export symbols to make them available to SPDK shared libraries
-    println!("cargo:rustc-link-arg=-Wl,--export-dynamic");
-    println!("cargo:rustc-link-lib=static=isal");
+    // Link dynamically using properly created shared library
+    println!("cargo:rustc-link-lib=dylib=isal");
     
     for lib in &spdk_libs {
         println!("cargo:rustc-link-lib=dylib={}", lib);
