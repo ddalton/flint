@@ -108,6 +108,9 @@ fn build_spdk_bindings() {
         println!("cargo:rustc-link-lib={}", lib);
     }
     
+    // ISA-L library (built as part of SPDK submodules)
+    println!("cargo:rustc-link-lib=dylib=isal");
+    
     // Generate bindings
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
