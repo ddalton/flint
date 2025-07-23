@@ -21,6 +21,24 @@ impl ControllerService {
         Self { driver }
     }
 
+    /// Get count of available healthy disks with initialized LVS
+    async fn get_available_disk_count(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disk_list = disks.list(&ListParams::default()).await?;
+        
+        let count = disk_list.items.iter()
+            .filter(|disk| {
+                if let Some(status) = &disk.status {
+                    status.healthy && status.blobstore_initialized
+                } else {
+                    false
+                }
+            })
+            .count();
+            
+        Ok(count)
+    }
+
     /// Provision volume with specified number of replicas - enhanced with validation
     async fn provision_volume(
         &self,
@@ -424,8 +442,15 @@ impl Controller for ControllerService {
         let volume_name = req.name.clone();
         let capacity = req.capacity_range.as_ref().map(|cr| cr.required_bytes).unwrap_or(0);
         
+        println!("🚀 [CSI_CONTROLLER] CreateVolume request received:");
+        println!("   Volume name: {}", volume_name);
+        println!("   Capacity: {} bytes ({} GB)", capacity, capacity / (1024 * 1024 * 1024));
+        println!("   Parameters: {:?}", req.parameters);
+        
         if volume_name.is_empty() || capacity == 0 {
-            return Err(Status::invalid_argument("Missing name or capacity"));
+            let error_msg = "Missing name or capacity";
+            println!("❌ [CSI_CONTROLLER] CreateVolume failed: {}", error_msg);
+            return Err(Status::invalid_argument(error_msg));
         }
 
         let num_replicas = req.parameters
@@ -433,21 +458,48 @@ impl Controller for ControllerService {
             .and_then(|n| n.parse::<i32>().ok())
             .unwrap_or(1);
 
-        let spdk_volume = self.provision_volume(&volume_name, capacity, num_replicas).await?;
-        let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
+        println!("   Number of replicas requested: {}", num_replicas);
 
-        let volume = Volume {
-            volume_id: spdk_volume.spec.volume_id.clone(),
-            capacity_bytes: spdk_volume.spec.size_bytes,
-            volume_context: self.build_volume_context(),
-            content_source: req.volume_content_source,
-            accessible_topology,
-            ..Default::default()
-        };
+        match self.provision_volume(&volume_name, capacity, num_replicas).await {
+            Ok(spdk_volume) => {
+                println!("✅ [CSI_CONTROLLER] Volume provisioned successfully: {}", volume_name);
+                let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
 
-        Ok(Response::new(CreateVolumeResponse {
-            volume: Some(volume),
-        }))
+                let volume = Volume {
+                    volume_id: spdk_volume.spec.volume_id.clone(),
+                    capacity_bytes: spdk_volume.spec.size_bytes,
+                    volume_context: self.build_volume_context(),
+                    content_source: req.volume_content_source,
+                    accessible_topology,
+                    ..Default::default()
+                };
+
+                Ok(Response::new(CreateVolumeResponse {
+                    volume: Some(volume),
+                }))
+            },
+            Err(status) => {
+                println!("❌ [CSI_CONTROLLER] Volume provisioning failed for '{}': {}", volume_name, status.message());
+                println!("   Error code: {:?}", status.code());
+                
+                // For resource exhaustion errors, provide more detailed context
+                if status.code() == tonic::Code::ResourceExhausted {
+                    if status.message().contains("Insufficient healthy disks") {
+                        let enhanced_message = format!(
+                            "Cannot create {}-replica volume: {}. Available SPDK disks with LVS: {}. For RAID volumes, ensure you have at least {} healthy disks with initialized LVS (Logical Volume Store) across different nodes.",
+                            num_replicas,
+                            status.message(),
+                            self.get_available_disk_count().await.unwrap_or(0),
+                            num_replicas
+                        );
+                        println!("   Enhanced error message: {}", enhanced_message);
+                        return Err(Status::resource_exhausted(enhanced_message));
+                    }
+                }
+                
+                Err(status)
+            }
+        }
     }
 
     async fn delete_volume(
