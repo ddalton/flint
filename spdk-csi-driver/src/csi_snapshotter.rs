@@ -1,11 +1,12 @@
 // csi_snapshotter.rs - Snapshot implementation functions
 use std::sync::Arc;
 use crate::driver::SpdkCsiDriver;
-use crate::csi_driver::csi::csi::v1::{
+use spdk_csi_driver::csi::{
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
     ListSnapshotsRequest, ListSnapshotsResponse, Snapshot,
     list_snapshots_response
 };
+use prost_types;
 use spdk_csi_driver::models::*;
 use kube::api::{Api, PostParams, Patch, PatchParams, ListParams};
 use reqwest::Client as HttpClient;

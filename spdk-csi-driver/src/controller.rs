@@ -2,7 +2,7 @@
 use std::sync::Arc;
 use crate::driver::SpdkCsiDriver;
 use crate::csi_snapshotter::*;
-use crate::csi_driver::csi::csi::v1::{
+use spdk_csi_driver::csi::{
     controller_server::Controller,
     *,
 };

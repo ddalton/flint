@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::path::Path;
 use crate::driver::SpdkCsiDriver;
-use crate::csi_driver::csi::csi::v1::{
+use spdk_csi_driver::csi::{
     node_server::Node,
     *,
 };

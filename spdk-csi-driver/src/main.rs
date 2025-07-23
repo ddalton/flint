@@ -23,7 +23,7 @@ mod csi_driver {
     }
 }
 
-use csi_driver::csi::csi::v1::{
+use spdk_csi_driver::csi::{
     controller_server::ControllerServer,
     identity_server::IdentityServer,
     node_server::NodeServer,

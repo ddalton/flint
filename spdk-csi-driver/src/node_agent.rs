@@ -16,7 +16,7 @@ use warp::Filter;
 use warp::{http::StatusCode, reply, Rejection, Reply};
 
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
-use spdk_csi_driver::spdk_embedded::{get_spdk_instance, initialize_spdk};
+use spdk_csi_driver::spdk_native::get_spdk_instance;
 
 /// Unified SPDK interface using embedded SPDK for common operations, RPC as fallback
 async fn call_spdk_rpc(
@@ -24,7 +24,8 @@ async fn call_spdk_rpc(
     rpc_request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let method = rpc_request["method"].as_str().unwrap_or("");
-    let params = rpc_request.get("params").unwrap_or(&json!({}));
+    let default_params = json!({});
+    let params = rpc_request.get("params").unwrap_or(&default_params);
     
     println!("🔧 [SPDK_HYBRID] Method: {} (checking embedded implementation)", method);
     
