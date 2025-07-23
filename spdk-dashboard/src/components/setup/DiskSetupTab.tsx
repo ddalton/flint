@@ -31,14 +31,14 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
   const getStatusColor = () => {
     if (disk.is_system_disk) return 'border-red-200 bg-red-50';
     if (needsUnmount) return 'border-yellow-200 bg-yellow-50';
-    if (disk.spdk_ready) return 'border-blue-200 bg-blue-50';
+    if (disk.spdk_ready) return 'border-indigo-200 bg-indigo-50';
     return 'border-green-200 bg-green-50';
   };
 
   const getStatusIcon = () => {
     if (disk.is_system_disk) return <Shield className="w-4 h-4 text-red-600" />;
     if (needsUnmount) return <AlertTriangle className="w-4 h-4 text-yellow-600" />;
-    if (disk.spdk_ready) return <Database className="w-4 h-4 text-blue-600" />;
+    if (disk.spdk_ready) return <Settings className="w-4 h-4 text-indigo-600" />;
     return <CheckCircle className="w-4 h-4 text-green-600" />;
   };
 
@@ -71,7 +71,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
           </div>
           <div className="flex justify-between">
             <span>Driver:</span>
-            <span className={`font-mono ${disk.spdk_ready ? 'text-blue-600' : ''}`}>
+            <span className={`font-mono ${disk.spdk_ready ? 'text-indigo-600' : ''}`}>
               {disk.driver}
             </span>
           </div>
@@ -106,7 +106,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
   const getStatusBadge = () => {
     if (disk.is_system_disk) return <span className="px-2 py-0.5 text-xs bg-red-100 text-red-700 rounded-full">System</span>;
     if (needsUnmount) return <span className="px-2 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded-full">Unmount</span>;
-    if (disk.spdk_ready) return <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full">SPDK</span>;
+    if (disk.spdk_ready) return <span className="px-2 py-0.5 text-xs bg-indigo-100 text-indigo-700 rounded-full">SPDK</span>;
     return <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">Ready</span>;
   };
 
@@ -129,7 +129,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
       <td className="px-3 py-2 text-sm">{sizeGB}GB</td>
       <td className="px-3 py-2">
         <span className={`text-xs font-mono px-2 py-1 rounded ${
-          disk.spdk_ready ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
+          disk.spdk_ready ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700'
         }`}>
           {disk.driver}
         </span>

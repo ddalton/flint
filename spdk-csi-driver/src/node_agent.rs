@@ -574,14 +574,25 @@ async fn setup_disks_for_spdk(
     request: DiskSetupRequest,
     agent: NodeAgent
 ) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🌐 [API] Received disk setup request for node: {}", agent.node_name);
+    println!("🌐 [API] Request: {:?}", request);
+    
     match agent.setup_disks_for_spdk(request).await {
-        Ok(result) => Ok(warp::reply::json(&result)),
-        Err(e) => Ok(warp::reply::json(&json!({
-            "success": false,
-            "error": e.to_string(),
-            "node": agent.node_name,
-            "completed_at": Utc::now().to_rfc3339()
-        })))
+        Ok(result) => {
+            println!("🌐 [API] Setup completed successfully: {:?}", result);
+            Ok(warp::reply::json(&result))
+        }
+        Err(e) => {
+            println!("🌐 [API] Setup failed with error: {}", e);
+            let error_response = json!({
+                "success": false,
+                "error": e.to_string(),
+                "node": agent.node_name,
+                "completed_at": Utc::now().to_rfc3339()
+            });
+            println!("🌐 [API] Returning error response: {:?}", error_response);
+            Ok(warp::reply::json(&error_response))
+        }
     }
 }
 
@@ -905,7 +916,7 @@ async fn discover_unbound_nvme_devices() -> Result<Vec<NvmeDevice>, Box<dyn std:
     Ok(devices)
 }
 
-async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std::error::Error>> {
+async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std::error::Error + Send + Sync>> {
     use std::fs;
     
     // Read device info from sysfs
@@ -1243,7 +1254,7 @@ impl NodeAgent {
         Ok(devices)
     }
 
-    async fn get_disk_info(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error>> {
+    async fn get_disk_info(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error + Send + Sync>> {
         let sysfs_path = format!("/sys/bus/pci/devices/{}", pci_addr);
         
         // Read PCI device information
@@ -1319,11 +1330,11 @@ impl NodeAgent {
         })
     }
 
-    async fn read_sysfs_file(&self, path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    async fn read_sysfs_file(&self, path: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(fs::read_to_string(path)?)
     }
 
-    async fn get_current_driver(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_current_driver(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let driver_path = format!("/sys/bus/pci/devices/{}/driver", pci_addr);
         
         match fs::read_link(&driver_path) {
@@ -1338,7 +1349,7 @@ impl NodeAgent {
         }
     }
 
-    async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error>> {
+    async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let nvme_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
         
         if let Ok(entries) = fs::read_dir(&nvme_path) {
@@ -1370,7 +1381,7 @@ impl NodeAgent {
         Err("NVMe device not found".into())
     }
 
-    async fn get_nvme_details(&self, device_name: &str) -> Result<(u64, String, String, String), Box<dyn std::error::Error>> {
+    async fn get_nvme_details(&self, device_name: &str) -> Result<(u64, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
         // Use nvme-cli to get device information
         let output = Command::new("nvme")
             .args(["id-ctrl", &format!("/dev/{}", device_name)])
@@ -1406,7 +1417,7 @@ impl NodeAgent {
         }
     }
 
-    async fn get_device_size(&self, device_name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    async fn get_device_size(&self, device_name: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let output = Command::new("blockdev")
             .args(["--getsize64", &format!("/dev/{}", device_name)])
             .output()?;
@@ -1415,7 +1426,7 @@ impl NodeAgent {
         Ok(size_str.trim().parse()?)
     }
 
-    async fn estimate_nvme_size_from_pci(&self, pci_addr: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    async fn estimate_nvme_size_from_pci(&self, pci_addr: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         // Try to get size information from PCI configuration or use lspci
         let output = Command::new("lspci")
             .args(["-v", "-s", pci_addr])
@@ -1461,7 +1472,7 @@ impl NodeAgent {
         }
     }
 
-    async fn get_mounted_partitions(&self, device_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    async fn get_mounted_partitions(&self, device_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let output = Command::new("lsblk")
             .args(["-ln", "-o", "NAME,MOUNTPOINT", &format!("/dev/{}", device_name)])
             .output()?;
@@ -1479,7 +1490,7 @@ impl NodeAgent {
         Ok(mounted)
     }
 
-    async fn is_system_disk(&self, device_name: &str, mounted_partitions: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn is_system_disk(&self, device_name: &str, mounted_partitions: &[String]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Check if any partition is mounted on critical system paths
         let critical_mounts = ["/", "/boot", "/boot/efi", "/var", "/usr", "/home"];
         
@@ -1541,6 +1552,14 @@ impl NodeAgent {
     }
 
     async fn setup_disks_for_spdk(&self, request: DiskSetupRequest) -> Result<DiskSetupResult, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [SETUP_HANDLER] Starting setup_disks_for_spdk on node: {}", self.node_name);
+        println!("🔧 [SETUP_HANDLER] Request details:");
+        println!("   - PCI addresses: {:?}", request.pci_addresses);
+        println!("   - Force unmount: {}", request.force_unmount);
+        println!("   - Backup data: {}", request.backup_data);
+        println!("   - Huge pages MB: {:?}", request.huge_pages_mb);
+        println!("   - Driver override: {:?}", request.driver_override);
+        
         let mut result = DiskSetupResult {
             success: true,
             setup_disks: Vec::new(),
@@ -1551,15 +1570,21 @@ impl NodeAgent {
         };
 
         // Validate all disks first
+        println!("🔧 [SETUP_HANDLER] Step 1: Validating {} disks...", request.pci_addresses.len());
         for pci_addr in &request.pci_addresses {
+            println!("🔧 [SETUP_HANDLER] Validating disk: {}", pci_addr);
             if let Err(e) = self.validate_disk_for_setup(pci_addr, request.force_unmount).await {
+                println!("❌ [SETUP_HANDLER] Validation failed for {}: {}", pci_addr, e);
                 result.failed_disks.push((pci_addr.clone(), e.to_string()));
                 result.success = false;
                 continue;
+            } else {
+                println!("✅ [SETUP_HANDLER] Validation passed for: {}", pci_addr);
             }
         }
 
         if !result.success && !request.force_unmount {
+            println!("❌ [SETUP_HANDLER] Validation failed and force_unmount=false, aborting");
             return Ok(result);
         }
 
@@ -1578,16 +1603,21 @@ impl NodeAgent {
         }
 
         // Process each disk
+        println!("🔧 [SETUP_HANDLER] Step 3: Processing {} disks for setup...", request.pci_addresses.len());
         for pci_addr in &request.pci_addresses {
             if result.failed_disks.iter().any(|(addr, _)| addr == pci_addr) {
+                println!("⏭️  [SETUP_HANDLER] Skipping already failed disk: {}", pci_addr);
                 continue;
             }
 
+            println!("🔧 [SETUP_HANDLER] Setting up disk: {}", pci_addr);
             match self.setup_single_disk(pci_addr, &request).await {
                 Ok(_) => {
+                    println!("✅ [SETUP_HANDLER] Successfully set up disk: {}", pci_addr);
                     result.setup_disks.push(pci_addr.clone());
                 }
                 Err(e) => {
+                    println!("❌ [SETUP_HANDLER] Failed to set up disk {}: {}", pci_addr, e);
                     result.failed_disks.push((pci_addr.clone(), e.to_string()));
                     result.success = false;
                 }
@@ -1595,88 +1625,164 @@ impl NodeAgent {
         }
 
         result.completed_at = Utc::now().to_rfc3339();
+        
+        println!("🔧 [SETUP_HANDLER] Setup completed. Final result:");
+        println!("   - Success: {}", result.success);
+        println!("   - Setup disks: {:?}", result.setup_disks);
+        println!("   - Failed disks: {:?}", result.failed_disks);
+        println!("   - Warnings: {:?}", result.warnings);
+        println!("   - Huge pages configured: {:?}", result.huge_pages_configured);
+        
         Ok(result)
     }
 
-    async fn validate_disk_for_setup(&self, pci_addr: &str, force_unmount: bool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn validate_disk_for_setup(&self, pci_addr: &str, force_unmount: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [VALIDATION] Validating disk for setup: {}", pci_addr);
+        println!("🔍 [VALIDATION] Force unmount: {}", force_unmount);
+        
         let disk_info = self.get_disk_info(pci_addr).await?;
+        println!("🔍 [VALIDATION] Retrieved disk info:");
+        println!("   - Device name: {}", disk_info.device_name);
+        println!("   - Driver: '{}'", disk_info.driver);
+        println!("   - Is system disk: {}", disk_info.is_system_disk);
+        println!("   - SPDK ready: {}", disk_info.spdk_ready);
+        println!("   - Mounted partitions: {:?}", disk_info.mounted_partitions);
 
         if disk_info.is_system_disk {
+            println!("❌ [VALIDATION] Cannot setup system disk for SPDK");
             return Err("Cannot setup system disk for SPDK".into());
         }
 
         if !disk_info.mounted_partitions.is_empty() && !force_unmount {
+            println!("❌ [VALIDATION] Disk has mounted partitions and force_unmount=false");
             return Err(format!("Disk has mounted partitions: {:?}. Use force_unmount=true to proceed", disk_info.mounted_partitions).into());
         }
 
         if disk_info.spdk_ready {
+            println!("❌ [VALIDATION] Disk is already setup for SPDK");
             return Err("Disk is already setup for SPDK".into());
         }
 
+        println!("✅ [VALIDATION] Disk validation passed for: {}", pci_addr);
         Ok(())
     }
 
-    async fn setup_single_disk(&self, pci_addr: &str, request: &DiskSetupRequest) -> Result<(), Box<dyn std::error::Error>> {
+    async fn setup_single_disk(&self, pci_addr: &str, request: &DiskSetupRequest) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [SETUP] Starting disk setup for PCI address: {}", pci_addr);
+        println!("🔧 [SETUP] Request parameters: force_unmount={}, backup_data={}, huge_pages_mb={:?}, driver_override={:?}", 
+                 request.force_unmount, request.backup_data, request.huge_pages_mb, request.driver_override);
+        
         let disk_info = self.get_disk_info(pci_addr).await?;
+        println!("🔧 [SETUP] Disk info retrieved:");
+        println!("   - Device name: {}", disk_info.device_name);
+        println!("   - Driver: '{}'", disk_info.driver);
+        println!("   - Size: {} bytes", disk_info.size_bytes);
+        println!("   - Model: {}", disk_info.model);
+        println!("   - Is system disk: {}", disk_info.is_system_disk);
+        println!("   - SPDK ready: {}", disk_info.spdk_ready);
+        println!("   - Mounted partitions: {:?}", disk_info.mounted_partitions);
 
         // Validate the disk can be set up
         if disk_info.is_system_disk {
+            println!("❌ [SETUP] Cannot setup system disk for SPDK");
             return Err("Cannot setup system disk for SPDK".into());
         }
 
         if disk_info.spdk_ready {
+            println!("❌ [SETUP] Disk is already setup for SPDK");
             return Err("Disk is already setup for SPDK".into());
         }
 
         // Step 1: If device is bound to nvme and has mounted partitions, handle them
+        println!("🔧 [SETUP] Step 1: Checking mounted partitions...");
         if disk_info.driver == "nvme" && !disk_info.mounted_partitions.is_empty() {
+            println!("⚠️  [SETUP] Device has mounted partitions: {:?}", disk_info.mounted_partitions);
             if !request.force_unmount {
+                println!("❌ [SETUP] force_unmount=false, cannot proceed with mounted partitions");
                 return Err(format!("Disk has mounted partitions: {:?}. Use force_unmount=true to proceed", disk_info.mounted_partitions).into());
             }
 
+            println!("🔧 [SETUP] force_unmount=true, proceeding with unmounting...");
             // Backup data if requested
             if request.backup_data {
+                println!("🔧 [SETUP] Backing up disk data...");
                 self.backup_disk_data(&disk_info).await?;
+                println!("✅ [SETUP] Disk data backup completed");
             }
 
             // Unmount all partitions
+            println!("🔧 [SETUP] Unmounting disk partitions...");
             self.unmount_disk_partitions(&disk_info).await?;
+            println!("✅ [SETUP] Disk partitions unmounted");
+        } else {
+            println!("✅ [SETUP] No mounted partitions to handle");
         }
 
         // AWS/Virtualized Environment: Use kernel-bound mode instead of userspace drivers
-        if self.is_virtualized_environment().await? && self.should_use_kernel_mode(&disk_info).await? {
-            println!("Setting up disk {} for SPDK in kernel-bound mode (AWS/virtualized compatible)", pci_addr);
-            return self.setup_kernel_bound_disk(pci_addr, &disk_info).await;
+        println!("🔧 [SETUP] Step 2: Checking environment type...");
+        let is_virtualized = self.is_virtualized_environment().await?;
+        println!("🔧 [SETUP] Virtualized environment: {}", is_virtualized);
+        
+        if is_virtualized {
+            let should_use_kernel = self.should_use_kernel_mode(&disk_info).await?;
+            println!("🔧 [SETUP] Should use kernel mode: {}", should_use_kernel);
+            
+            if should_use_kernel {
+                println!("🔧 [SETUP] Using kernel-bound mode for AWS/virtualized compatibility");
+                return self.setup_kernel_bound_disk(pci_addr, &disk_info).await;
+            } else {
+                println!("🔧 [SETUP] Kernel mode not suitable, falling back to userspace drivers");
+            }
+        } else {
+            println!("🔧 [SETUP] Bare metal environment detected, using userspace drivers");
         }
 
         // Traditional bare metal path: Use userspace drivers
-        // Step 2: Unbind from current driver (if bound)
+        println!("🔧 [SETUP] Step 3: Traditional bare metal userspace driver setup");
+        
+        // Step 3a: Unbind from current driver (if bound)
+        println!("🔧 [SETUP] Step 3a: Checking current driver binding...");
         if disk_info.driver != "unbound" {
+            println!("🔧 [SETUP] Unbinding from current driver: {}", disk_info.driver);
             self.unbind_from_driver(pci_addr, &disk_info.driver).await?;
+            println!("✅ [SETUP] Successfully unbound from driver: {}", disk_info.driver);
+        } else {
+            println!("✅ [SETUP] Device already unbound, no unbinding needed");
         }
 
-        // Step 3: Choose optimal driver for environment
+        // Step 3b: Choose optimal driver for environment
+        println!("🔧 [SETUP] Step 3b: Selecting optimal SPDK driver...");
         let target_driver = if let Some(override_driver) = &request.driver_override {
+            println!("🔧 [SETUP] Using driver override: {}", override_driver);
             override_driver.clone()
         } else {
-            self.select_optimal_spdk_driver().await?
+            let selected_driver = self.select_optimal_spdk_driver().await?;
+            println!("🔧 [SETUP] Auto-selected driver: {}", selected_driver);
+            selected_driver
         };
 
-        // Step 4: Load target driver module
+        // Step 3c: Load target driver module
+        println!("🔧 [SETUP] Step 3c: Loading driver module: {}", target_driver);
         self.load_driver_module(&target_driver).await?;
+        println!("✅ [SETUP] Driver module loaded successfully");
 
-        // Step 5: Bind to SPDK-compatible driver
+        // Step 3d: Bind to SPDK-compatible driver
+        println!("🔧 [SETUP] Step 3d: Binding to SPDK driver: {}", target_driver);
         self.bind_to_driver(pci_addr, &target_driver).await?;
+        println!("✅ [SETUP] Successfully bound to driver: {}", target_driver);
 
-        // Step 6: Verify setup
+        // Step 3e: Verify setup
+        println!("🔧 [SETUP] Step 3e: Verifying SPDK setup...");
         tokio::time::sleep(Duration::from_secs(2)).await;
         self.verify_spdk_setup(pci_addr).await?;
+        println!("✅ [SETUP] SPDK setup verification completed successfully");
 
+        println!("🎉 [SETUP] Disk setup completed successfully for PCI address: {}", pci_addr);
         Ok(())
     }
 
     /// Select the optimal SPDK userspace driver for the current environment
-    async fn select_optimal_spdk_driver(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn select_optimal_spdk_driver(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check if we're in a virtualized environment
         let is_virtualized = self.is_virtualized_environment().await?;
         
@@ -1712,7 +1818,7 @@ impl NodeAgent {
     }
 
     /// Check if we're running in a virtualized environment
-    async fn is_virtualized_environment(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn is_virtualized_environment(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Check common virtualization indicators
         
         // 1. Check DMI system information
@@ -1751,7 +1857,7 @@ impl NodeAgent {
     }
 
     /// Check if a specific kernel driver is available
-    async fn is_driver_available(&self, driver: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn is_driver_available(&self, driver: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Try to load the module (won't load if already loaded)
         let output = Command::new("modprobe")
             .arg("--dry-run")
@@ -1762,7 +1868,7 @@ impl NodeAgent {
     }
 
     /// Check if VFIO no-IOMMU mode is available
-    async fn is_vfio_noiommu_available(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    async fn is_vfio_noiommu_available(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         // Check if vfio-pci is available
         if !self.is_driver_available("vfio-pci").await? {
             return Ok(false);
@@ -1785,7 +1891,7 @@ impl NodeAgent {
         Ok(output.status.success())
     }
 
-    async fn backup_disk_data(&self, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error>> {
+    async fn backup_disk_data(&self, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let backup_dir = format!("{}/{}", self.backup_path, disk_info.pci_address.replace(":", "_"));
         fs::create_dir_all(&backup_dir)?;
 
@@ -1810,7 +1916,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn unmount_disk_partitions(&self, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error>> {
+    async fn unmount_disk_partitions(&self, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let output = Command::new("lsblk")
             .args(["-ln", "-o", "NAME", &format!("/dev/{}", disk_info.device_name)])
             .output()?;
@@ -1838,7 +1944,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn unbind_from_driver(&self, pci_addr: &str, driver: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn unbind_from_driver(&self, pci_addr: &str, driver: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let unbind_path = format!("/sys/bus/pci/drivers/{}/unbind", driver);
         
         if Path::new(&unbind_path).exists() {
@@ -1856,7 +1962,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn load_driver_module(&self, driver: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn load_driver_module(&self, driver: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Check if module is already loaded
         let output = Command::new("lsmod")
             .output()?;
@@ -1879,7 +1985,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn bind_to_driver(&self, pci_addr: &str, driver: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn bind_to_driver(&self, pci_addr: &str, driver: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Enable VFIO if using vfio-pci
         if driver == "vfio-pci" {
             self.enable_vfio(pci_addr).await?;
@@ -1905,7 +2011,7 @@ impl NodeAgent {
         Err(format!("Failed to bind {} to {}", pci_addr, driver).into())
     }
 
-    async fn enable_vfio(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn enable_vfio(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Read vendor and device IDs
         let vendor_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/vendor", pci_addr)).await?;
         let device_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/device", pci_addr)).await?;
@@ -1922,7 +2028,7 @@ impl NodeAgent {
         Ok(())
     }
 
-    async fn verify_spdk_setup(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn verify_spdk_setup(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let current_driver = self.get_current_driver(pci_addr).await?;
         
         if !self.is_spdk_compatible_driver(&current_driver) {
@@ -1933,54 +2039,121 @@ impl NodeAgent {
     }
 
     /// Check if disk should use kernel-bound mode (AWS/virtualized environments)
-    async fn should_use_kernel_mode(&self, disk_info: &UnimplementedDisk) -> Result<bool, Box<dyn std::error::Error>> {
-        // Use kernel mode for AWS/virtualized environments when:
-        // 1. Not a system disk
-        // 2. Either bound to nvme driver OR unbound (ready for setup)
-        Ok(!disk_info.is_system_disk && 
-           (disk_info.driver == "nvme" || disk_info.driver.is_empty() || disk_info.driver == "unbound"))
+    async fn should_use_kernel_mode(&self, disk_info: &UnimplementedDisk) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [KERNEL_MODE] Evaluating kernel mode criteria:");
+        println!("   - Is system disk: {}", disk_info.is_system_disk);
+        println!("   - Current driver: '{}'", disk_info.driver);
+        println!("   - Driver is nvme: {}", disk_info.driver == "nvme");
+        println!("   - Driver is empty: {}", disk_info.driver.is_empty());
+        println!("   - Driver is unbound: {}", disk_info.driver == "unbound");
+        
+        let not_system_disk = !disk_info.is_system_disk;
+        let driver_compatible = disk_info.driver == "nvme" || disk_info.driver.is_empty() || disk_info.driver == "unbound";
+        let result = not_system_disk && driver_compatible;
+        
+        println!("🔍 [KERNEL_MODE] Decision logic:");
+        println!("   - Not system disk: {}", not_system_disk);
+        println!("   - Driver compatible: {}", driver_compatible);
+        println!("   - Final result: {}", result);
+        
+        Ok(result)
     }
 
     /// Setup disk for SPDK using kernel-bound mode (no driver binding)
-    async fn setup_kernel_bound_disk(&self, pci_addr: &str, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Configuring disk {} for SPDK kernel-bound access (AWS compatible)", pci_addr);
+    async fn setup_kernel_bound_disk(&self, pci_addr: &str, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [KERNEL_SETUP] Starting kernel-bound disk setup for PCI address: {}", pci_addr);
+        println!("🔧 [KERNEL_SETUP] Device info: name={}, driver='{}', size={}", 
+                 disk_info.device_name, disk_info.driver, disk_info.size_bytes);
         
         // Step 1: Ensure disk is bound to nvme driver (if unbound)
+        println!("🔧 [KERNEL_SETUP] Step 1: Checking driver binding...");
         if disk_info.driver.is_empty() || disk_info.driver == "unbound" {
-            println!("Binding {} to nvme driver for kernel access", pci_addr);
-            self.bind_to_driver(pci_addr, "nvme").await?;
-            // Wait for block device to appear
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            println!("🔧 [KERNEL_SETUP] Device is unbound, binding {} to nvme driver", pci_addr);
+            match self.bind_to_driver(pci_addr, "nvme").await {
+                Ok(_) => {
+                    println!("✅ [KERNEL_SETUP] Successfully bound to nvme driver");
+                    // Wait for block device to appear
+                    println!("🔧 [KERNEL_SETUP] Waiting 2 seconds for block device to appear...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    println!("❌ [KERNEL_SETUP] Failed to bind to nvme driver: {}", e);
+                    return Err(format!("Failed to bind {} to nvme driver: {}", pci_addr, e).into());
+                }
+            }
+        } else {
+            println!("✅ [KERNEL_SETUP] Device already bound to driver: {}", disk_info.driver);
         }
         
         // Step 2: Ensure the device is accessible via block device
+        println!("🔧 [KERNEL_SETUP] Step 2: Verifying block device access...");
         let block_device = format!("/dev/{}", disk_info.device_name);
+        println!("🔧 [KERNEL_SETUP] Checking if block device exists: {}", block_device);
+        
         if !std::path::Path::new(&block_device).exists() {
-            return Err(format!("Block device {} not found after nvme binding", block_device).into());
+            println!("❌ [KERNEL_SETUP] Block device {} not found", block_device);
+            // Try to find the actual device name
+            println!("🔧 [KERNEL_SETUP] Searching for actual device name...");
+            match self.find_nvme_device_name(pci_addr).await {
+                Ok(actual_name) => {
+                    println!("🔧 [KERNEL_SETUP] Found actual device name: {}", actual_name);
+                    let actual_block_device = format!("/dev/{}", actual_name);
+                    if std::path::Path::new(&actual_block_device).exists() {
+                        println!("✅ [KERNEL_SETUP] Using actual block device: {}", actual_block_device);
+                    } else {
+                        println!("❌ [KERNEL_SETUP] Actual block device also not found: {}", actual_block_device);
+                        return Err(format!("Block device not found: neither {} nor {}", block_device, actual_block_device).into());
+                    }
+                }
+                Err(e) => {
+                    println!("❌ [KERNEL_SETUP] Could not find device name: {}", e);
+                    return Err(format!("Block device {} not found after nvme binding: {}", block_device, e).into());
+                }
+            }
+        } else {
+            println!("✅ [KERNEL_SETUP] Block device exists: {}", block_device);
         }
 
         // Step 3: Try to attach the NVMe device to SPDK using kernel access
+        println!("🔧 [KERNEL_SETUP] Step 3: Attaching to SPDK...");
         let attach_result = self.attach_kernel_nvme_to_spdk(pci_addr, &disk_info.device_name).await;
         match attach_result {
-            Ok(_) => println!("Successfully attached {} to SPDK via kernel access", disk_info.device_name),
+            Ok(_) => {
+                println!("✅ [KERNEL_SETUP] Successfully attached {} to SPDK via kernel access", disk_info.device_name);
+            }
             Err(e) => {
                 // Don't fail setup if SPDK attachment fails - the disk can still be used
-                println!("Warning: Could not attach {} to SPDK (will use direct kernel access): {}", disk_info.device_name, e);
+                println!("⚠️  [KERNEL_SETUP] Could not attach {} to SPDK (will use direct kernel access): {}", disk_info.device_name, e);
+                println!("🔧 [KERNEL_SETUP] This is not necessarily a failure - disk can still be used directly");
             }
         }
 
         // Step 4: Mark as ready for SPDK (kernel mode)
-        println!("Disk {} configured for SPDK in kernel-bound mode", pci_addr);
+        println!("🎉 [KERNEL_SETUP] Disk {} configured for SPDK in kernel-bound mode", pci_addr);
         Ok(())
     }
 
     /// Attach kernel-bound NVMe device to SPDK for bdev access
-    async fn attach_kernel_nvme_to_spdk(&self, pci_addr: &str, device_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn attach_kernel_nvme_to_spdk(&self, pci_addr: &str, device_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [SPDK_ATTACH] Starting SPDK attachment for device: {}", device_name);
+        println!("🔧 [SPDK_ATTACH] PCI address: {}", pci_addr);
+        println!("🔧 [SPDK_ATTACH] SPDK RPC URL: {}", self.spdk_rpc_url);
+        
         // Try to create a kernel bdev in SPDK for this device
         let bdev_name = format!("kernel_{}", device_name);
         let device_path = format!("/dev/{}", device_name);
+        println!("🔧 [SPDK_ATTACH] Target bdev name: {}", bdev_name);
+        println!("🔧 [SPDK_ATTACH] Target device path: {}", device_path);
+
+        // Verify device path exists before trying to create bdev
+        if !std::path::Path::new(&device_path).exists() {
+            println!("❌ [SPDK_ATTACH] Device path does not exist: {}", device_path);
+            return Err(format!("Device path {} does not exist", device_path).into());
+        }
+        println!("✅ [SPDK_ATTACH] Device path exists: {}", device_path);
 
         // Use SPDK's aio bdev to access the kernel device
+        println!("🔧 [SPDK_ATTACH] Attempting to create AIO bdev...");
         let rpc_request = json!({
             "method": "bdev_aio_create",
             "params": {
@@ -1989,13 +2162,18 @@ impl NodeAgent {
                 "block_size": 512
             }
         });
+        println!("🔧 [SPDK_ATTACH] AIO RPC request: {}", serde_json::to_string_pretty(&rpc_request).unwrap());
 
         match call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
-            Ok(_) => {
-                println!("Created SPDK aio bdev '{}' for kernel device {}", bdev_name, device_path);
+            Ok(response) => {
+                println!("✅ [SPDK_ATTACH] Successfully created SPDK aio bdev '{}' for kernel device {}", bdev_name, device_path);
+                println!("🔧 [SPDK_ATTACH] AIO response: {:?}", response);
                 Ok(())
             }
             Err(e) => {
+                println!("⚠️  [SPDK_ATTACH] AIO bdev creation failed: {}", e);
+                println!("🔧 [SPDK_ATTACH] Trying uring bdev as fallback...");
+                
                 // If aio fails, try uring bdev (newer, better performance)
                 let uring_request = json!({
                     "method": "bdev_uring_create", 
@@ -2005,13 +2183,18 @@ impl NodeAgent {
                         "block_size": 512
                     }
                 });
+                println!("🔧 [SPDK_ATTACH] URING RPC request: {}", serde_json::to_string_pretty(&uring_request).unwrap());
 
                 match call_spdk_rpc(&self.spdk_rpc_url, &uring_request).await {
-                    Ok(_) => {
-                        println!("Created SPDK uring bdev '{}' for kernel device {}", bdev_name, device_path);
+                    Ok(response) => {
+                        println!("✅ [SPDK_ATTACH] Successfully created SPDK uring bdev '{}' for kernel device {}", bdev_name, device_path);
+                        println!("🔧 [SPDK_ATTACH] URING response: {:?}", response);
                         Ok(())
                     }
                     Err(uring_err) => {
+                        println!("❌ [SPDK_ATTACH] Both AIO and URING bdev creation failed");
+                        println!("❌ [SPDK_ATTACH] AIO error: {}", e);
+                        println!("❌ [SPDK_ATTACH] URING error: {}", uring_err);
                         Err(format!("Failed to create SPDK bdev for {}: aio error: {}, uring error: {}", 
                                   device_path, e, uring_err).into())
                     }
@@ -2020,7 +2203,7 @@ impl NodeAgent {
         }
     }
 
-    async fn setup_huge_pages(&self, huge_pages_mb: u32) -> Result<u32, Box<dyn std::error::Error>> {
+    async fn setup_huge_pages(&self, huge_pages_mb: u32) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         // Calculate optimal hugepage allocation for SPDK if not specified or too small
         let optimal_mb = if huge_pages_mb == 0 || huge_pages_mb < 2048 {
             self.calculate_optimal_hugepages().await?
@@ -2050,7 +2233,7 @@ impl NodeAgent {
     }
 
     /// Calculate optimal hugepage allocation based on system memory for SPDK workloads
-    async fn calculate_optimal_hugepages(&self) -> Result<u32, Box<dyn std::error::Error>> {
+    async fn calculate_optimal_hugepages(&self) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
         // Read total system memory
         let meminfo = fs::read_to_string("/proc/meminfo")?;
         let total_mem_kb = meminfo
@@ -2107,7 +2290,7 @@ impl NodeAgent {
         Ok(result)
     }
 
-    async fn reset_single_disk(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn reset_single_disk(&self, pci_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let current_driver = self.get_current_driver(pci_addr).await?;
         
         // Unbind from current driver if bound

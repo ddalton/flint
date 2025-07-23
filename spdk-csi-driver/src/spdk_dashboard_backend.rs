@@ -1650,7 +1650,7 @@ async fn get_all_nodes_disk_setup(state: AppState) -> Result<impl warp::Reply, w
     let http_client = HttpClient::new();
     let mut all_nodes_data = json!({});
     
-    for (node_name, node_agent_url) in spdk_nodes.iter() {
+    for (node_name, _node_agent_url) in spdk_nodes.iter() {
         let node_agent_base = get_node_agent_url(&spdk_nodes, node_name).unwrap_or_default();
         
         // Get uninitialized disks for this node
