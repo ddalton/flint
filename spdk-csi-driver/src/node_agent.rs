@@ -27,10 +27,14 @@ async fn call_spdk_rpc(
     let default_params = json!({});
     let params = rpc_request.get("params").unwrap_or(&default_params);
     
-    println!("🔧 [SPDK_HYBRID] Method: {} (checking embedded implementation)", method);
+    // Check if we're running in embedded mode
+    let spdk_mode = env::var("SPDK_MODE").unwrap_or("rpc".to_string());
     
-    // Use embedded SPDK for common operations
-    match method {
+    if spdk_mode == "embedded" {
+        println!("🚀 [SPDK_EMBEDDED] Method: {} (using embedded implementation)", method);
+        
+        // Use embedded SPDK for common operations
+        match method {
         "bdev_aio_create" => {
             println!("🚀 [SPDK_EMBEDDED] Using embedded AIO bdev creation");
             let spdk = get_spdk_instance()?;
@@ -117,11 +121,16 @@ async fn call_spdk_rpc(
             }
         }
         
-        _ => {
-            // Fall back to RPC for other methods
-            println!("🔄 [SPDK_FALLBACK] Using RPC for method: {}", method);
-            call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
+            _ => {
+                // Fall back to RPC for other methods not implemented in embedded mode
+                println!("🔄 [SPDK_FALLBACK] Method {} not implemented in embedded mode, using RPC", method);
+                call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
+            }
         }
+    } else {
+        // RPC mode - use RPC for all methods
+        println!("🔌 [SPDK_RPC] Method: {} (using RPC mode)", method);
+        call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
     }
 }
 
@@ -271,8 +280,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
     
-    // Wait for SPDK to be ready
-    wait_for_spdk_ready(&agent).await?;
+    // Check if we're running in embedded mode
+    let spdk_mode = env::var("SPDK_MODE").unwrap_or("rpc".to_string());
+    
+    if spdk_mode == "embedded" {
+        println!("🚀 [EMBEDDED] Initializing embedded SPDK mode");
+        
+        // Initialize embedded SPDK instance
+        match get_spdk_instance() {
+            Ok(_spdk) => {
+                println!("✅ [EMBEDDED] SPDK instance initialized successfully");
+            }
+            Err(e) => {
+                eprintln!("❌ [EMBEDDED] Failed to initialize SPDK: {}", e);
+                println!("🔄 [EMBEDDED] Continuing with mock bindings for development");
+            }
+        }
+    } else {
+        println!("🔌 [RPC] Using RPC mode - waiting for SPDK to be ready");
+        // Wait for SPDK to be ready via RPC
+        wait_for_spdk_ready(&agent).await?;
+    }
     
     // Start HTTP API server for disk setup operations
     let api_agent = agent.clone();
