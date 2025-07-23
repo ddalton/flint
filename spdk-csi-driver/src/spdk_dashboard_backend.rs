@@ -407,7 +407,7 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
     }
     
     for disk in disks_list.items {
-        nodes.insert(disk.spec.node.clone());
+        nodes.insert(disk.spec.node_id.clone());
         let dashboard_disk = convert_disk_to_dashboard(&disk, &dashboard_volumes);
         dashboard_disks.push(dashboard_disk);
     }
@@ -607,7 +607,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
     let provisioned_volumes: Vec<ProvisionedVolume> = volumes.iter()
         .filter_map(|vol| {
             for replica in &vol.replica_statuses {
-                if replica.node == spec.node {
+                if replica.node == spec.node_id {
                     return Some(ProvisionedVolume {
                         volume_name: vol.name.clone(),
                         volume_id: vol.id.clone(),
@@ -626,7 +626,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
     
     DashboardDisk {
         id: disk.metadata.name.clone().unwrap_or_default(),
-        node: spec.node.clone(),
+        node: spec.node_id.clone(),
         pci_addr: spec.pcie_addr.clone(),
         capacity: status.total_capacity,
         capacity_gb: status.total_capacity / (1024 * 1024 * 1024),

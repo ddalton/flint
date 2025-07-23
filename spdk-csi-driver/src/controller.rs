@@ -7,7 +7,7 @@ use crate::csi_driver::csi::csi::v1::{
     *,
 };
 use tonic::{Request, Response, Status};
-use kube::{Api, api::{ListParams, Patch, PatchParams, PostParams}};
+use kube::{Api, api::{PatchParams, Patch, PostParams, ListParams}};
 use reqwest::Client as HttpClient;
 use serde_json::json;
 use spdk_csi_driver::models::*;
@@ -176,7 +176,7 @@ impl ControllerService {
         // For multi-replica, validate node distribution is possible
         if num_replicas > 1 {
             let unique_nodes: std::collections::HashSet<_> = available_disks.iter()
-                .map(|disk| &disk.spec.node)
+                .map(|disk| &disk.spec.node_id)
                 .collect();
 
             if unique_nodes.len() < num_replicas as usize {
@@ -209,10 +209,10 @@ impl ControllerService {
             let b_free = b.status.as_ref().map(|s| s.free_space).unwrap_or(0);
             b_free.cmp(&a_free)
         });
-        
+
         for disk in sorted_disks {
-            if !used_nodes.contains(&disk.spec.node) && selected_disks.len() < num_replicas {
-                used_nodes.insert(disk.spec.node.clone());
+            if !used_nodes.contains(&disk.spec.node_id) && selected_disks.len() < num_replicas {
+                used_nodes.insert(disk.spec.node_id.clone());
                 selected_disks.push(disk);
             }
         }
@@ -230,7 +230,7 @@ impl ControllerService {
 
         // Log selection for debugging
         let selected_nodes: Vec<_> = selected_disks.iter()
-            .map(|d| &d.spec.node)
+            .map(|d| &d.spec.node_id)
             .collect();
         println!("Selected disks on nodes: {:?}", selected_nodes);
 
@@ -258,11 +258,11 @@ impl ControllerService {
             let lvol_uuid = self.create_volume_lvol(disk, capacity, volume_id).await
                 .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
 
-            let node_ip = self.driver.get_node_ip(&disk.spec.node).await?;
+            let node_ip = self.driver.get_node_ip(&disk.spec.node_id).await?;
             let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
 
             let replica = Replica {
-                node: disk.spec.node.clone(),
+                node: disk.spec.node_id.clone(),
                 replica_type: "lvol".to_string(),
                 pcie_addr: Some(disk.spec.pcie_addr.clone()),
                 disk_ref: disk.metadata.name.clone().unwrap_or_default(),
@@ -288,7 +288,7 @@ impl ControllerService {
         size_bytes: i64,
         volume_id: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node).await?;
+        let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await?;
         let http_client = HttpClient::new();
         let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
         let lvol_name = format!("vol_{}", volume_id);

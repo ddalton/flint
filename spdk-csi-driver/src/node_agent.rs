@@ -933,61 +933,17 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
     })
 }
 
-async fn discover_unbound_nvme_devices() -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
-    use std::process::Command;
-    
-    // Use lspci to find NVMe devices
-    let output = Command::new("lspci")
-        .args(["-D", "-d", "::0108"]) // NVMe class code
-        .output()?;
-    
-    let lspci_output = String::from_utf8(output.stdout)?;
-    let mut devices = Vec::new();
-    
-    for line in lspci_output.lines() {
-        if let Some(pcie_addr) = line.split_whitespace().next() {
-            // Check if device is bound to a driver
-            let sys_path = format!("/sys/bus/pci/devices/{}/driver", pcie_addr);
-            if !std::path::Path::new(&sys_path).exists() {
-                // Unbound device - get more info
-                if let Ok(device) = get_nvme_device_info(pcie_addr).await {
-                    devices.push(device);
-                }
-            }
-        }
-    }
-    
-    Ok(devices)
-}
 
-async fn get_nvme_device_info(pcie_addr: &str) -> Result<NvmeDevice, Box<dyn std::error::Error + Send + Sync>> {
-    use std::fs;
-    
-    // Read device info from sysfs
-    let vendor_path = format!("/sys/bus/pci/devices/{}/vendor", pcie_addr);
-    let device_path = format!("/sys/bus/pci/devices/{}/device", pcie_addr);
-    
-    let _vendor = fs::read_to_string(vendor_path).unwrap_or_default().trim().to_string();
-    let device = fs::read_to_string(device_path).unwrap_or_default().trim().to_string();
-    
-    // Estimate capacity (this would need more sophisticated detection in production)
-    let capacity = 1_000_000_000_000; // 1TB default
-    
-    Ok(NvmeDevice {
-        controller_id: format!("unbound_{}", pcie_addr.replace(":", "_")),
-        pcie_addr: pcie_addr.to_string(),
-        capacity,
-        model: format!("Unbound NVMe Device {}", device),
-    })
-}
 
 async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let disk_name = format!("{}-{}", agent.node_name, device.controller_id);
+    let device_path = format!("/dev/{}", device.controller_id); // e.g., /dev/nvme1n1
     
     let spdk_disk = SpdkDisk::new_with_metadata(&disk_name, SpdkDiskSpec {
-        node: agent.node_name.clone(),
+        node_id: agent.node_name.clone(),           // Changed from 'node' to 'node_id'
+        device_path,                                // Added required field
+        size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)), // Changed from 'capacity' to 'size' as string
         pcie_addr: device.pcie_addr.clone(),
-        capacity: device.capacity,
         blobstore_uuid: None,
         nvme_controller_id: Some(device.controller_id.clone()),
     });
@@ -1069,10 +1025,12 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     let mut updated_status = disk.status.clone().unwrap_or_default();
     
     // Update capacity if changed
-    if disk.spec.capacity != device.capacity {
+    let current_capacity_gb = disk.spec.size.trim_end_matches("GB").parse::<i64>().unwrap_or(0) * (1024 * 1024 * 1024);
+    if current_capacity_gb != device.capacity {
+        let new_size = format!("{}GB", device.capacity / (1024 * 1024 * 1024));
         let patch = json!({
             "spec": {
-                "capacity": device.capacity
+                "size": new_size
             }
         });
         spdk_disks.patch(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await?;

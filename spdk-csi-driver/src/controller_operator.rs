@@ -379,7 +379,7 @@ async fn create_replacement_lvol(
     let lvs_name = format!("lvs_{}", replacement_disk.metadata.name.as_ref().unwrap());
     let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
 
-    let target_node_name = &replacement_disk.spec.node;
+    let target_node_name = &replacement_disk.spec.node_id;
     let rpc_url = get_rpc_url_for_node(&ctx.client, target_node_name).await?;
     
     println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
@@ -419,7 +419,7 @@ async fn update_replica_after_replacement(
     
     let mut new_spec = spdk_volume.spec.clone();
     new_spec.replicas[failed_replica_index] = Replica {
-        node: replacement_disk.spec.node.clone(),
+        node: replacement_disk.spec.node_id.clone(),
         replica_type: "lvol".to_string(),
         pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
         disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
@@ -505,7 +505,7 @@ async fn find_replacement_disk(
                 status.healthy 
                     && status.blobstore_initialized 
                     && status.free_space >= required_capacity 
-                    && !used_nodes.contains(&d.spec.node)
+                    && !used_nodes.contains(&d.spec.node_id)
             } else {
                 false
             }

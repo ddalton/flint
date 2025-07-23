@@ -886,7 +886,7 @@ impl Node for NodeService {
         let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
         if let Ok(disk_list) = disks_api.list(&kube::api::ListParams::default()).await {
             let local_disks: Vec<_> = disk_list.items.iter()
-                .filter(|disk| disk.spec.node == self.driver.node_id)
+                .filter(|disk| disk.spec.node_id == self.driver.node_id)
                 .collect();
             
             // Estimate max volumes based on disk capacity and typical volume sizes

@@ -167,9 +167,10 @@ pub struct RaidRebuildInfo {
 #[kube(namespaced)]
 #[kube(status = "SpdkDiskStatus")]
 pub struct SpdkDiskSpec {
-    pub node: String,
+    pub node_id: String,        // Changed from 'node' to match CRD
+    pub device_path: String,    // Added required field
+    pub size: String,           // Changed from 'capacity' (i64) to 'size' (String) to match CRD
     pub pcie_addr: String,
-    pub capacity: i64,
     pub blobstore_uuid: Option<String>,
     pub nvme_controller_id: Option<String>,
 }
