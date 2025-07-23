@@ -59,7 +59,6 @@ RUN apk add --no-cache \
     liburing-dev \
     util-linux-dev \
     numactl-dev \
-    libisal-dev \
     && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
@@ -69,7 +68,8 @@ COPY --from=spdk-builder /spdk/include/spdk/ /usr/local/include/spdk/
 COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK libraries (built as part of SPDK --with-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
-# Copy ISA-L libraries if built as part of SPDK dependencies (best effort)
+
+# Create a simple script to copy ISA-L if it exists
 RUN mkdir -p /usr/local/lib/
 
 # Ensure static libraries are available for linking
@@ -98,9 +98,13 @@ COPY --chown=65532:65532 wrapper.h ./
 # Debug: List available SPDK libraries before build
 RUN echo "=== SPDK Library Debug Info ===" && \
     echo "Contents of /usr/local/lib:" && \
-    ls -la /usr/local/lib/ | grep -E '\.(a|so)' || echo "No libraries found" && \
-    echo "SPDK headers:" && \
-    ls -la /usr/local/include/spdk/ | head -5 || echo "No SPDK headers found" && \
+    ls -la /usr/local/lib/ | grep -E '\.(a|so)' | wc -l && echo " libraries found" && \
+    echo "SPDK libraries:" && \
+    ls -la /usr/local/lib/libspdk* | head -10 || echo "No SPDK libraries found" && \
+    echo "DPDK libraries:" && \
+    ls -la /usr/local/lib/librte* | head -5 || echo "No DPDK libraries found" && \
+    echo "ISA-L libraries:" && \
+    ls -la /usr/local/lib/*isal* || echo "No ISA-L libraries found" && \
     echo "Environment:" && \
     echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \

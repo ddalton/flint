@@ -59,12 +59,29 @@ fn build_spdk_bindings() {
     let dpdk_lib = format!("{}/lib", spdk_root);
     println!("cargo:rustc-link-search=native={}", dpdk_lib);
     
-    // Core SPDK libraries (verified against SPDK v24.01.x) - use dynamic linking
+    // Comprehensive SPDK libraries (verified against SPDK v24.01.x) - use dynamic linking
     let spdk_libs = [
-        "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread",
-        "spdk_bdev", "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_bdev_aio",
-        "spdk_json", "spdk_accel", "spdk_trace", "spdk_notify", "spdk_conf",
-        "spdk_init", "spdk_dma",
+        // Core environment and utilities
+        "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread", "spdk_conf",
+        "spdk_init", "spdk_dma", "spdk_json", "spdk_trace", "spdk_notify",
+        
+        // Block device subsystem
+        "spdk_bdev", "spdk_bdev_aio", "spdk_bdev_lvol", "spdk_bdev_nvme",
+        "spdk_bdev_malloc", "spdk_bdev_null", "spdk_bdev_error", "spdk_bdev_delay",
+        "spdk_bdev_split", "spdk_bdev_raid", "spdk_bdev_gpt", "spdk_bdev_passthru",
+        
+        // Blob and logical volume management  
+        "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_blobfs", "spdk_blobfs_bdev",
+        
+        // Acceleration and crypto (contains ISA-L functionality)
+        "spdk_accel", "spdk_accel_ioat", "spdk_accel_error",
+        
+        // Network and NVMe-oF
+        "spdk_nvme", "spdk_nvmf", "spdk_sock", "spdk_sock_posix",
+        
+        // Additional subsystems
+        "spdk_ioat", "spdk_vmd", "spdk_virtio", "spdk_scsi", "spdk_iscsi",
+        "spdk_rpc", "spdk_jsonrpc", "spdk_ut", "spdk_ut_mock",
     ];
     
     for lib in &spdk_libs {
@@ -73,9 +90,15 @@ fn build_spdk_bindings() {
     
     // DPDK libraries (required by SPDK when built with --with-shared)
     let dpdk_libs = [
+        // Core DPDK
         "rte_eal", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
-        "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_bus_pci",
-        "rte_pci", "rte_telemetry", "rte_rcu",
+        "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_telemetry", "rte_rcu",
+        
+        // Bus and device support
+        "rte_bus_pci", "rte_pci", "rte_bus_vdev",
+        
+        // Additional common DPDK libs
+        "rte_malloc", "rte_memzone", "rte_cmdline", "rte_net", "rte_log",
     ];
     
     for lib in &dpdk_libs {
@@ -87,9 +110,6 @@ fn build_spdk_bindings() {
     for lib in &sys_libs {
         println!("cargo:rustc-link-lib={}", lib);
     }
-    
-    // ISA-L library (Intel Storage Acceleration Library) - required by SPDK
-    println!("cargo:rustc-link-lib=dylib=isal");
     
     // Generate bindings
     let bindings = bindgen::Builder::default()
