@@ -865,12 +865,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
                         match initialize_blobstore_on_device(agent, &disk).await {
                             Ok(_) => {
                                 println!("✅ [BLOBSTORE] Successfully initialized blobstore for: {}", disk_name);
-                                
-                                // Update the status to reflect successful initialization
-                                match update_disk_blobstore_status(agent, &disk_name, true).await {
-                                    Ok(_) => println!("✅ [BLOBSTORE] Updated status for {}: blobstore_initialized=true", disk_name),
-                                    Err(e) => eprintln!("⚠️ [BLOBSTORE] Failed to update status for {}: {}", disk_name, e),
-                                }
+                                // Status update is now handled inside initialize_blobstore_on_device
                             }
                             Err(e) => {
                                 println!("❌ [BLOBSTORE] Failed to initialize blobstore for {}: {}", disk_name, e);
@@ -1108,9 +1103,29 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     
     // Check if device path exists (for kernel-bound devices)
     let bdev_name = if disk.spec.device_path.starts_with("/dev/") {
-        // Use kernel device path for kernel-bound devices
-        println!("🔗 [SPDK_INIT] Using kernel device path: {}", disk.spec.device_path);
-        disk.spec.device_path.strip_prefix("/dev/").unwrap_or(controller_id).to_string()
+        // For kernel-bound devices, create an AIO bdev first
+        println!("🔗 [SPDK_INIT] Creating AIO bdev for kernel device: {}", disk.spec.device_path);
+        let aio_bdev_name = format!("aio_{}", controller_id);
+        
+        let aio_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+            "method": "bdev_aio_create",
+            "params": {
+                "name": aio_bdev_name,
+                "filename": disk.spec.device_path,
+                "block_size": 4096
+            }
+        })).await;
+        
+        match aio_result {
+            Ok(_) => {
+                println!("✅ [SPDK_INIT] Successfully created AIO bdev: {}", aio_bdev_name);
+                aio_bdev_name
+            }
+            Err(e) => {
+                println!("❌ [SPDK_INIT] Failed to create AIO bdev: {}", e);
+                return Err(format!("Failed to create AIO bdev for {}: {}", disk.spec.device_path, e).into());
+            }
+        }
     } else {
         // Use SPDK controller name for SPDK-attached devices
         let name = format!("{}n1", controller_id);
@@ -1132,6 +1147,13 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     
     match lvol_store_result {
         Ok(result) => {
+            // Check if the result contains an error
+            if let Some(error) = result.get("error") {
+                let error_msg = format!("SPDK RPC error: {}", error);
+                println!("❌ [SPDK_INIT] LVS creation failed: {}", error_msg);
+                return Err(error_msg.into());
+            }
+            
             println!("✅ [SPDK_INIT] Successfully created LVS: {}", lvs_name);
             println!("📊 [SPDK_INIT] LVS result: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
             
