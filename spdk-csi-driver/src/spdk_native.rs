@@ -56,7 +56,7 @@ mod bindings {
     
     // Mock functions for non-Linux platforms
     pub unsafe fn spdk_env_init(_opts: *const spdk_env_opts) -> i32 { 0 }
-    pub unsafe fn spdk_log_set_print_level(_level: u32) {}
+    pub unsafe fn spdk_log_set_print_level(_level: i32) {}
     pub unsafe fn spdk_get_ticks_hz() -> u64 { 1000000000 }
     
     // Bdev iteration functions (real SPDK API signatures)
@@ -173,7 +173,7 @@ impl SpdkNative {
                 if bindings::spdk_env_init(ptr::null()) != 0 {
                     init_result = Err(anyhow!("SPDK environment initialization failed"));
                 } else {
-                    bindings::spdk_log_set_print_level(SPDK_LOG_INFO);
+                    bindings::spdk_log_set_print_level(SPDK_LOG_INFO as i32);
                     println!("✅ [SPDK_NATIVE] Environment initialized");
                 }
             }
@@ -479,10 +479,10 @@ impl SpdkNative {
                 "total_size": (num_blocks as u64) * (block_size as u64),
                 // Note: spdk_bdev_is_claimed doesn't exist in SPDK API, removed claimed status
                 "supported_io_types": {
-                    "read": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_READ as bindings::spdk_bdev_io_type),
-                    "write": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE as bindings::spdk_bdev_io_type),
-                    "unmap": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_UNMAP as bindings::spdk_bdev_io_type),
-                    "flush": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH as bindings::spdk_bdev_io_type),
+                    "read": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_READ) }),
+                    "write": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_WRITE) }),
+                    "unmap": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_UNMAP) }),
+                    "flush": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_FLUSH) }),
                 }
             });
             
@@ -556,14 +556,14 @@ impl SpdkNative {
                     "num_blocks": num_blocks,
                     "size": size,
                     "supported_io_types": {
-                        "read": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_READ as bindings::spdk_bdev_io_type),
-                        "write": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE as bindings::spdk_bdev_io_type),
-                        "flush": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH as bindings::spdk_bdev_io_type),
-                        "reset": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_RESET as bindings::spdk_bdev_io_type),
-                        "unmap": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_UNMAP as bindings::spdk_bdev_io_type),
-                        "write_zeroes": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE_ZEROES as bindings::spdk_bdev_io_type),
-                        "nvme_admin": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_NVME_ADMIN as bindings::spdk_bdev_io_type),
-                        "nvme_io": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_NVME_IO as bindings::spdk_bdev_io_type),
+                        "read": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_READ) }),
+                        "write": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_WRITE) }),
+                        "flush": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_FLUSH) }),
+                        "reset": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_RESET) }),
+                        "unmap": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_UNMAP) }),
+                        "write_zeroes": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_WRITE_ZEROES) }),
+                        "nvme_admin": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_NVME_ADMIN) }),
+                        "nvme_io": bindings::spdk_bdev_io_type_supported(bdev, unsafe { std::mem::transmute(SPDK_BDEV_IO_TYPE_NVME_IO) }),
                     }
                 }));
                 
