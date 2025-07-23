@@ -84,11 +84,11 @@ fn build_spdk_bindings() {
         "spdk_rpc", "spdk_jsonrpc", "spdk_ut", "spdk_ut_mock",
     ];
     
-    // ISA-L library - link before SPDK libraries to resolve their undefined references
-    println!("cargo:rustc-link-lib=dylib=isal");
+    // Static SPDK linking - ISA-L symbols are incorporated into SPDK static libraries
+    // No separate ISA-L linking needed with static SPDK build
     
     for lib in &spdk_libs {
-        println!("cargo:rustc-link-lib=dylib={}", lib);
+        println!("cargo:rustc-link-lib=static={}", lib);
     }
     
     // DPDK libraries (required by SPDK when built with --with-shared) - only verified ones
@@ -102,7 +102,7 @@ fn build_spdk_bindings() {
     ];
     
     for lib in &dpdk_libs {
-        println!("cargo:rustc-link-lib=dylib={}", lib);
+        println!("cargo:rustc-link-lib=static={}", lib);
     }
     
     // System dependencies

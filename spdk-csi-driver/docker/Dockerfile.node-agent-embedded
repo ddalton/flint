@@ -43,8 +43,8 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     make install && \
     ldconfig && \
     cd .. && \
-    echo "=== Configuring SPDK with ISA-L available in system ===" && \
-    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH ./configure --with-ublk --enable-debug --with-shared && \
+    echo "=== Configuring SPDK for static linking (avoids ISA-L shared lib issues) ===" && \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH ./configure --with-ublk --enable-debug --disable-shared && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
@@ -72,15 +72,14 @@ RUN apk add --no-cache \
     && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
-# Copy SPDK build artifacts from spdk-builder stage
+# Copy SPDK static libraries and headers from spdk-builder stage
 COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
 COPY --from=spdk-builder /spdk/include/spdk/ /usr/local/include/spdk/
 COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
-# Copy DPDK libraries (built as part of SPDK --with-shared)
+# Copy DPDK static libraries (built as part of SPDK --disable-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
-# Copy ISA-L libraries that were built and installed system-wide during SPDK build
-COPY --from=spdk-builder /usr/local/lib/libisal* /usr/local/lib/
+# ISA-L symbols are now incorporated into SPDK static libraries - no separate copy needed
 
 # Ensure static libraries are available for linking
 RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
@@ -88,9 +87,8 @@ RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No st
 # Create pkg-config files for SPDK libraries if they don't exist
 RUN mkdir -p /usr/local/lib/pkgconfig
 
-# Set up environment for SPDK linking
+# Set up environment for SPDK static linking
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV SPDK_ROOT_DIR=/usr/local
 
 # Switch back to unprivileged user for build
@@ -118,10 +116,10 @@ RUN echo "=== SPDK Library Debug Info ===" && \
     ls -la /usr/local/lib/librte* | head -5 || echo "No DPDK libraries found" && \
     echo "ISA-L libraries:" && \
     ls -la /usr/local/lib/*isal* || echo "No ISA-L libraries found" && \
-    echo "Check if ISA-L symbols are properly incorporated into SPDK libraries:" && \
-    nm -D /usr/local/lib/libspdk_accel.so | grep -E '(isal_|crc32_iscsi|xor_gen)' | head -5 || echo "ISA-L symbols not found in SPDK accel library - this may be expected" && \
-    echo "ISA-L libraries available:" && \
-    ls -la /usr/local/lib/libisal* || echo "No separate ISA-L libraries found" && \
+    echo "Verifying static libraries contain ISA-L symbols:" && \
+    nm /usr/local/lib/libspdk_accel.a | grep -E '(isal_|crc32_iscsi|xor_gen)' | head -5 || echo "ISA-L symbols not found in SPDK accel static library - checking other libs" && \
+    echo "Static libraries available:" && \
+    ls -la /usr/local/lib/*.a | head -10 || echo "No static libraries found" && \
     echo "Environment:" && \
     echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \
@@ -159,8 +157,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy SPDK runtime libraries and scripts (for debugging/management)
-COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
+# Copy SPDK management scripts and Python modules (static binary doesn't need runtime libs)
 COPY --from=spdk-builder /spdk/scripts/ /usr/local/scripts/
 COPY --from=spdk-builder /spdk/python/ /usr/local/lib/python3.12/dist-packages/
 
@@ -174,7 +171,6 @@ RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
     fi && \
     chmod +x /usr/local/scripts/*.sh
 
-# Set up library path for SPDK
-ENV LD_LIBRARY_PATH=/usr/local/lib
+# Static linking - no runtime library path needed
 
 ENTRYPOINT ["/usr/local/bin/node-agent"] 
