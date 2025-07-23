@@ -860,23 +860,49 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
 }
 
 async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
-    // Get all NVMe controllers from local SPDK
-    let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_nvme_get_controllers"
-    })).await?;
     let mut devices = Vec::new();
     
-    if let Some(controller_list) = controllers["result"].as_array() {
-        for controller in controller_list {
-            if let Some(device) = parse_nvme_controller(controller) {
-                devices.push(device);
+    // Get all NVMe controllers that are already attached to SPDK
+    let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_nvme_get_controllers"
+    })).await;
+    
+    if let Ok(controllers_result) = controllers {
+        if let Some(controller_list) = controllers_result["result"].as_array() {
+            for controller in controller_list {
+                if let Some(device) = parse_nvme_controller(controller) {
+                    devices.push(device);
+                }
             }
         }
     }
     
-    // Note: Unbound devices are NOT included in automatic discovery
-    // They are only available through the setup API via discover_all_disks()
-    // This prevents invalid SpdkDisk CRD creation for unbound devices
+    // ALSO get kernel-bound SPDK-ready devices that should be included in discovery
+    // This fixes the issue where SPDK-ready kernel-bound disks were ignored in periodic discovery
+    let pci_devices = agent.get_nvme_pci_devices().await.unwrap_or_default();
+    
+    for pci_addr in pci_devices {
+        // Skip if we already have this device from SPDK controllers
+        if devices.iter().any(|d| d.pcie_addr == pci_addr) {
+            continue;
+        }
+        
+        // Check if this is a SPDK-ready device that should be discovered
+        if let Ok(disk_info) = agent.get_disk_info(&pci_addr).await {
+            if disk_info.spdk_ready && !disk_info.is_system_disk {
+                // Convert to NvmeDevice format for consistency
+                let device = NvmeDevice {
+                    controller_id: disk_info.device_name.clone(),
+                    pcie_addr: disk_info.pci_address.clone(),
+                    capacity: disk_info.size_bytes as i64,
+                    model: disk_info.model.clone(),
+                };
+                devices.push(device);
+                println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
+                         device.controller_id, device.pcie_addr);
+            }
+        }
+    }
     
     Ok(devices)
 }
