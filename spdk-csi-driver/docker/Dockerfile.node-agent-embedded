@@ -59,8 +59,8 @@ RUN apk add --no-cache \
 
 # Copy SPDK build artifacts from spdk-builder stage
 COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
+COPY --from=spdk-builder /spdk/include/spdk/ /usr/local/include/spdk/
 COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
-COPY --from=spdk-builder /spdk/include/ /usr/local/include/spdk/
 
 # Set up environment for SPDK linking
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
