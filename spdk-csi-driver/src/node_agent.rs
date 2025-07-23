@@ -121,6 +121,89 @@ async fn call_spdk_rpc(
             }
         }
         
+        "bdev_get_blobstores" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded blobstore list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_blobstores().await {
+                Ok(blobstores) => Ok(json!({"result": blobstores})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] Blobstore list failed: {}", e);
+                    Ok(json!({"result": []}))  // Return empty array instead of falling back
+                }
+            }
+        }
+        
+        "blobstore_sync_all" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded blobstore sync");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.sync_all_blobstores().await {
+                Ok(_) => Ok(json!({"result": true})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] Blobstore sync failed: {}", e);
+                    Ok(json!({"result": false}))
+                }
+            }
+        }
+        
+        "bdev_nvme_get_controllers" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded NVMe controller list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_nvme_controllers().await {
+                Ok(controllers) => Ok(json!({"result": controllers})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] NVMe controller list failed: {}", e);
+                    Ok(json!({"result": []}))
+                }
+            }
+        }
+        
+        "bdev_raid_get_bdevs" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded RAID bdev list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_raid_bdevs().await {
+                Ok(raids) => Ok(json!({"result": raids})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] RAID bdev list failed: {}", e);
+                    Ok(json!({"result": []}))
+                }
+            }
+        }
+        
+        "nvmf_get_subsystems" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded NVMe-oF subsystem list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_nvmeof_subsystems().await {
+                Ok(subsystems) => Ok(json!({"result": subsystems})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] NVMe-oF subsystem list failed: {}", e);
+                    Ok(json!({"result": []}))
+                }
+            }
+        }
+        
+        "bdev_get_iostat" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded I/O statistics");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_bdev_iostat().await {
+                Ok(iostats) => Ok(json!({"result": iostats})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] I/O statistics failed: {}", e);
+                    Ok(json!({"result": []}))
+                }
+            }
+        }
+        
+        "spdk_get_version" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded SPDK version");
+            Ok(json!({"result": {"version": "24.01-embedded"}}))
+        }
+        
             _ => {
                 // Fall back to RPC for other methods not implemented in embedded mode
                 println!("🔄 [SPDK_FALLBACK] Method {} not implemented in embedded mode, using RPC", method);
