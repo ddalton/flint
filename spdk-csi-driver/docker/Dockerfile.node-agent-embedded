@@ -56,6 +56,9 @@ RUN apk add --no-cache \
     clang \
     protoc \
     protobuf-dev \
+    liburing-dev \
+    util-linux-dev \
+    numactl-dev \
     && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
