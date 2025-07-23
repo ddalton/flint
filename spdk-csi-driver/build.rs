@@ -5,137 +5,146 @@ fn main() {
     // Check if we should skip SPDK bindings (useful for controller-only builds)
     let skip_spdk = env::var("SKIP_SPDK_BINDINGS").unwrap_or_default().to_lowercase() == "true";
     
-    // Only generate SPDK bindings on Linux and when not explicitly skipped
+    // Build SPDK bindings on Linux when not skipped
     if cfg!(target_os = "linux") && !skip_spdk {
-        println!("cargo:rerun-if-changed=wrapper.h");
-        
-        // Look for SPDK installation
-        let spdk_root = env::var("SPDK_ROOT_DIR")
-            .or_else(|_| env::var("SPDK_ROOT"))
-            .unwrap_or_else(|_| "/usr/local".to_string());
-        
-        let spdk_include = format!("{}/include", spdk_root);
-        let spdk_lib = format!("{}/lib", spdk_root);
-        
-        println!("cargo:rustc-link-search=native={}", spdk_lib);
-        println!("cargo:rustc-link-lib=static=spdk_bdev");
-        println!("cargo:rustc-link-lib=static=spdk_blob");
-        println!("cargo:rustc-link-lib=static=spdk_blob_bdev");
-        println!("cargo:rustc-link-lib=static=spdk_lvol");
-        println!("cargo:rustc-link-lib=static=spdk_util");
-        println!("cargo:rustc-link-lib=static=spdk_env_dpdk");
-        println!("cargo:rustc-link-lib=static=spdk_log");
-        
-        // Generate bindings
-        let bindings = bindgen::Builder::default()
-            .header("wrapper.h")
-            .clang_arg(format!("-I{}", spdk_include))
-            .clang_arg("-I/usr/include")
-            // Only include what we need for Flint (avoid problematic NVMe types)
-            .allowlist_function("spdk_bdev_.*")
-            .allowlist_function("spdk_lvol_.*")
-            .allowlist_function("spdk_blob_.*")
-            .allowlist_function("spdk_env_.*")
-            .allowlist_function("spdk_log_.*")
-            .allowlist_function("spdk_util_.*")
-            // Allow essential types for bdev/lvol operations
-            .allowlist_type("spdk_bdev.*")
-            .allowlist_type("spdk_lvol.*")
-            .allowlist_type("spdk_blob.*")
-            .allowlist_type("spdk_env.*")
-            // Allow basic NVMe types needed by bdev layer (but not complex ones)
-            .allowlist_type("spdk_nvme_cmd")
-            .allowlist_type("spdk_nvme_cpl")
-            .allowlist_var("SPDK_BDEV_.*")
-            .allowlist_var("SPDK_LVOL_.*")
-            .allowlist_var("SPDK_BLOB_.*")
-            // Blocklist problematic NVMe types that cause alignment issues
-            .blocklist_type("spdk_nvme_ctrlr_data")
-            .blocklist_type("spdk_nvmf_fabric_.*")
-            .blocklist_type("spdk_nvme_tcp_.*")
-            .blocklist_type("spdk_nvme_vs_register.*")
-            .blocklist_function("spdk_nvme.*")
-            .blocklist_var("SPDK_NVME.*")
-            // Derive traits for ease of use (but avoid Copy for large structs)
-            .derive_debug(true)
-            .derive_default(true)
-            .derive_eq(false)
-            .derive_partialeq(false)
-            .derive_hash(false)
-            // Avoid layout tests and copy derivation that can be problematic
-            .layout_tests(false)
-            .derive_copy(false)
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-            .generate()
-            .expect("Unable to generate SPDK bindings");
-
-        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-        bindings
-            .write_to_file(out_path.join("spdk_bindings.rs"))
-            .expect("Couldn't write SPDK bindings!");
+        build_spdk_bindings();
     } else {
+        create_empty_bindings();
         if skip_spdk {
             println!("cargo:warning=SPDK bindings skipped (SKIP_SPDK_BINDINGS=true)");
         } else {
             println!("cargo:warning=SPDK bindings only available on Linux");
         }
-        
-        // Create an empty bindings file to satisfy the include! macro
-        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-        std::fs::write(
-            out_path.join("spdk_bindings.rs"),
-            "// SPDK bindings skipped\n"
-        ).expect("Couldn't write empty SPDK bindings file!");
     }
 
-    // Always build protobuf (CSI spec)
-    println!("cargo:rerun-if-changed=proto/csi.proto");
+    // Always build protobuf for CSI
+    build_protobuf();
+}
+
+fn build_spdk_bindings() {
+    println!("cargo:rerun-if-changed=wrapper.h");
     
-    let out_dir = env::var("OUT_DIR").unwrap();
-    println!("Generating protobuf files to: {}", out_dir);
+    // Find SPDK installation
+    let spdk_root = env::var("SPDK_ROOT_DIR")
+        .or_else(|_| env::var("SPDK_ROOT"))
+        .unwrap_or_else(|| "/usr/local".to_string());
     
-    // Ensure proto file exists
-    if !std::path::Path::new("proto/csi.proto").exists() {
-        panic!("proto/csi.proto file not found!");
+    let spdk_include = format!("{}/include", spdk_root);
+    let spdk_lib = format!("{}/lib", spdk_root);
+    
+    // Verify SPDK installation exists
+    let spdk_header = format!("{}/spdk/stdinc.h", spdk_include);
+    if !std::path::Path::new(&spdk_header).exists() {
+        panic!("SPDK headers not found at {}. Install SPDK or set SPDK_ROOT_DIR", spdk_include);
     }
     
-    let result = tonic_build::configure()
+    println!("cargo:warning=Using SPDK from: {}", spdk_root);
+    
+    // Link SPDK libraries
+    println!("cargo:rustc-link-search=native={}", spdk_lib);
+    
+    // Core SPDK libraries
+    let spdk_libs = [
+        "spdk_env_dpdk", "spdk_env", "spdk_util", "spdk_log", "spdk_thread",
+        "spdk_bdev", "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_bdev_aio",
+    ];
+    
+    for lib in &spdk_libs {
+        println!("cargo:rustc-link-lib=static={}", lib);
+    }
+    
+    // System dependencies
+    let sys_libs = ["uring", "uuid", "dl", "rt", "numa"];
+    for lib in &sys_libs {
+        println!("cargo:rustc-link-lib={}", lib);
+    }
+    
+    // Generate bindings
+    let bindings = bindgen::Builder::default()
+        .header("wrapper.h")
+        .clang_arg(format!("-I{}", spdk_include))
+        .clang_arg("-I/usr/include")
+        
+        // Core SPDK functions we need
+        .allowlist_function("spdk_env_.*")
+        .allowlist_function("spdk_log_.*")
+        .allowlist_function("spdk_util_.*")
+        .allowlist_function("spdk_get_ticks_hz")
+        .allowlist_function("spdk_uuid_.*")
+        .allowlist_function("spdk_bdev_.*")
+        .allowlist_function("spdk_blob_.*")
+        .allowlist_function("spdk_lvol_.*")
+        
+        // Essential types
+        .allowlist_type("spdk_env_opts")
+        .allowlist_type("spdk_log_level")
+        .allowlist_type("spdk_bdev.*")
+        .allowlist_type("spdk_lvol.*")
+        .allowlist_type("spdk_bdev_io_.*")
+        .allowlist_type("spdk_lvol_store_clear_method")
+        .allowlist_type("spdk_lvol_clear_method")
+        .allowlist_type("spdk_bdev_io_type")
+        
+        // Constants
+        .allowlist_var("SPDK_BDEV_.*")
+        .allowlist_var("SPDK_LVOL_.*")
+        .allowlist_var("SPDK_LOG_.*")
+        
+        // Block problematic types
+        .blocklist_type("spdk_nvme.*")
+        .blocklist_type("spdk_nvmf_.*")
+        .blocklist_function("spdk_nvme.*")
+        .blocklist_var("SPDK_NVME.*")
+        
+        // Conservative derives
+        .derive_debug(true)
+        .derive_default(true)
+        .derive_eq(false)
+        .derive_copy(false)
+        .layout_tests(false)
+        .size_t_is_usize(true)
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("Failed to generate SPDK bindings");
+
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("spdk_bindings.rs"))
+        .expect("Failed to write SPDK bindings");
+    
+    println!("cargo:warning=SPDK bindings generated successfully");
+}
+
+fn create_empty_bindings() {
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    std::fs::write(
+        out_path.join("spdk_bindings.rs"),
+        "// SPDK bindings skipped\n"
+    ).expect("Failed to write empty bindings file");
+}
+
+fn build_protobuf() {
+    println!("cargo:rerun-if-changed=proto/csi.proto");
+    
+    if !std::path::Path::new("proto/csi.proto").exists() {
+        panic!("proto/csi.proto file not found");
+    }
+    
+    let out_dir = env::var("OUT_DIR").unwrap();
+    
+    tonic_build::configure()
         .build_server(true)
         .build_client(true)
         .out_dir(&out_dir)
-        .compile(&["proto/csi.proto"], &["proto/"]);
+        .compile(&["proto/csi.proto"], &["proto/"])
+        .expect("Failed to compile protobuf");
     
-    match result {
-        Ok(_) => {
-            println!("Protobuf compilation succeeded");
-            
-            // List files in out_dir to see what was generated
-            if let Ok(entries) = std::fs::read_dir(&out_dir) {
-                println!("Files in {}:", out_dir);
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        println!("  {}", entry.file_name().to_string_lossy());
-                    }
-                }
-            }
-            
-                         // Check if the expected file exists (tonic generates based on package name)
-             let generated_file_v1 = format!("{}/csi.v1.rs", out_dir);
-             let generated_file = format!("{}/csi.rs", out_dir);
-             
-             if std::path::Path::new(&generated_file_v1).exists() {
-                 // Rename csi.v1.rs to csi.rs for easier importing
-                 std::fs::rename(&generated_file_v1, &generated_file)
-                     .expect("Failed to rename csi.v1.rs to csi.rs");
-                 println!("Renamed {} to {}", generated_file_v1, generated_file);
-             } else if !std::path::Path::new(&generated_file).exists() {
-                 panic!("Neither {} nor {} was generated", generated_file_v1, generated_file);
-             }
-        }
-        Err(e) => {
-            panic!("Failed to compile protos: {}", e);
-        }
+    // Handle file naming
+    let generated_v1 = format!("{}/csi.v1.rs", out_dir);
+    let generated = format!("{}/csi.rs", out_dir);
+    
+    if std::path::Path::new(&generated_v1).exists() {
+        std::fs::rename(&generated_v1, &generated)
+            .expect("Failed to rename generated protobuf file");
     }
-    
-    println!("Successfully generated protobuf files");
 }
