@@ -2,8 +2,11 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Only generate SPDK bindings on Linux
-    if cfg!(target_os = "linux") {
+    // Check if we should skip SPDK bindings (useful for controller-only builds)
+    let skip_spdk = env::var("SKIP_SPDK_BINDINGS").unwrap_or_default().to_lowercase() == "true";
+    
+    // Only generate SPDK bindings on Linux and when not explicitly skipped
+    if cfg!(target_os = "linux") && !skip_spdk {
         println!("cargo:rerun-if-changed=wrapper.h");
         
         // Look for SPDK installation
@@ -71,7 +74,18 @@ fn main() {
             .write_to_file(out_path.join("spdk_bindings.rs"))
             .expect("Couldn't write SPDK bindings!");
     } else {
-        println!("cargo:warning=SPDK bindings only available on Linux");
+        if skip_spdk {
+            println!("cargo:warning=SPDK bindings skipped (SKIP_SPDK_BINDINGS=true)");
+        } else {
+            println!("cargo:warning=SPDK bindings only available on Linux");
+        }
+        
+        // Create an empty bindings file to satisfy the include! macro
+        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        std::fs::write(
+            out_path.join("spdk_bindings.rs"),
+            "// SPDK bindings skipped\n"
+        ).expect("Couldn't write empty SPDK bindings file!");
     }
 
     // Always build protobuf (CSI spec)

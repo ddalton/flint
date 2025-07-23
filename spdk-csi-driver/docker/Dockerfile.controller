@@ -6,11 +6,9 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 # - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
 # - openssl-dev: Required by the openssl-sys crate for SSL/TLS functionality.
 # - pkgconf: Required to locate OpenSSL libraries (Alpine's pkg-config).
-# - clang-dev: Required by bindgen for generating Rust bindings to C libraries.
-# - llvm-dev: Required by bindgen for libclang.
 USER root
-RUN apk add --no-cache perl protobuf-dev openssl-dev clang-dev llvm-dev pkgconf || \
-    apk add --no-cache perl protobuf-dev openssl-dev clang-dev llvm-dev
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    apk add --no-cache perl protobuf-dev openssl-dev
 
 # Set OpenSSL environment variables to help openssl-sys find libraries
 ENV OPENSSL_DIR=/usr
@@ -18,8 +16,8 @@ ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
 
-# Set libclang path for bindgen
-ENV LIBCLANG_PATH=/usr/lib
+# Skip SPDK native bindings for controller (only needs HTTP RPC)
+ENV SKIP_SPDK_BINDINGS=true
 
 # Switch back to the unprivileged user for the actual build process.
 USER 65532
