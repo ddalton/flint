@@ -44,7 +44,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
 
   return (
     <div className={`relative border-2 rounded-lg p-3 transition-all hover:shadow-sm ${
-      isSelected ? 'border-blue-500 bg-blue-50' : getStatusColor()
+      isSelected ? `${getStatusColor()} ring-2 ring-blue-500 ring-offset-1` : getStatusColor()
     }`}>
       {canSelect && (
         <input
