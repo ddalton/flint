@@ -55,14 +55,31 @@ fn build_spdk_bindings() {
     // Link SPDK libraries
     println!("cargo:rustc-link-search=native={}", spdk_lib);
     
-    // Core SPDK libraries (verified against SPDK v24.01.x)
+    // Also add DPDK library path (DPDK is built as part of SPDK)
+    let dpdk_lib = format!("{}/lib", spdk_root);
+    println!("cargo:rustc-link-search=native={}", dpdk_lib);
+    
+    // Core SPDK libraries (verified against SPDK v24.01.x) - use dynamic linking
     let spdk_libs = [
         "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread",
         "spdk_bdev", "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_bdev_aio",
+        "spdk_json", "spdk_accel", "spdk_trace", "spdk_notify", "spdk_conf",
+        "spdk_init", "spdk_dma",
     ];
     
     for lib in &spdk_libs {
-        println!("cargo:rustc-link-lib=static={}", lib);
+        println!("cargo:rustc-link-lib=dylib={}", lib);
+    }
+    
+    // DPDK libraries (required by SPDK when built with --with-shared)
+    let dpdk_libs = [
+        "rte_eal", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
+        "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_bus_pci",
+        "rte_pci", "rte_telemetry", "rte_rcu",
+    ];
+    
+    for lib in &dpdk_libs {
+        println!("cargo:rustc-link-lib=dylib={}", lib);
     }
     
     // System dependencies
