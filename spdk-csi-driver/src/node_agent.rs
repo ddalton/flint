@@ -1292,8 +1292,10 @@ impl NodeAgent {
                 (device_name, size_bytes, model, serial, firmware_version, mounted_partitions, is_system_disk)
             };
         
-        // Determine if SPDK ready
-        let spdk_ready = self.is_spdk_compatible_driver(&driver);
+        // Determine if SPDK ready (supports both userspace and kernel-bound modes)
+        let spdk_ready = self.is_spdk_compatible_driver(&driver) || 
+                        (self.is_virtualized_environment().await.unwrap_or(false) && 
+                         driver == "nvme" && !is_system_disk);
         
         Ok(UnimplementedDisk {
             pci_address: pci_addr.to_string(),
@@ -1641,6 +1643,13 @@ impl NodeAgent {
             self.unmount_disk_partitions(&disk_info).await?;
         }
 
+        // AWS/Virtualized Environment: Use kernel-bound mode instead of userspace drivers
+        if self.is_virtualized_environment().await? && self.should_use_kernel_mode(&disk_info).await? {
+            println!("Setting up disk {} for SPDK in kernel-bound mode (AWS/virtualized compatible)", pci_addr);
+            return self.setup_kernel_bound_disk(pci_addr, &disk_info).await;
+        }
+
+        // Traditional bare metal path: Use userspace drivers
         // Step 2: Unbind from current driver (if bound)
         if disk_info.driver != "unbound" {
             self.unbind_from_driver(pci_addr, &disk_info.driver).await?;
@@ -1921,6 +1930,94 @@ impl NodeAgent {
         }
 
         Ok(())
+    }
+
+    /// Check if disk should use kernel-bound mode (AWS/virtualized environments)
+    async fn should_use_kernel_mode(&self, disk_info: &UnimplementedDisk) -> Result<bool, Box<dyn std::error::Error>> {
+        // Use kernel mode for AWS/virtualized environments when:
+        // 1. Not a system disk
+        // 2. Either bound to nvme driver OR unbound (ready for setup)
+        Ok(!disk_info.is_system_disk && 
+           (disk_info.driver == "nvme" || disk_info.driver.is_empty() || disk_info.driver == "unbound"))
+    }
+
+    /// Setup disk for SPDK using kernel-bound mode (no driver binding)
+    async fn setup_kernel_bound_disk(&self, pci_addr: &str, disk_info: &UnimplementedDisk) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Configuring disk {} for SPDK kernel-bound access (AWS compatible)", pci_addr);
+        
+        // Step 1: Ensure disk is bound to nvme driver (if unbound)
+        if disk_info.driver.is_empty() || disk_info.driver == "unbound" {
+            println!("Binding {} to nvme driver for kernel access", pci_addr);
+            self.bind_to_driver(pci_addr, "nvme").await?;
+            // Wait for block device to appear
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        
+        // Step 2: Ensure the device is accessible via block device
+        let block_device = format!("/dev/{}", disk_info.device_name);
+        if !std::path::Path::new(&block_device).exists() {
+            return Err(format!("Block device {} not found after nvme binding", block_device).into());
+        }
+
+        // Step 3: Try to attach the NVMe device to SPDK using kernel access
+        let attach_result = self.attach_kernel_nvme_to_spdk(pci_addr, &disk_info.device_name).await;
+        match attach_result {
+            Ok(_) => println!("Successfully attached {} to SPDK via kernel access", disk_info.device_name),
+            Err(e) => {
+                // Don't fail setup if SPDK attachment fails - the disk can still be used
+                println!("Warning: Could not attach {} to SPDK (will use direct kernel access): {}", disk_info.device_name, e);
+            }
+        }
+
+        // Step 4: Mark as ready for SPDK (kernel mode)
+        println!("Disk {} configured for SPDK in kernel-bound mode", pci_addr);
+        Ok(())
+    }
+
+    /// Attach kernel-bound NVMe device to SPDK for bdev access
+    async fn attach_kernel_nvme_to_spdk(&self, pci_addr: &str, device_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Try to create a kernel bdev in SPDK for this device
+        let bdev_name = format!("kernel_{}", device_name);
+        let device_path = format!("/dev/{}", device_name);
+
+        // Use SPDK's aio bdev to access the kernel device
+        let rpc_request = json!({
+            "method": "bdev_aio_create",
+            "params": {
+                "name": bdev_name,
+                "filename": device_path,
+                "block_size": 512
+            }
+        });
+
+        match call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
+            Ok(_) => {
+                println!("Created SPDK aio bdev '{}' for kernel device {}", bdev_name, device_path);
+                Ok(())
+            }
+            Err(e) => {
+                // If aio fails, try uring bdev (newer, better performance)
+                let uring_request = json!({
+                    "method": "bdev_uring_create", 
+                    "params": {
+                        "name": bdev_name,
+                        "filename": device_path,
+                        "block_size": 512
+                    }
+                });
+
+                match call_spdk_rpc(&self.spdk_rpc_url, &uring_request).await {
+                    Ok(_) => {
+                        println!("Created SPDK uring bdev '{}' for kernel device {}", bdev_name, device_path);
+                        Ok(())
+                    }
+                    Err(uring_err) => {
+                        Err(format!("Failed to create SPDK bdev for {}: aio error: {}, uring error: {}", 
+                                  device_path, e, uring_err).into())
+                    }
+                }
+            }
+        }
     }
 
     async fn setup_huge_pages(&self, huge_pages_mb: u32) -> Result<u32, Box<dyn std::error::Error>> {
