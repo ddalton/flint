@@ -65,43 +65,63 @@ fn build_spdk_bindings() {
         .clang_arg(format!("-I{}", spdk_include))
         .clang_arg("-I/usr/include")
         
-        // Core SPDK functions we need
+        // Core SPDK environment and initialization
         .allowlist_function("spdk_env_.*")
         .allowlist_function("spdk_log_.*")
         .allowlist_function("spdk_util_.*")
         .allowlist_function("spdk_get_ticks_hz")
         .allowlist_function("spdk_uuid_.*")
-        .allowlist_function("spdk_bdev_.*")
+        
+        // Bdev iteration and property functions (real SPDK v24.01.x APIs)
+        .allowlist_function("spdk_bdev_first")
+        .allowlist_function("spdk_bdev_next")
+        .allowlist_function("spdk_bdev_get_by_name")
+        .allowlist_function("spdk_bdev_get_name")
+        .allowlist_function("spdk_bdev_get_block_size")
+        .allowlist_function("spdk_bdev_get_num_blocks")
+        .allowlist_function("spdk_bdev_get_uuid")
+        .allowlist_function("spdk_bdev_get_product_name")
+        .allowlist_function("spdk_bdev_get_module_name")
+        .allowlist_function("spdk_bdev_io_type_supported")
+        .allowlist_function("spdk_bdev_open_ext")
+        .allowlist_function("spdk_bdev_close")
+        
+        // Blob/Blobstore functions (real SPDK v24.01.x APIs)
+        .allowlist_function("spdk_bs_.*")
         .allowlist_function("spdk_blob_.*")
         .allowlist_function("spdk_lvol_.*")
-        .allowlist_function("spdk_bs_.*")
         
-        // Essential types
+        // Essential bdev types and constants
+        .allowlist_type("spdk_bdev")
+        .allowlist_type("spdk_bdev_desc")
+        .allowlist_type("spdk_bdev_io_type")
+        .allowlist_type("spdk_io_channel")
+        .allowlist_type("spdk_uuid")
         .allowlist_type("spdk_env_opts")
         .allowlist_type("spdk_log_level")
-        .allowlist_type("spdk_bdev.*")
-        .allowlist_type("spdk_lvol.*")
-        .allowlist_type("spdk_bdev_io_.*")
-        .allowlist_type("spdk_blob.*")
-        .allowlist_type("spdk_bs_.*")
-        .allowlist_type("spdk_uuid")
-        .allowlist_type("spdk_io_channel")
         
-        // Constants
-        .allowlist_var("SPDK_BDEV_.*")
-        .allowlist_var("SPDK_LVOL_.*")
+        // Bdev I/O type constants (from spdk/bdev.h)
+        .allowlist_var("SPDK_BDEV_IO_TYPE_.*")
         .allowlist_var("SPDK_LOG_.*")
-        .allowlist_var("SPDK_BS_.*")
-        .allowlist_var("SPDK_BLOB_.*")
+        .allowlist_var("SPDK_BDEV_.*")
+        .allowlist_var("SPDK_ENV_.*")
         
-        // Allow basic NVMe types that might be referenced
+        // Blob/LVS related types
+        .allowlist_type("spdk_blob_store")
+        .allowlist_type("spdk_blob")
+        .allowlist_type("spdk_lvol_store")
+        .allowlist_type("spdk_lvol")
+        .allowlist_type("spdk_bs_dev")
+        .allowlist_type("spdk_bs_opts")
+        .allowlist_type("spdk_blob_opts")
+        
+        // Allow some basic NVMe types that might be referenced but block complex ones
         .allowlist_type("spdk_nvme_cmd")
         .allowlist_type("spdk_nvme_status")
         
-        // Block only specific problematic NVMe functions
-        .blocklist_function("spdk_nvme_ctrlr_.*")
-        .blocklist_function("spdk_nvme_qpair_.*")
-        .blocklist_var("SPDK_NVME_CTRLR_.*")
+        // Block only specific problematic NVMe functions that might cause issues
+        .blocklist_function("spdk_nvme_ctrlr_.*_detailed.*")
+        .blocklist_function("spdk_nvme_qpair_.*_advanced.*")
         
         // Conservative derives
         .derive_debug(true)
