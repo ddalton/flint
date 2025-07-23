@@ -84,6 +84,11 @@ fn build_spdk_bindings() {
         "spdk_rpc", "spdk_jsonrpc", "spdk_ut", "spdk_ut_mock",
     ];
     
+    // ISA-L library (built as part of SPDK submodules) - link statically FIRST with whole-archive
+    println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+    println!("cargo:rustc-link-lib=static=isal");
+    println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+    
     for lib in &spdk_libs {
         println!("cargo:rustc-link-lib=dylib={}", lib);
     }
@@ -107,9 +112,6 @@ fn build_spdk_bindings() {
     for lib in &sys_libs {
         println!("cargo:rustc-link-lib={}", lib);
     }
-    
-    // ISA-L library (built as part of SPDK submodules) - use dynamic linking
-    println!("cargo:rustc-link-lib=dylib=isal");
     
     // Generate bindings
     let bindings = bindgen::Builder::default()

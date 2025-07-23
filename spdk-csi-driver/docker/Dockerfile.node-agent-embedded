@@ -69,22 +69,13 @@ COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK libraries (built as part of SPDK --with-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
-# Copy ISA-L libraries from SPDK submodule build and create shared library
+# Copy ISA-L static library from SPDK submodule build  
 COPY --from=spdk-builder /spdk/isa-l/.libs/ /tmp/isal-libs/
 RUN echo "=== ISA-L libraries found ===" && \
     ls -la /tmp/isal-libs/ && \
     cp /tmp/isal-libs/*.a /usr/local/lib/ 2>/dev/null || echo "No .a files" && \
-    cp /tmp/isal-libs/*.so* /usr/local/lib/ 2>/dev/null || echo "No .so files" && \
-    cp /tmp/isal-libs/libisal.lai /usr/local/lib/ 2>/dev/null || echo "No .lai file" && \
-    echo "Creating shared ISA-L library from static library..." && \
-    cd /usr/local/lib && \
-    ar x libisal.a && \
-    gcc -shared -o libisal.so *.o && \
-    rm -f *.o && \
-    echo "Created libisal.so from libisal.a" && \
-    ls -la libisal.* && \
     rm -rf /tmp/isal-libs && \
-    echo "ISA-L libraries setup successfully"
+    echo "ISA-L static library copied successfully"
 
 # Ensure static libraries are available for linking
 RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
