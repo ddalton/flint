@@ -28,24 +28,34 @@ fn main() {
             .header("wrapper.h")
             .clang_arg(format!("-I{}", spdk_include))
             .clang_arg("-I/usr/include")
-            // Only include what we need for Flint
-            .allowlist_function("spdk_.*")
-            .allowlist_type("spdk_.*")
-            .allowlist_var("SPDK_.*")
-            // Focus on our core functionality
+            // Only include what we need for Flint (avoid problematic NVMe types)
             .allowlist_function("spdk_bdev_.*")
             .allowlist_function("spdk_lvol_.*")
-            .allowlist_function("spdk_app_.*")
+            .allowlist_function("spdk_blob_.*")
             .allowlist_function("spdk_env_.*")
-            // Derive traits for ease of use
+            .allowlist_function("spdk_log_.*")
+            .allowlist_function("spdk_util_.*")
+            // Allow essential types for bdev/lvol operations
+            .allowlist_type("spdk_bdev.*")
+            .allowlist_type("spdk_lvol.*")
+            .allowlist_type("spdk_blob.*")
+            .allowlist_type("spdk_env.*")
+            .allowlist_var("SPDK_BDEV_.*")
+            .allowlist_var("SPDK_LVOL_.*")
+            .allowlist_var("SPDK_BLOB_.*")
+            // Blocklist problematic NVMe types that cause alignment issues
+            .blocklist_type("spdk_nvme.*")
+            .blocklist_function("spdk_nvme.*")
+            .blocklist_var("SPDK_NVME.*")
+            // Derive traits for ease of use (but avoid Copy for large structs)
             .derive_debug(true)
             .derive_default(true)
-            .derive_copy(true)
-            .derive_eq(true)
-            .derive_partialeq(true)
-            .derive_hash(true)
-            // Avoid layout tests that can be problematic
+            .derive_eq(false)
+            .derive_partialeq(false)
+            .derive_hash(false)
+            // Avoid layout tests and copy derivation that can be problematic
             .layout_tests(false)
+            .derive_copy(false)
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .generate()
             .expect("Unable to generate SPDK bindings");

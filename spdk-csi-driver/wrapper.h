@@ -13,8 +13,8 @@
 // LVol (Logical Volume) functionality - core for Flint
 #include <spdk/lvol.h>
 
-// NVMe functionality for direct device access  
-#include <spdk/nvme.h>
+// Note: Removed spdk/nvme.h due to alignment conflicts in generated bindings
+// Flint primarily uses bdev/lvol functionality, not direct NVMe access
 
 // Note: Removed headers that might not exist in SPDK v24.01:
 // - spdk/app.h (application framework - not needed for embedded use)
