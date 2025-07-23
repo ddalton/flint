@@ -1149,30 +1149,91 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         Ok(result) => {
             // Check if the result contains an error
             if let Some(error) = result.get("error") {
-                let error_msg = format!("SPDK RPC error: {}", error);
-                println!("❌ [SPDK_INIT] LVS creation failed: {}", error_msg);
-                return Err(error_msg.into());
-            }
-            
-            println!("✅ [SPDK_INIT] Successfully created LVS: {}", lvs_name);
-            println!("📊 [SPDK_INIT] LVS result: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
-            
-            // Update status to reflect successful initialization
-            let patch = json!({
-                "status": {
-                    "blobstore_initialized": true,
-                    "lvs_name": lvs_name,
-                    "last_checked": Utc::now().to_rfc3339()
+                let error_code = error["code"].as_i64().unwrap_or(0);
+                let error_msg = error["message"].as_str().unwrap_or("Unknown error");
+                
+                // Handle "File exists" error specially - check if our LVS actually exists
+                if error_code == -17 && error_msg == "File exists" {
+                    println!("⚠️ [SPDK_INIT] LVS creation reported 'File exists', checking if our LVS exists: {}", lvs_name);
+                    
+                    // Query existing LVS stores to see if ours exists
+                    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+                        "method": "bdev_lvol_get_lvstores"
+                    })).await {
+                        Ok(lvstores_result) => {
+                            let mut our_lvs_exists = false;
+                            
+                            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                                for lvstore in lvstore_list {
+                                    if let Some(name) = lvstore["name"].as_str() {
+                                        if name == lvs_name {
+                                            our_lvs_exists = true;
+                                            println!("✅ [SPDK_INIT] Found existing LVS with our name: {}", lvs_name);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if our_lvs_exists {
+                                println!("✅ [SPDK_INIT] LVS already exists with correct name, treating as success: {}", lvs_name);
+                                
+                                // Update status to reflect successful initialization
+                                let patch = json!({
+                                    "status": {
+                                        "blobstore_initialized": true,
+                                        "lvs_name": lvs_name,
+                                        "last_checked": Utc::now().to_rfc3339()
+                                    }
+                                });
+                                
+                                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
+                                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_name),
+                                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                                }
+                                
+                                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_name);
+                            } else {
+                                let error_msg = format!("File exists error but our LVS '{}' not found", lvs_name);
+                                println!("❌ [SPDK_INIT] {}", error_msg);
+                                return Err(error_msg.into());
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Failed to query existing LVS stores: {}", e);
+                            println!("❌ [SPDK_INIT] {}", error_msg);
+                            return Err(error_msg.into());
+                        }
+                    }
+                } else {
+                    // Other SPDK errors
+                    let error_msg = format!("SPDK RPC error: {}", error);
+                    println!("❌ [SPDK_INIT] LVS creation failed: {}", error_msg);
+                    return Err(error_msg.into());
                 }
-            });
-            
-            let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
-            match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_name),
-                Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+            } else {
+                // Successful creation
+                println!("✅ [SPDK_INIT] Successfully created LVS: {}", lvs_name);
+                println!("📊 [SPDK_INIT] LVS result: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
+                
+                // Update status to reflect successful initialization
+                let patch = json!({
+                    "status": {
+                        "blobstore_initialized": true,
+                        "lvs_name": lvs_name,
+                        "last_checked": Utc::now().to_rfc3339()
+                    }
+                });
+                
+                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
+                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_name),
+                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                }
+                
+                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_name);
             }
-            
-            println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_name);
         }
         Err(e) => {
             println!("❌ [SPDK_INIT] Failed to create LVS on {}: {}", disk.spec.pcie_addr, e);
