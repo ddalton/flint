@@ -311,7 +311,9 @@ export const DiskSetupTab: React.FC = () => {
   const setupSelectedDisks = async () => {
     const disksByNode = Object.groupBy(
       Array.from(selectedDisks).map(diskKey => {
-        const [nodeName, pciAddr] = diskKey.split(':');
+        const firstColonIndex = diskKey.indexOf(':');
+        const nodeName = diskKey.substring(0, firstColonIndex);
+        const pciAddr = diskKey.substring(firstColonIndex + 1);
         return { nodeName, pciAddr };
       }),
       ({ nodeName }) => nodeName
