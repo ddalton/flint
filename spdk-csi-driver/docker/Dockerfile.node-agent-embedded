@@ -44,7 +44,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     ldconfig && \
     cd .. && \
     echo "=== Configuring SPDK for static linking (avoids ISA-L shared lib issues) ===" && \
-    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH ./configure --with-ublk --enable-debug --disable-shared && \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH ./configure --with-ublk --enable-debug --without-shared && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
