@@ -1732,7 +1732,7 @@ impl NodeAgent {
         if let Ok(output) = Command::new("systemd-detect-virt")
             .output() {
             if output.status.success() {
-                let virt_type = String::from_utf8_lossy(&output.stdout).trim();
+                let virt_type = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 return Ok(virt_type != "none");
             }
         }
