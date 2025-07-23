@@ -69,17 +69,13 @@ COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK libraries (built as part of SPDK --with-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
-# Copy ISA-L static library from SPDK submodule build and create shared version
+# Copy ISA-L static library from SPDK submodule build
 COPY --from=spdk-builder /spdk/isa-l/.libs/ /tmp/isal-libs/
 RUN echo "=== ISA-L libraries found ===" && \
     ls -la /tmp/isal-libs/ && \
     cp /tmp/isal-libs/*.a /usr/local/lib/ 2>/dev/null || echo "No .a files" && \
-    echo "Creating shared ISA-L library from static..." && \
-    cd /usr/local/lib && \
-    gcc -shared -fPIC -Wl,--whole-archive libisal.a -Wl,--no-whole-archive -o libisal.so.2 && \
-    ln -sf libisal.so.2 libisal.so && \
-    echo "Shared ISA-L library created successfully" && \
-    rm -rf /tmp/isal-libs
+    rm -rf /tmp/isal-libs && \
+    echo "ISA-L static library copied successfully"
 
 # Ensure static libraries are available for linking
 RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
@@ -114,12 +110,8 @@ RUN echo "=== SPDK Library Debug Info ===" && \
     ls -la /usr/local/lib/librte* | head -5 || echo "No DPDK libraries found" && \
     echo "ISA-L libraries:" && \
     ls -la /usr/local/lib/*isal* || echo "No ISA-L libraries found" && \
-    echo "ISA-L static library symbols:" && \
-    nm /usr/local/lib/libisal.a | grep -E '^[0-9a-f]+ T (isal_|XTS_|crc|xor_)' | head -10 || echo "No ISA-L symbols found in static lib" && \
-    echo "ISA-L shared library symbols:" && \
-    nm -D /usr/local/lib/libisal.so | grep -E '^[0-9a-f]+ T (isal_|XTS_|crc|xor_)' | head -10 || echo "No ISA-L symbols found in shared lib" && \
-    echo "Check if required symbols are present:" && \
-    nm -D /usr/local/lib/libisal.so | grep -E '(isal_inflate_reset|XTS_AES_256_enc|crc32_iscsi|xor_gen)' || echo "Missing required symbols!" && \
+    echo "Check if required ISA-L symbols are present in static library:" && \
+    nm /usr/local/lib/libisal.a | grep -E '(isal_inflate_reset|XTS_AES_256_enc|crc32_iscsi|xor_gen)' || echo "Missing required symbols!" && \
     echo "Environment:" && \
     echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \
