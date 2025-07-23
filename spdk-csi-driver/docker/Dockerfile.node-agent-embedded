@@ -64,9 +64,16 @@ COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
 COPY --from=spdk-builder /spdk/include/spdk/ /usr/local/include/spdk/
 COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 
+# Ensure static libraries are available for linking
+RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
+
+# Create pkg-config files for SPDK libraries if they don't exist
+RUN mkdir -p /usr/local/lib/pkgconfig
+
 # Set up environment for SPDK linking
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV SPDK_ROOT_DIR=/usr/local
 
 # Switch back to unprivileged user for build
 USER 65532
@@ -79,6 +86,17 @@ COPY --chown=65532:65532 src/ ./src/
 COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
 COPY --chown=65532:65532 wrapper.h ./
+
+# Debug: List available SPDK libraries before build
+RUN echo "=== SPDK Library Debug Info ===" && \
+    echo "Contents of /usr/local/lib:" && \
+    ls -la /usr/local/lib/ | grep -E '\.(a|so)' || echo "No libraries found" && \
+    echo "SPDK headers:" && \
+    ls -la /usr/local/include/spdk/ | head -5 || echo "No SPDK headers found" && \
+    echo "Environment:" && \
+    echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \
+    echo "================================"
 
 # Build the node-agent with embedded SPDK
 # Note: This will require updating Cargo.toml with SPDK bindings

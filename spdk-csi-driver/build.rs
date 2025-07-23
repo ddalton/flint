@@ -40,6 +40,18 @@ fn build_spdk_bindings() {
     
     println!("cargo:warning=Using SPDK from: {}", spdk_root);
     
+    // Debug: List available SPDK libraries
+    if let Ok(entries) = std::fs::read_dir(&spdk_lib) {
+        println!("cargo:warning=Available libraries in {}:", spdk_lib);
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".a") || name.ends_with(".so") {
+                    println!("cargo:warning=  {}", name);
+                }
+            }
+        }
+    }
+    
     // Link SPDK libraries
     println!("cargo:rustc-link-search=native={}", spdk_lib);
     
