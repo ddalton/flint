@@ -1101,50 +1101,114 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
-    // Check if device path exists (for kernel-bound devices)
+    // Determine bdev name and create AIO bdev if needed
     let bdev_name = if disk.spec.device_path.starts_with("/dev/") {
         // For kernel-bound devices, create an AIO bdev first
         println!("🔗 [SPDK_INIT] Creating AIO bdev for kernel device: {}", disk.spec.device_path);
-        let aio_bdev_name = format!("aio_{}", controller_id);
         
-        let aio_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        // Extract device name from path (e.g., "/dev/nvme1n1" -> "nvme1n1")
+        let device_name = disk.spec.device_path.trim_start_matches("/dev/");
+        
+        let aio_bdev_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
             "method": "bdev_aio_create",
             "params": {
-                "name": aio_bdev_name,
-                "filename": disk.spec.device_path,
+                "name": format!("aio_{}", device_name),
+                "filename": format!("/dev/{}", device_name),
                 "block_size": 4096
             }
         })).await;
-        
-        match aio_result {
-            Ok(_) => {
-                println!("✅ [SPDK_INIT] Successfully created AIO bdev: {}", aio_bdev_name);
-                aio_bdev_name
+
+        match aio_bdev_result {
+            Ok(result) => {
+                if let Some(error) = result.get("error") {
+                    // AIO bdev might already exist, which is fine
+                    if error["code"].as_i64() == Some(-17) {
+                        println!("✅ [SPDK_INIT] AIO bdev already exists: aio_{}", device_name);
+                    } else {
+                        println!("❌ [SPDK_INIT] Failed to create AIO bdev: {}", error);
+                        return Err(format!("Failed to create AIO bdev: {}", error).into());
+                    }
+                } else {
+                    println!("✅ [SPDK_INIT] Successfully created AIO bdev: aio_{}", device_name);
+                }
             }
             Err(e) => {
                 println!("❌ [SPDK_INIT] Failed to create AIO bdev: {}", e);
-                return Err(format!("Failed to create AIO bdev for {}: {}", disk.spec.device_path, e).into());
+                return Err(e);
             }
         }
+
+        format!("aio_{}", device_name)
     } else {
         // Use SPDK controller name for SPDK-attached devices
         let name = format!("{}n1", controller_id);
         println!("🔗 [SPDK_INIT] Using SPDK bdev name: {}", name);
         name
     };
+
+    // Now handle LVS creation with discovery-first approach
+    println!("🔍 [SPDK_INIT] Checking if LVS already exists: {}", lvs_name);
     
-    // Create lvol store (which serves as our blobstore)
+    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_lvol_get_lvstores"
+    })).await {
+        Ok(lvstores_result) => {
+            let mut our_lvs_exists = false;
+            
+            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                for lvstore in lvstore_list {
+                    if let Some(name) = lvstore["name"].as_str() {
+                        if name == lvs_name {
+                            our_lvs_exists = true;
+                            println!("✅ [SPDK_INIT] Found existing LVS: {}", lvs_name);
+                            println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if our_lvs_exists {
+                println!("✅ [SPDK_INIT] LVS already exists, updating Kubernetes status to match SPDK reality");
+                
+                // Update status to reflect that LVS exists
+                let patch = json!({
+                    "status": {
+                        "blobstore_initialized": true,
+                        "lvs_name": lvs_name,
+                        "last_checked": Utc::now().to_rfc3339()
+                    }
+                });
+                
+                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
+                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status to reflect existing LVS: {}", disk_name),
+                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                }
+                
+                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_name);
+                return Ok(());
+            } else {
+                println!("🔍 [SPDK_INIT] No existing LVS found, will create new one: {}", lvs_name);
+            }
+        }
+        Err(e) => {
+            println!("⚠️ [SPDK_INIT] Failed to query existing LVS stores: {}", e);
+            println!("🔄 [SPDK_INIT] Proceeding with LVS creation attempt");
+        }
+    }
+
+    // Only create LVS if it doesn't already exist
     println!("🏗️ [SPDK_INIT] Creating LVS on bdev: {} with name: {}", bdev_name, lvs_name);
-    
     let lvol_store_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_create_lvstore",
         "params": {
             "bdev_name": bdev_name,
             "lvs_name": lvs_name,
-            "cluster_sz": 65536 // 64KB clusters for good performance
+            "cluster_sz": 1048576
         }
     })).await;
-    
+
     match lvol_store_result {
         Ok(result) => {
             // Check if the result contains an error
@@ -1168,7 +1232,8 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                     if let Some(name) = lvstore["name"].as_str() {
                                         if name == lvs_name {
                                             our_lvs_exists = true;
-                                            println!("✅ [SPDK_INIT] Found existing LVS with our name: {}", lvs_name);
+                                            println!("✅ [SPDK_INIT] Found existing LVS: {}", lvs_name);
+                                            println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
                                             break;
                                         }
                                     }
@@ -1202,6 +1267,59 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                         }
                         Err(e) => {
                             let error_msg = format!("Failed to query existing LVS stores: {}", e);
+                            println!("❌ [SPDK_INIT] {}", error_msg);
+                            return Err(error_msg.into());
+                        }
+                    }
+                } else if error_code == -1 && error_msg == "Operation not permitted" {
+                    println!("⚠️ [SPDK_INIT] LVS creation reported 'Operation not permitted', likely bdev already claimed. Checking existing LVS: {}", lvs_name);
+                    
+                    // Query existing LVS stores to see if ours exists (bdev might be claimed by existing LVS)
+                    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+                        "method": "bdev_lvol_get_lvstores"
+                    })).await {
+                        Ok(lvstores_result) => {
+                            let mut our_lvs_exists = false;
+                            
+                            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                                for lvstore in lvstore_list {
+                                    if let Some(name) = lvstore["name"].as_str() {
+                                        if name == lvs_name {
+                                            our_lvs_exists = true;
+                                            println!("✅ [SPDK_INIT] Found existing LVS claiming the bdev: {}", lvs_name);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if our_lvs_exists {
+                                println!("✅ [SPDK_INIT] LVS already exists and claims the bdev, treating as success: {}", lvs_name);
+                                
+                                // Update status to reflect successful initialization
+                                let patch = json!({
+                                    "status": {
+                                        "blobstore_initialized": true,
+                                        "lvs_name": lvs_name,
+                                        "last_checked": Utc::now().to_rfc3339()
+                                    }
+                                });
+                                
+                                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
+                                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_name),
+                                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                                }
+                                
+                                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_name);
+                            } else {
+                                let error_msg = format!("Operation not permitted but our LVS '{}' not found - bdev might be claimed by different LVS", lvs_name);
+                                println!("❌ [SPDK_INIT] {}", error_msg);
+                                return Err(error_msg.into());
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Failed to query existing LVS stores after 'Operation not permitted': {}", e);
                             println!("❌ [SPDK_INIT] {}", error_msg);
                             return Err(error_msg.into());
                         }
