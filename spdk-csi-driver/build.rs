@@ -91,14 +91,14 @@ fn build_spdk_bindings() {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
     
-    // DPDK libraries (required by SPDK when built with --with-shared) - only verified ones
+    // DPDK libraries (required by SPDK static build) - expanded for static linking
     let dpdk_libs = [
         // Core DPDK (verified to exist)
-        "rte_eal", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
+        "rte_eal", "rte_log", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
         "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_telemetry", "rte_rcu",
         
-        // Bus and device support (verified to exist)
-        "rte_bus_pci", "rte_pci",
+        // Bus and device support (commonly needed for static builds)
+        "rte_bus_pci", "rte_pci", "rte_bus_vdev",
     ];
     
     for lib in &dpdk_libs {
