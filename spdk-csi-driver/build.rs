@@ -84,8 +84,8 @@ fn build_spdk_bindings() {
         "spdk_rpc", "spdk_jsonrpc", "spdk_ut", "spdk_ut_mock",
     ];
     
-    // ISA-L is now properly incorporated into SPDK shared libraries during SPDK build
-    // No separate ISA-L linking needed
+    // ISA-L library - link before SPDK libraries to resolve their undefined references
+    println!("cargo:rustc-link-lib=dylib=isal");
     
     for lib in &spdk_libs {
         println!("cargo:rustc-link-lib=dylib={}", lib);
