@@ -47,13 +47,11 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 USER root
 
 # Install both Rust and SPDK runtime dependencies for building
+# Note: Using minimal package set for Chainguard-based image
 RUN apk add --no-cache \
     perl \
-    protobuf-dev \
-    pkgconfig \
+    build-base \
     linux-headers \
-    musl-dev \
-    gcc \
     && rm -rf /var/cache/apk/*
 
 # Copy SPDK build artifacts from spdk-builder stage
