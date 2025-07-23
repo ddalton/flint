@@ -1,0 +1,1 @@
+when you install the chart, you can simply set --set crds.install=false if the CRDs already exist, preventing any conflicts.

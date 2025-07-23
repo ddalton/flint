@@ -1,0 +1,129 @@
+#--------------------------------------------------------------------
+# Stage 1: SPDK Builder 
+# Build SPDK from source with development libraries
+#--------------------------------------------------------------------
+FROM ubuntu:24.04 AS spdk-builder
+
+# Install SPDK build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libncurses5-dev \
+    liburing-dev \
+    libfuse3-dev \
+    python3 \
+    python3-pyelftools \
+    git \
+    wget \
+    meson \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /spdk
+
+# Clone, configure, and build SPDK with static libraries for embedding
+RUN git clone https://github.com/spdk/spdk.git . && \
+    git checkout v24.01 && \
+    git submodule update --init --recursive && \
+    ./configure --with-ublk --enable-debug --with-shared && \
+    make -j$(nproc)
+
+#--------------------------------------------------------------------
+# Stage 2: Rust Builder with SPDK integration
+# Build the node-agent with SPDK embedded
+#--------------------------------------------------------------------
+FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS rust-builder
+
+# Switch to root to install build dependencies
+USER root
+
+# Install both Rust and SPDK runtime dependencies for building
+RUN apk add --no-cache \
+    perl \
+    protobuf-dev \
+    pkgconfig \
+    linux-headers \
+    musl-dev \
+    gcc \
+    && rm -rf /var/cache/apk/*
+
+# Copy SPDK build artifacts from spdk-builder stage
+COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
+COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
+COPY --from=spdk-builder /spdk/include/ /usr/local/include/spdk/
+
+# Set up environment for SPDK linking
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Switch back to unprivileged user for build
+USER 65532
+
+WORKDIR /app
+
+# Copy Rust source files
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
+
+# Build the node-agent with embedded SPDK
+# Note: This will require updating Cargo.toml with SPDK bindings
+RUN cargo build --release --bin node-agent
+
+#--------------------------------------------------------------------
+# Stage 3: Runtime Image
+# Combined node-agent + SPDK runtime environment
+#--------------------------------------------------------------------
+FROM ubuntu:24.04
+
+# Install combined runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Node-agent dependencies
+    pciutils \
+    util-linux \
+    curl \
+    ca-certificates \
+    # SPDK runtime dependencies  
+    libaio1t64 \
+    libnuma1 \
+    libssl3 \
+    libpciaccess0 \
+    libcunit1 \
+    liburing2 \
+    libfuse3-3 \
+    libuuid1 \
+    python3 \
+    kmod \
+    grep \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy SPDK runtime libraries and scripts (for debugging/management)
+COPY --from=spdk-builder /spdk/build/lib/ /usr/local/lib/
+COPY --from=spdk-builder /spdk/scripts/ /usr/local/scripts/
+COPY --from=spdk-builder /spdk/python/ /usr/local/lib/python3.12/dist-packages/
+
+# Copy the embedded node-agent binary
+COPY --from=rust-builder /app/target/release/node-agent /usr/local/bin/
+
+# Create runtime directories
+RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
+    if [ ! -f /usr/lib/ssl/openssl.cnf ] && [ -f /etc/ssl/openssl.cnf ]; then \
+        ln -sf /etc/ssl/openssl.cnf /usr/lib/ssl/openssl.cnf; \
+    fi && \
+    chmod +x /usr/local/scripts/*.sh
+
+# Set up library path for SPDK
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+ENTRYPOINT ["/usr/local/bin/node-agent"] 

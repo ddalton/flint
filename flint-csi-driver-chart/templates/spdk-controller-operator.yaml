@@ -1,0 +1,72 @@
+{{- if .Values.spdkOperator.enabled }}
+# SPDK Controller Operator Deployment
+# This operator manages SPDK custom resources (SpdkVolume, SpdkDisk, etc.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spdk-controller-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: spdk-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spdk-controller-operator
+  template:
+    metadata:
+      labels:
+        app: spdk-controller-operator
+        component: spdk-operator
+    spec:
+      serviceAccountName: flint-csi-controller
+      containers:
+        - name: spdk-controller-operator
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
+          imagePullPolicy: Always
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | default "info" | quote }}
+            - name: SPDK_RPC_URL
+              value: "http://localhost:5260"
+            - name: HEALTH_CHECK_INTERVAL
+              value: "{{ .Values.spdkOperator.healthCheckInterval }}"
+            - name: REBUILD_ENABLED
+              value: "{{ .Values.spdkOperator.rebuildEnabled }}"
+          ports:
+            - name: healthz
+              containerPort: 9809
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 5
+            timeoutSeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+{{- end }} 
