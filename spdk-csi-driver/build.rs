@@ -74,6 +74,7 @@ fn build_spdk_bindings() {
         .allowlist_function("spdk_bdev_.*")
         .allowlist_function("spdk_blob_.*")
         .allowlist_function("spdk_lvol_.*")
+        .allowlist_function("spdk_bs_.*")
         
         // Essential types
         .allowlist_type("spdk_env_opts")
@@ -81,20 +82,26 @@ fn build_spdk_bindings() {
         .allowlist_type("spdk_bdev.*")
         .allowlist_type("spdk_lvol.*")
         .allowlist_type("spdk_bdev_io_.*")
-        .allowlist_type("spdk_lvol_store_clear_method")
-        .allowlist_type("spdk_lvol_clear_method")
-        .allowlist_type("spdk_bdev_io_type")
+        .allowlist_type("spdk_blob.*")
+        .allowlist_type("spdk_bs_.*")
+        .allowlist_type("spdk_uuid")
+        .allowlist_type("spdk_io_channel")
         
         // Constants
         .allowlist_var("SPDK_BDEV_.*")
         .allowlist_var("SPDK_LVOL_.*")
         .allowlist_var("SPDK_LOG_.*")
+        .allowlist_var("SPDK_BS_.*")
+        .allowlist_var("SPDK_BLOB_.*")
         
-        // Block problematic types
-        .blocklist_type("spdk_nvme.*")
-        .blocklist_type("spdk_nvmf_.*")
-        .blocklist_function("spdk_nvme.*")
-        .blocklist_var("SPDK_NVME.*")
+        // Allow basic NVMe types that might be referenced
+        .allowlist_type("spdk_nvme_cmd")
+        .allowlist_type("spdk_nvme_status")
+        
+        // Block only specific problematic NVMe functions
+        .blocklist_function("spdk_nvme_ctrlr_.*")
+        .blocklist_function("spdk_nvme_qpair_.*")
+        .blocklist_var("SPDK_NVME_CTRLR_.*")
         
         // Conservative derives
         .derive_debug(true)

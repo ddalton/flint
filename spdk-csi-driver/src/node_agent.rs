@@ -60,8 +60,9 @@ async fn call_spdk_rpc(
             let spdk = get_spdk_instance()?;
             let bdev_name = params["bdev_name"].as_str().unwrap_or("");
             let lvs_name = params["lvs_name"].as_str().unwrap_or("");
+            let cluster_size = params["cluster_sz"].as_u64().unwrap_or(1048576); // Default 1MB cluster size
             
-            match spdk.create_lvs(bdev_name, lvs_name).await {
+            match spdk.create_lvs(bdev_name, lvs_name, cluster_size).await {
                 Ok(_) => Ok(json!({"result": true})),
                 Err(e) => {
                     // Return error in SPDK RPC format  
