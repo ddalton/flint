@@ -88,17 +88,14 @@ fn build_spdk_bindings() {
         println!("cargo:rustc-link-lib=dylib={}", lib);
     }
     
-    // DPDK libraries (required by SPDK when built with --with-shared)
+    // DPDK libraries (required by SPDK when built with --with-shared) - only verified ones
     let dpdk_libs = [
-        // Core DPDK
+        // Core DPDK (verified to exist)
         "rte_eal", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
         "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_telemetry", "rte_rcu",
         
-        // Bus and device support
-        "rte_bus_pci", "rte_pci", "rte_bus_vdev",
-        
-        // Additional common DPDK libs
-        "rte_malloc", "rte_memzone", "rte_cmdline", "rte_net", "rte_log",
+        // Bus and device support (verified to exist)
+        "rte_bus_pci", "rte_pci",
     ];
     
     for lib in &dpdk_libs {
