@@ -650,5 +650,4 @@ pub async fn initialize_spdk() -> Result<()> {
     let _spdk = get_spdk_instance()?;
     println!("✅ [SPDK_NATIVE] Global SPDK instance ready");
     Ok(())
-} 
-} 
+}
