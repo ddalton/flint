@@ -555,18 +555,36 @@ async fn start_api_server(agent: NodeAgent) {
 
 // HTTP API handlers for disk setup operations
 async fn get_uninitialized_disks(agent: NodeAgent) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🌐 [API] Received request for uninitialized disks on node: {}", agent.node_name);
+    
     match agent.discover_all_disks().await {
-        Ok(disks) => Ok(warp::reply::json(&json!({
-            "success": true,
-            "disks": disks,
-            "count": disks.len(),
-            "node": agent.node_name
-        }))),
-        Err(e) => Ok(warp::reply::json(&json!({
-            "success": false,
-            "error": e.to_string(),
-            "node": agent.node_name
-        })))
+        Ok(disks) => {
+            println!("🌐 [API] Discovery successful: {} disks found", disks.len());
+            for (i, disk) in disks.iter().enumerate() {
+                println!("🌐 [API]   Disk {}: PCI={}, Name={}, Driver={}, System={}, SPDK Ready={}, Size={}GB", 
+                         i+1, disk.pci_address, disk.device_name, disk.driver, 
+                         disk.is_system_disk, disk.spdk_ready, disk.size_bytes / (1024*1024*1024));
+            }
+            
+            let response = json!({
+                "success": true,
+                "disks": disks,
+                "count": disks.len(),
+                "node": agent.node_name
+            });
+            println!("🌐 [API] Returning successful response with {} disks", disks.len());
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            println!("❌ [API] Discovery failed with error: {}", e);
+            let response = json!({
+                "success": false,
+                "error": e.to_string(),
+                "node": agent.node_name
+            });
+            println!("🌐 [API] Returning error response: {:?}", response);
+            Ok(warp::reply::json(&response))
+        }
     }
 }
 
@@ -1221,23 +1239,39 @@ async fn update_lvol_store_statistics(
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
     async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Starting discover_all_disks for node: {}", self.node_name);
         let mut all_disks = Vec::new();
         
         // Get all NVMe PCI devices
         let pci_devices = self.get_nvme_pci_devices().await?;
+        println!("🔍 [DISCOVERY] Processing {} PCI devices...", pci_devices.len());
         
         for pci_addr in pci_devices {
-            if let Ok(disk_info) = self.get_disk_info(&pci_addr).await {
-                // Include ALL disks - the frontend will handle filtering and display based on disk type
-                // System disks will be shown but marked as non-selectable
-                all_disks.push(disk_info);
+            println!("🔍 [DISCOVERY] Processing PCI device: {}", pci_addr);
+            match self.get_disk_info(&pci_addr).await {
+                Ok(disk_info) => {
+                    println!("✅ [DISCOVERY] Successfully got disk info for {}: name='{}', driver='{}', spdk_ready={}, is_system={}", 
+                             pci_addr, disk_info.device_name, disk_info.driver, disk_info.spdk_ready, disk_info.is_system_disk);
+                    all_disks.push(disk_info);
+                }
+                Err(e) => {
+                    println!("❌ [DISCOVERY] Failed to get disk info for {}: {}", pci_addr, e);
+                }
             }
+        }
+        
+        println!("🔍 [DISCOVERY] Discovery completed: {} total disks found", all_disks.len());
+        for (i, disk) in all_disks.iter().enumerate() {
+            println!("🔍 [DISCOVERY]   Disk {}: {} (PCI: {}, Driver: {}, System: {}, SPDK Ready: {})", 
+                     i+1, disk.device_name, disk.pci_address, disk.driver, disk.is_system_disk, disk.spdk_ready);
         }
         
         Ok(all_disks)
     }
 
     async fn get_nvme_pci_devices(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Scanning for NVMe PCI devices using lspci...");
+        
         let output = Command::new("lspci")
             .args(["-D", "-d", "::0108"]) // NVMe class code
             .output()?;
@@ -1245,19 +1279,25 @@ impl NodeAgent {
         let stdout = String::from_utf8(output.stdout)?;
         let mut devices = Vec::new();
 
+        println!("🔍 [DISCOVERY] lspci output:");
         for line in stdout.lines() {
+            println!("🔍 [DISCOVERY]   {}", line);
             if let Some(pci_addr) = line.split_whitespace().next() {
                 devices.push(pci_addr.to_string());
+                println!("🔍 [DISCOVERY] Found PCI device: {}", pci_addr);
             }
         }
 
+        println!("🔍 [DISCOVERY] Total NVMe PCI devices found: {}", devices.len());
         Ok(devices)
     }
 
     async fn get_disk_info(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISK_INFO] Getting disk info for PCI address: {}", pci_addr);
         let sysfs_path = format!("/sys/bus/pci/devices/{}", pci_addr);
         
         // Read PCI device information
+        println!("🔍 [DISK_INFO] Reading PCI device information from: {}", sysfs_path);
         let vendor_id = self.read_sysfs_file(&format!("{}/vendor", sysfs_path)).await?;
         let device_id = self.read_sysfs_file(&format!("{}/device", sysfs_path)).await?;
         let subsystem_vendor = self.read_sysfs_file(&format!("{}/subsystem_vendor", sysfs_path)).await
@@ -1265,17 +1305,22 @@ impl NodeAgent {
         let subsystem_device = self.read_sysfs_file(&format!("{}/subsystem_device", sysfs_path)).await
             .unwrap_or_else(|_| device_id.clone());
         
+        println!("🔍 [DISK_INFO] PCI Info - Vendor: {}, Device: {}", vendor_id.trim(), device_id.trim());
+        
         // Get NUMA node
         let numa_node = self.read_sysfs_file(&format!("{}/numa_node", sysfs_path)).await
             .ok()
             .and_then(|s| s.trim().parse().ok());
+        println!("🔍 [DISK_INFO] NUMA node: {:?}", numa_node);
 
         // Get current driver
         let driver = self.get_current_driver(pci_addr).await?;
+        println!("🔍 [DISK_INFO] Current driver: '{}'", driver);
         
         // Get device information - for unbound devices, use PCI info and reasonable defaults
         let (device_name, size_bytes, model, serial, firmware_version, mounted_partitions, is_system_disk) = 
             if driver == "unbound" {
+                println!("🔍 [DISK_INFO] Device is unbound, using PCI-based detection");
                 // For unbound devices, use PCI address as device identifier
                 let device_name = format!("nvme-{}", pci_addr.replace(":", "-"));
                 
@@ -1284,6 +1329,9 @@ impl NodeAgent {
                 
                 // Get model name from vendor/device ID lookup
                 let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+                
+                println!("🔍 [DISK_INFO] Unbound device info - Name: {}, Size: {} bytes, Model: {}", 
+                         device_name, estimated_size, model);
                 
                 (
                     device_name,
@@ -1295,11 +1343,15 @@ impl NodeAgent {
                     false, // Unbound devices are never system disks
                 )
             } else {
+                println!("🔍 [DISK_INFO] Device is bound to '{}', getting block device information", driver);
                 // For bound devices, get the actual block device information
                 let device_name = self.find_nvme_device_name(pci_addr).await?;
+                println!("🔍 [DISK_INFO] Found block device name: {}", device_name);
                 let (size_bytes, model, serial, firmware_version) = self.get_nvme_details(&device_name).await?;
                 let mounted_partitions = self.get_mounted_partitions(&device_name).await?;
                 let is_system_disk = self.is_system_disk(&device_name, &mounted_partitions).await?;
+                println!("🔍 [DISK_INFO] Bound device info - Name: {}, Size: {} bytes, Model: {}, Mounted: {:?}, System: {}", 
+                         device_name, size_bytes, model, mounted_partitions, is_system_disk);
                 (device_name, size_bytes, model, serial, firmware_version, mounted_partitions, is_system_disk)
             };
         
@@ -1308,7 +1360,10 @@ impl NodeAgent {
                         (self.is_virtualized_environment().await.unwrap_or(false) && 
                          driver == "nvme" && !is_system_disk);
         
-        Ok(UnimplementedDisk {
+        println!("🔍 [DISK_INFO] SPDK compatibility - Driver compatible: {}, Is system: {}, SPDK ready: {}", 
+                 self.is_spdk_compatible_driver(&driver), is_system_disk, spdk_ready);
+
+        let disk_info = UnimplementedDisk {
             pci_address: pci_addr.to_string(),
             device_name,
             vendor_id: vendor_id.trim().to_string(),
@@ -1327,7 +1382,10 @@ impl NodeAgent {
             is_system_disk,
             spdk_ready,
             discovered_at: Utc::now().to_rfc3339(),
-        })
+        };
+        
+        println!("✅ [DISK_INFO] Completed disk info for {}: {}", pci_addr, disk_info.device_name);
+        Ok(disk_info)
     }
 
     async fn read_sysfs_file(&self, path: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -1640,30 +1698,63 @@ impl NodeAgent {
         println!("🔍 [VALIDATION] Validating disk for setup: {}", pci_addr);
         println!("🔍 [VALIDATION] Force unmount: {}", force_unmount);
         
+        // Check if PCI device exists
+        let sysfs_path = format!("/sys/bus/pci/devices/{}", pci_addr);
+        println!("🔍 [VALIDATION] Checking PCI device path: {}", sysfs_path);
+        if !std::path::Path::new(&sysfs_path).exists() {
+            let error_msg = format!("PCI device {} does not exist", pci_addr);
+            println!("❌ [VALIDATION] {}", error_msg);
+            return Err(error_msg.into());
+        }
+        println!("✅ [VALIDATION] PCI device path exists");
+        
+        // Get current driver
+        let current_driver = self.get_current_driver(pci_addr).await?;
+        println!("🔍 [VALIDATION] Current driver: '{}'", current_driver);
+        
+        // Get disk information
         let disk_info = self.get_disk_info(pci_addr).await?;
-        println!("🔍 [VALIDATION] Retrieved disk info:");
-        println!("   - Device name: {}", disk_info.device_name);
-        println!("   - Driver: '{}'", disk_info.driver);
-        println!("   - Is system disk: {}", disk_info.is_system_disk);
-        println!("   - SPDK ready: {}", disk_info.spdk_ready);
-        println!("   - Mounted partitions: {:?}", disk_info.mounted_partitions);
-
+        println!("🔍 [VALIDATION] Disk info - Name: {}, Driver: {}, System: {}, SPDK Ready: {}", 
+                 disk_info.device_name, disk_info.driver, disk_info.is_system_disk, disk_info.spdk_ready);
+        
+        // Check if it's a system disk
         if disk_info.is_system_disk {
-            println!("❌ [VALIDATION] Cannot setup system disk for SPDK");
-            return Err("Cannot setup system disk for SPDK".into());
+            let error_msg = format!("Cannot setup system disk: {} ({})", pci_addr, disk_info.device_name);
+            println!("❌ [VALIDATION] {}", error_msg);
+            return Err(error_msg.into());
         }
-
+        println!("✅ [VALIDATION] Not a system disk");
+        
+        // Check mounted partitions
         if !disk_info.mounted_partitions.is_empty() && !force_unmount {
-            println!("❌ [VALIDATION] Disk has mounted partitions and force_unmount=false");
-            return Err(format!("Disk has mounted partitions: {:?}. Use force_unmount=true to proceed", disk_info.mounted_partitions).into());
+            let error_msg = format!("Disk has mounted partitions: {:?}. Use force_unmount=true to proceed", disk_info.mounted_partitions);
+            println!("❌ [VALIDATION] {}", error_msg);
+            return Err(error_msg.into());
         }
-
-        if disk_info.spdk_ready {
-            println!("❌ [VALIDATION] Disk is already setup for SPDK");
-            return Err("Disk is already setup for SPDK".into());
+        
+        if !disk_info.mounted_partitions.is_empty() && force_unmount {
+            println!("⚠️ [VALIDATION] Disk has mounted partitions but force_unmount=true: {:?}", disk_info.mounted_partitions);
+        } else {
+            println!("✅ [VALIDATION] No mounted partitions to worry about");
         }
-
-        println!("✅ [VALIDATION] Disk validation passed for: {}", pci_addr);
+        
+        // For unbound devices, we can't check block device files since they don't exist yet
+        if current_driver == "unbound" {
+            println!("✅ [VALIDATION] Device is unbound - validation passed (no block device to check)");
+            return Ok(());
+        }
+        
+        // For bound devices, validate the block device exists and is accessible
+        let device_path = format!("/dev/{}", disk_info.device_name);
+        println!("🔍 [VALIDATION] Checking block device path: {}", device_path);
+        if !std::path::Path::new(&device_path).exists() {
+            let error_msg = format!("Block device {} does not exist", device_path);
+            println!("❌ [VALIDATION] {}", error_msg);
+            return Err(error_msg.into());
+        }
+        println!("✅ [VALIDATION] Block device path exists");
+        
+        println!("✅ [VALIDATION] All validation checks passed for: {}", pci_addr);
         Ok(())
     }
 
