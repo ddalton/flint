@@ -46,12 +46,12 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 # Switch to root to install build dependencies
 USER root
 
-# Install both Rust and SPDK runtime dependencies for building
-# Note: Using minimal package set for Chainguard-based image
+# Install build dependencies for embedded SPDK
 RUN apk add --no-cache \
     perl \
-    build-base \
     linux-headers \
+    openssl-dev \
+    pkgconfig \
     && rm -rf /var/cache/apk/*
 
 # Copy SPDK build artifacts from spdk-builder stage
@@ -73,6 +73,7 @@ COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
 COPY --chown=65532:65532 src/ ./src/
 COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
+COPY --chown=65532:65532 wrapper.h ./
 
 # Build the node-agent with embedded SPDK
 # Note: This will require updating Cargo.toml with SPDK bindings
