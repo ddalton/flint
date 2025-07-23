@@ -54,6 +54,8 @@ RUN apk add --no-cache \
     openssl-dev \
     pkgconf \
     clang \
+    protoc \
+    protobuf-dev \
     && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
