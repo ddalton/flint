@@ -3,31 +3,27 @@
 
 #include <spdk/stdinc.h>
 #include <spdk/bdev.h>
-#include <spdk/bdev_zone.h>
 #include <spdk/blob.h>
 #include <spdk/blob_bdev.h>
 #include <spdk/env.h>
-#include <spdk/event.h>
 #include <spdk/log.h>
-#include <spdk/string.h>
-#include <spdk/thread.h>
 #include <spdk/util.h>
 #include <spdk/uuid.h>
 
 // LVol (Logical Volume) functionality - core for Flint
 #include <spdk/lvol.h>
 
-// NVMe functionality for direct device access
+// NVMe functionality for direct device access  
 #include <spdk/nvme.h>
-#include <spdk/nvmf.h>
 
-// JSON RPC (for compatibility with existing RPC fallback)
-#include <spdk/jsonrpc.h>
-#include <spdk/rpc.h>
-
-// Application framework
-#include <spdk/app.h>
-#include <spdk/init.h>
-
-// Version info
-#include <spdk/version.h> 
+// Note: Removed headers that might not exist in SPDK v24.01:
+// - spdk/app.h (application framework - not needed for embedded use)
+// - spdk/init.h (initialization - not needed for embedded use)
+// - spdk/jsonrpc.h (might not exist)
+// - spdk/rpc.h (might not exist)
+// - spdk/version.h (might not exist)
+// - spdk/nvmf.h (might not exist)
+// - spdk/event.h (might not exist)
+// - spdk/thread.h (might not exist)
+// - spdk/string.h (might not exist)
+// - spdk/bdev_zone.h (might not exist) 
