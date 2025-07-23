@@ -27,7 +27,7 @@ fn build_spdk_bindings() {
     // Find SPDK installation
     let spdk_root = env::var("SPDK_ROOT_DIR")
         .or_else(|_| env::var("SPDK_ROOT"))
-        .unwrap_or_else(|| "/usr/local".to_string());
+        .unwrap_or_else(|_| "/usr/local".to_string());
     
     let spdk_include = format!("{}/include", spdk_root);
     let spdk_lib = format!("{}/lib", spdk_root);
