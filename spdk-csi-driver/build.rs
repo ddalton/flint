@@ -88,6 +88,9 @@ fn build_spdk_bindings() {
         println!("cargo:rustc-link-lib={}", lib);
     }
     
+    // ISA-L library (Intel Storage Acceleration Library) - required by SPDK
+    println!("cargo:rustc-link-lib=dylib=isal");
+    
     // Generate bindings
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")

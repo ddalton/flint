@@ -59,6 +59,7 @@ RUN apk add --no-cache \
     liburing-dev \
     util-linux-dev \
     numactl-dev \
+    libisal-dev \
     && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
@@ -68,6 +69,8 @@ COPY --from=spdk-builder /spdk/include/spdk/ /usr/local/include/spdk/
 COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK libraries (built as part of SPDK --with-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
+# Copy ISA-L libraries if built as part of SPDK dependencies (best effort)
+RUN mkdir -p /usr/local/lib/
 
 # Ensure static libraries are available for linking
 RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
