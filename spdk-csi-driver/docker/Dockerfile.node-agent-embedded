@@ -47,13 +47,14 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 USER root
 
 # Install build dependencies for embedded SPDK
+# Try to install clang/llvm, fallback gracefully if not available in Chainguard
 RUN apk add --no-cache \
     perl \
     linux-headers \
     openssl-dev \
     pkgconf \
     clang \
-    clang-dev \
+    && (apk add --no-cache llvm-dev || echo "llvm-dev not available in Chainguard") \
     && rm -rf /var/cache/apk/*
 
 # Copy SPDK build artifacts from spdk-builder stage
