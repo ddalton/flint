@@ -104,7 +104,7 @@ COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
 COPY --chown=65532:65532 wrapper.h ./
 
-# Debug: List available SPDK libraries before build
+# Debug: List available SPDK libraries and check ISA-L symbols before build
 RUN echo "=== SPDK Library Debug Info ===" && \
     echo "Contents of /usr/local/lib:" && \
     ls -la /usr/local/lib/ | grep -E '\.(a|so)' | wc -l && echo " libraries found" && \
@@ -114,6 +114,12 @@ RUN echo "=== SPDK Library Debug Info ===" && \
     ls -la /usr/local/lib/librte* | head -5 || echo "No DPDK libraries found" && \
     echo "ISA-L libraries:" && \
     ls -la /usr/local/lib/*isal* || echo "No ISA-L libraries found" && \
+    echo "ISA-L static library symbols:" && \
+    nm /usr/local/lib/libisal.a | grep -E '^[0-9a-f]+ T (isal_|XTS_|crc|xor_)' | head -10 || echo "No ISA-L symbols found in static lib" && \
+    echo "ISA-L shared library symbols:" && \
+    nm -D /usr/local/lib/libisal.so | grep -E '^[0-9a-f]+ T (isal_|XTS_|crc|xor_)' | head -10 || echo "No ISA-L symbols found in shared lib" && \
+    echo "Check if required symbols are present:" && \
+    nm -D /usr/local/lib/libisal.so | grep -E '(isal_inflate_reset|XTS_AES_256_enc|crc32_iscsi|xor_gen)' || echo "Missing required symbols!" && \
     echo "Environment:" && \
     echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \
