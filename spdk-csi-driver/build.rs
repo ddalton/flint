@@ -100,11 +100,14 @@ fn build_spdk_bindings() {
         .allowlist_type("spdk_env_opts")
         .allowlist_type("spdk_log_level")
         
-        // Bdev I/O type constants (from spdk/bdev.h)
+        // Bdev I/O type constants (from spdk/bdev.h enum)
         .allowlist_var("SPDK_BDEV_IO_TYPE_.*")
         .allowlist_var("SPDK_LOG_.*")
         .allowlist_var("SPDK_BDEV_.*")
         .allowlist_var("SPDK_ENV_.*")
+        
+        // Generate enum constants
+        .rustified_enum("spdk_bdev_io_type")
         
         // Blob/LVS related types
         .allowlist_type("spdk_blob_store")

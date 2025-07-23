@@ -7,6 +7,23 @@ use std::sync::{Arc, Mutex, Once};
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 
+// SPDK I/O type constants (from spdk/bdev.h enum spdk_bdev_io_type)
+const SPDK_BDEV_IO_TYPE_READ: u32 = 1;
+const SPDK_BDEV_IO_TYPE_WRITE: u32 = 2;
+const SPDK_BDEV_IO_TYPE_UNMAP: u32 = 3;
+const SPDK_BDEV_IO_TYPE_FLUSH: u32 = 4;
+const SPDK_BDEV_IO_TYPE_RESET: u32 = 5;
+const SPDK_BDEV_IO_TYPE_NVME_ADMIN: u32 = 6;
+const SPDK_BDEV_IO_TYPE_NVME_IO: u32 = 7;
+const SPDK_BDEV_IO_TYPE_WRITE_ZEROES: u32 = 9;
+
+// SPDK log level constants
+const SPDK_LOG_ERROR: u32 = 1;
+const SPDK_LOG_WARN: u32 = 2;
+const SPDK_LOG_NOTICE: u32 = 3;
+const SPDK_LOG_INFO: u32 = 4;
+const SPDK_LOG_DEBUG: u32 = 5;
+
 // Include the generated SPDK bindings (Linux only)
 #[cfg(target_os = "linux")]
 mod bindings {
@@ -35,23 +52,6 @@ mod bindings {
     pub type spdk_blob_opts = std::ffi::c_void;
     pub type spdk_io_channel = *mut std::ffi::c_void;
     pub type spdk_uuid = [u8; 16];
-    
-    // Bdev I/O type constants (matching SPDK v24.01.x)
-    pub const SPDK_BDEV_IO_TYPE_READ: u32 = 1;
-    pub const SPDK_BDEV_IO_TYPE_WRITE: u32 = 2;
-    pub const SPDK_BDEV_IO_TYPE_UNMAP: u32 = 3;
-    pub const SPDK_BDEV_IO_TYPE_FLUSH: u32 = 4;
-    pub const SPDK_BDEV_IO_TYPE_RESET: u32 = 5;
-    pub const SPDK_BDEV_IO_TYPE_NVME_ADMIN: u32 = 6;
-    pub const SPDK_BDEV_IO_TYPE_NVME_IO: u32 = 7;
-    pub const SPDK_BDEV_IO_TYPE_WRITE_ZEROES: u32 = 9;
-    
-    // Log level constants
-    pub const SPDK_LOG_ERROR: u32 = 1;
-    pub const SPDK_LOG_WARN: u32 = 2;
-    pub const SPDK_LOG_NOTICE: u32 = 3;
-    pub const SPDK_LOG_INFO: u32 = 4;
-    pub const SPDK_LOG_DEBUG: u32 = 5;
     
     // Mock functions for non-Linux platforms
     pub unsafe fn spdk_env_init(_opts: *const spdk_env_opts) -> i32 { 0 }
@@ -92,9 +92,11 @@ mod bindings {
     }
     pub unsafe fn spdk_bdev_io_type_supported(_bdev: *const spdk_bdev, io_type: u32) -> bool {
         match io_type {
-            SPDK_BDEV_IO_TYPE_READ | SPDK_BDEV_IO_TYPE_WRITE | 
-            SPDK_BDEV_IO_TYPE_FLUSH | SPDK_BDEV_IO_TYPE_UNMAP | 
-            SPDK_BDEV_IO_TYPE_WRITE_ZEROES => true,
+            val if val == super::SPDK_BDEV_IO_TYPE_READ => true,
+            val if val == super::SPDK_BDEV_IO_TYPE_WRITE => true,
+            val if val == super::SPDK_BDEV_IO_TYPE_FLUSH => true,
+            val if val == super::SPDK_BDEV_IO_TYPE_UNMAP => true,
+            val if val == super::SPDK_BDEV_IO_TYPE_WRITE_ZEROES => true,
             _ => false,
         }
     }
@@ -161,19 +163,18 @@ impl SpdkNative {
     pub fn new() -> Result<Self> {
         println!("🔧 [SPDK_NATIVE] Initializing SPDK environment...");
         
+        let mut init_result: Result<(), anyhow::Error> = Ok(());
+        
         unsafe {
             #[cfg(target_os = "linux")]
             {
-                // Initialize SPDK environment with default options
-                let result = spdk_env_init(ptr::null());
-                if result != 0 {
-                    return Err(anyhow!("SPDK environment initialization failed: {}", result));
+                // Initialize SPDK environment with minimal options
+                if bindings::spdk_env_init(ptr::null()) != 0 {
+                    init_result = Err(anyhow!("SPDK environment initialization failed"));
+                } else {
+                    bindings::spdk_log_set_print_level(SPDK_LOG_INFO);
+                    println!("✅ [SPDK_NATIVE] Environment initialized");
                 }
-                
-                // Set logging level to INFO
-                spdk_log_set_print_level(3); // SPDK_LOG_INFO = 3
-                
-                println!("✅ [SPDK_NATIVE] SPDK environment initialized successfully");
             }
             
             #[cfg(not(target_os = "linux"))]
@@ -181,6 +182,8 @@ impl SpdkNative {
                 println!("🔧 [SPDK_MOCK] Mock SPDK initialization");
             }
         }
+        
+        init_result?;
         
         Ok(SpdkNative {})
     }
@@ -428,45 +431,57 @@ impl SpdkNative {
         #[cfg(target_os = "linux")]
         unsafe {
             let bdev_name_c = CString::new(bdev_name)?;
-            let bdev = spdk_bdev_get_by_name(bdev_name_c.as_ptr());
+            let bdev = bindings::spdk_bdev_get_by_name(bdev_name_c.as_ptr());
             
             if bdev.is_null() {
                 return Ok(None);
             }
             
-            let name = CStr::from_ptr(spdk_bdev_get_name(bdev))
-                .to_string_lossy().to_string();
-            let product_name = CStr::from_ptr(spdk_bdev_get_product_name(bdev))
+            let name = std::ffi::CStr::from_ptr(bindings::spdk_bdev_get_name(bdev))
                 .to_string_lossy().to_string();
             
-            let block_size = spdk_bdev_get_block_size(bdev);
-            let num_blocks = spdk_bdev_get_num_blocks(bdev);
-            let md_size = spdk_bdev_get_md_size(bdev);
+            // Get product name using spdk_bdev_get_module_name as fallback
+            let module_name_ptr = bindings::spdk_bdev_get_module_name(bdev);
+            let product_name = if !module_name_ptr.is_null() {
+                std::ffi::CStr::from_ptr(module_name_ptr)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                "Unknown".to_string()
+            };
             
-            // Get UUID
-            let uuid_ptr = spdk_bdev_get_uuid(bdev);
-            let mut uuid_str = [0i8; 37];
-            spdk_uuid_fmt_lower(
-                uuid_str.as_mut_ptr(),
-                uuid_str.len(),
-                uuid_ptr
-            );
-            let uuid = CStr::from_ptr(uuid_str.as_ptr()).to_string_lossy().to_string();
+            let block_size = bindings::spdk_bdev_get_block_size(bdev);
+            let num_blocks = bindings::spdk_bdev_get_num_blocks(bdev);
+            // Note: spdk_bdev_get_md_size doesn't exist in SPDK API, metadata size is typically 0
+            
+            // Get UUID using the same approach as get_bdevs
+            let uuid_ptr = bindings::spdk_bdev_get_uuid(bdev);
+            let mut uuid_str = String::new();
+            if !uuid_ptr.is_null() {
+                // Convert UUID to string format
+                let uuid_bytes = std::slice::from_raw_parts(uuid_ptr as *const u8, 16);
+                uuid_str = format!("{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3],
+                    uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7],
+                    uuid_bytes[8], uuid_bytes[9], uuid_bytes[10], uuid_bytes[11],
+                    uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+            } else {
+                uuid_str = "unknown".to_string();
+            }
             
             let info = json!({
                 "name": name,
-                "uuid": uuid,
+                "uuid": uuid_str,
                 "product_name": product_name,
                 "block_size": block_size,
                 "num_blocks": num_blocks,
-                "md_size": md_size,
                 "total_size": (num_blocks as u64) * (block_size as u64),
-                "claimed": spdk_bdev_is_claimed(bdev),
+                // Note: spdk_bdev_is_claimed doesn't exist in SPDK API, removed claimed status
                 "supported_io_types": {
-                    "read": spdk_bdev_io_type_supported(bdev, 1), // SPDK_BDEV_IO_TYPE_READ
-                    "write": spdk_bdev_io_type_supported(bdev, 2), // SPDK_BDEV_IO_TYPE_WRITE
-                    "unmap": spdk_bdev_io_type_supported(bdev, 3), // SPDK_BDEV_IO_TYPE_UNMAP
-                    "flush": spdk_bdev_io_type_supported(bdev, 4), // SPDK_BDEV_IO_TYPE_FLUSH
+                    "read": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_READ),
+                    "write": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE),
+                    "unmap": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_UNMAP),
+                    "flush": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH),
                 }
             });
             
@@ -540,14 +555,14 @@ impl SpdkNative {
                     "num_blocks": num_blocks,
                     "size": size,
                     "supported_io_types": {
-                        "read": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_READ),
-                        "write": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_WRITE),
-                        "flush": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_FLUSH),
-                        "reset": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_RESET),
-                        "unmap": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_UNMAP),
-                        "write_zeroes": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_WRITE_ZEROES),
-                        "nvme_admin": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_NVME_ADMIN),
-                        "nvme_io": bindings::spdk_bdev_io_type_supported(bdev, bindings::SPDK_BDEV_IO_TYPE_NVME_IO),
+                        "read": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_READ),
+                        "write": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE),
+                        "flush": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH),
+                        "reset": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_RESET),
+                        "unmap": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_UNMAP),
+                        "write_zeroes": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_WRITE_ZEROES),
+                        "nvme_admin": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_NVME_ADMIN),
+                        "nvme_io": bindings::spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_NVME_IO),
                     }
                 }));
                 
