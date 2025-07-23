@@ -4,7 +4,7 @@
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS spdk-builder
 
-# Install SPDK build dependencies
+# Install SPDK build dependencies including ISA-L autotools
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -26,15 +26,25 @@ RUN apt-get update && apt-get install -y \
     automake \
     libtool \
     uuid-dev \
+    yasm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /spdk
 
-# Clone, configure, and build SPDK with static libraries for embedding
+# Clone, configure, and build SPDK with proper ISA-L integration for shared libraries
 RUN git clone https://github.com/spdk/spdk.git . && \
     git checkout v24.01 && \
     git submodule update --init --recursive && \
-    ./configure --with-ublk --enable-debug --with-shared && \
+    echo "=== Building ISA-L first ===" && \
+    cd isa-l && \
+    ./autogen.sh && \
+    ./configure --enable-shared --enable-static --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    cd .. && \
+    echo "=== Configuring SPDK with ISA-L available in system ===" && \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH ./configure --with-ublk --enable-debug --with-shared && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
@@ -69,21 +79,8 @@ COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK libraries (built as part of SPDK --with-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
-# Copy ISA-L static library from SPDK submodule build and create proper shared library
-COPY --from=spdk-builder /spdk/isa-l/.libs/ /tmp/isal-libs/
-RUN echo "=== ISA-L libraries found ===" && \
-    ls -la /tmp/isal-libs/ && \
-    cp /tmp/isal-libs/*.a /usr/local/lib/ 2>/dev/null || echo "No .a files" && \
-    echo "Creating proper shared ISA-L library with all symbols exported..." && \
-    cd /usr/local/lib && \
-    mkdir -p /tmp/isal-extract && \
-    cd /tmp/isal-extract && \
-    ar x /usr/local/lib/libisal.a && \
-    gcc -shared -fPIC -o /usr/local/lib/libisal.so.2 *.o && \
-    cd /usr/local/lib && \
-    ln -sf libisal.so.2 libisal.so && \
-    rm -rf /tmp/isal-extract /tmp/isal-libs && \
-    echo "Shared ISA-L library created from object files"
+# Copy ISA-L libraries that were built and installed system-wide during SPDK build
+COPY --from=spdk-builder /usr/local/lib/libisal* /usr/local/lib/
 
 # Ensure static libraries are available for linking
 RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
@@ -121,11 +118,10 @@ RUN echo "=== SPDK Library Debug Info ===" && \
     ls -la /usr/local/lib/librte* | head -5 || echo "No DPDK libraries found" && \
     echo "ISA-L libraries:" && \
     ls -la /usr/local/lib/*isal* || echo "No ISA-L libraries found" && \
-    echo "Check if required ISA-L symbols are present:" && \
-    echo "In static library:" && \
-    nm /usr/local/lib/libisal.a | grep -E '(isal_inflate_reset|XTS_AES_256_enc|crc32_iscsi|xor_gen)' || echo "Missing required symbols in static lib!" && \
-    echo "In shared library:" && \
-    nm -D /usr/local/lib/libisal.so | grep -E '(isal_inflate_reset|XTS_AES_256_enc|crc32_iscsi|xor_gen)' || echo "Missing required symbols in shared lib!" && \
+    echo "Check if ISA-L symbols are properly incorporated into SPDK libraries:" && \
+    nm -D /usr/local/lib/libspdk_accel.so | grep -E '(isal_|crc32_iscsi|xor_gen)' | head -5 || echo "ISA-L symbols not found in SPDK accel library - this may be expected" && \
+    echo "ISA-L libraries available:" && \
+    ls -la /usr/local/lib/libisal* || echo "No separate ISA-L libraries found" && \
     echo "Environment:" && \
     echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" && \
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" && \
