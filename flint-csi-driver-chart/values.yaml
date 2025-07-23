@@ -19,12 +19,16 @@ images:
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (controller + node modes)
     tag: latest
-  nodeAgent:
-    name: flint-node-agent
+  nodeAgentEmbedded:
+    name: flint-node-agent-embedded
     tag: latest
-  spdkTgt:
-    name: spdk-tgt
-    tag: latest
+  # Legacy separate images (deprecated - use nodeAgentEmbedded instead)
+  # nodeAgent:
+  #   name: flint-node-agent
+  #   tag: latest
+  # spdkTgt:
+  #   name: spdk-tgt
+  #   tag: latest
 
 csiSidecars:
   repository: registry.k8s.io/sig-storage

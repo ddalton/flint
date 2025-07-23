@@ -4,14 +4,6 @@ version = "0.4.0"
 edition = "2021"
 
 [[bin]]
-name = "spdk-dashboard-backend"
-path = "src/spdk_dashboard_backend.rs"
-
-[[bin]]
-name = "csi-driver"
-path = "src/main.rs"
-
-[[bin]]
 name = "controller"
 path = "src/controller_operator.rs"
 
@@ -19,31 +11,40 @@ path = "src/controller_operator.rs"
 name = "node-agent"
 path = "src/node_agent.rs"
 
+[[bin]]
+name = "csi-driver"
+path = "src/main.rs"
+
+[[bin]]
+name = "spdk-dashboard-backend"
+path = "src/spdk_dashboard_backend.rs"
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-tonic = "0.11"
-prost = "0.12"
-prost-types = "0.12"
-kube = { version = "1.1.0", features = ["client", "derive", "runtime"] }
-kube-derive = "1.1.0"
-k8s-openapi = { version = "0.25.0", features = ["v1_30"] }
+kube = { version = "0.87", features = ["client", "derive", "runtime"] }
+k8s-openapi = { version = "0.20", features = ["latest"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 reqwest = { version = "0.11", features = ["json"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 clap = { version = "4.0", features = ["derive"] }
-warp = "0.3.7"
-schemars = { version = "0.8.15", features = ["chrono"] }
-regex = "1.11.1"
-futures = "0.3.31"
+warp = "0.3"
 
-openssl = { version = "0.10", features = ["vendored"] }
-openssl-sys = { version = "0.9", features = ["vendored"] }
+# SPDK Integration - Using OpenEBS production-tested bindings
+# NOTE: Version compatibility - Flint uses SPDK v24.01, latest spdk-rs uses v24.05
+# For production use, consider upgrading SPDK to v24.05 or using a compatible spdk-rs version
+spdk-rs = { git = "https://github.com/openebs/spdk-rs", branch = "develop" }
 
 [build-dependencies]
-tonic-build = "0.11"
+tonic-build = "0.10"
 
 [lib]
 name = "spdk_csi_driver"

@@ -16,19 +16,126 @@ use warp::Filter;
 use warp::{http::StatusCode, reply, Rejection, Reply};
 
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
+use spdk_csi_driver::spdk_embedded::{get_spdk_instance, initialize_spdk};
 
-/// Unified SPDK RPC helper that works with both Unix sockets and HTTP
+/// Unified SPDK interface using embedded SPDK for common operations, RPC as fallback
 async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let method = rpc_request["method"].as_str().unwrap_or("");
+    let params = rpc_request.get("params").unwrap_or(&json!({}));
+    
+    println!("🔧 [SPDK_HYBRID] Method: {} (checking embedded implementation)", method);
+    
+    // Use embedded SPDK for common operations
+    match method {
+        "bdev_aio_create" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded AIO bdev creation");
+            let spdk = get_spdk_instance()?;
+            let name = params["name"].as_str().unwrap_or("");
+            let filename = params["filename"].as_str().unwrap_or("");
+            
+            match spdk.create_aio_bdev(filename, name).await {
+                Ok(_) => Ok(json!({"result": true})),
+                Err(e) => {
+                    // Return error in SPDK RPC format
+                    Ok(json!({
+                        "error": {
+                            "code": -1,
+                            "message": e.to_string()
+                        }
+                    }))
+                }
+            }
+        }
+        
+        "bdev_lvol_create_lvstore" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded LVS creation");
+            let spdk = get_spdk_instance()?;
+            let bdev_name = params["bdev_name"].as_str().unwrap_or("");
+            let lvs_name = params["lvs_name"].as_str().unwrap_or("");
+            
+            match spdk.create_lvs(bdev_name, lvs_name).await {
+                Ok(_) => Ok(json!({"result": true})),
+                Err(e) => {
+                    // Return error in SPDK RPC format  
+                    Ok(json!({
+                        "error": {
+                            "code": -1,
+                            "message": e.to_string()
+                        }
+                    }))
+                }
+            }
+        }
+        
+        "bdev_lvol_get_lvstores" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded LVS list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_lvol_stores().await {
+                Ok(stores) => Ok(json!({"result": stores})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] LVS list failed, falling back to RPC: {}", e);
+                    call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
+                }
+            }
+        }
+        
+        "bdev_get_bdevs" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded bdev list");
+            let spdk = get_spdk_instance()?;
+            
+            match spdk.get_bdevs().await {
+                Ok(bdevs) => Ok(json!({"result": bdevs})),
+                Err(e) => {
+                    println!("⚠️ [SPDK_EMBEDDED] Bdev list failed, falling back to RPC: {}", e);
+                    call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
+                }
+            }
+        }
+        
+        "bdev_lvol_create" => {
+            println!("🚀 [SPDK_EMBEDDED] Using embedded lvol creation");
+            let spdk = get_spdk_instance()?;
+            let lvs_name = params["lvs_name"].as_str().unwrap_or("");
+            let lvol_name = params["lvol_name"].as_str().unwrap_or("");
+            let size = params["size"].as_u64().unwrap_or(0);
+            
+            match spdk.create_lvol(lvs_name, lvol_name, size).await {
+                Ok(bdev_name) => Ok(json!({"result": bdev_name})),
+                Err(e) => {
+                    Ok(json!({
+                        "error": {
+                            "code": -1,
+                            "message": e.to_string()
+                        }
+                    }))
+                }
+            }
+        }
+        
+        _ => {
+            // Fall back to RPC for other methods
+            println!("🔄 [SPDK_FALLBACK] Using RPC for method: {}", method);
+            call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
+        }
+    }
+}
+
+/// Fallback RPC implementation for methods not yet implemented in embedded SPDK
+async fn call_spdk_rpc_fallback(
+    spdk_rpc_url: &str,
+    rpc_request: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     if spdk_rpc_url.starts_with("unix://") {
-        // Unix socket connection
-        use std::os::unix::net::UnixStream;
-        use std::io::{Write, Read};
+        // Unix socket connection using tokio for async I/O
+        use tokio::net::UnixStream;
+        use tokio::io::{AsyncWriteExt, AsyncReadExt};
         
         let socket_path = spdk_rpc_url.trim_start_matches("unix://");
-        let mut stream = UnixStream::connect(socket_path)?;
+        let mut stream = UnixStream::connect(socket_path).await?;
         
         // Convert to proper JSON-RPC 2.0 format
         let jsonrpc_request = json!({
@@ -37,14 +144,24 @@ async fn call_spdk_rpc(
             "params": rpc_request.get("params").unwrap_or(&json!({})),
             "id": 1
         });
+        
         let message = format!("{}\n", jsonrpc_request.to_string());
-        stream.write_all(message.as_bytes())?;
+        println!("🔌 [RPC_FALLBACK] Sending to SPDK: {}", message.trim());
         
-        let mut buffer = [0; 8192];
-        let bytes_read = stream.read(&mut buffer)?;
+        stream.write_all(message.as_bytes()).await?;
+        
+        // Use larger buffer and read until we get a complete response
+        let mut buffer = vec![0; 32768]; // 32KB buffer
+        let bytes_read = stream.read(&mut buffer).await?;
+        
+        if bytes_read == 0 {
+            return Err("No response from SPDK".into());
+        }
+        
         let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+        println!("📨 [RPC_FALLBACK] Response from SPDK: {}", response_str.trim());
         
-        let response: serde_json::Value = serde_json::from_str(&response_str)?;
+        let response: serde_json::Value = serde_json::from_str(response_str.trim())?;
         Ok(response)
     } else {
         // HTTP connection

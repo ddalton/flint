@@ -80,37 +80,22 @@ spec:
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
-        - name: node-agent
-          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
+        - name: node-agent-embedded
+          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgentEmbedded.name }}:{{ .Values.images.nodeAgentEmbedded.tag }}"
           imagePullPolicy: Always
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: SPDK_RPC_URL
-              value: "unix:///var/tmp/spdk.sock"
+            - name: SPDK_MODE
+              value: "embedded"
             - name: AUTO_INITIALIZE_BLOBSTORE
               value: "true"
             - name: API_PORT
               value: "8081"
-          securityContext:
-            privileged: true
-          ports:
-            - name: api-port
-              containerPort: 8081
-          volumeMounts:
-            - name: plugin-dir
-              mountPath: /csi
-            - name: device-dir
-              mountPath: /dev
-            - name: sys-dir
-              mountPath: /sys
-            - name: spdk-socket
-              mountPath: /var/tmp
-        - name: spdk-tgt
-          image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTgt.name }}:{{ .Values.images.spdkTgt.tag }}"
-          imagePullPolicy: Always
+            - name: RUST_LOG
+              value: "info"
           securityContext:
             privileged: true
           resources:
@@ -122,9 +107,16 @@ spec:
               memory: "2Gi"
               cpu: "1000m"
               hugepages-2Mi: "2Gi"
+          ports:
+            - name: api-port
+              containerPort: 8081
           volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
             - name: device-dir
               mountPath: /dev
+            - name: sys-dir
+              mountPath: /sys
             - name: hugepages
               mountPath: /dev/hugepages
             - name: spdk-socket
