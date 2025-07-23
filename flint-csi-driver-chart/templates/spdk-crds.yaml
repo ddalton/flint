@@ -116,27 +116,88 @@ spec:
             - device_path
             - node_id
             - size
+            - pcie_addr
             properties:
               device_path:
                 type: string
+                description: "Path to the device (e.g., /dev/nvme1n1)"
               node_id:
                 type: string
+                description: "Kubernetes node name where the disk is located"
               size:
                 type: string
+                description: "Size of the disk (e.g., 1000GB)"
+              pcie_addr:
+                type: string
+                description: "PCIe address of the NVMe device (e.g., 0000:00:1f.0)"
+              blobstore_uuid:
+                type: string
+                nullable: true
+                description: "UUID of the SPDK blobstore on this disk"
+              nvme_controller_id:
+                type: string
+                nullable: true
+                description: "NVMe controller ID (e.g., nvme1n1)"
           status:
             type: object
             properties:
-              state:
+              total_capacity:
+                type: integer
+                format: int64
+                description: "Total capacity of the disk in bytes"
+              free_space:
+                type: integer
+                format: int64
+                description: "Available free space in bytes"
+              used_space:
+                type: integer
+                format: int64
+                description: "Used space in bytes"
+              healthy:
+                type: boolean
+                description: "Whether the disk is healthy and operational"
+              last_checked:
                 type: string
-                enum: ["available", "claimed", "failed", "initializing"]
-              bdev_name:
+                description: "Timestamp of the last health check"
+              lvol_count:
+                type: integer
+                format: int32
+                description: "Number of logical volumes on this disk"
+              blobstore_initialized:
+                type: boolean
+                description: "Whether the SPDK blobstore has been initialized"
+              io_stats:
+                type: object
+                description: "I/O statistics for this disk"
+                properties:
+                  read_iops:
+                    type: integer
+                    format: int64
+                    description: "Read IOPS"
+                  write_iops:
+                    type: integer
+                    format: int64
+                    description: "Write IOPS"
+                  read_latency_us:
+                    type: integer
+                    format: int64
+                    description: "Read latency in microseconds"
+                  write_latency_us:
+                    type: integer
+                    format: int64
+                    description: "Write latency in microseconds"
+                  error_count:
+                    type: integer
+                    format: int64
+                    description: "Number of I/O errors"
+              lvs_name:
                 type: string
-              cluster_id:
-                type: string
+                nullable: true
+                description: "Name of the logical volume store on this disk"
     additionalPrinterColumns:
-    - name: State
-      type: string
-      jsonPath: .status.state
+    - name: Healthy
+      type: boolean
+      jsonPath: .status.healthy
     - name: Node
       type: string
       jsonPath: .spec.node_id
@@ -146,6 +207,15 @@ spec:
     - name: Device
       type: string
       jsonPath: .spec.device_path
+    - name: Blobstore
+      type: boolean
+      jsonPath: .status.blobstore_initialized
+    - name: Free
+      type: string
+      jsonPath: .status.free_space
+    - name: LVols
+      type: integer
+      jsonPath: .status.lvol_count
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp

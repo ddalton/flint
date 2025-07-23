@@ -825,29 +825,70 @@ async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::
 }
 
 async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Discovering NVMe devices on node {}", agent.node_name);
+    println!("🔍 [DISCOVERY] Starting NVMe device discovery on node: {}", agent.node_name);
+    println!("🔧 [DISCOVERY] Config - auto_init_blobstore: {}, discovery_interval: {}s", 
+             agent.auto_initialize_blobstore, agent.discovery_interval);
     
     // Discover local NVMe devices
     let discovered_devices = query_local_nvme_devices(agent).await?;
     
     if discovered_devices.is_empty() {
-        println!("No NVMe devices found on node {}", agent.node_name);
+        println!("❌ [DISCOVERY] No NVMe devices found on node: {}", agent.node_name);
         return Ok(());
+    }
+    
+    println!("✅ [DISCOVERY] Found {} NVMe device(s) on node: {}", discovered_devices.len(), agent.node_name);
+    for device in &discovered_devices {
+        println!("📀 [DISCOVERY] Device: {} ({}) - PCIe: {}, Size: {}GB", 
+                 device.controller_id, device.model, device.pcie_addr, 
+                 device.capacity / (1024 * 1024 * 1024));
     }
     
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
     
-    for device in discovered_devices {
+    for device in &discovered_devices {
         let disk_name = format!("{}-{}", agent.node_name, device.controller_id);
         
-        match spdk_disks.get(&disk_name).await {
-            Ok(existing_disk) => {
-                // Update existing disk
-                update_existing_disk_resource(agent, &existing_disk, &device).await?;
+        // Implement robust get-or-create with retry logic
+        match get_or_create_disk_resource(agent, &spdk_disks, &disk_name, &device).await {
+            Ok(disk) => {
+                println!("✅ [DISCOVERY] Successfully got/created disk resource: {}", disk_name);
+                
+                // Check if blobstore initialization is needed
+                if let Some(status) = &disk.status {
+                    println!("🔍 [BLOBSTORE] Checking initialization status for {}: blobstore_initialized={}, auto_init={}", 
+                             disk_name, status.blobstore_initialized, agent.auto_initialize_blobstore);
+                    
+                    if !status.blobstore_initialized && agent.auto_initialize_blobstore {
+                        println!("🚀 [BLOBSTORE] Starting blobstore initialization for: {}", disk_name);
+                        
+                        match initialize_blobstore_on_device(agent, &disk).await {
+                            Ok(_) => {
+                                println!("✅ [BLOBSTORE] Successfully initialized blobstore for: {}", disk_name);
+                                
+                                // Update the status to reflect successful initialization
+                                match update_disk_blobstore_status(agent, &disk_name, true).await {
+                                    Ok(_) => println!("✅ [BLOBSTORE] Updated status for {}: blobstore_initialized=true", disk_name),
+                                    Err(e) => eprintln!("⚠️ [BLOBSTORE] Failed to update status for {}: {}", disk_name, e),
+                                }
+                            }
+                            Err(e) => {
+                                println!("❌ [BLOBSTORE] Failed to initialize blobstore for {}: {}", disk_name, e);
+                                eprintln!("Failed to initialize blobstore for {}: {}", disk_name, e);
+                            }
+                        }
+                    } else if status.blobstore_initialized {
+                        println!("✅ [BLOBSTORE] Already initialized for: {}", disk_name);
+                    } else {
+                        println!("⏭️ [BLOBSTORE] Auto-initialization disabled for: {}", disk_name);
+                    }
+                } else {
+                    println!("⚠️ [BLOBSTORE] No status found for disk: {}", disk_name);
+                }
             }
-            Err(_) => {
-                // Create new disk resource
-                create_new_disk_resource(agent, &device).await?;
+            Err(e) => {
+                println!("❌ [DISCOVERY] Failed to get or create disk resource {}: {}", disk_name, e);
+                eprintln!("Failed to get or create disk resource {}: {}", disk_name, e);
             }
         }
     }
@@ -855,8 +896,108 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     // Update I/O statistics for all disks on this node
     update_disk_io_statistics(agent).await?;
     
-    println!("Disk discovery completed for node {}", agent.node_name);
+    println!("✅ [DISCOVERY] Disk discovery completed successfully for node: {}", agent.node_name);
+    println!("📊 [DISCOVERY] Summary - Processed {} device(s)", discovered_devices.len());
     Ok(())
+}
+
+async fn get_or_create_disk_resource(
+    agent: &NodeAgent,
+    spdk_disks: &Api<SpdkDisk>,
+    disk_name: &str,
+    device: &NvmeDevice,
+) -> Result<SpdkDisk, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [DISK_RESOURCE] Attempting to get or create resource: {}", disk_name);
+    
+    // Try to get existing resource first
+    match spdk_disks.get(disk_name).await {
+        Ok(existing_disk) => {
+            println!("✅ [DISK_RESOURCE] Found existing resource: {}", disk_name);
+            println!("🔍 [DISK_RESOURCE] Checking if update needed for: {}", disk_name);
+            
+            // Resource exists - update it if needed
+            update_existing_disk_resource(agent, &existing_disk, device).await?;
+            
+            // Fetch the updated resource
+            println!("📥 [DISK_RESOURCE] Fetching updated resource: {}", disk_name);
+            Ok(spdk_disks.get(disk_name).await?)
+        }
+        Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
+            println!("❌ [DISK_RESOURCE] Resource not found, creating new: {}", disk_name);
+            
+            // Resource doesn't exist - try to create it
+            match create_new_disk_resource_internal(agent, spdk_disks, disk_name, device).await {
+                Ok(disk) => {
+                    println!("✅ [DISK_RESOURCE] Successfully created new resource: {}", disk_name);
+                    Ok(disk)
+                }
+                Err(e) => {
+                    println!("⚠️ [DISK_RESOURCE] Creation failed ({}), checking for race condition: {}", e, disk_name);
+                    
+                    // If creation failed, it might be due to race condition - retry get
+                    eprintln!("Creation failed ({}), retrying get for {}", e, disk_name);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    
+                    match spdk_disks.get(disk_name).await {
+                        Ok(disk) => {
+                            println!("🔄 [DISK_RESOURCE] Found existing resource {} after creation conflict (race condition resolved)", disk_name);
+                            Ok(disk)
+                        }
+                        Err(get_err) => {
+                            let error_msg = format!("Failed to create and retrieve {}: create_err={}, get_err={}", 
+                                                   disk_name, e, get_err);
+                            println!("❌ [DISK_RESOURCE] {}", error_msg);
+                            Err(error_msg.into())
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let error_msg = format!("Unexpected error getting {}: {}", disk_name, e);
+            println!("❌ [DISK_RESOURCE] {}", error_msg);
+            Err(error_msg.into())
+        }
+    }
+}
+
+async fn create_new_disk_resource_internal(
+    agent: &NodeAgent,
+    spdk_disks: &Api<SpdkDisk>,
+    disk_name: &str,
+    device: &NvmeDevice,
+) -> Result<SpdkDisk, Box<dyn std::error::Error + Send + Sync>> {
+    let device_path = format!("/dev/{}", device.controller_id);
+    
+    let spdk_disk = SpdkDisk::new_with_metadata(disk_name, SpdkDiskSpec {
+        node_id: agent.node_name.clone(),
+        device_path,
+        size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)),
+        pcie_addr: device.pcie_addr.clone(),
+        blobstore_uuid: None,
+        nvme_controller_id: Some(device.controller_id.clone()),
+    });
+    
+    // Set initial status
+    let mut spdk_disk_with_status = spdk_disk;
+    spdk_disk_with_status.status = Some(SpdkDiskStatus {
+        total_capacity: device.capacity,
+        free_space: device.capacity,
+        used_space: 0,
+        healthy: true,
+        last_checked: Utc::now().to_rfc3339(),
+        lvol_count: 0,
+        blobstore_initialized: false,
+        io_stats: IoStatistics::default(),
+        lvs_name: None,
+    });
+    
+    let created_disk = spdk_disks.create(&PostParams::default(), &spdk_disk_with_status).await?;
+    
+    println!("Created SpdkDisk resource: {} for device {} ({})", 
+             disk_name, device.pcie_addr, device.model);
+    
+    Ok(created_disk)
 }
 
 async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
@@ -935,53 +1076,19 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
 
 
 
-async fn create_new_disk_resource(agent: &NodeAgent, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let disk_name = format!("{}-{}", agent.node_name, device.controller_id);
-    let device_path = format!("/dev/{}", device.controller_id); // e.g., /dev/nvme1n1
-    
-    let spdk_disk = SpdkDisk::new_with_metadata(&disk_name, SpdkDiskSpec {
-        node_id: agent.node_name.clone(),           // Changed from 'node' to 'node_id'
-        device_path,                                // Added required field
-        size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)), // Changed from 'capacity' to 'size' as string
-        pcie_addr: device.pcie_addr.clone(),
-        blobstore_uuid: None,
-        nvme_controller_id: Some(device.controller_id.clone()),
-    });
-    
-    // Set initial status
-    let mut spdk_disk_with_status = spdk_disk;
-    spdk_disk_with_status.status = Some(SpdkDiskStatus {
-        total_capacity: device.capacity,
-        free_space: device.capacity,
-        used_space: 0,
-        healthy: true,
-        last_checked: Utc::now().to_rfc3339(),
-        lvol_count: 0,
-        blobstore_initialized: false,
-        io_stats: IoStatistics::default(),
-        lvs_name: None,
-    });
-    
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
-    spdk_disks.create(&PostParams::default(), &spdk_disk_with_status).await?;
-    
-    println!("Created SpdkDisk resource: {} for device {} ({})", 
-             disk_name, device.pcie_addr, device.model);
-    
-    // Initialize blobstore if auto-initialization is enabled
-    if agent.auto_initialize_blobstore {
-        initialize_blobstore_on_device(agent, &spdk_disk_with_status).await?;
-    }
-    
-    Ok(())
-}
 
 async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let lvs_name = format!("lvs_{}", disk_name);
+    
+    println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_name);
+    println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {}", lvs_name, disk.spec.pcie_addr);
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
     let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
-    let _attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+    println!("🔌 [SPDK_INIT] Attempting to attach controller: {} at PCIe: {}", controller_id, disk.spec.pcie_addr);
+    
+    let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_nvme_attach_controller",
         "params": {
             "name": controller_id,
@@ -990,11 +1097,30 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
     })).await;
     
+    match attach_result {
+        Ok(_) => println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id),
+        Err(e) => println!("⚠️ [SPDK_INIT] Controller attach failed (may already be attached): {}", e),
+    }
+    
     // Wait a moment for the device to be ready
+    println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
+    // Check if device path exists (for kernel-bound devices)
+    let bdev_name = if disk.spec.device_path.starts_with("/dev/") {
+        // Use kernel device path for kernel-bound devices
+        println!("🔗 [SPDK_INIT] Using kernel device path: {}", disk.spec.device_path);
+        disk.spec.device_path.strip_prefix("/dev/").unwrap_or(controller_id).to_string()
+    } else {
+        // Use SPDK controller name for SPDK-attached devices
+        let name = format!("{}n1", controller_id);
+        println!("🔗 [SPDK_INIT] Using SPDK bdev name: {}", name);
+        name
+    };
+    
     // Create lvol store (which serves as our blobstore)
-    let bdev_name = format!("{}n1", controller_id);
+    println!("🏗️ [SPDK_INIT] Creating LVS on bdev: {} with name: {}", bdev_name, lvs_name);
+    
     let lvol_store_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_create_lvstore",
         "params": {
@@ -1005,12 +1131,31 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     })).await;
     
     match lvol_store_result {
-        Ok(_) => {
-            update_disk_blobstore_status(agent, disk, true, Some(lvs_name)).await?;
-            println!("Initialized lvol store on disk: {}", disk.metadata.name.as_ref().unwrap());
+        Ok(result) => {
+            println!("✅ [SPDK_INIT] Successfully created LVS: {}", lvs_name);
+            println!("📊 [SPDK_INIT] LVS result: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
+            
+            // Update status to reflect successful initialization
+            let patch = json!({
+                "status": {
+                    "blobstore_initialized": true,
+                    "lvs_name": lvs_name,
+                    "last_checked": Utc::now().to_rfc3339()
+                }
+            });
+            
+            let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
+            match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_name),
+                Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+            }
+            
+            println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_name);
         }
         Err(e) => {
+            println!("❌ [SPDK_INIT] Failed to create LVS on {}: {}", disk.spec.pcie_addr, e);
             eprintln!("Failed to create lvol store on {}: {}", disk.spec.pcie_addr, e);
+            return Err(e);
         }
     }
     
@@ -1097,25 +1242,24 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
 }
 
 async fn update_disk_blobstore_status(
-    agent: &NodeAgent, 
-    disk: &SpdkDisk, 
-    initialized: bool,
-    lvs_name: Option<String>
+    agent: &NodeAgent,
+    disk_name: &str,
+    blobstore_initialized: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [STATUS_UPDATE] Updating blobstore status for {}: initialized={}", disk_name, blobstore_initialized);
+    
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), "default");
-    let disk_name = disk.metadata.name.as_ref().unwrap();
     
-    let mut status = disk.status.clone().unwrap_or_default();
-    status.blobstore_initialized = initialized;
-    status.lvs_name = lvs_name;
-    status.last_checked = Utc::now().to_rfc3339();
+    let patch = json!({
+        "status": {
+            "blobstore_initialized": blobstore_initialized,
+            "last_checked": Utc::now().to_rfc3339()
+        }
+    });
     
-    spdk_disks
-        .patch_status(disk_name, &PatchParams::default(), &Patch::Merge(json!({
-            "status": status
-        })))
-        .await?;
+    spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await?;
     
+    println!("✅ [STATUS_UPDATE] Successfully updated blobstore status for: {}", disk_name);
     Ok(())
 }
 
