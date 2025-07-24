@@ -72,18 +72,6 @@ spec:
             runAsUser: 65532
             runAsGroup: 0
             allowPrivilegeEscalation: false
-          ports:
-            - name: healthz
-              containerPort: 9809
-              protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: healthz
-            initialDelaySeconds: 10
-            timeoutSeconds: 3
-            periodSeconds: 10
-            failureThreshold: 5
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -119,10 +107,10 @@ spec:
             httpGet:
               path: /healthz
               port: healthz
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             timeoutSeconds: 3
             periodSeconds: 10
-            failureThreshold: 5
+            failureThreshold: 10
           volumeMounts:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
