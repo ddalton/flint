@@ -21,7 +21,7 @@ images:
     tag: latest
   # Two-container node deployment (recommended)
   spdkTarget:
-    name: spdk-target       # SPDK target daemon (v25.05.x)
+    name: spdk-tgt          # SPDK target daemon (v25.05.x)
     tag: latest
   nodeAgent:
     name: flint-node-agent  # CSI Node Agent (communicates via RPC)
