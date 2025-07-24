@@ -16,6 +16,9 @@ ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
 
+# Skip SPDK native bindings for dashboard backend (only needs HTTP APIs)
+ENV SKIP_SPDK_BINDINGS=true
+
 # Switch back to the unprivileged user for the actual build process.
 USER 65532
 
