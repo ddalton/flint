@@ -188,10 +188,40 @@ fn build_spdk_bindings() {
         .allowlist_function("spdk_bdev_open_ext")
         .allowlist_function("spdk_bdev_close")
         
-        // Blob/Blobstore functions (real SPDK v25.05.x APIs)
+        // Core SPDK v25.05.x APIs verified from headers
+        // Bdev management functions
+        .allowlist_function("spdk_bdev_get_by_name")
+        .allowlist_function("spdk_bdev_first")
+        .allowlist_function("spdk_bdev_next")
+        .allowlist_function("spdk_bdev_get_name")
+        .allowlist_function("spdk_bdev_get_block_size")
+        .allowlist_function("spdk_bdev_get_num_blocks")
+        .allowlist_function("spdk_bdev_get_module_name")
+        
+        // Blobstore functions
         .allowlist_function("spdk_bs_.*")
+        
+        // Blob functions
         .allowlist_function("spdk_blob_.*")
+        
+        // Lvol functions (these exist in v25.05.x)
         .allowlist_function("spdk_lvol_.*")
+        
+        // LVS functions 
+        .allowlist_function("spdk_lvs_.*")
+        
+        // Specific creation/destruction functions
+        .allowlist_function("spdk_lvol_store_construct")
+        .allowlist_function("spdk_lvol_store_destruct")
+        .allowlist_function("spdk_lvol_store_get_by_name")
+        .allowlist_function("spdk_lvol_create")
+        .allowlist_function("spdk_lvol_destroy")
+        .allowlist_function("spdk_bdev_aio_create")
+        
+        // Environment and initialization
+        .allowlist_function("spdk_env_.*")
+        .allowlist_function("spdk_log_.*")
+        .allowlist_function("spdk_get_ticks_hz")
         
         // Essential bdev types and constants
         .allowlist_type("spdk_bdev")
@@ -211,14 +241,22 @@ fn build_spdk_bindings() {
         // Generate enum constants
         .rustified_enum("spdk_bdev_io_type")
         
-        // Blob/LVS related types
+        // Core SPDK types available in v25.05.x
         .allowlist_type("spdk_blob_store")
-        .allowlist_type("spdk_blob")
-        .allowlist_type("spdk_lvol_store")
+        .allowlist_type("spdk_blob") 
         .allowlist_type("spdk_lvol")
-        .allowlist_type("spdk_bs_dev")
+        .allowlist_type("spdk_lvol_store")
         .allowlist_type("spdk_bs_opts")
         .allowlist_type("spdk_blob_opts")
+        .allowlist_type("spdk_blob_id")
+        .allowlist_type("spdk_env_opts")
+        
+        // Bdev types 
+        .allowlist_type("spdk_bdev")
+        
+        // Enums for clear methods
+        .allowlist_type("spdk_lvol_clear_method")
+        .allowlist_type("spdk_lvs_clear_method")
         
         // Allow some basic NVMe types that might be referenced but block complex ones
         .allowlist_type("spdk_nvme_cmd")
