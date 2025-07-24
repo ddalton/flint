@@ -20,8 +20,59 @@ spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
       containers:
+        {{- if .Values.deployment.nodeMode | default "two-container" | eq "two-container" }}
+        # SPDK Target Container (v25.05.x)
+        - name: spdk-target
+          image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
+          imagePullPolicy: Always
+          env:
+            - name: SPDK_VERSION
+              value: "v25.05.x"
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RAWIO
+          resources:
+            limits:
+              hugepages-2Mi: "1Gi"
+              memory: "2Gi"
+            requests:
+              hugepages-2Mi: "1Gi" 
+              memory: "1Gi"
+          volumeMounts:
+            - name: hugepages
+              mountPath: /hugepages
+            - name: spdk-socket
+              mountPath: /var/tmp
+            - name: device-dir
+              mountPath: /dev
+        # CSI Node Agent Container
+        - name: node-agent
+          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
+          imagePullPolicy: Always
+          env:
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SPDK_RPC_URL
+              value: "unix:///var/tmp/spdk.sock"
+            - name: LOG_LEVEL
+              value: "{{ .Values.logging.level | default "info" }}"
+            - name: USE_HOSTNAME_TOPOLOGY
+              value: "{{ .Values.driver.useHostnameTopology }}"
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+        {{- else }}
+        # Legacy Embedded Mode Container
         - name: flint-csi-driver
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgentEmbedded.name }}:{{ .Values.images.nodeAgentEmbedded.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -32,12 +83,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: SPDK_RPC_URL
-              value: "unix:///var/tmp/spdk.sock"
+            - name: SPDK_MODE
+              value: "embedded"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
           securityContext:
             privileged: true
+        {{- end }}
           ports:
             - name: healthz
               containerPort: 9809
@@ -80,47 +132,6 @@ spec:
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
-        - name: node-agent-embedded
-          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgentEmbedded.name }}:{{ .Values.images.nodeAgentEmbedded.tag }}"
-          imagePullPolicy: Always
-          env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: SPDK_MODE
-              value: "embedded"
-            - name: AUTO_INITIALIZE_BLOBSTORE
-              value: "true"
-            - name: API_PORT
-              value: "8081"
-            - name: RUST_LOG
-              value: "info"
-          securityContext:
-            privileged: true
-          resources:
-            requests:
-              memory: "1Gi"
-              cpu: "500m"
-              hugepages-2Mi: "2Gi"
-            limits:
-              memory: "2Gi"
-              cpu: "1000m"
-              hugepages-2Mi: "2Gi"
-          ports:
-            - name: api-port
-              containerPort: 8081
-          volumeMounts:
-            - name: plugin-dir
-              mountPath: /csi
-            - name: device-dir
-              mountPath: /dev
-            - name: sys-dir
-              mountPath: /sys
-            - name: hugepages
-              mountPath: /dev/hugepages
-            - name: spdk-socket
-              mountPath: /var/tmp
       volumes:
         - name: kubelet-dir
           hostPath:

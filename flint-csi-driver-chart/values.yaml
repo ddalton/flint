@@ -17,18 +17,16 @@ images:
     name: flint-controller  # SPDK Controller Operator binary
     tag: latest
   flintCsiDriver:
-    name: flint-driver      # CSI Driver binary (controller + node modes)
+    name: flint-driver      # CSI Driver binary (controller mode)
     tag: latest
-  nodeAgentEmbedded:
-    name: flint-node-agent-embedded
+  # Two-container node deployment (recommended)
+  spdkTarget:
+    name: spdk-target       # SPDK target daemon (v25.05.x)
     tag: latest
-  # Legacy separate images (deprecated - use nodeAgentEmbedded instead)
-  # nodeAgent:
-  #   name: flint-node-agent
-  #   tag: latest
-  # spdkTgt:
-  #   name: spdk-tgt
-  #   tag: latest
+  nodeAgent:
+    name: flint-node-agent  # CSI Node Agent (communicates via RPC)
+    tag: latest
+  # Embedded mode removed - use two-container approach
 
 csiSidecars:
   repository: registry.k8s.io/sig-storage
@@ -71,6 +69,16 @@ driver:
   # Self-managed clusters (kubeadm, etc.): useHostnameTopology: true
   # Rancher-managed clusters: useHostnameTopology: false
   # EKS/GKE/AKS: useHostnameTopology: false
+
+# Deployment configuration
+deployment:
+  # nodeMode: "two-container" only
+  # two-container: Separate SPDK target and CSI node agent containers (recommended)
+  nodeMode: "two-container"
+
+# Logging configuration
+logging:
+  level: "info"
 
 # SPDK Controller Operator configuration
 # The operator manages SPDK custom resources (SpdkVolume, SpdkDisk, etc.)

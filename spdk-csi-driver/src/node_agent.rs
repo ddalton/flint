@@ -3,325 +3,52 @@ use kube::{
     api::{PatchParams, Patch, PostParams},
 };
 use tokio::time::{Duration, interval};
-use reqwest::Client as HttpClient;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use anyhow::Result;
 use chrono::Utc;
 use std::env;
 use std::fs;
 use std::process::Command;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+
+// Web framework imports - using warp for HTTP management endpoints
 use warp::Filter;
-use warp::{http::StatusCode, reply, Rejection, Reply};
+use warp::{reply, Rejection, Reply};
+use warp::http::StatusCode;
 
 use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
-use spdk_csi_driver::spdk_native::get_spdk_instance;
+use spdk_csi_driver::spdk_native::SpdkNative;
 
-/// Unified SPDK interface using embedded SPDK for common operations, RPC as fallback
+/// SPDK RPC interface for CSI operations
+/// 
+/// This implementation uses SPDK v25.05.x RPC interface exclusively.
+/// All operations are performed via persistent socket connections to the SPDK target process.
+/// Implementation matches the official SPDK Go client pattern.
 async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let method = rpc_request["method"].as_str().unwrap_or("");
-    let default_params = json!({});
-    let params = rpc_request.get("params").unwrap_or(&default_params);
+    let params = rpc_request.get("params");
     
-    // Check if we're running in embedded mode
-    let spdk_mode = env::var("SPDK_MODE").unwrap_or("rpc".to_string());
+    println!("🔧 [SPDK_RPC] Executing method: {} via persistent socket connection", method);
     
-    if spdk_mode == "embedded" {
-        println!("🚀 [SPDK_EMBEDDED] Method: {} (using embedded implementation)", method);
-        
-        // Use embedded SPDK for common operations
-        match method {
-        "bdev_aio_create" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded AIO bdev creation");
-            let spdk = get_spdk_instance()?;
-            let name = params["name"].as_str().unwrap_or("");
-            let filename = params["filename"].as_str().unwrap_or("");
-            
-            match spdk.create_aio_bdev(filename, name).await {
-                Ok(_) => Ok(json!({"result": true})),
-                Err(e) => {
-                    // Return error in SPDK RPC format
-                    Ok(json!({
-                        "error": {
-                            "code": -1,
-                            "message": e.to_string()
-                        }
-                    }))
-                }
-            }
-        }
-        
-        "bdev_lvol_create_lvstore" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded LVS creation");
-            let spdk = get_spdk_instance()?;
-            let bdev_name = params["bdev_name"].as_str().unwrap_or("");
-            let lvs_name = params["lvs_name"].as_str().unwrap_or("");
-            // Default cluster size is 1MB (1048576 bytes) if not specified
-            let cluster_size = params["cluster_sz"].as_u64().unwrap_or(1048576);
-            
-            match spdk.create_lvs(bdev_name, lvs_name, cluster_size).await {
-                Ok(_) => Ok(json!({"result": true})),
-                Err(e) => {
-                    // Return error in SPDK RPC format  
-                    Ok(json!({
-                        "error": {
-                            "code": -1,
-                            "message": e.to_string()
-                        }
-                    }))
-                }
-            }
-        }
-        
-        "bdev_lvol_get_lvstores" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded LVS list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_lvol_stores().await {
-                Ok(stores) => Ok(json!({"result": stores})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] LVS list failed, falling back to RPC: {}", e);
-                    call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
-                }
-            }
-        }
-        
-        "bdev_get_bdevs" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded bdev list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_bdevs().await {
-                Ok(bdevs) => Ok(json!({"result": bdevs})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] Bdev list failed, falling back to RPC: {}", e);
-                    call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
-                }
-            }
-        }
-        
-        "bdev_lvol_create" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded lvol creation");
-            let spdk = get_spdk_instance()?;
-            let lvs_name = params["lvs_name"].as_str().unwrap_or("");
-            let lvol_name = params["lvol_name"].as_str().unwrap_or("");
-            let size = params["size"].as_u64().unwrap_or(0);
-            
-            match spdk.create_lvol(lvs_name, lvol_name, size).await {
-                Ok(bdev_name) => Ok(json!({"result": bdev_name})),
-                Err(e) => {
-                    Ok(json!({
-                        "error": {
-                            "code": -1,
-                            "message": e.to_string()
-                        }
-                    }))
-                }
-            }
-        }
-        
-        "bdev_lvol_delete_lvstore" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded LVS deletion");
-            let spdk = get_spdk_instance()?;
-            let lvs_name = params["lvs_name"].as_str().unwrap_or("");
-            
-            match spdk.delete_lvs(lvs_name).await {
-                Ok(_) => Ok(json!({"result": true})),
-                Err(e) => {
-                    // Return error in SPDK RPC format
-                    Ok(json!({
-                        "error": {
-                            "code": -1,
-                            "message": e.to_string()
-                        }
-                    }))
-                }
-            }
-        }
-        
-        "bdev_lvol_delete" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded lvol deletion");
-            let spdk = get_spdk_instance()?;
-            let lvol_name = params["name"].as_str().unwrap_or("");
-            
-            // Parse lvol name to get LVS name and UUID (format: "lvs_name/uuid")
-            if let Some((lvs_name, lvol_uuid)) = lvol_name.split_once('/') {
-                match spdk.delete_lvol(lvs_name, lvol_uuid).await {
-                    Ok(_) => Ok(json!({"result": true})),
-                    Err(e) => {
-                        Ok(json!({
-                            "error": {
-                                "code": -1,
-                                "message": e.to_string()
-                            }
-                        }))
-                    }
-                }
-            } else {
-                Ok(json!({
-                    "error": {
-                        "code": -22,
-                        "message": format!("Invalid lvol name format: {}", lvol_name)
-                    }
-                }))
-            }
-        }
-        
-        "bdev_get_blobstores" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded blobstore list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_blobstores().await {
-                Ok(blobstores) => Ok(json!({"result": blobstores})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] Blobstore list failed: {}", e);
-                    Ok(json!({"result": []}))  // Return empty array instead of falling back
-                }
-            }
-        }
-        
-        "blobstore_sync_all" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded blobstore sync");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.sync_all_blobstores().await {
-                Ok(_) => Ok(json!({"result": true})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] Blobstore sync failed: {}", e);
-                    Ok(json!({"result": false}))
-                }
-            }
-        }
-        
-        "bdev_nvme_get_controllers" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded NVMe controller list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_nvme_controllers().await {
-                Ok(controllers) => Ok(json!({"result": controllers})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] NVMe controller list failed: {}", e);
-                    Ok(json!({"result": []}))
-                }
-            }
-        }
-        
-        "bdev_raid_get_bdevs" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded RAID bdev list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_raid_bdevs().await {
-                Ok(raids) => Ok(json!({"result": raids})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] RAID bdev list failed: {}", e);
-                    Ok(json!({"result": []}))
-                }
-            }
-        }
-        
-        "nvmf_get_subsystems" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded NVMe-oF subsystem list");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_nvmeof_subsystems().await {
-                Ok(subsystems) => Ok(json!({"result": subsystems})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] NVMe-oF subsystem list failed: {}", e);
-                    Ok(json!({"result": []}))
-                }
-            }
-        }
-        
-        "bdev_get_iostat" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded I/O statistics");
-            let spdk = get_spdk_instance()?;
-            
-            match spdk.get_bdev_iostat().await {
-                Ok(iostats) => Ok(json!({"result": iostats})),
-                Err(e) => {
-                    println!("⚠️ [SPDK_EMBEDDED] I/O statistics failed: {}", e);
-                    Ok(json!({"result": []}))
-                }
-            }
-        }
-        
-        "spdk_get_version" => {
-            println!("🚀 [SPDK_EMBEDDED] Using embedded SPDK version");
-            Ok(json!({"result": {"version": "25.05-embedded"}}))
-        }
-        
-            _ => {
-                // Fall back to RPC for other methods not implemented in embedded mode
-                println!("🔄 [SPDK_FALLBACK] Method {} not implemented in embedded mode, using RPC", method);
-                call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
-            }
-        }
-    } else {
-        // RPC mode - use RPC for all methods
-        println!("🔌 [SPDK_RPC] Method: {} (using RPC mode)", method);
-        call_spdk_rpc_fallback(spdk_rpc_url, rpc_request).await
-    }
+    // Create SPDK RPC client with persistent socket connection
+    let spdk_socket = spdk_rpc_url.trim_start_matches("unix://");
+    let spdk = SpdkNative::new(Some(spdk_socket.to_string())).await
+        .map_err(|e| format!("Failed to create SPDK client: {}", e))?;
+    
+    // Call method using the new persistent socket client
+    let result = spdk.call_method(method, params.cloned()).await
+        .map_err(|e| format!("SPDK RPC call failed: {}", e))?;
+    
+    // Return result in JSON-RPC 2.0 format
+    Ok(json!({"result": result}))
 }
 
-/// Fallback RPC implementation for methods not yet implemented in embedded SPDK
-async fn call_spdk_rpc_fallback(
-    spdk_rpc_url: &str,
-    rpc_request: &serde_json::Value,
-) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    if spdk_rpc_url.starts_with("unix://") {
-        // Unix socket connection using tokio for async I/O
-        use tokio::net::UnixStream;
-        use tokio::io::{AsyncWriteExt, AsyncReadExt};
-        
-        let socket_path = spdk_rpc_url.trim_start_matches("unix://");
-        let mut stream = UnixStream::connect(socket_path).await?;
-        
-        // Convert to proper JSON-RPC 2.0 format
-        let jsonrpc_request = json!({
-            "jsonrpc": "2.0",
-            "method": rpc_request["method"],
-            "params": rpc_request.get("params").unwrap_or(&json!({})),
-            "id": 1
-        });
-        
-        let message = format!("{}\n", jsonrpc_request.to_string());
-        println!("🔌 [RPC_FALLBACK] Sending to SPDK: {}", message.trim());
-        
-        stream.write_all(message.as_bytes()).await?;
-        
-        // Use larger buffer and read until we get a complete response
-        let mut buffer = vec![0; 32768]; // 32KB buffer
-        let bytes_read = stream.read(&mut buffer).await?;
-        
-        if bytes_read == 0 {
-            return Err("No response from SPDK".into());
-        }
-        
-        let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-        println!("📨 [RPC_FALLBACK] Response from SPDK: {}", response_str.trim());
-        
-        let response: serde_json::Value = serde_json::from_str(response_str.trim())?;
-        Ok(response)
-    } else {
-        // HTTP connection
-        let http_client = HttpClient::new();
-        let response = http_client
-            .post(spdk_rpc_url)
-            .json(rpc_request)
-            .send()
-            .await?;
-        
-        if !response.status().is_success() {
-            return Err(format!("HTTP request failed with status: {}", response.status()).into());
-        }
-        
-        let json_response: serde_json::Value = response.json().await?;
-        Ok(json_response)
-    }
-}
+// Removed unused direct_rpc_call function - call_spdk_rpc is used directly
 
 // Disk setup functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,27 +188,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
     
-    // Check if we're running in embedded mode
-    let spdk_mode = env::var("SPDK_MODE").unwrap_or("rpc".to_string());
-    
-    if spdk_mode == "embedded" {
-        println!("🚀 [EMBEDDED] Initializing embedded SPDK mode");
-        
-        // Initialize embedded SPDK instance
-        match get_spdk_instance() {
-            Ok(_spdk) => {
-                println!("✅ [EMBEDDED] SPDK instance initialized successfully");
-            }
-            Err(e) => {
-                eprintln!("❌ [EMBEDDED] Failed to initialize SPDK: {}", e);
-                println!("🔄 [EMBEDDED] Continuing with mock bindings for development");
-            }
-        }
-    } else {
-        println!("🔌 [RPC] Using RPC mode - waiting for SPDK to be ready");
-        // Wait for SPDK to be ready via RPC
-        wait_for_spdk_ready(&agent).await?;
-    }
+    // Initialize RPC connection to SPDK target
+    println!("🔌 [RPC] Using RPC mode - waiting for SPDK to be ready");
+    // Wait for SPDK to be ready via RPC
+    wait_for_spdk_ready(&agent).await?;
     
     // Start HTTP API server for disk setup operations
     let api_agent = agent.clone();
@@ -1119,44 +829,17 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
     let max_retries = 30; // 5 minutes
     
     for attempt in 1..=max_retries {
-        // Check if we're using Unix socket or HTTP
-        let result = if agent.spdk_rpc_url.starts_with("unix://") {
-            // Unix socket connection
-            use std::os::unix::net::UnixStream;
-            use std::io::{Write, Read};
-            
-            let socket_path = agent.spdk_rpc_url.trim_start_matches("unix://");
-            match UnixStream::connect(socket_path) {
-                Ok(mut stream) => {
-                    let rpc_call = json!({"jsonrpc": "2.0", "method": "spdk_get_version", "id": 1});
-                    let message = format!("{}\n", rpc_call.to_string());
-                    
-                    match stream.write_all(message.as_bytes()) {
-                        Ok(_) => {
-                            let mut buffer = [0; 4096];
-                            match stream.read(&mut buffer) {
-                                Ok(_) => Ok(()),
-                                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                            }
-                        }
-                        Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                    }
+        // Use the new SPDK RPC client to check if SPDK is ready
+        let spdk_socket = agent.spdk_rpc_url.trim_start_matches("unix://");
+        let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = match SpdkNative::new(Some(spdk_socket.to_string())).await {
+            Ok(spdk) => {
+                // Try to call a simple RPC method to verify SPDK is responsive
+                match spdk.call_method("spdk_get_version", None).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!("SPDK RPC call failed: {}", e).into())
                 }
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             }
-        } else {
-            // HTTP connection
-            let http_client = HttpClient::new();
-            match http_client
-                .post(&agent.spdk_rpc_url)
-                .json(&json!({"method": "spdk_get_version"}))
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => Ok(()),
-                Ok(_) => Err("HTTP request failed".into()),
-                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-            }
+            Err(e) => Err(format!("Failed to connect to SPDK: {}", e).into())
         };
         
         match result {

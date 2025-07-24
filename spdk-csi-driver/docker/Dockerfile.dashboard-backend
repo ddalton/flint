@@ -1,50 +1,58 @@
-FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+# Multi-stage Dockerfile for SPDK CSI driver dashboard backend
+FROM rust:1.75-alpine3.18 AS builder
 
-# --- System-level setup ---
-# Switch to root to install build dependencies.
-# - perl: Required by the openssl-sys crate.
-# - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
-# - openssl-dev: Required by the openssl-sys crate for SSL/TLS functionality.
-# - pkgconf: Required to locate OpenSSL libraries (Alpine's pkg-config).
-USER root
-RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
-    apk add --no-cache perl protobuf-dev openssl-dev
+# Install build dependencies  
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig \
+    openssl-dev \
+    protobuf-dev
 
-# Set OpenSSL environment variables to help openssl-sys find libraries
-ENV OPENSSL_DIR=/usr
-ENV OPENSSL_LIB_DIR=/usr/lib
-ENV OPENSSL_INCLUDE_DIR=/usr/include
-ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+# Create app user
+RUN adduser -D -s /bin/sh -u 1001 appuser
 
-# Skip SPDK native bindings for dashboard backend (only needs HTTP APIs)
-ENV SKIP_SPDK_BINDINGS=true
-
-# Switch back to the unprivileged user for the actual build process.
-USER 65532
-
-# --- Application build ---
+# Set working directory
 WORKDIR /app
 
-# Copy all necessary source files with the correct ownership.
-COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
-COPY --chown=65532:65532 src/ ./src/
-COPY --chown=65532:65532 build.rs ./
-COPY --chown=65532:65532 proto/ ./proto/
+# Copy source code
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY build.rs ./
+COPY proto/ ./proto/
 
-# Build the dashboard backend binary
-RUN cargo build --release --bin spdk-dashboard-backend
+# Dashboard backend only needs HTTP APIs - no SPDK bindings
 
-# --- Final Stage ---
-FROM ubuntu:24.04
+# Build the dashboard backend
+RUN cargo build --release --bin dashboard-backend
 
-RUN apt-get update && apt-get install -y \
-    curl \
+# Runtime stage
+FROM alpine:3.18
+
+# Install runtime dependencies
+RUN apk add --no-cache \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    curl
 
-# Copy the built binary from the builder stage
-COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/
+# Create app user  
+RUN adduser -D -s /bin/sh -u 1001 appuser
 
+# Copy the compiled binary
+COPY --from=builder /app/target/release/dashboard-backend /usr/local/bin/
+RUN chown appuser:appuser /usr/local/bin/dashboard-backend && \
+    chmod +x /usr/local/bin/dashboard-backend
+
+# Switch to non-root user
+USER appuser
+
+# Expose port for dashboard backend
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/spdk-dashboard-backend"] 
+# Set environment variables
+ENV RUST_LOG=info
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Command to run the application
+CMD ["/usr/local/bin/dashboard-backend"] 

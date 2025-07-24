@@ -5,7 +5,7 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 # - perl: Required by the openssl-sys crate.
 # - protobuf-dev: Provides standard Google .proto files.
 USER root
-RUN apk add --no-cache perl protobuf-dev
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf
 
 # Switch back to the unprivileged user for the actual build process.
 USER 65532
@@ -19,6 +19,8 @@ COPY --chown=65532:65532 src/ ./src/
 COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
 
+# Using RPC interface - no SPDK bindings needed
+
 # Build the node-agent binary
 RUN cargo build --release --bin node-agent
 
@@ -31,9 +33,58 @@ RUN apt-get update && apt-get install -y \
     util-linux \
     curl \
     ca-certificates \
+    iproute2 \
+    kmod \
+    systemd-udev \
     && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for running the node-agent
+RUN useradd -r -u 65532 -g root spdk-csi
 
 # Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/node-agent /usr/local/bin/
 
-ENTRYPOINT ["/usr/local/bin/node-agent"]
+# Create necessary directories
+RUN mkdir -p /var/log/spdk-csi /var/lib/spdk-csi /etc/spdk-csi
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "Starting SPDK CSI Node Agent..."\n\
+echo "Node Agent Version: latest"\n\
+echo "SPDK RPC Communication: Unix Socket"\n\
+\n\
+# Wait for SPDK target to be ready\n\
+SPDK_SOCKET="${SPDK_SOCKET:-/var/tmp/spdk.sock}"\n\
+echo "Waiting for SPDK target at ${SPDK_SOCKET}..."\n\
+\n\
+timeout=60\n\
+while [ $timeout -gt 0 ] && [ ! -S "${SPDK_SOCKET}" ]; do\n\
+    echo "  Waiting for SPDK socket... ($timeout seconds remaining)"\n\
+    sleep 1\n\
+    timeout=$((timeout - 1))\n\
+done\n\
+\n\
+if [ ! -S "${SPDK_SOCKET}" ]; then\n\
+    echo "ERROR: SPDK socket not found at ${SPDK_SOCKET}"\n\
+    exit 1\n\
+fi\n\
+\n\
+echo "✅ SPDK target ready"\n\
+\n\
+# Start the node agent\n\
+exec /usr/local/bin/node-agent \\\n\
+    --endpoint="${CSI_ENDPOINT:-unix:///csi/csi.sock}" \\\n\
+    --node-id="${NODE_ID:-$(hostname)}" \\\n\
+    --spdk-socket="${SPDK_SOCKET}" \\\n\
+    --log-level="${LOG_LEVEL:-info}"\n\
+' > /usr/local/bin/node-agent-start.sh && chmod +x /usr/local/bin/node-agent-start.sh
+
+# Set proper ownership
+RUN chown -R 65532:root /var/log/spdk-csi /var/lib/spdk-csi /etc/spdk-csi
+
+# Switch to non-root user
+USER 65532
+
+ENTRYPOINT ["/usr/local/bin/node-agent-start.sh"]

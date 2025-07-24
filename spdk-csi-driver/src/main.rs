@@ -17,11 +17,8 @@ use node::NodeService;
 use identity::IdentityService;
 use driver::SpdkCsiDriver;
 
-mod csi_driver {
-    pub mod csi {
-        tonic::include_proto!("csi");
-    }
-}
+// Use the CSI protobuf types from lib.rs instead of duplicating them
+// This avoids the tonic::include_proto! macro issue
 
 use spdk_csi_driver::csi::{
     controller_server::ControllerServer,
