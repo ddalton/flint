@@ -124,6 +124,7 @@ const App: React.FC = () => {
       onAutoRefreshChange={setAutoRefresh}
       onRefresh={handleRefresh}
       onLogout={handleLogout}
+      usingMockData={dashboardHook.usingMockData}
     />
   );
 };

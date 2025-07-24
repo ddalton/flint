@@ -157,7 +157,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
-  const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
+  const { data: dashboardData, usingMockData } = useDashboardData(false); // Get node names from dashboard
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -186,6 +186,7 @@ export const DiskSetupTab: React.FC = () => {
   const [deleteInProgress, setDeleteInProgress] = useState<Set<string>>(new Set());
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [diskToDelete, setDiskToDelete] = useState<{nodeName: string, pciAddr: string, diskName: string, model: string, size: number} | null>(null);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
 
   // Get node names from dashboard API, fallback to mock node names for mock data alignment
   const knownNodes = dashboardData?.nodes || [
@@ -273,7 +274,9 @@ export const DiskSetupTab: React.FC = () => {
     if (selectedDisks.size !== 1) return false;
     
     const selectedDiskKey = Array.from(selectedDisks)[0];
-    const [nodeName, pciAddr] = selectedDiskKey.split(':');
+    const colonIndex = selectedDiskKey.indexOf(':');
+    const nodeName = selectedDiskKey.substring(0, colonIndex);
+    const pciAddr = selectedDiskKey.substring(colonIndex + 1);
     const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     
     return disk && disk.spdk_ready && !disk.is_system_disk;
@@ -284,19 +287,11 @@ export const DiskSetupTab: React.FC = () => {
     if (selectedDisks.size === 0) return false;
     
     const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
-      const [nodeName, pciAddr] = diskKey.split(':');
+      const colonIndex = diskKey.indexOf(':');
+      const nodeName = diskKey.substring(0, colonIndex);
+      const pciAddr = diskKey.substring(colonIndex + 1);
       return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     }).filter(Boolean);
-    
-    console.log('canSetupSelected check:', {
-      selectedDisks: selectedDisks.size,
-      selectedDiskDetails: selectedDiskDetails.map(d => ({
-        pci_address: d?.pci_address,
-        spdk_ready: d?.spdk_ready,
-        is_system_disk: d?.is_system_disk,
-        mounted_partitions: d?.mounted_partitions?.length
-      }))
-    });
     
     // All selected disks must be suitable for setup (not system disks, not already SPDK ready, no mounted partitions)
     const result = selectedDiskDetails.every(disk => 
@@ -305,8 +300,6 @@ export const DiskSetupTab: React.FC = () => {
       !disk.spdk_ready && 
       disk.mounted_partitions.length === 0
     );
-    
-    console.log('canSetupSelected result:', result);
     return result;
   }, [selectedDisks, allDisks]);
 
@@ -314,7 +307,9 @@ export const DiskSetupTab: React.FC = () => {
     if (selectedDisks.size !== 1) return null;
     
     const selectedDiskKey = Array.from(selectedDisks)[0];
-    const [nodeName, pciAddr] = selectedDiskKey.split(':');
+    const colonIndex = selectedDiskKey.indexOf(':');
+    const nodeName = selectedDiskKey.substring(0, colonIndex);
+    const pciAddr = selectedDiskKey.substring(colonIndex + 1);
     const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     
     if (disk && disk.spdk_ready && !disk.is_system_disk) {
@@ -437,6 +432,7 @@ export const DiskSetupTab: React.FC = () => {
     const diskInfo = getSelectedDiskInfo();
     if (diskInfo) {
       setDiskToDelete(diskInfo);
+      setDeleteConfirmationText('');
       setShowDeleteConfirmation(true);
     }
   };
@@ -506,36 +502,43 @@ export const DiskSetupTab: React.FC = () => {
         </div>
 
         {/* Statistics Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-          <div className="bg-blue-50 rounded-lg p-4 text-center">
-            <Database className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-blue-600">{stats.total}</p>
-            <p className="text-sm text-gray-600">Total Disks</p>
+        <div className="flex gap-4">
+          {/* Info Cards - Smaller, stacked */}
+          <div className="flex flex-col gap-2">
+            <div className="bg-gray-50 border border-gray-200 rounded p-2 text-center min-w-[100px]">
+              <Database className="w-4 h-4 text-gray-600 mx-auto mb-1" />
+              <p className="text-sm font-semibold text-gray-700">{stats.total}</p>
+              <p className="text-xs text-gray-500">Total</p>
+            </div>
+            <div className="bg-gray-50 border border-gray-200 rounded p-2 text-center min-w-[100px]">
+              <Monitor className="w-4 h-4 text-gray-600 mx-auto mb-1" />
+              <p className="text-sm font-semibold text-gray-700">{stats.selected}</p>
+              <p className="text-xs text-gray-500">Selected</p>
+            </div>
           </div>
-          <div className="bg-green-50 rounded-lg p-4 text-center">
-            <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-green-600">{stats.ready}</p>
-            <p className="text-sm text-gray-600">Setup Ready</p>
-          </div>
-          <div className="bg-yellow-50 rounded-lg p-4 text-center">
-            <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-yellow-600">{stats.needsUnmount}</p>
-            <p className="text-sm text-gray-600">Needs Unmount</p>
-          </div>
-          <div className="bg-red-50 rounded-lg p-4 text-center">
-            <Shield className="w-6 h-6 text-red-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-red-600">{stats.system}</p>
-            <p className="text-sm text-gray-600">System Disks</p>
-          </div>
-          <div className="bg-indigo-50 rounded-lg p-4 text-center">
-            <Settings className="w-6 h-6 text-indigo-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-indigo-600">{stats.spdkReady}</p>
-            <p className="text-sm text-gray-600">SPDK Ready</p>
-          </div>
-          <div className="bg-purple-50 rounded-lg p-4 text-center">
-            <Monitor className="w-6 h-6 text-purple-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-purple-600">{stats.selected}</p>
-            <p className="text-sm text-gray-600">Selected</p>
+          
+          {/* Disk State Cards - vibrant colors */}
+          <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-green-50 rounded-lg p-4 text-center border border-green-200">
+              <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-green-600">{stats.ready}</p>
+              <p className="text-sm text-gray-600">Setup Ready</p>
+            </div>
+            <div className="bg-yellow-50 rounded-lg p-4 text-center border border-yellow-200">
+              <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-yellow-600">{stats.needsUnmount}</p>
+              <p className="text-sm text-gray-600">Needs Unmount</p>
+            </div>
+            <div className="bg-red-50 rounded-lg p-4 text-center border border-red-200">
+              <Shield className="w-6 h-6 text-red-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-red-600">{stats.system}</p>
+              <p className="text-sm text-gray-600">System Disks</p>
+            </div>
+            <div className="bg-indigo-50 rounded-lg p-4 text-center border border-indigo-200">
+              <Settings className="w-6 h-6 text-indigo-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-indigo-600">{stats.spdkReady}</p>
+              <p className="text-sm text-gray-600">SPDK Ready</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1143,6 +1146,19 @@ export const DiskSetupTab: React.FC = () => {
                     single-replica volumes will be lost unless migrated or snapshotted first.
                   </p>
                 </div>
+                
+                <div className="mt-6">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    To confirm deletion, type the device name: <span className="font-mono font-bold">{diskToDelete.diskName}</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={deleteConfirmationText}
+                    onChange={(e) => setDeleteConfirmationText(e.target.value)}
+                    placeholder={`Type "${diskToDelete.diskName}" to confirm`}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1151,6 +1167,7 @@ export const DiskSetupTab: React.FC = () => {
                 onClick={() => {
                   setShowDeleteConfirmation(false);
                   setDiskToDelete(null);
+                  setDeleteConfirmationText('');
                 }}
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
               >
@@ -1158,7 +1175,8 @@ export const DiskSetupTab: React.FC = () => {
               </button>
               <button
                 onClick={confirmDeleteDisk}
-                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 flex items-center gap-2"
+                disabled={deleteConfirmationText !== diskToDelete.diskName}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 <Trash2 className="w-4 h-4" />
                 Delete Disk

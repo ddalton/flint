@@ -570,6 +570,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     nodes: []
   });
   const [loading, setLoading] = useState(true);
+  const [usingMockData, setUsingMockData] = useState(false);
 
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
@@ -626,11 +627,13 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
         console.warn('API not available, using mock data:', apiError);
         // Use mock data for development/demo
         setData(mockData);
+        setUsingMockData(true);
       }
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
       // Use mock data as fallback
       setData(mockData);
+      setUsingMockData(true);
     } finally {
       setLoading(false);
     }
@@ -651,7 +654,8 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     data,
     loading,
     stats,
-    refreshData
+    refreshData,
+    usingMockData
   };
 };
 

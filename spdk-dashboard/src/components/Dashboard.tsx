@@ -32,6 +32,7 @@ interface DashboardProps {
   onAutoRefreshChange: (enabled: boolean) => void;
   onRefresh: () => void;
   onLogout: () => void;
+  usingMockData?: boolean;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -41,7 +42,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   autoRefresh,
   onAutoRefreshChange,
   onRefresh,
-  onLogout
+  onLogout,
+  usingMockData = false
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
@@ -253,6 +255,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         onAutoRefreshChange={onAutoRefreshChange}
         onRefresh={onRefresh}
         onLogout={onLogout}
+        usingMockData={usingMockData}
       />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
