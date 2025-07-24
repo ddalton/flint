@@ -271,7 +271,7 @@ pub unsafe extern "C" fn spdk_env_init(_opts: *const spdk_env_opts) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn spdk_log_set_print_level(_level: spdk_log_level) {}
+pub unsafe extern "C" fn spdk_log_set_print_level(_level: i32) {}
 
 // Add other stub functions as needed by spdk_native.rs
 "#;
