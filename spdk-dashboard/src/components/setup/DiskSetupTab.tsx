@@ -157,7 +157,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
-  const { data: dashboardData, usingMockData } = useDashboardData(false); // Get node names from dashboard
+  const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
