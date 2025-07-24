@@ -19,6 +19,9 @@ spec:
     spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
+      securityContext:
+        # Set group ownership of volumes to allow non-root containers to write
+        fsGroup: 0
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
         # SPDK Target Container (v25.05.x)
