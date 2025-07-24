@@ -122,11 +122,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("🔧 [SOCKET] No existing socket file found at: {}", socket_path);
         }
         
-        // Create parent directory if it doesn't exist
+        // Create parent directory with proper permissions if it doesn't exist
         if let Some(parent) = std::path::Path::new(socket_path).parent() {
             println!("🔧 [SOCKET] Ensuring parent directory exists: {}", parent.display());
             match std::fs::create_dir_all(parent) {
-                Ok(_) => println!("✅ [SOCKET] Parent directory ready: {}", parent.display()),
+                Ok(_) => {
+                    println!("✅ [SOCKET] Parent directory created: {}", parent.display());
+                    
+                    // Set directory permissions to 775 (owner: rwx, group: rwx, others: r-x)
+                    // This allows user 65532 with group 0 to write files
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o775);
+                    match std::fs::set_permissions(parent, perms) {
+                        Ok(_) => println!("✅ [SOCKET] Directory permissions set to 775: {}", parent.display()),
+                        Err(e) => println!("⚠️ [SOCKET] Could not set directory permissions (may already be correct): {}", e),
+                    }
+                }
                 Err(e) => {
                     println!("❌ [SOCKET] Failed to create parent directory: {} (error: {})", parent.display(), e);
                     return Err(e.into());
