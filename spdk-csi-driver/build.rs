@@ -217,6 +217,7 @@ pub type spdk_blob = *mut std::ffi::c_void;
 pub type spdk_bs_dev = *mut std::ffi::c_void;
 pub type spdk_io_channel = *mut std::ffi::c_void;
 pub type spdk_uuid = [u8; 16];
+pub type spdk_bdev_io_type = u32;
 
 // Stub function implementations (return null/error values)
 #[no_mangle]
@@ -237,6 +238,31 @@ pub unsafe extern "C" fn spdk_bdev_get_name(_bdev: *mut spdk_bdev) -> *const std
 #[no_mangle]
 pub unsafe extern "C" fn spdk_bdev_get_by_name(_name: *const std::ffi::c_char) -> *mut spdk_bdev {
     ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_module_name(_bdev: *mut spdk_bdev) -> *const std::ffi::c_char {
+    ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_block_size(_bdev: *mut spdk_bdev) -> u32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_num_blocks(_bdev: *mut spdk_bdev) -> u64 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_uuid(_bdev: *mut spdk_bdev) -> *const spdk_uuid {
+    ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_io_type_supported(_bdev: *mut spdk_bdev, _io_type: spdk_bdev_io_type) -> bool {
+    false
 }
 
 #[no_mangle]
