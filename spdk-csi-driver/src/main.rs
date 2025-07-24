@@ -106,60 +106,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if endpoint.starts_with("unix://") {
         let socket_path = endpoint.trim_start_matches("unix://");
         
-        println!("🔧 [SOCKET] Preparing Unix socket at: {}", socket_path);
-        
         // Remove existing socket file if it exists
         if std::path::Path::new(socket_path).exists() {
-            println!("🔧 [SOCKET] Socket file exists, attempting to remove: {}", socket_path);
-            match std::fs::remove_file(socket_path) {
-                Ok(_) => println!("✅ [SOCKET] Successfully removed existing socket file"),
-                Err(e) => {
-                    println!("❌ [SOCKET] Failed to remove existing socket: {} (error: {})", socket_path, e);
-                    return Err(e.into());
-                }
-            }
-        } else {
-            println!("🔧 [SOCKET] No existing socket file found at: {}", socket_path);
+            std::fs::remove_file(socket_path)?;
         }
         
-        // Create parent directory with proper permissions if it doesn't exist
+        // Create parent directory if it doesn't exist
         if let Some(parent) = std::path::Path::new(socket_path).parent() {
-            println!("🔧 [SOCKET] Ensuring parent directory exists: {}", parent.display());
-            match std::fs::create_dir_all(parent) {
-                Ok(_) => {
-                    println!("✅ [SOCKET] Parent directory created: {}", parent.display());
-                    
-                    // Set directory permissions to 775 (owner: rwx, group: rwx, others: r-x)
-                    // This allows user 65532 with group 0 to write files
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::Permissions::from_mode(0o775);
-                    match std::fs::set_permissions(parent, perms) {
-                        Ok(_) => println!("✅ [SOCKET] Directory permissions set to 775: {}", parent.display()),
-                        Err(e) => println!("⚠️ [SOCKET] Could not set directory permissions (may already be correct): {}", e),
-                    }
-                }
-                Err(e) => {
-                    println!("❌ [SOCKET] Failed to create parent directory: {} (error: {})", parent.display(), e);
-                    return Err(e.into());
-                }
-            }
+            std::fs::create_dir_all(parent)?;
         }
         
         // Use UnixListener for Unix domain socket
         use tokio::net::UnixListener;
         use tokio_stream::wrappers::UnixListenerStream;
         
-        println!("🔧 [SOCKET] Attempting to bind Unix socket: {}", socket_path);
-        let listener = match UnixListener::bind(socket_path) {
-            Ok(listener) => {
-                println!("✅ [SOCKET] Successfully bound Unix socket: {}", socket_path);
-                listener
-            }
-            Err(e) => {
-                println!("❌ [SOCKET] Failed to bind Unix socket: {} (error: {})", socket_path, e);
-                return Err(e.into());
-            }
-        };
+        let listener = UnixListener::bind(socket_path)?;
         let stream = UnixListenerStream::new(listener);
         
         println!("Listening on unix socket: {}", socket_path);
