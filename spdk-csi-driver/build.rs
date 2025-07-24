@@ -59,7 +59,7 @@ fn build_spdk_bindings() {
     let dpdk_lib = format!("{}/lib", spdk_root);
     println!("cargo:rustc-link-search=native={}", dpdk_lib);
     
-    // Comprehensive SPDK libraries (verified against SPDK v24.01.x) - use dynamic linking
+    // Comprehensive SPDK libraries (verified against SPDK v25.05.x) - use dynamic linking
     let spdk_libs = [
         // Core environment and utilities
         "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread", "spdk_conf",
@@ -124,7 +124,7 @@ fn build_spdk_bindings() {
         .allowlist_function("spdk_get_ticks_hz")
         .allowlist_function("spdk_uuid_.*")
         
-        // Bdev iteration and property functions (real SPDK v24.01.x APIs)
+        // Bdev iteration and property functions (real SPDK v25.05.x APIs)
         .allowlist_function("spdk_bdev_first")
         .allowlist_function("spdk_bdev_next")
         .allowlist_function("spdk_bdev_get_by_name")
@@ -138,7 +138,7 @@ fn build_spdk_bindings() {
         .allowlist_function("spdk_bdev_open_ext")
         .allowlist_function("spdk_bdev_close")
         
-        // Blob/Blobstore functions (real SPDK v24.01.x APIs)
+        // Blob/Blobstore functions (real SPDK v25.05.x APIs)
         .allowlist_function("spdk_bs_.*")
         .allowlist_function("spdk_blob_.*")
         .allowlist_function("spdk_lvol_.*")

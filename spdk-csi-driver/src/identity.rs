@@ -11,7 +11,7 @@ use spdk_csi_driver::csi::{
 use tonic::{Request, Response, Status};
 use kube;
 
-const PLUGIN_NAME: &str = "flint.csi.storage.io";
+const PLUGIN_NAME: &str = "spdk.csi.storage.io";
 const PLUGIN_VERSION: &str = "1.0.0";
 
 pub struct IdentityService {

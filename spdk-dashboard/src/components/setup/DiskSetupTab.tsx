@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, 
   Play, Database, Shield, Info, ChevronLeft, ChevronRight,
-  Search, Filter, Monitor, Grid, List,  
+  Search, Filter, Monitor, Grid, List, Trash2  
 } from 'lucide-react';
 import { 
   useDiskSetup, 
@@ -156,7 +156,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 };
 
 export const DiskSetupTab: React.FC = () => {
-  const { nodeData, refreshNodeDisks, setupDisksOnNode, setNodeData } = useDiskSetup();
+  const { nodeData, refreshNodeDisks, setupDisksOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
   // UI State
@@ -181,6 +181,12 @@ export const DiskSetupTab: React.FC = () => {
   const [setupInProgress, setSetupInProgress] = useState<Set<string>>(new Set());
   const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult>>({});
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+
+  // Delete State
+  const [deleteInProgress, setDeleteInProgress] = useState<Set<string>>(new Set());
+  const [deleteResults, setDeleteResults] = useState<Record<string, any>>({});
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [diskToDelete, setDiskToDelete] = useState<{nodeName: string, pciAddr: string, diskName: string, model: string, size: number} | null>(null);
 
   // Get node names from dashboard API, fallback to mock node names for mock data alignment
   const knownNodes = dashboardData?.nodes || [
@@ -262,6 +268,36 @@ export const DiskSetupTab: React.FC = () => {
 
     return result;
   }, [allDisks, searchTerm, selectedNodes, statusFilter, sizeFilter]);
+
+  // Check if deletion is allowed (single SPDK Ready disk selected)
+  const canDeleteSelectedDisk = useMemo(() => {
+    if (selectedDisks.size !== 1) return false;
+    
+    const selectedDiskKey = Array.from(selectedDisks)[0];
+    const [nodeName, pciAddr] = selectedDiskKey.split(':');
+    const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+    
+    return disk && disk.spdk_ready && !disk.is_system_disk;
+  }, [selectedDisks, allDisks]);
+
+  const getSelectedDiskInfo = () => {
+    if (selectedDisks.size !== 1) return null;
+    
+    const selectedDiskKey = Array.from(selectedDisks)[0];
+    const [nodeName, pciAddr] = selectedDiskKey.split(':');
+    const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+    
+    if (disk && disk.spdk_ready && !disk.is_system_disk) {
+      return { 
+        nodeName, 
+        pciAddr, 
+        diskName: disk.device_name,
+        model: disk.model,
+        size: Math.round(disk.size_bytes / (1024 * 1024 * 1024))
+      };
+    }
+    return null;
+  };
 
   // Pagination
   const totalPages = Math.ceil(filteredDisks.length / pageSize);
@@ -364,6 +400,47 @@ export const DiskSetupTab: React.FC = () => {
         newSet.delete(node);
         return newSet;
       });
+    }
+  };
+
+  const handleDeleteDisk = () => {
+    const diskInfo = getSelectedDiskInfo();
+    if (diskInfo) {
+      setDiskToDelete(diskInfo);
+      setShowDeleteConfirmation(true);
+    }
+  };
+
+  const confirmDeleteDisk = async () => {
+    if (!diskToDelete) return;
+
+    setDeleteInProgress(prev => new Set([...prev, diskToDelete.nodeName]));
+    setShowDeleteConfirmation(false);
+
+    try {
+      const result = await deleteDiskOnNode(diskToDelete.nodeName, diskToDelete.pciAddr);
+      
+      setDeleteResults(prev => ({ ...prev, [diskToDelete.nodeName]: result }));
+
+      if (result.success) {
+        // Remove from selection and refresh
+        setSelectedDisks(new Set());
+        setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
+      }
+    } catch (error) {
+      const errorResult = {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error',
+        completed_at: new Date().toISOString()
+      };
+      setDeleteResults(prev => ({ ...prev, [diskToDelete.nodeName]: errorResult }));
+    } finally {
+      setDeleteInProgress(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(diskToDelete.nodeName);
+        return newSet;
+      });
+      setDiskToDelete(null);
     }
   };
 
@@ -650,6 +727,142 @@ export const DiskSetupTab: React.FC = () => {
               </button>
             </div>
             <div className="flex items-center gap-2">
+              {canDeleteSelectedDisk && (
+                <button
+                  onClick={handleDeleteDisk}
+                  disabled={Array.from(deleteInProgress).length > 0}
+                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {Array.from(deleteInProgress).length > 0 ? (
+                    <>
+                      <Settings className="w-4 h-4 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      Delete SPDK Disk
+                    </>
+                  )}
+                </button>
+              )}
+              <button
+                onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+                className="text-sm text-blue-600 hover:text-blue-800"
+              >
+                {showAdvancedOptions ? 'Hide' : 'Show'} Options
+              </button>
+              <button
+                onClick={setupSelectedDisks}
+                disabled={Array.from(setupInProgress).length > 0}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {Array.from(setupInProgress).length > 0 ? (
+                  <>
+                    <Settings className="w-4 h-4 animate-spin" />
+                    Setting up...
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4" />
+                    Setup Selected
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Setup Options */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={setupOptions.force_unmount}
+                onChange={(e) => setSetupOptions(prev => ({ ...prev, force_unmount: e.target.checked }))}
+                className="rounded"
+              />
+              <span className="text-sm font-medium">Force Unmount</span>
+            </label>
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={setupOptions.backup_data}
+                onChange={(e) => setSetupOptions(prev => ({ ...prev, backup_data: e.target.checked }))}
+                className="rounded"
+              />
+              <span className="text-sm font-medium">Backup Data</span>
+            </label>
+          </div>
+
+          {showAdvancedOptions && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-gray-50 rounded-lg">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Huge Pages (MB)
+                </label>
+                <input
+                  type="number"
+                  value={setupOptions.huge_pages_mb}
+                  onChange={(e) => setSetupOptions(prev => ({ ...prev, huge_pages_mb: parseInt(e.target.value) || 0 }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  min="0"
+                  step="512"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  SPDK Driver
+                </label>
+                <select
+                  value={setupOptions.driver_override}
+                  onChange={(e) => setSetupOptions(prev => ({ ...prev, driver_override: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="vfio-pci">vfio-pci (Recommended)</option>
+                  <option value="uio_pci_generic">uio_pci_generic</option>
+                  <option value="igb_uio">igb_uio</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bulk Actions */}
+      {selectedDisks.size > 0 && (
+        <div className="bg-white rounded-lg shadow p-4">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-4">
+              <span className="text-sm font-medium text-gray-700">
+                {selectedDisks.size} disk{selectedDisks.size !== 1 ? 's' : ''} selected
+              </span>
+              <button
+                onClick={() => setSelectedDisks(new Set())}
+                className="text-sm text-gray-600 hover:text-gray-800"
+              >
+                Clear Selection
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              {canDeleteSelectedDisk && (
+                <button
+                  onClick={handleDeleteDisk}
+                  disabled={Array.from(deleteInProgress).length > 0}
+                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {Array.from(deleteInProgress).length > 0 ? (
+                    <>
+                      <Settings className="w-4 h-4 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      Delete SPDK Disk
+                    </>
+                  )}
+                </button>
+              )}
               <button
                 onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
                 className="text-sm text-blue-600 hover:text-blue-800"
@@ -949,6 +1162,101 @@ export const DiskSetupTab: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      {showDeleteConfirmation && diskToDelete && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div className="flex items-center gap-3 mb-4">
+              <AlertTriangle className="w-8 h-8 text-red-600" />
+              <h3 className="text-lg font-bold text-gray-900">Delete SPDK Disk</h3>
+            </div>
+            
+            <div className="mb-6">
+              <p className="text-gray-700 mb-4">
+                You are about to delete the SPDK setup for disk:
+              </p>
+              <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                <div className="flex justify-between">
+                  <span className="font-medium">Device:</span>
+                  <span className="font-mono">{diskToDelete.diskName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="font-medium">Node:</span>
+                  <span>{diskToDelete.nodeName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="font-medium">Model:</span>
+                  <span>{diskToDelete.model}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="font-medium">Size:</span>
+                  <span>{diskToDelete.size}GB</span>
+                </div>
+              </div>
+              
+              <div className="mt-4 space-y-3">
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <h4 className="font-medium text-blue-900 mb-2">Industry Best Practice Options</h4>
+                  <div className="space-y-2 text-sm text-blue-800">
+                    <label className="flex items-center space-x-2">
+                      <input type="checkbox" className="rounded" defaultChecked />
+                      <span>Migrate single-replica volumes to other disks</span>
+                    </label>
+                    <label className="flex items-center space-x-2">
+                      <input type="checkbox" className="rounded" defaultChecked />
+                      <span>Take snapshots before deletion</span>
+                    </label>
+                    <label className="flex items-center space-x-2">
+                      <input type="checkbox" className="rounded" />
+                      <span>Force delete (skip safety checks)</span>
+                    </label>
+                  </div>
+                </div>
+                
+                <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <p className="text-sm text-yellow-800">
+                    <strong>What will happen:</strong>
+                  </p>
+                  <ul className="mt-2 text-xs text-yellow-700 space-y-1">
+                    <li>• Single-replica volumes will be migrated or deleted</li>
+                    <li>• Multi-replica volumes allowed if ≥2 healthy replicas total</li>
+                    <li>• LVS (Logical Volume Store) will be destroyed</li>
+                    <li>• Disk will be reset to kernel driver mode</li>
+                    <li>• Custom resources will be updated</li>
+                  </ul>
+                </div>
+                
+                <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-sm text-red-800">
+                    <strong>⚠️ Warning:</strong> This action cannot be undone. Any data on 
+                    single-replica volumes will be lost unless migrated or snapshotted first.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowDeleteConfirmation(false);
+                  setDiskToDelete(null);
+                }}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteDisk}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 flex items-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete Disk
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -46,7 +46,7 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
-# No external dependencies - bindings generated from your SPDK v24.01 installation
+# No external dependencies - bindings generated from your SPDK v25.05 installation
 
 [build-dependencies]
 tonic-build = "0.10"

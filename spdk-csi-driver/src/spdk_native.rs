@@ -2,10 +2,80 @@
 // This module provides safe Rust wrappers around SPDK C APIs
 
 use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex, Once};
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
+use tokio::sync::oneshot;
+
+// C callback function pointer types
+type LvolStoreDestructCb = extern "C" fn(cb_arg: *mut c_void, lvs_errno: c_int);
+type BlobDeleteCb = extern "C" fn(cb_arg: *mut c_void, bserrno: c_int);
+
+// Callback context for async operations
+struct CallbackContext {
+    sender: oneshot::Sender<Result<()>>,
+}
+
+// C callback implementations
+extern "C" fn lvs_destruct_complete(cb_arg: *mut c_void, lvs_errno: c_int) {
+    unsafe {
+        let ctx = Box::from_raw(cb_arg as *mut CallbackContext);
+        let result = if lvs_errno == 0 {
+            Ok(())
+        } else {
+            Err(anyhow!("LVS deletion failed with error: {}", lvs_errno))
+        };
+        let _ = ctx.sender.send(result);
+    }
+}
+
+extern "C" fn blob_delete_complete(cb_arg: *mut c_void, bserrno: c_int) {
+    unsafe {
+        let ctx = Box::from_raw(cb_arg as *mut CallbackContext);
+        let result = if bserrno == 0 {
+            Ok(())
+        } else {
+            Err(anyhow!("Blob deletion failed with error: {}", bserrno))
+        };
+        let _ = ctx.sender.send(result);
+    }
+}
+
+// Opaque SPDK C struct declarations
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct spdk_lvol_store {
+    _private: [u8; 0], // Opaque struct
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct spdk_lvol {
+    _private: [u8; 0], // Opaque struct
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct spdk_blob {
+    _private: [u8; 0], // Opaque struct
+}
+
+// SPDK C API function declarations for LVS operations
+#[cfg(target_os = "linux")]
+extern "C" {
+    // LVS operations
+    fn spdk_lvol_store_get_by_name(name: *const c_char) -> *mut spdk_lvol_store;
+    fn spdk_lvol_store_destruct(lvs: *mut spdk_lvol_store, cb_fn: Option<LvolStoreDestructCb>, cb_arg: *mut c_void);
+    
+    // Lvol operations
+    fn spdk_lvol_get_by_uuid(uuid: *const c_char) -> *mut spdk_lvol;
+    fn spdk_lvol_get_blob(lvol: *mut spdk_lvol) -> *mut spdk_blob;
+    
+    // Blob operations
+    fn spdk_bs_delete_blob(blob: *mut spdk_blob, cb_fn: Option<BlobDeleteCb>, cb_arg: *mut c_void);
+}
 
 // SPDK I/O type constants (from spdk/bdev.h enum spdk_bdev_io_type)
 const SPDK_BDEV_IO_TYPE_READ: u32 = 1;
@@ -53,6 +123,11 @@ mod bindings {
     pub type spdk_io_channel = *mut std::ffi::c_void;
     pub type spdk_uuid = [u8; 16];
     pub type spdk_bdev_io_type = u32;
+    
+    // Type aliases for callback function pointers
+    use std::os::raw::{c_char, c_int, c_void};
+    pub type LvolStoreDestructCb = extern "C" fn(cb_arg: *mut c_void, lvs_errno: c_int);
+    pub type BlobDeleteCb = extern "C" fn(cb_arg: *mut c_void, bserrno: c_int);
     
     // Mock functions for non-Linux platforms
     pub unsafe fn spdk_env_init(_opts: *const spdk_env_opts) -> i32 { 0 }
@@ -112,6 +187,29 @@ mod bindings {
     pub unsafe fn spdk_bs_get_cluster_size(_bs: *mut spdk_blob_store) -> u64 { 1048576 }
     pub unsafe fn spdk_bs_free_cluster_count(_bs: *mut spdk_blob_store) -> u64 { 500 }
     pub unsafe fn spdk_bs_total_data_cluster_count(_bs: *mut spdk_blob_store) -> u64 { 1000 }
+    
+    // Mock implementations for deletion operations
+    pub unsafe fn spdk_lvol_store_get_by_name(_name: *const c_char) -> *mut spdk_lvol_store {
+        0x2000 as *mut spdk_lvol_store // Mock pointer
+    }
+    pub unsafe fn spdk_lvol_store_destruct(_lvs: *mut spdk_lvol_store, cb_fn: Option<LvolStoreDestructCb>, cb_arg: *mut c_void) {
+        // Simulate successful completion
+        if let Some(callback) = cb_fn {
+            callback(cb_arg, 0); // 0 = success
+        }
+    }
+    pub unsafe fn spdk_lvol_get_by_uuid(_uuid: *const c_char) -> *mut spdk_lvol {
+        0x3000 as *mut spdk_lvol // Mock pointer
+    }
+    pub unsafe fn spdk_lvol_get_blob(_lvol: *mut spdk_lvol) -> *mut spdk_blob {
+        0x4000 as *mut spdk_blob // Mock pointer
+    }
+    pub unsafe fn spdk_bs_delete_blob(_blob: *mut spdk_blob, cb_fn: Option<BlobDeleteCb>, cb_arg: *mut c_void) {
+        // Simulate successful completion
+        if let Some(callback) = cb_fn {
+            callback(cb_arg, 0); // 0 = success
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -361,10 +459,30 @@ impl SpdkNative {
         unsafe {
             println!("🗑️ [SPDK_NATIVE] Deleting lvol {} from LVS {}", lvol_uuid, lvs_name);
             
-            // In real SPDK implementation:
-            // 1. Find the blob by UUID
-            // 2. Call spdk_bs_delete_blob() to delete the blob
-            // 3. Unregister the lvol bdev
+            // Create C string for UUID
+            let uuid_cstr = CString::new(lvol_uuid)?;
+            
+            // Find the lvol by UUID
+            let lvol = spdk_lvol_get_by_uuid(uuid_cstr.as_ptr());
+            if lvol.is_null() {
+                return Err(anyhow!("Lvol with UUID {} not found", lvol_uuid));
+            }
+            
+            // Get the blob from lvol
+            let blob = spdk_lvol_get_blob(lvol);
+            if blob.is_null() {
+                return Err(anyhow!("Failed to get blob from lvol {}", lvol_uuid));
+            }
+            
+            // Create callback context for async operation
+            let (sender, receiver) = oneshot::channel();
+            let ctx = Box::into_raw(Box::new(CallbackContext { sender }));
+            
+            // Call SPDK C API to delete the blob
+            spdk_bs_delete_blob(blob, Some(blob_delete_complete), ctx as *mut c_void);
+            
+            // Wait for completion
+            receiver.await.map_err(|_| anyhow!("Callback channel closed"))??;
             
             println!("✅ [SPDK_NATIVE] Lvol deleted: {}", lvol_uuid);
             Ok(())
@@ -373,6 +491,44 @@ impl SpdkNative {
         #[cfg(not(target_os = "linux"))]
         {
             println!("🔧 [SPDK_MOCK] Mock lvol deletion: {} from {}", lvol_uuid, lvs_name);
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            Ok(())
+        }
+    }
+
+    /// Delete LVS (Logical Volume Store) using real SPDK C API
+    pub async fn delete_lvs(&self, lvs_name: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            println!("🗑️ [SPDK_NATIVE] Deleting LVS: {}", lvs_name);
+            
+            // Create C string for LVS name
+            let name_cstr = CString::new(lvs_name)?;
+            
+            // Find the lvol store by name using SPDK C API
+            let lvol_store = spdk_lvol_store_get_by_name(name_cstr.as_ptr());
+            if lvol_store.is_null() {
+                return Err(anyhow!("LVS '{}' not found", lvs_name));
+            }
+            
+            // Create callback context for async operation
+            let (sender, receiver) = oneshot::channel();
+            let ctx = Box::into_raw(Box::new(CallbackContext { sender }));
+            
+            // Call SPDK C API to destroy the LVS (this automatically deletes all lvols)
+            spdk_lvol_store_destruct(lvol_store, Some(lvs_destruct_complete), ctx as *mut c_void);
+            
+            // Wait for completion
+            receiver.await.map_err(|_| anyhow!("Callback channel closed"))??;
+            
+            println!("✅ [SPDK_NATIVE] LVS deleted successfully: {}", lvs_name);
+            Ok(())
+        }
+        
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("🔧 [SPDK_MOCK] Mock LVS deletion: {}", lvs_name);
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             Ok(())
         }
     }

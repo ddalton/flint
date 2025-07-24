@@ -33,7 +33,7 @@ WORKDIR /spdk
 
 # Clone, configure, and build SPDK with proper ISA-L integration for shared libraries
 RUN git clone https://github.com/spdk/spdk.git . && \
-    git checkout v24.01 && \
+    git checkout v25.05 && \
     git submodule update --init --recursive && \
     echo "=== Building ISA-L first ===" && \
     cd isa-l && \
