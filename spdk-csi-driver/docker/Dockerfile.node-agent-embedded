@@ -79,10 +79,25 @@ COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 # Copy DPDK static libraries (built as part of SPDK --disable-shared)
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
-# ISA-L symbols are now incorporated into SPDK static libraries - no separate copy needed
+# Copy ISA-L static libraries explicitly (CRC functions are needed for v25.05)
+COPY --from=spdk-builder /usr/local/lib/libisal.a /usr/local/lib/ || echo "ISA-L static lib not found"
+COPY --from=spdk-builder /usr/local/lib/libisal.so* /usr/local/lib/ || echo "ISA-L shared lib not found" 
+COPY --from=spdk-builder /usr/local/lib/libisa-l.* /usr/local/lib/ || echo "Alternative ISA-L lib not found"
+COPY --from=spdk-builder /usr/local/lib/libisal_crypto.* /usr/local/lib/ || echo "ISA-L crypto lib not found"
 
-# Ensure static libraries are available for linking
-RUN find /usr/local/lib -name "*.a" -exec ls -la {} \; | head -10 || echo "No static libraries found"
+# Copy any ISA-L object files that might contain CRC functions in v25.05
+COPY --from=spdk-builder /spdk/isa-l/.libs/ /usr/local/lib/isal-objects/ || echo "ISA-L object files not found"
+
+# Ensure static libraries are available for linking and debug library structure
+RUN echo "=== SPDK v25.05 Library Structure Debug ===" && \
+    echo "SPDK static libraries:" && \
+    find /usr/local/lib -name "libspdk*.a" | head -10 && \
+    echo "DPDK static libraries:" && \
+    find /usr/local/lib -name "librte*.a" | head -10 && \
+    echo "ISA-L libraries:" && \
+    find /usr/local/lib -name "*isal*" && \
+    echo "Total static libraries: $(find /usr/local/lib -name '*.a' | wc -l)" && \
+    echo "========================================"
 
 # Create pkg-config files for SPDK libraries if they don't exist
 RUN mkdir -p /usr/local/lib/pkgconfig
@@ -90,6 +105,12 @@ RUN mkdir -p /usr/local/lib/pkgconfig
 # Set up environment for SPDK static linking
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 ENV SPDK_ROOT_DIR=/usr/local
+
+# Set OpenSSL environment variables to help openssl-sys find libraries
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
 
 # Switch back to unprivileged user for build
 USER 65532

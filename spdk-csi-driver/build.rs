@@ -40,15 +40,40 @@ fn build_spdk_bindings() {
     
     println!("cargo:warning=Using SPDK from: {}", spdk_root);
     
-    // Debug: List available SPDK libraries
+    // Debug: List available SPDK libraries (v25.05.x structure analysis)
     if let Ok(entries) = std::fs::read_dir(&spdk_lib) {
-        println!("cargo:warning=Available libraries in {}:", spdk_lib);
+        println!("cargo:warning=Available libraries in {} (SPDK v25.05.x):", spdk_lib);
+        let mut spdk_libs_found = Vec::new();
+        let mut dpdk_libs_found = Vec::new();
+        let mut isal_libs_found = Vec::new();
+        
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.ends_with(".a") || name.ends_with(".so") {
-                    println!("cargo:warning=  {}", name);
+                    if name.contains("spdk") {
+                        spdk_libs_found.push(name.to_string());
+                    } else if name.contains("rte_") {
+                        dpdk_libs_found.push(name.to_string());
+                    } else if name.contains("isal") {
+                        isal_libs_found.push(name.to_string());
+                    }
                 }
             }
+        }
+        
+        println!("cargo:warning=SPDK libraries found: {}", spdk_libs_found.len());
+        for lib in &spdk_libs_found[..std::cmp::min(10, spdk_libs_found.len())] {
+            println!("cargo:warning=  {}", lib);
+        }
+        
+        println!("cargo:warning=DPDK libraries found: {}", dpdk_libs_found.len());
+        for lib in &dpdk_libs_found[..std::cmp::min(10, dpdk_libs_found.len())] {
+            println!("cargo:warning=  {}", lib);
+        }
+        
+        println!("cargo:warning=ISA-L libraries found: {}", isal_libs_found.len());
+        for lib in &isal_libs_found {
+            println!("cargo:warning=  {}", lib);
         }
     }
     
@@ -59,9 +84,9 @@ fn build_spdk_bindings() {
     let dpdk_lib = format!("{}/lib", spdk_root);
     println!("cargo:rustc-link-search=native={}", dpdk_lib);
     
-    // Comprehensive SPDK libraries (verified against SPDK v25.05.x) - use dynamic linking
+    // SPDK v25.05.x libraries with updated structure
     let spdk_libs = [
-        // Core environment and utilities
+        // Core environment and utilities (v25.05.x structure)
         "spdk_env_dpdk", "spdk_util", "spdk_log", "spdk_thread", "spdk_conf",
         "spdk_init", "spdk_dma", "spdk_json", "spdk_trace", "spdk_notify",
         
@@ -73,8 +98,8 @@ fn build_spdk_bindings() {
         // Blob and logical volume management  
         "spdk_blob", "spdk_blob_bdev", "spdk_lvol", "spdk_blobfs", "spdk_blobfs_bdev",
         
-        // Acceleration and crypto (contains ISA-L functionality)
-        "spdk_accel", "spdk_accel_ioat", "spdk_accel_error",
+        // Acceleration and crypto - v25.05.x may have restructured these
+        "spdk_accel", "spdk_accel_ioat", "spdk_accel_error", 
         
         // Network and NVMe-oF
         "spdk_nvme", "spdk_nvmf", "spdk_sock", "spdk_sock_posix",
@@ -82,31 +107,56 @@ fn build_spdk_bindings() {
         // Additional subsystems
         "spdk_ioat", "spdk_vmd", "spdk_virtio", "spdk_scsi", "spdk_iscsi",
         "spdk_rpc", "spdk_jsonrpc", "spdk_ut", "spdk_ut_mock",
+        
+        // v25.05.x specific libraries that may be new or restructured
+        "spdk_event", "spdk_event_bdev", "spdk_sock_uring",
     ];
     
-    // Static SPDK linking - ISA-L symbols are incorporated into SPDK static libraries
-    // No separate ISA-L linking needed with static SPDK build
+    // Static SPDK linking - v25.05.x approach
+    // In v25.05, ISA-L symbols might be integrated differently
+    // Try ISA-L first, but with fallback approaches
+    println!("cargo:rustc-link-lib=static=isal");
     
+    // Link SPDK libraries in proper order for v25.05.x
     for lib in &spdk_libs {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
     
-    // DPDK libraries (required by SPDK static build) - expanded for static linking
+    // Additional ISA-L linking approaches for v25.05.x
+    // ISA-L functions might now be in separate object files or different libs
+    println!("cargo:rustc-link-lib=static=isa-l");  // Alternative ISA-L name
+    println!("cargo:rustc-link-lib=static=isal_crypto");  // ISA-L crypto functions
+    
+    // DPDK libraries for SPDK v25.05.x static builds
     let dpdk_libs = [
-        // Core DPDK (verified to exist)
+        // Core DPDK libraries
         "rte_eal", "rte_log", "rte_mempool", "rte_ring", "rte_kvargs", "rte_hash",
         "rte_timer", "rte_mbuf", "rte_ethdev", "rte_cryptodev", "rte_telemetry", "rte_rcu",
         
-        // Bus and device support (commonly needed for static builds)
-        "rte_bus_pci", "rte_pci", "rte_bus_vdev",
+        // Bus and device support
+        "rte_bus_pci", "rte_pci", "rte_bus_vdev", "rte_bus_auxiliary",
+        
+        // Network and security libraries for v25.05.x
+        "rte_net", "rte_security", "rte_power", "rte_acl", "rte_cfgfile",
+        
+        // Additional DPDK libraries that might be required in v25.05.x
+        "rte_compressdev", "rte_bbdev", "rte_rawdev", "rte_regexdev",
+        "rte_rib", "rte_fib", "rte_graph", "rte_node", "rte_bpf",
+        "rte_stack", "rte_reorder", "rte_sched", "rte_distributor",
+        
+        // Memory and utility libraries
+        "rte_malloc", "rte_mempool_ring", "rte_mempool_stack",
     ];
     
     for lib in &dpdk_libs {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
     
-    // System dependencies
-    let sys_libs = ["uring", "uuid", "dl", "rt", "numa"];
+    // System dependencies - comprehensive list for static SPDK builds
+    let sys_libs = [
+        "uring", "uuid", "dl", "rt", "numa", "ssl", "crypto", 
+        "pthread", "m", "c", "aio"
+    ];
     for lib in &sys_libs {
         println!("cargo:rustc-link-lib={}", lib);
     }

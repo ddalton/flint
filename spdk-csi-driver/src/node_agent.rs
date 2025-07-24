@@ -1812,6 +1812,7 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
     Ok(true)
 }
 
+#[allow(dead_code)]
 async fn update_disk_blobstore_status(
     agent: &NodeAgent,
     disk_name: &str,
