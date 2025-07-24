@@ -279,6 +279,24 @@ export const DiskSetupTab: React.FC = () => {
     return disk && disk.spdk_ready && !disk.is_system_disk;
   }, [selectedDisks, allDisks]);
 
+  // Check if setup is allowed (selected disks are NOT already SPDK ready and are suitable for setup)
+  const canSetupSelected = useMemo(() => {
+    if (selectedDisks.size === 0) return false;
+    
+    const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
+      const [nodeName, pciAddr] = diskKey.split(':');
+      return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+    }).filter(Boolean);
+    
+    // All selected disks must be suitable for setup (not system disks, not already SPDK ready, no mounted partitions)
+    return selectedDiskDetails.every(disk => 
+      disk && 
+      !disk.is_system_disk && 
+      !disk.spdk_ready && 
+      disk.mounted_partitions.length === 0
+    );
+  }, [selectedDisks, allDisks]);
+
   const getSelectedDiskInfo = () => {
     if (selectedDisks.size !== 1) return null;
     
@@ -744,140 +762,25 @@ export const DiskSetupTab: React.FC = () => {
               >
                 {showAdvancedOptions ? 'Hide' : 'Show'} Options
               </button>
-              <button
-                onClick={setupSelectedDisks}
-                disabled={Array.from(setupInProgress).length > 0}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                {Array.from(setupInProgress).length > 0 ? (
-                  <>
-                    <Settings className="w-4 h-4 animate-spin" />
-                    Setting up...
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-4 h-4" />
-                    Setup Selected
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Setup Options */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <label className="flex items-center space-x-2">
-              <input
-                type="checkbox"
-                checked={setupOptions.force_unmount}
-                onChange={(e) => setSetupOptions(prev => ({ ...prev, force_unmount: e.target.checked }))}
-                className="rounded"
-              />
-              <span className="text-sm font-medium">Force Unmount</span>
-            </label>
-            <label className="flex items-center space-x-2">
-              <input
-                type="checkbox"
-                checked={setupOptions.backup_data}
-                onChange={(e) => setSetupOptions(prev => ({ ...prev, backup_data: e.target.checked }))}
-                className="rounded"
-              />
-              <span className="text-sm font-medium">Backup Data</span>
-            </label>
-          </div>
-
-          {showAdvancedOptions && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-gray-50 rounded-lg">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Huge Pages (MB)
-                </label>
-                <input
-                  type="number"
-                  value={setupOptions.huge_pages_mb}
-                  onChange={(e) => setSetupOptions(prev => ({ ...prev, huge_pages_mb: parseInt(e.target.value) || 0 }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  min="0"
-                  step="512"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SPDK Driver
-                </label>
-                <select
-                  value={setupOptions.driver_override}
-                  onChange={(e) => setSetupOptions(prev => ({ ...prev, driver_override: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="vfio-pci">vfio-pci (Recommended)</option>
-                  <option value="uio_pci_generic">uio_pci_generic</option>
-                  <option value="igb_uio">igb_uio</option>
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Bulk Actions */}
-      {selectedDisks.size > 0 && (
-        <div className="bg-white rounded-lg shadow p-4">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4">
-              <span className="text-sm font-medium text-gray-700">
-                {selectedDisks.size} disk{selectedDisks.size !== 1 ? 's' : ''} selected
-              </span>
-              <button
-                onClick={() => setSelectedDisks(new Set())}
-                className="text-sm text-gray-600 hover:text-gray-800"
-              >
-                Clear Selection
-              </button>
-            </div>
-            <div className="flex items-center gap-2">
-              {canDeleteSelectedDisk && (
+              {canSetupSelected && (
                 <button
-                  onClick={handleDeleteDisk}
-                  disabled={Array.from(deleteInProgress).length > 0}
-                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+                  onClick={setupSelectedDisks}
+                  disabled={Array.from(setupInProgress).length > 0}
+                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
                 >
-                  {Array.from(deleteInProgress).length > 0 ? (
+                  {Array.from(setupInProgress).length > 0 ? (
                     <>
                       <Settings className="w-4 h-4 animate-spin" />
-                      Deleting...
+                      Setting up...
                     </>
                   ) : (
                     <>
-                      <Trash2 className="w-4 h-4" />
-                      Delete SPDK Disk
+                      <Play className="w-4 h-4" />
+                      Setup Selected
                     </>
                   )}
                 </button>
               )}
-              <button
-                onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-                className="text-sm text-blue-600 hover:text-blue-800"
-              >
-                {showAdvancedOptions ? 'Hide' : 'Show'} Options
-              </button>
-              <button
-                onClick={setupSelectedDisks}
-                disabled={Array.from(setupInProgress).length > 0}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                {Array.from(setupInProgress).length > 0 ? (
-                  <>
-                    <Settings className="w-4 h-4 animate-spin" />
-                    Setting up...
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-4 h-4" />
-                    Setup Selected
-                  </>
-                )}
-              </button>
             </div>
           </div>
 
@@ -936,6 +839,8 @@ export const DiskSetupTab: React.FC = () => {
           )}
         </div>
       )}
+
+
 
       {/* Bulk Actions */}
       <div className="bg-white rounded-lg shadow p-4">
