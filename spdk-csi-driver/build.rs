@@ -199,9 +199,60 @@ fn build_spdk_bindings() {
 
 fn create_empty_bindings() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let empty_bindings = r#"
+// SPDK bindings skipped - providing stub implementations for compilation
+
+use std::ptr;
+
+// Basic SPDK types
+pub type spdk_bdev = *mut std::ffi::c_void;
+pub type spdk_bdev_desc = *mut std::ffi::c_void;
+pub type spdk_lvol_store = *mut std::ffi::c_void;
+pub type spdk_lvol = *mut std::ffi::c_void;
+pub type spdk_env_opts = std::ffi::c_void;
+pub type spdk_log_level = u32;
+pub type spdk_bdev_io_stat = std::ffi::c_void;
+pub type spdk_blob_store = *mut std::ffi::c_void;
+pub type spdk_blob = *mut std::ffi::c_void;
+pub type spdk_bs_dev = *mut std::ffi::c_void;
+pub type spdk_io_channel = *mut std::ffi::c_void;
+pub type spdk_uuid = [u8; 16];
+
+// Stub function implementations (return null/error values)
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_first() -> *mut spdk_bdev {
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_next(_bdev: *mut spdk_bdev) -> *mut spdk_bdev {
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_name(_bdev: *mut spdk_bdev) -> *const std::ffi::c_char {
+    ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_bdev_get_by_name(_name: *const std::ffi::c_char) -> *mut spdk_bdev {
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_env_init(_opts: *const spdk_env_opts) -> i32 {
+    -1  // Return error
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spdk_log_set_print_level(_level: spdk_log_level) {}
+
+// Add other stub functions as needed by spdk_native.rs
+"#;
+    
     std::fs::write(
         out_path.join("spdk_bindings.rs"),
-        "// SPDK bindings skipped\n"
+        empty_bindings
     ).expect("Failed to write empty bindings file");
 }
 
