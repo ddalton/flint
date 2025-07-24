@@ -80,13 +80,22 @@ COPY --from=spdk-builder /spdk/build/include/ /usr/local/include/
 COPY --from=spdk-builder /spdk/dpdk/build/lib/ /usr/local/lib/
 
 # Copy ISA-L static libraries explicitly (CRC functions are needed for v25.05)
-COPY --from=spdk-builder /usr/local/lib/libisal.a /usr/local/lib/ || echo "ISA-L static lib not found"
-COPY --from=spdk-builder /usr/local/lib/libisal.so* /usr/local/lib/ || echo "ISA-L shared lib not found" 
-COPY --from=spdk-builder /usr/local/lib/libisa-l.* /usr/local/lib/ || echo "Alternative ISA-L lib not found"
-COPY --from=spdk-builder /usr/local/lib/libisal_crypto.* /usr/local/lib/ || echo "ISA-L crypto lib not found"
+# Copy with error handling - files may not exist in all SPDK builds
+COPY --from=spdk-builder /usr/local/lib/ /tmp/spdk-libs/
+RUN find /tmp/spdk-libs -name "*isal*" -exec cp {} /usr/local/lib/ \; 2>/dev/null || echo "No ISA-L libraries found in /usr/local/lib"
 
-# Copy any ISA-L object files that might contain CRC functions in v25.05
-COPY --from=spdk-builder /spdk/isa-l/.libs/ /usr/local/lib/isal-objects/ || echo "ISA-L object files not found"
+# Copy ISA-L object files that might contain CRC functions in v25.05  
+COPY --from=spdk-builder /spdk/isa-l/ /tmp/isal-src/
+RUN if [ -d /tmp/isal-src/.libs ]; then \
+        mkdir -p /usr/local/lib/isal-objects && \
+        cp -r /tmp/isal-src/.libs/* /usr/local/lib/isal-objects/ 2>/dev/null && \
+        echo "ISA-L object files copied"; \
+    else \
+        echo "ISA-L .libs directory not found"; \
+    fi
+
+# Cleanup temporary directories
+RUN rm -rf /tmp/spdk-libs /tmp/isal-src
 
 # Ensure static libraries are available for linking and debug library structure
 RUN echo "=== SPDK v25.05 Library Structure Debug ===" && \
