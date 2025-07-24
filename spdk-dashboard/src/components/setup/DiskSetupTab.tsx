@@ -184,7 +184,6 @@ export const DiskSetupTab: React.FC = () => {
 
   // Delete State
   const [deleteInProgress, setDeleteInProgress] = useState<Set<string>>(new Set());
-  const [deleteResults, setDeleteResults] = useState<Record<string, any>>({});
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [diskToDelete, setDiskToDelete] = useState<{nodeName: string, pciAddr: string, diskName: string, model: string, size: number} | null>(null);
 
@@ -419,8 +418,6 @@ export const DiskSetupTab: React.FC = () => {
 
     try {
       const result = await deleteDiskOnNode(diskToDelete.nodeName, diskToDelete.pciAddr);
-      
-      setDeleteResults(prev => ({ ...prev, [diskToDelete.nodeName]: result }));
 
       if (result.success) {
         // Remove from selection and refresh
@@ -428,12 +425,7 @@ export const DiskSetupTab: React.FC = () => {
         setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
       }
     } catch (error) {
-      const errorResult = {
-        success: false,
-        message: error instanceof Error ? error.message : 'Unknown error',
-        completed_at: new Date().toISOString()
-      };
-      setDeleteResults(prev => ({ ...prev, [diskToDelete.nodeName]: errorResult }));
+      console.error('Failed to delete disk:', error);
     } finally {
       setDeleteInProgress(prev => {
         const newSet = new Set(prev);
