@@ -12,7 +12,7 @@ crds:
   installSpdkCRDs: true
 
 images:
-  repository: flint  # Change this to your actual registry for production
+  repository: docker-sandbox.infra.cloudera.com/ddalton  # Change this to your actual registry for production
   flintCsiController:
     name: flint-controller  # SPDK Controller Operator binary
     tag: latest

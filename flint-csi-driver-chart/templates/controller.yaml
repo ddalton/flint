@@ -25,7 +25,7 @@ spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: flint-csi-controller
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE

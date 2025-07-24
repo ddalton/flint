@@ -32,7 +32,7 @@ COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
 
 # The build will now have all necessary system dependencies.
-RUN cargo build --release --bin controller
+RUN cargo build --release --bin csi-driver
 
 # --- Final Stage ---
 FROM ubuntu:24.04
@@ -42,6 +42,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/controller /usr/local/bin/
+COPY --from=builder /app/target/release/csi-driver /usr/local/bin/
 
-ENTRYPOINT ["/usr/local/bin/controller"]
+ENTRYPOINT ["/usr/local/bin/csi-driver"]
