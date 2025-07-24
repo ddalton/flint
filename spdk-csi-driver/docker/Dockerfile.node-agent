@@ -4,8 +4,17 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 # Switch to root to install build dependencies.
 # - perl: Required by the openssl-sys crate.
 # - protobuf-dev: Provides standard Google .proto files.
+# - openssl-dev: OpenSSL development libraries for Rust crates
+# - pkgconf: Package configuration tool for finding libraries
 USER root
-RUN apk add --no-cache perl protobuf-dev
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    apk add --no-cache perl protobuf-dev openssl-dev
+
+# Set OpenSSL environment variables to help openssl-sys find libraries
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
 
 # Switch back to the unprivileged user for the actual build process.
 USER 65532
