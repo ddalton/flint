@@ -34,15 +34,36 @@ async fn call_spdk_rpc(
     let params = rpc_request.get("params");
     
     println!("🔧 [SPDK_RPC] Executing method: {} via persistent socket connection", method);
+    println!("🔧 [SPDK_RPC] Socket URL: {}", spdk_rpc_url);
     
     // Create SPDK RPC client with persistent socket connection
     let spdk_socket = spdk_rpc_url.trim_start_matches("unix://");
+    println!("🔧 [SPDK_RPC] Socket path: {}", spdk_socket);
+    
+    // Check if socket file exists before attempting connection
+    if !std::path::Path::new(spdk_socket).exists() {
+        let error_msg = format!("SPDK socket file does not exist: {}", spdk_socket);
+        println!("❌ [SPDK_RPC] {}", error_msg);
+        return Err(error_msg.into());
+    }
+    
     let spdk = SpdkNative::new(Some(spdk_socket.to_string())).await
-        .map_err(|e| format!("Failed to create SPDK client: {}", e))?;
+        .map_err(|e| {
+            let error_msg = format!("Failed to create SPDK client for socket {}: {}", spdk_socket, e);
+            println!("❌ [SPDK_RPC] {}", error_msg);
+            error_msg
+        })?;
     
     // Call method using the new persistent socket client
+    println!("🔧 [SPDK_RPC] Calling method '{}' with params: {:?}", method, params);
     let result = spdk.call_method(method, params.cloned()).await
-        .map_err(|e| format!("SPDK RPC call failed: {}", e))?;
+        .map_err(|e| {
+            let error_msg = format!("SPDK RPC call '{}' failed: {}", method, e);
+            println!("❌ [SPDK_RPC] {}", error_msg);
+            error_msg
+        })?;
+    
+    println!("✅ [SPDK_RPC] Method '{}' completed successfully", method);
     
     // Return result in JSON-RPC 2.0 format
     Ok(json!({"result": result}))
@@ -827,6 +848,7 @@ async fn proxy_spdk_rpc(
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let max_retries = 30; // 5 minutes
+    let mut last_error = String::new();
     
     for attempt in 1..=max_retries {
         // Use the new SPDK RPC client to check if SPDK is ready
@@ -835,23 +857,49 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
             Ok(spdk) => {
                 // Try to call a simple RPC method to verify SPDK is responsive
                 match spdk.call_method("spdk_get_version", None).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(format!("SPDK RPC call failed: {}", e).into())
+                    Ok(response) => {
+                        println!("✅ [SPDK_READY] SPDK version check successful: {:?}", response);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let error_msg = format!("SPDK RPC call failed: {}", e);
+                        println!("❌ [SPDK_READY] RPC call error: {}", error_msg);
+                        Err(error_msg.into())
+                    }
                 }
             }
-            Err(e) => Err(format!("Failed to connect to SPDK: {}", e).into())
+            Err(e) => {
+                let error_msg = format!("Failed to connect to SPDK: {}", e);
+                println!("❌ [SPDK_READY] Connection error: {}", error_msg);
+                Err(error_msg.into())
+            }
         };
         
         match result {
             Ok(_) => {
-                println!("SPDK is ready on node {}", agent.node_name);
+                println!("🎉 [SPDK_READY] SPDK is ready on node {} after {} attempts", agent.node_name, attempt);
                 return Ok(());
             }
-            _ => {
+            Err(e) => {
+                last_error = e.to_string();
                 if attempt == max_retries {
-                    return Err("SPDK failed to become ready within timeout".into());
+                    println!("❌ [SPDK_READY] SPDK failed to become ready after {} attempts", max_retries);
+                    println!("❌ [SPDK_READY] Final error: {}", last_error);
+                    println!("❌ [SPDK_READY] Socket path: {}", spdk_socket);
+                    println!("❌ [SPDK_READY] Troubleshooting:");
+                    println!("   - Check if SPDK target daemon is running");
+                    println!("   - Verify socket file exists and has correct permissions");
+                    println!("   - Check SPDK logs for startup errors");
+                    println!("   - Ensure proper configuration file is loaded");
+                    return Err(format!("SPDK failed to become ready within {} minutes. Last error: {}", max_retries / 6, last_error).into());
                 }
-                println!("Waiting for SPDK to be ready... (attempt {}/{})", attempt, max_retries);
+                
+                // Show progress every 5 attempts (50 seconds)
+                if attempt % 5 == 0 {
+                    println!("⏳ [SPDK_READY] Still waiting for SPDK (attempt {}/{})... Latest error: {}", attempt, max_retries, last_error);
+                } else {
+                    println!("⏳ [SPDK_READY] Waiting for SPDK to be ready... (attempt {}/{})", attempt, max_retries);
+                }
                 tokio::time::sleep(Duration::from_secs(10)).await;
             }
         }

@@ -96,14 +96,28 @@ echo "RPC Socket: /var/tmp/spdk.sock"\n\
 # Ensure clean RPC socket\n\
 rm -f /var/tmp/spdk.sock\n\
 \n\
+# Create SPDK configuration file (fix for process substitution issue)\n\
+echo "Creating SPDK configuration file..."\n\
+echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
+\n\
+# Verify config file was created\n\
+if [ ! -f /tmp/spdk_config.json ]; then\n\
+    echo "ERROR: Failed to create SPDK configuration file"\n\
+    exit 1\n\
+fi\n\
+\n\
+echo "SPDK config created: $(cat /tmp/spdk_config.json)"\n\
+\n\
 # Start SPDK target daemon with RPC enabled\n\
 # - Uses Unix socket for RPC communication\n\
 # - Logging set to NOTICE level for production\n\
+# - Configuration loaded from proper JSON file\n\
 # - No device binding initially (devices added via RPC)\n\
+echo "Starting SPDK target daemon..."\n\
 exec /usr/local/bin/spdk_tgt \\\n\
     -r /var/tmp/spdk.sock \\\n\
     -L all \\\n\
-    --json <(echo "{\\"subsystems\\":[]}")\n\
+    --json /tmp/spdk_config.json\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 
 # Expose the standard SPDK NVMe-oF port (though CSI mainly uses RPC)

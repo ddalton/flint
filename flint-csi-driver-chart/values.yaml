@@ -17,16 +17,15 @@ images:
     name: flint-controller  # SPDK Controller Operator binary
     tag: latest
   flintCsiDriver:
-    name: flint-driver      # CSI Driver binary (controller mode)
+    name: flint-driver      # CSI Driver binary (controller and node modes)
     tag: latest
-  # Two-container node deployment (recommended)
+  # Three-container node deployment (recommended)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (v25.05.x)
     tag: latest
   nodeAgent:
-    name: flint-node-agent  # CSI Node Agent (communicates via RPC)
+    name: flint-node-agent  # Disk management and HTTP API server
     tag: latest
-  # Embedded mode removed - use two-container approach
 
 csiSidecars:
   repository: registry.k8s.io/sig-storage
@@ -72,9 +71,17 @@ driver:
 
 # Deployment configuration
 deployment:
-  # nodeMode: "two-container" only
-  # two-container: Separate SPDK target and CSI node agent containers (recommended)
-  nodeMode: "two-container"
+  # Node deployment architecture:
+  # "three-container": Separate SPDK target, CSI driver, and node agent containers (recommended)
+  #   - spdk-tgt: SPDK target daemon (privileged)
+  #   - flint-csi-driver: CSI protocol handler (node mode)
+  #   - node-agent: Disk management and HTTP API server
+  # "two-container": Legacy mode with SPDK target and combined CSI+disk agent
+  #   - spdk-tgt: SPDK target daemon (privileged)
+  #   - node-agent: Both CSI protocol and disk management (not recommended)
+  # "embedded": Single container with embedded SPDK and CSI (legacy compatibility)
+  #   - flint-csi-driver: Single container with SPDK embedded (privileged)
+  nodeMode: "three-container"
 
 # Logging configuration
 logging:
