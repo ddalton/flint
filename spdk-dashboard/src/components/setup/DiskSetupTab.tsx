@@ -288,13 +288,26 @@ export const DiskSetupTab: React.FC = () => {
       return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     }).filter(Boolean);
     
+    console.log('canSetupSelected check:', {
+      selectedDisks: selectedDisks.size,
+      selectedDiskDetails: selectedDiskDetails.map(d => ({
+        pci_address: d?.pci_address,
+        spdk_ready: d?.spdk_ready,
+        is_system_disk: d?.is_system_disk,
+        mounted_partitions: d?.mounted_partitions?.length
+      }))
+    });
+    
     // All selected disks must be suitable for setup (not system disks, not already SPDK ready, no mounted partitions)
-    return selectedDiskDetails.every(disk => 
+    const result = selectedDiskDetails.every(disk => 
       disk && 
       !disk.is_system_disk && 
       !disk.spdk_ready && 
       disk.mounted_partitions.length === 0
     );
+    
+    console.log('canSetupSelected result:', result);
+    return result;
   }, [selectedDisks, allDisks]);
 
   const getSelectedDiskInfo = () => {
