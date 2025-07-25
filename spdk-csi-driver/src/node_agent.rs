@@ -1759,13 +1759,14 @@ impl NodeAgent {
                     (real_device_name, size, model, is_system, !is_system)
                 }
                 Err(_) => {
-                    // Even this failed, use basic info
+                    // Even device name resolution failed, but still check for system disk by PCI
                     let device_name = format!("nvme-{}", pci_addr.replace(":", "-"));
                     let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+                    let is_system = self.system_disk_check_by_pci(pci_addr).await;
                     
-                    println!("🔄 [FALLBACK] NVMe fallback - Name: {}, Model: {}", device_name, model);
+                    println!("🔄 [FALLBACK] NVMe fallback - Name: {}, Model: {}, System: {}", device_name, model, is_system);
                     
-                    (device_name, 1_000_000_000_000, model, false, false)
+                    (device_name, 1_000_000_000_000, model, is_system, !is_system)
                 }
             }
         } else {
@@ -1803,6 +1804,42 @@ impl NodeAgent {
                  pci_addr, disk_info.device_name, disk_info.driver, disk_info.spdk_ready);
         
         Ok(disk_info)
+    }
+
+    /// System disk check using PCI address when device name is not available
+    async fn system_disk_check_by_pci(&self, pci_addr: &str) -> bool {
+        println!("🔍 [SYSTEM_CHECK_PCI] Checking if PCI device {} contains system disk", pci_addr);
+        
+        // Method 1: Find any block device that belongs to this PCI and check if it's mounted on root
+        if let Ok(entries) = fs::read_dir("/sys/block") {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let device_name = entry.file_name().to_string_lossy().to_string();
+                    
+                    if device_name.starts_with("nvme") && device_name.contains("n") {
+                        let device_path = format!("/sys/block/{}/device", device_name);
+                        
+                        // Use readlink command to get fully resolved path
+                        if let Ok(output) = Command::new("readlink").args(["-f", &device_path]).output() {
+                            let resolved_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            
+                            if resolved_path.contains(pci_addr) {
+                                println!("🔍 [SYSTEM_CHECK_PCI] Found device {} for PCI {}, checking if system disk", device_name, pci_addr);
+                                
+                                // Check if this device contains the root filesystem
+                                if self.quick_system_disk_check(&device_name).await {
+                                    println!("✅ [SYSTEM_CHECK_PCI] PCI device {} is system disk (via {})", pci_addr, device_name);
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("✅ [SYSTEM_CHECK_PCI] PCI device {} is NOT a system disk", pci_addr);
+        false
     }
 
     /// Quick system disk check without full mount analysis
@@ -2022,32 +2059,25 @@ impl NodeAgent {
     }
 
     async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Method 1: Look for controller in PCI sysfs, then find its actual namespaces
-        let nvme_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
+        println!("🔍 [DEVICE_SEARCH] Looking for NVMe device for PCI address: {}", pci_addr);
         
-        if let Ok(entries) = fs::read_dir(&nvme_path) {
+        // Method 1: Direct search in /sys/block/ using readlink -f to get full paths
+        if let Ok(entries) = fs::read_dir("/sys/block") {
             for entry in entries {
                 if let Ok(entry) = entry {
-                    let controller_name = entry.file_name().to_string_lossy().to_string();
-                    if controller_name.starts_with("nvme") {
-                        // Find actual namespaces in /sys/block/ that belong to this controller
-                        if let Ok(block_entries) = fs::read_dir("/sys/block") {
-                            for block_entry in block_entries {
-                                if let Ok(block_entry) = block_entry {
-                                    let block_name = block_entry.file_name().to_string_lossy().to_string();
-                                    // Find block devices that belong to this controller
-                                    if block_name.starts_with(&format!("{}n", controller_name)) {
-                                        // Verify this block device belongs to our PCI address
-                                        let device_path = format!("/sys/block/{}/device", block_name);
-                                        if let Ok(real_path) = fs::read_link(&device_path) {
-                                            if real_path.to_string_lossy().contains(pci_addr) {
-                                                println!("✅ Found actual namespace: {} for controller {} (PCI: {})", 
-                                                         block_name, controller_name, pci_addr);
-                                                return Ok(block_name);
-                                            }
-                                        }
-                                    }
-                                }
+                    let device_name = entry.file_name().to_string_lossy().to_string();
+                    
+                    if device_name.starts_with("nvme") && device_name.contains("n") {
+                        let device_path = format!("/sys/block/{}/device", device_name);
+                        
+                        // Use readlink command to get fully resolved path
+                        if let Ok(output) = Command::new("readlink").args(["-f", &device_path]).output() {
+                            let resolved_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            println!("🔍 [DEVICE_SEARCH] {} -> {}", device_name, resolved_path);
+                            
+                            if resolved_path.contains(pci_addr) {
+                                println!("✅ [DEVICE_SEARCH] Found matching device: {} for PCI {}", device_name, pci_addr);
+                                return Ok(device_name);
                             }
                         }
                     }
@@ -2055,41 +2085,29 @@ impl NodeAgent {
             }
         }
         
-        // Method 2: Direct search in /sys/block/ by PCI address (completely dynamic)
-        for entry in fs::read_dir("/sys/block")? {
-            let entry = entry?;
-            let device_name = entry.file_name().to_string_lossy().to_string();
-            
-            if device_name.starts_with("nvme") {
-                let device_path = format!("/sys/block/{}/device", device_name);
-                if let Ok(real_path) = fs::read_link(&device_path) {
-                    if real_path.to_string_lossy().contains(pci_addr) {
-                        println!("✅ Found device via /sys/block scan: {} (PCI: {})", device_name, pci_addr);
-                        return Ok(device_name);
-                    }
-                }
-            }
-        }
+        // Method 2: Look through PCI device structure (fallback)
+        let nvme_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
         
-        // Method 3: Use NVMe subsystem info if available
-        let nvme_subsystem_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
-        if let Ok(entries) = fs::read_dir(&nvme_subsystem_path) {
+        if let Ok(entries) = fs::read_dir(&nvme_path) {
             for entry in entries {
                 if let Ok(entry) = entry {
                     let controller_name = entry.file_name().to_string_lossy().to_string();
                     if controller_name.starts_with("nvme") {
-                        // Check if there's a namespace directory
-                        let ns_path = format!("{}/{}", entry.path().display(), controller_name);
-                        if let Ok(ns_entries) = fs::read_dir(&ns_path) {
+                        println!("🔍 [DEVICE_SEARCH] Found controller: {}", controller_name);
+                        
+                        // Look for namespaces in the controller directory
+                        let controller_path = entry.path();
+                        if let Ok(ns_entries) = fs::read_dir(&controller_path) {
                             for ns_entry in ns_entries {
                                 if let Ok(ns_entry) = ns_entry {
                                     let ns_name = ns_entry.file_name().to_string_lossy().to_string();
                                     if ns_name.starts_with(&format!("{}n", controller_name)) && 
                                        ns_name.chars().last().map_or(false, |c| c.is_ascii_digit()) {
+                                        
                                         // Verify it exists in /dev/
                                         let dev_path = format!("/dev/{}", ns_name);
                                         if std::path::Path::new(&dev_path).exists() {
-                                            println!("✅ Found namespace via subsystem: {} (PCI: {})", ns_name, pci_addr);
+                                            println!("✅ [DEVICE_SEARCH] Found namespace via controller: {} for PCI {}", ns_name, pci_addr);
                                             return Ok(ns_name);
                                         }
                                     }
@@ -2102,7 +2120,9 @@ impl NodeAgent {
         }
         
         // If we get here, no namespace was found - return descriptive error
-        Err(format!("No NVMe namespace found for PCI device {} - device may be unbound or have no accessible namespaces", pci_addr).into())
+        let error_msg = format!("No NVMe namespace found for PCI device {} - device may be unbound or have no accessible namespaces", pci_addr);
+        println!("❌ [DEVICE_SEARCH] {}", error_msg);
+        Err(error_msg.into())
     }
 
     async fn get_nvme_details(&self, device_name: &str) -> Result<(u64, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
