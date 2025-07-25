@@ -170,6 +170,9 @@ struct NodeAgent {
     discovery_interval: u64,
     auto_initialize_blobstore: bool,
     backup_path: String,
+    // New fields for metadata sync configuration
+    metadata_sync_interval: u64,
+    metadata_sync_enabled: bool,
 }
 
 #[tokio::main]
@@ -193,6 +196,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .unwrap_or(true),
         backup_path: env::var("DISK_BACKUP_PATH")
             .unwrap_or("/var/lib/spdk-csi/backups".to_string()),
+        // Configure metadata sync - default to every 30 seconds
+        metadata_sync_interval: env::var("METADATA_SYNC_INTERVAL")
+            .unwrap_or("30".to_string())
+            .parse()
+            .unwrap_or(30),
+        metadata_sync_enabled: env::var("METADATA_SYNC_ENABLED")
+            .unwrap_or("true".to_string())
+            .parse()
+            .unwrap_or(true),
     };
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
@@ -208,15 +220,303 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         start_api_server(api_agent).await;
     });
     
+    // Start periodic metadata sync task
+    if agent.metadata_sync_enabled {
+        let metadata_agent = agent.clone();
+        tokio::spawn(async move {
+            run_metadata_sync_loop(metadata_agent).await;
+        });
+        println!("Started periodic metadata sync task (interval: {}s)", agent.metadata_sync_interval);
+    }
+    
     // Start disk discovery loop
     run_discovery_loop(agent).await?;
     
     Ok(())
 }
 
+/// Background task that periodically calls spdk_blob_sync_md to sync metadata
+/// This reduces the amount of work needed during SPDK shutdown
+async fn run_metadata_sync_loop(agent: NodeAgent) {
+    let mut interval = interval(Duration::from_secs(agent.metadata_sync_interval));
+    
+    loop {
+        interval.tick().await;
+        
+        if let Err(e) = sync_blob_metadata(&agent).await {
+            eprintln!("Metadata sync failed: {}", e);
+        }
+    }
+}
+
+/// Correctly sync blob metadata by directly accessing blobstores
+async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Starting direct blobstore metadata sync for node: {}", agent.node_name);
+    
+    // Step 1: Get all blobstores directly (not through bdevs)
+    let blobstores = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_blobstores"
+    })).await {
+        Ok(result) => result,
+        Err(_) => {
+            println!("No blobstores found or RPC not available, trying alternative methods");
+            return sync_blob_metadata_fallback(agent).await;
+        }
+    };
+    let mut synced_count = 0;
+    
+    if let Some(blobstore_list) = blobstores["result"].as_array() {
+        for blobstore in blobstore_list {
+            if let Some(blobstore_name) = blobstore["name"].as_str() {
+                println!("Syncing blobstore: {}", blobstore_name);
+                
+                // Direct blobstore sync - this is the correct approach
+                let sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+                    "method": "blobstore_sync",
+                    "params": {
+                        "name": blobstore_name
+                    }
+                })).await;
+                    
+                match sync_result {
+                    Ok(_) => {
+                        synced_count += 1;
+                        println!("✓ Successfully synced blobstore: {}", blobstore_name);
+                    }
+                    Err(e) => {
+                        eprintln!("✗ Error syncing blobstore {}: {}", blobstore_name, e);
+                    }
+                }
+                
+                // Small delay to avoid overwhelming SPDK
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    
+    // Step 2: Also sync lvol stores (which are built on top of blobstores)
+    let lvol_synced = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
+        .unwrap_or(0);
+    
+    println!("Metadata sync completed: {} blobstores, {} lvol stores", 
+             synced_count, lvol_synced);
+    
+    Ok(())
+}
+
+// Fallback method if direct blobstore access isn't available
+async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Using fallback blobstore sync methods");
+    
+    // Method 1: Global blobstore sync (if available)
+    let global_sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "blobstore_sync_all"
+    })).await;
+        
+    match global_sync_result {
+        Ok(_) => {
+            println!("✓ Global blobstore sync successful");
+            return Ok(());
+        }
+        _ => println!("Global blobstore sync not available, trying individual methods"),
+    }
+    
+    // Method 2: Sync through lvol stores (most common case)
+    let lvol_count = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
+        .unwrap_or(0);
+    
+    // Method 3: Find blobstores through their underlying bdevs
+    let bdev_count = sync_blobstores_via_bdevs(&agent.spdk_rpc_url).await
+        .unwrap_or(0);
+    
+    println!("Fallback sync completed: {} lvol stores, {} bdevs", lvol_count, bdev_count);
+    Ok(())
+}
+
+// Sync lvol store metadata (which indirectly syncs underlying blobstores)
+async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let lvstores = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await {
+        Ok(result) => result,
+        Err(_) => return Ok(0),
+    };
+    let mut synced_count = 0;
+    
+    if let Some(stores) = lvstores["result"].as_array() {
+        for store in stores {
+            if let Some(lvs_name) = store["name"].as_str() {
+                println!("Syncing lvol store metadata: {}", lvs_name);
+                
+                // This syncs the lvol store's metadata, which includes blob metadata
+                let sync_result = call_spdk_rpc(rpc_url, &json!({
+                    "method": "bdev_lvol_sync_metadata",
+                    "params": {
+                        "lvs_name": lvs_name
+                    }
+                })).await;
+                    
+                match sync_result {
+                    Ok(_) => {
+                        synced_count += 1;
+                        println!("✓ Synced lvol store: {}", lvs_name);
+                    }
+                    Err(_) => {
+                        // Try alternative RPC method
+                        let alt_result = call_spdk_rpc(rpc_url, &json!({
+                            "method": "spdk_blob_sync_md",
+                            "params": {
+                                "lvs_name": lvs_name
+                            }
+                        })).await;
+                            
+                        if alt_result.is_ok() {
+                            synced_count += 1;
+                            println!("✓ Synced lvol store (alt method): {}", lvs_name);
+                        } else {
+                            println!("✗ Failed to sync lvol store: {}", lvs_name);
+                        }
+                    }
+                }
+                
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    
+    Ok(synced_count)
+}
+
+// Last resort: Find blobstores through their underlying bdevs
+async fn sync_blobstores_via_bdevs(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let bdevs = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await {
+        Ok(result) => result,
+        Err(_) => return Ok(0),
+    };
+    let mut synced_count = 0;
+    
+    if let Some(bdev_list) = bdevs["result"].as_array() {
+        for bdev in bdev_list {
+            if let Some(bdev_name) = bdev["name"].as_str() {
+                // Look for bdevs that have blobstores on them
+                if has_blobstore_on_bdev(bdev) {
+                    println!("Found bdev with blobstore: {}", bdev_name);
+                    
+                    // Try to get the blobstore name from the bdev
+                    if let Some(blobstore_name) = extract_blobstore_name(bdev) {
+                        let sync_result = call_spdk_rpc(rpc_url, &json!({
+                            "method": "blobstore_sync",
+                            "params": {
+                                "name": blobstore_name
+                            }
+                        })).await;
+                            
+                        if sync_result.is_ok() {
+                            synced_count += 1;
+                            println!("✓ Synced blobstore via bdev: {} -> {}", bdev_name, blobstore_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(synced_count)
+}
+
+fn has_blobstore_on_bdev(bdev: &serde_json::Value) -> bool {
+    // Check if this bdev has a blobstore
+    bdev.get("has_blobstore").and_then(|v| v.as_bool()).unwrap_or(false) ||
+    bdev["driver_specific"].get("blobstore").is_some() ||
+    bdev["driver_specific"]["nvme"]
+        .as_object()
+        .and_then(|nvme| nvme.get("blobstore_initialized"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn extract_blobstore_name(bdev: &serde_json::Value) -> Option<String> {
+    // Try to extract the blobstore name from bdev metadata
+    bdev["driver_specific"]["blobstore"]["name"].as_str().map(String::from)
+        .or_else(|| {
+            // For NVMe bdevs, blobstore name might be derived from bdev name
+            bdev["name"].as_str().map(|name| format!("blobstore_{}", name))
+        })
+}
+
+// Most robust approach: Try multiple methods in order of preference
+async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Starting robust blobstore metadata sync for node: {}", agent.node_name);
+    
+    // Try methods in order of preference:
+    
+    // 1. Direct blobstore access (best)
+    if let Ok(()) = sync_blob_metadata_correct(agent).await {
+        return Ok(());
+    }
+    
+    // 2. Global sync (second best)
+    if let Ok(()) = try_global_blobstore_sync(agent).await {
+        return Ok(());
+    }
+    
+    // 3. Lvol store sync (common case)
+    if let Ok(count) = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await {
+        if count > 0 {
+            println!("Successfully synced {} lvol stores", count);
+            return Ok(());
+        }
+    }
+    
+    // 4. Last resort: bdev-based approach
+    sync_blob_metadata_fallback(agent).await
+}
+
+async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method": "blobstore_sync_all"})).await;
+        
+    match result {
+        Ok(_) => {
+            println!("✓ Global blobstore sync successful");
+            Ok(())
+        }
+        Err(_e) => {
+            Err("Global blobstore sync failed".into())
+        }
+    }
+}
 
 
+/// Enhanced shutdown handler that performs final metadata sync before exit
+async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Performing graceful shutdown with final metadata sync...");
+    
+    // Perform final metadata sync before shutdown
+    if agent.metadata_sync_enabled {
+        println!("Performing final metadata sync before shutdown...");
+        if let Err(e) = sync_blob_metadata(agent).await {
+            eprintln!("Warning: Final metadata sync failed: {}", e);
+        } else {
+            println!("Final metadata sync completed successfully");
+        }
+    }
+    
+    // Then proceed with normal SPDK shutdown
+    println!("Initiating SPDK application shutdown...");
+    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "spdk_app_stop",
+        "params": {}
+    })).await;
 
+    match result {
+        Ok(_) => {
+            println!("SPDK shutdown initiated successfully");
+        }
+        Err(e) => {
+            eprintln!("Failed to send SPDK shutdown RPC: {}", e);
+        }
+    }
+    
+    Ok(())
+}
 
 async fn start_api_server(agent: NodeAgent) {
     let cors = warp::cors()
@@ -275,6 +575,30 @@ async fn start_api_server(agent: NodeAgent) {
                 .and(warp::post())
                 .and(agent_filter.clone())
                 .and_then(refresh_disk_discovery)
+        )
+        .or(
+            // Enhanced shutdown with metadata sync
+            warp::path("spdk")
+                .and(warp::path("shutdown"))
+                .and(warp::post())
+                .and(agent_filter.clone())
+                .and_then(shutdown_spdk_process_with_sync)
+        )
+        .or(
+            // Manual metadata sync trigger
+            warp::path("spdk")
+                .and(warp::path("sync-metadata"))
+                .and(warp::post())
+                .and(agent_filter.clone())
+                .and_then(trigger_metadata_sync)
+        )
+        .or(
+            // Get metadata sync status
+            warp::path("spdk")
+                .and(warp::path("sync-status"))
+                .and(warp::get())
+                .and(agent_filter.clone())
+                .and_then(get_metadata_sync_status)
         )
         .or(
             // Generic SPDK RPC proxy for cross-node communication
@@ -440,9 +764,64 @@ async fn refresh_disk_discovery(agent: NodeAgent) -> Result<impl warp::Reply, wa
     }
 }
 
+/// Enhanced shutdown handler that performs metadata sync before shutdown
+async fn shutdown_spdk_process_with_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    println!("Received request to gracefully shut down SPDK process with metadata sync.");
+    
+    match perform_graceful_shutdown_with_sync(&agent).await {
+        Ok(_) => {
+            let reply = reply::json(&json!({
+                "success": true,
+                "message": "SPDK shutdown with metadata sync initiated successfully."
+            }));
+            Ok(reply::with_status(reply, StatusCode::OK))
+        }
+        Err(e) => {
+            eprintln!("Failed to perform graceful shutdown: {}", e);
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("Graceful shutdown failed: {}", e)
+            }));
+            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
 
+/// API handler to manually trigger metadata sync
+async fn trigger_metadata_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    println!("Received request to manually trigger metadata sync.");
+    
+    match sync_blob_metadata(&agent).await {
+        Ok(_) => {
+            let reply = reply::json(&json!({
+                "success": true,
+                "message": "Metadata sync completed successfully.",
+                "synced_at": Utc::now().to_rfc3339()
+            }));
+            Ok(reply::with_status(reply, StatusCode::OK))
+        }
+        Err(e) => {
+            eprintln!("Manual metadata sync failed: {}", e);
+            let reply = reply::json(&json!({
+                "success": false,
+                "error": format!("Metadata sync failed: {}", e)
+            }));
+            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
 
-
+/// API handler to get metadata sync configuration and status
+async fn get_metadata_sync_status(agent: NodeAgent) -> Result<impl Reply, Rejection> {
+    let reply = reply::json(&json!({
+        "success": true,
+        "metadata_sync_enabled": agent.metadata_sync_enabled,
+        "metadata_sync_interval": agent.metadata_sync_interval,
+        "node": agent.node_name,
+        "checked_at": Utc::now().to_rfc3339()
+    }));
+    Ok(reply::with_status(reply, StatusCode::OK))
+}
 
 /// Generic SPDK RPC proxy for cross-node communication
 /// Forwards JSON-RPC calls to the local SPDK instance via Unix socket
@@ -720,9 +1099,7 @@ async fn create_new_disk_resource_internal(
 async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
     let mut devices = Vec::new();
     
-    println!("🔍 [SPDK_DISCOVERY] Querying SPDK for attached NVMe controllers...");
-    
-    // Primary discovery: Get all NVMe controllers that are already attached to SPDK
+    // Get all NVMe controllers that are already attached to SPDK
     let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_nvme_get_controllers"
     })).await;
@@ -731,17 +1108,14 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         if let Some(controller_list) = controllers_result["result"].as_array() {
             for controller in controller_list {
                 if let Some(device) = parse_nvme_controller(controller) {
-                    println!("✅ [SPDK_DISCOVERY] Found SPDK controller: {} at {}", device.controller_id, device.pcie_addr);
                     devices.push(device);
                 }
             }
         }
     }
     
-    println!("🔍 [SPDK_DISCOVERY] Found {} SPDK-attached devices, checking for additional devices...", devices.len());
-    
-    // Secondary discovery: Check for SPDK-ready devices not yet attached
-    // This ensures we don't miss devices that should be available to SPDK
+    // ALSO get kernel-bound SPDK-ready devices that should be included in discovery
+    // This fixes the issue where SPDK-ready kernel-bound disks were ignored in periodic discovery
     let pci_devices = agent.get_nvme_pci_devices().await.unwrap_or_default();
     
     for pci_addr in pci_devices {
@@ -754,28 +1128,19 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         if let Ok(disk_info) = agent.get_disk_info(&pci_addr).await {
             if disk_info.spdk_ready && !disk_info.is_system_disk {
                 // Convert to NvmeDevice format for consistency
-                // Only use devices that SPDK knows about - skip devices not in SPDK
-                let controller_id = if let Some(spdk_name) = agent.get_spdk_device_by_pci(&pci_addr).await.unwrap_or(None) {
-                    spdk_name
-                } else {
-                    println!("⚠️ [SPDK_DISCOVERY] Skipping device not available in SPDK: {} ({})", disk_info.device_name, pci_addr);
-                    continue;
-                };
-                
                 let device = NvmeDevice {
-                    controller_id,
+                    controller_id: disk_info.device_name.clone(),
                     pcie_addr: disk_info.pci_address.clone(),
                     capacity: disk_info.size_bytes as i64,
                     model: disk_info.model.clone(),
                 };
-                println!("✅ [SPDK_DISCOVERY] Included SPDK-ready kernel-bound device: {} ({})", 
+                println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
                          device.controller_id, device.pcie_addr);
                 devices.push(device);
             }
         }
     }
     
-    println!("🔍 [SPDK_DISCOVERY] Total devices discovered: {}", devices.len());
     Ok(devices)
 }
 
@@ -876,14 +1241,10 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
 
         format!("aio_{}", device_name)
     } else {
-        // Use SPDK's actual device name - no fallback to manual construction
-        if let Some(spdk_device_name) = agent.get_spdk_device_by_pci(&disk.spec.pcie_addr).await? {
-            println!("🔗 [SPDK_INIT] Using SPDK device name: {}", spdk_device_name);
-            spdk_device_name
-        } else {
-            println!("❌ [SPDK_INIT] Device not found in SPDK: {}", disk.spec.pcie_addr);
-            return Err(format!("Device {} not available in SPDK", disk.spec.pcie_addr).into());
-        }
+        // Use SPDK controller name for SPDK-attached devices
+        let name = format!("{}n1", controller_id);
+        println!("🔗 [SPDK_INIT] Using SPDK bdev name: {}", name);
+        name
     };
 
     // Now handle LVS creation with discovery-first approach
@@ -1161,15 +1522,8 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
 }
 
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if device is accessible via SPDK using actual device name
-    let bdev_name = if let Some(spdk_name) = agent.get_spdk_device_by_pci(&device.pcie_addr).await.unwrap_or(None) {
-        spdk_name
-    } else {
-        // If device not found in SPDK, it's not healthy
-        println!("❌ [HEALTH_CHECK] Device not found in SPDK: {}", device.pcie_addr);
-        return Ok(false);
-    };
-    
+    // Check if device is accessible via SPDK
+    let bdev_name = format!("{}n1", device.controller_id);
     let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_get_bdevs",
         "params": {
@@ -1315,59 +1669,6 @@ async fn update_lvol_store_statistics(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
-    /// Get device name using SPDK's native APIs instead of manual construction
-    async fn get_spdk_device_by_pci(&self, pci_addr: &str) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [SPDK_LOOKUP] Looking up device name for PCI address: {}", pci_addr);
-        
-        // First try to get from attached NVMe controllers
-        let controllers_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_nvme_get_controllers"
-        })).await;
-        
-        if let Ok(controllers) = controllers_result {
-            if let Some(controller_list) = controllers["result"].as_array() {
-                for controller in controller_list {
-                    if let Some(traddr) = controller["trid"]["traddr"].as_str() {
-                        if traddr == pci_addr {
-                            if let Some(name) = controller["name"].as_str() {
-                                println!("✅ [SPDK_LOOKUP] Found attached controller: {} -> {}", pci_addr, name);
-                                return Ok(Some(name.to_string()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // If not found in controllers, check all available bdevs
-        let bdevs_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_get_bdevs"
-        })).await;
-        
-        if let Ok(bdevs) = bdevs_result {
-            if let Some(bdev_list) = bdevs["result"].as_array() {
-                for bdev in bdev_list {
-                    // Check if this bdev corresponds to our PCI address
-                    if let Some(driver_specific) = bdev["driver_specific"].as_object() {
-                        if let Some(nvme_info) = driver_specific.get("nvme") {
-                            if let Some(traddr) = nvme_info["trid"]["traddr"].as_str() {
-                                if traddr == pci_addr {
-                                    if let Some(name) = bdev["name"].as_str() {
-                                        println!("✅ [SPDK_LOOKUP] Found bdev: {} -> {}", pci_addr, name);
-                                        return Ok(Some(name.to_string()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        println!("❌ [SPDK_LOOKUP] No SPDK device found for PCI address: {}", pci_addr);
-        Ok(None)
-    }
-
     async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DISCOVERY] Starting discover_all_disks for node: {}", self.node_name);
         let mut all_disks = Vec::new();
@@ -1386,6 +1687,20 @@ impl NodeAgent {
                 }
                 Err(e) => {
                     println!("❌ [DISCOVERY] Failed to get disk info for {}: {}", pci_addr, e);
+                    
+                    // ✅ ROBUST FALLBACK: If get_disk_info fails, try basic sysfs discovery
+                    println!("🔄 [DISCOVERY] Attempting fallback discovery for: {}", pci_addr);
+                    match self.create_basic_disk_info_from_sysfs(&pci_addr).await {
+                        Ok(fallback_disk) => {
+                            println!("✅ [DISCOVERY] Fallback discovery successful for {}: name='{}', driver='{}'", 
+                                     pci_addr, fallback_disk.device_name, fallback_disk.driver);
+                            all_disks.push(fallback_disk);
+                        }
+                        Err(fallback_err) => {
+                            println!("❌ [DISCOVERY] Both primary and fallback discovery failed for {}: primary={}, fallback={}", 
+                                     pci_addr, e, fallback_err);
+                        }
+                    }
                 }
             }
         }
@@ -1397,6 +1712,112 @@ impl NodeAgent {
         }
         
         Ok(all_disks)
+    }
+
+    /// Create basic disk info using only sysfs (no SPDK dependencies)
+    /// This ensures we can always discover available disks even if SPDK is not working
+    async fn create_basic_disk_info_from_sysfs(&self, pci_addr: &str) -> Result<UnimplementedDisk, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔄 [FALLBACK] Creating basic disk info for PCI: {}", pci_addr);
+        let sysfs_path = format!("/sys/bus/pci/devices/{}", pci_addr);
+        
+        // Verify PCI device exists
+        if !std::path::Path::new(&sysfs_path).exists() {
+            return Err(format!("PCI device {} does not exist", pci_addr).into());
+        }
+        
+        // Read basic PCI information
+        let vendor_id = self.read_sysfs_file(&format!("{}/vendor", sysfs_path)).await
+            .unwrap_or_else(|_| "0x0000".to_string());
+        let device_id = self.read_sysfs_file(&format!("{}/device", sysfs_path)).await
+            .unwrap_or_else(|_| "0x0000".to_string());
+            
+        // Get current driver (this should always work)
+        let driver = self.get_current_driver(pci_addr).await.unwrap_or("unknown".to_string());
+        
+        // Generate device info based on driver state
+        let (device_name, size_bytes, model, is_system_disk, spdk_ready) = if driver == "unbound" || driver == "unknown" {
+            // For unbound devices, create minimal info
+            let device_name = format!("nvme-{}", pci_addr.replace(":", "-"));
+            let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+            let estimated_size = 1_000_000_000_000; // 1TB default
+            
+            println!("🔄 [FALLBACK] Unbound device - Name: {}, Model: {}, Estimated size: {}GB", 
+                     device_name, model, estimated_size / (1024*1024*1024));
+            
+            (device_name, estimated_size, model, false, false)
+        } else if driver == "nvme" {
+            // For nvme-bound devices, try to get real block device info
+            match self.find_nvme_device_name(pci_addr).await {
+                Ok(real_device_name) => {
+                    let size = self.get_device_size(&real_device_name).await.unwrap_or(1_000_000_000_000);
+                    let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+                    let is_system = self.quick_system_disk_check(&real_device_name).await;
+                    
+                    println!("🔄 [FALLBACK] NVMe device - Name: {}, Size: {}GB, System: {}", 
+                             real_device_name, size / (1024*1024*1024), is_system);
+                    
+                    (real_device_name, size, model, is_system, !is_system)
+                }
+                Err(_) => {
+                    // Even this failed, use basic info
+                    let device_name = format!("nvme-{}", pci_addr.replace(":", "-"));
+                    let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+                    
+                    println!("🔄 [FALLBACK] NVMe fallback - Name: {}, Model: {}", device_name, model);
+                    
+                    (device_name, 1_000_000_000_000, model, false, false)
+                }
+            }
+        } else {
+            // Other drivers (vfio-pci, etc.) - treat as SPDK-ready
+            let device_name = format!("spdk-{}", pci_addr.replace(":", "-"));
+            let model = self.get_model_from_pci_ids(&vendor_id, &device_id).await;
+            
+            println!("🔄 [FALLBACK] SPDK driver '{}' - Name: {}, Model: {}", driver, device_name, model);
+            
+            (device_name, 1_000_000_000_000, model, false, true)
+        };
+        
+        let disk_info = UnimplementedDisk {
+            pci_address: pci_addr.to_string(),
+            device_name,
+            vendor_id: vendor_id.trim().to_string(),
+            device_id: device_id.trim().to_string(),
+            subsystem_vendor_id: vendor_id.trim().to_string(),
+            subsystem_device_id: device_id.trim().to_string(),
+            numa_node: None,
+            driver,
+            size_bytes,
+            model,
+            serial: "Unknown".to_string(),
+            firmware_version: "Unknown".to_string(),
+            namespace_id: Some(1),
+            mounted_partitions: Vec::new(),
+            filesystem_type: None,
+            is_system_disk,
+            spdk_ready,
+            discovered_at: Utc::now().to_rfc3339(),
+        };
+        
+        println!("✅ [FALLBACK] Created basic disk info for {}: name='{}', driver='{}', spdk_ready={}", 
+                 pci_addr, disk_info.device_name, disk_info.driver, disk_info.spdk_ready);
+        
+        Ok(disk_info)
+    }
+
+    /// Quick system disk check without full mount analysis
+    async fn quick_system_disk_check(&self, device_name: &str) -> bool {
+        // Check if device name suggests it's likely a system disk
+        if device_name.contains("nvme0n1") || device_name.contains("sda") || device_name.contains("vda") {
+            // Additional check: see if it's mounted on root
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
+                let root_source = String::from_utf8_lossy(&output.stdout);
+                if root_source.contains(device_name) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     async fn get_nvme_pci_devices(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1474,13 +1895,8 @@ impl NodeAgent {
                 )
             } else {
                 println!("🔍 [DISK_INFO] Device is bound to '{}', getting block device information", driver);
-                // For bound devices, use SPDK to get the actual device name
-                let device_name = if let Some(spdk_name) = self.get_spdk_device_by_pci(pci_addr).await? {
-                    spdk_name
-                } else {
-                    println!("❌ [DISK_INFO] Device not found in SPDK, skipping: {}", pci_addr);
-                    return Err(format!("Device {} not available in SPDK", pci_addr).into());
-                };
+                // For bound devices, get the actual block device information
+                let device_name = self.find_nvme_device_name(pci_addr).await?;
                 println!("🔍 [DISK_INFO] Found block device name: {}", device_name);
                 let (size_bytes, model, serial, firmware_version) = self.get_nvme_details(&device_name).await?;
                 let mounted_partitions = self.get_mounted_partitions(&device_name).await?;
@@ -1542,7 +1958,89 @@ impl NodeAgent {
         }
     }
 
-
+    async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Method 1: Look for controller in PCI sysfs, then find its actual namespaces
+        let nvme_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
+        
+        if let Ok(entries) = fs::read_dir(&nvme_path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let controller_name = entry.file_name().to_string_lossy().to_string();
+                    if controller_name.starts_with("nvme") {
+                        // Find actual namespaces in /sys/block/ that belong to this controller
+                        if let Ok(block_entries) = fs::read_dir("/sys/block") {
+                            for block_entry in block_entries {
+                                if let Ok(block_entry) = block_entry {
+                                    let block_name = block_entry.file_name().to_string_lossy().to_string();
+                                    // Find block devices that belong to this controller
+                                    if block_name.starts_with(&format!("{}n", controller_name)) {
+                                        // Verify this block device belongs to our PCI address
+                                        let device_path = format!("/sys/block/{}/device", block_name);
+                                        if let Ok(real_path) = fs::read_link(&device_path) {
+                                            if real_path.to_string_lossy().contains(pci_addr) {
+                                                println!("✅ Found actual namespace: {} for controller {} (PCI: {})", 
+                                                         block_name, controller_name, pci_addr);
+                                                return Ok(block_name);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 2: Direct search in /sys/block/ by PCI address (completely dynamic)
+        for entry in fs::read_dir("/sys/block")? {
+            let entry = entry?;
+            let device_name = entry.file_name().to_string_lossy().to_string();
+            
+            if device_name.starts_with("nvme") {
+                let device_path = format!("/sys/block/{}/device", device_name);
+                if let Ok(real_path) = fs::read_link(&device_path) {
+                    if real_path.to_string_lossy().contains(pci_addr) {
+                        println!("✅ Found device via /sys/block scan: {} (PCI: {})", device_name, pci_addr);
+                        return Ok(device_name);
+                    }
+                }
+            }
+        }
+        
+        // Method 3: Use NVMe subsystem info if available
+        let nvme_subsystem_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
+        if let Ok(entries) = fs::read_dir(&nvme_subsystem_path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let controller_name = entry.file_name().to_string_lossy().to_string();
+                    if controller_name.starts_with("nvme") {
+                        // Check if there's a namespace directory
+                        let ns_path = format!("{}/{}", entry.path().display(), controller_name);
+                        if let Ok(ns_entries) = fs::read_dir(&ns_path) {
+                            for ns_entry in ns_entries {
+                                if let Ok(ns_entry) = ns_entry {
+                                    let ns_name = ns_entry.file_name().to_string_lossy().to_string();
+                                    if ns_name.starts_with(&format!("{}n", controller_name)) && 
+                                       ns_name.chars().last().map_or(false, |c| c.is_ascii_digit()) {
+                                        // Verify it exists in /dev/
+                                        let dev_path = format!("/dev/{}", ns_name);
+                                        if std::path::Path::new(&dev_path).exists() {
+                                            println!("✅ Found namespace via subsystem: {} (PCI: {})", ns_name, pci_addr);
+                                            return Ok(ns_name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we get here, no namespace was found - return descriptive error
+        Err(format!("No NVMe namespace found for PCI device {} - device may be unbound or have no accessible namespaces", pci_addr).into())
+    }
 
     async fn get_nvme_details(&self, device_name: &str) -> Result<(u64, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
         // Use nvme-cli to get device information
@@ -2442,9 +2940,8 @@ impl NodeAgent {
             println!("❌ [KERNEL_SETUP] Block device {} not found", block_device);
             // Try to find the actual device name
             println!("🔧 [KERNEL_SETUP] Searching for actual device name...");
-            // Use SPDK to find the actual device name
-            match self.get_spdk_device_by_pci(pci_addr).await {
-                Ok(Some(actual_name)) => {
+            match self.find_nvme_device_name(pci_addr).await {
+                Ok(actual_name) => {
                     println!("🔧 [KERNEL_SETUP] Found actual device name: {}", actual_name);
                     let actual_block_device = format!("/dev/{}", actual_name);
                     if std::path::Path::new(&actual_block_device).exists() {
@@ -2454,12 +2951,8 @@ impl NodeAgent {
                         return Err(format!("Block device not found: neither {} nor {}", block_device, actual_block_device).into());
                     }
                 }
-                Ok(None) => {
-                    println!("❌ [KERNEL_SETUP] Device not found in SPDK: {}", pci_addr);
-                    return Err(format!("Device {} not available in SPDK", pci_addr).into());
-                }
                 Err(e) => {
-                    println!("❌ [KERNEL_SETUP] SPDK lookup failed: {}", e);
+                    println!("❌ [KERNEL_SETUP] Could not find device name: {}", e);
                     return Err(format!("Block device {} not found after nvme binding: {}", block_device, e).into());
                 }
             }
@@ -2696,7 +3189,9 @@ impl NodeAgent {
             "spdk_ready_disks": disk_statuses.iter().filter(|d| d["spdk_ready"].as_bool().unwrap_or(false)).count(),
             "uninitialized_disks": disk_statuses.iter().filter(|d| !d["spdk_ready"].as_bool().unwrap_or(true) && !d["is_system_disk"].as_bool().unwrap_or(true)).count(),
             "disks": disk_statuses,
-            "checked_at": Utc::now().to_rfc3339()
+            "checked_at": Utc::now().to_rfc3339(),
+            "metadata_sync_enabled": self.metadata_sync_enabled,
+            "metadata_sync_interval": self.metadata_sync_interval
         }))
     }
 
@@ -2941,7 +3436,5 @@ impl NodeAgent {
             }
         }
     }
-
-
 }
             

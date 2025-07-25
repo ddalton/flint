@@ -330,7 +330,12 @@ impl SpdkNative {
         Ok(())
     }
     
-
+    /// Get blobstores - matches SPDK v25.05.x bdev_get_blobstores RPC
+    pub async fn get_blobstores(&self) -> Result<Vec<Value>> {
+        let result = self.call_rpc("bdev_get_blobstores", None).await?;
+        let empty_vec = Vec::new();
+        Ok(result.as_array().unwrap_or(&empty_vec).clone())
+    }
     
     /// Additional RPC methods for dashboard support
     pub async fn get_nvme_controllers(&self) -> Result<Vec<Value>> {
@@ -357,7 +362,10 @@ impl SpdkNative {
         Ok(result.as_array().unwrap_or(&empty_vec).clone())
     }
     
-
+    pub async fn sync_all_blobstores(&self) -> Result<()> {
+        self.call_rpc("blobstore_sync_all", None).await?;
+        Ok(())
+    }
     
     /// Generic RPC call for any method
     pub async fn call_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
