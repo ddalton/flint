@@ -170,9 +170,6 @@ struct NodeAgent {
     discovery_interval: u64,
     auto_initialize_blobstore: bool,
     backup_path: String,
-    // New fields for metadata sync configuration
-    metadata_sync_interval: u64,
-    metadata_sync_enabled: bool,
 }
 
 #[tokio::main]
@@ -196,15 +193,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .unwrap_or(true),
         backup_path: env::var("DISK_BACKUP_PATH")
             .unwrap_or("/var/lib/spdk-csi/backups".to_string()),
-        // Configure metadata sync - default to every 30 seconds
-        metadata_sync_interval: env::var("METADATA_SYNC_INTERVAL")
-            .unwrap_or("30".to_string())
-            .parse()
-            .unwrap_or(30),
-        metadata_sync_enabled: env::var("METADATA_SYNC_ENABLED")
-            .unwrap_or("true".to_string())
-            .parse()
-            .unwrap_or(true),
     };
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
@@ -220,303 +208,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         start_api_server(api_agent).await;
     });
     
-    // Start periodic metadata sync task
-    if agent.metadata_sync_enabled {
-        let metadata_agent = agent.clone();
-        tokio::spawn(async move {
-            run_metadata_sync_loop(metadata_agent).await;
-        });
-        println!("Started periodic metadata sync task (interval: {}s)", agent.metadata_sync_interval);
-    }
-    
     // Start disk discovery loop
     run_discovery_loop(agent).await?;
     
     Ok(())
 }
 
-/// Background task that periodically calls spdk_blob_sync_md to sync metadata
-/// This reduces the amount of work needed during SPDK shutdown
-async fn run_metadata_sync_loop(agent: NodeAgent) {
-    let mut interval = interval(Duration::from_secs(agent.metadata_sync_interval));
-    
-    loop {
-        interval.tick().await;
-        
-        if let Err(e) = sync_blob_metadata(&agent).await {
-            eprintln!("Metadata sync failed: {}", e);
-        }
-    }
-}
-
-/// Correctly sync blob metadata by directly accessing blobstores
-async fn sync_blob_metadata_correct(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Starting direct blobstore metadata sync for node: {}", agent.node_name);
-    
-    // Step 1: Get all blobstores directly (not through bdevs)
-    let blobstores = match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_get_blobstores"
-    })).await {
-        Ok(result) => result,
-        Err(_) => {
-            println!("No blobstores found or RPC not available, trying alternative methods");
-            return sync_blob_metadata_fallback(agent).await;
-        }
-    };
-    let mut synced_count = 0;
-    
-    if let Some(blobstore_list) = blobstores["result"].as_array() {
-        for blobstore in blobstore_list {
-            if let Some(blobstore_name) = blobstore["name"].as_str() {
-                println!("Syncing blobstore: {}", blobstore_name);
-                
-                // Direct blobstore sync - this is the correct approach
-                let sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-                    "method": "blobstore_sync",
-                    "params": {
-                        "name": blobstore_name
-                    }
-                })).await;
-                    
-                match sync_result {
-                    Ok(_) => {
-                        synced_count += 1;
-                        println!("✓ Successfully synced blobstore: {}", blobstore_name);
-                    }
-                    Err(e) => {
-                        eprintln!("✗ Error syncing blobstore {}: {}", blobstore_name, e);
-                    }
-                }
-                
-                // Small delay to avoid overwhelming SPDK
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-    
-    // Step 2: Also sync lvol stores (which are built on top of blobstores)
-    let lvol_synced = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
-        .unwrap_or(0);
-    
-    println!("Metadata sync completed: {} blobstores, {} lvol stores", 
-             synced_count, lvol_synced);
-    
-    Ok(())
-}
-
-// Fallback method if direct blobstore access isn't available
-async fn sync_blob_metadata_fallback(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Using fallback blobstore sync methods");
-    
-    // Method 1: Global blobstore sync (if available)
-    let global_sync_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "blobstore_sync_all"
-    })).await;
-        
-    match global_sync_result {
-        Ok(_) => {
-            println!("✓ Global blobstore sync successful");
-            return Ok(());
-        }
-        _ => println!("Global blobstore sync not available, trying individual methods"),
-    }
-    
-    // Method 2: Sync through lvol stores (most common case)
-    let lvol_count = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await
-        .unwrap_or(0);
-    
-    // Method 3: Find blobstores through their underlying bdevs
-    let bdev_count = sync_blobstores_via_bdevs(&agent.spdk_rpc_url).await
-        .unwrap_or(0);
-    
-    println!("Fallback sync completed: {} lvol stores, {} bdevs", lvol_count, bdev_count);
-    Ok(())
-}
-
-// Sync lvol store metadata (which indirectly syncs underlying blobstores)
-async fn sync_lvol_stores_metadata(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    let lvstores = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await {
-        Ok(result) => result,
-        Err(_) => return Ok(0),
-    };
-    let mut synced_count = 0;
-    
-    if let Some(stores) = lvstores["result"].as_array() {
-        for store in stores {
-            if let Some(lvs_name) = store["name"].as_str() {
-                println!("Syncing lvol store metadata: {}", lvs_name);
-                
-                // This syncs the lvol store's metadata, which includes blob metadata
-                let sync_result = call_spdk_rpc(rpc_url, &json!({
-                    "method": "bdev_lvol_sync_metadata",
-                    "params": {
-                        "lvs_name": lvs_name
-                    }
-                })).await;
-                    
-                match sync_result {
-                    Ok(_) => {
-                        synced_count += 1;
-                        println!("✓ Synced lvol store: {}", lvs_name);
-                    }
-                    Err(_) => {
-                        // Try alternative RPC method
-                        let alt_result = call_spdk_rpc(rpc_url, &json!({
-                            "method": "spdk_blob_sync_md",
-                            "params": {
-                                "lvs_name": lvs_name
-                            }
-                        })).await;
-                            
-                        if alt_result.is_ok() {
-                            synced_count += 1;
-                            println!("✓ Synced lvol store (alt method): {}", lvs_name);
-                        } else {
-                            println!("✗ Failed to sync lvol store: {}", lvs_name);
-                        }
-                    }
-                }
-                
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-    
-    Ok(synced_count)
-}
-
-// Last resort: Find blobstores through their underlying bdevs
-async fn sync_blobstores_via_bdevs(rpc_url: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    let bdevs = match call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await {
-        Ok(result) => result,
-        Err(_) => return Ok(0),
-    };
-    let mut synced_count = 0;
-    
-    if let Some(bdev_list) = bdevs["result"].as_array() {
-        for bdev in bdev_list {
-            if let Some(bdev_name) = bdev["name"].as_str() {
-                // Look for bdevs that have blobstores on them
-                if has_blobstore_on_bdev(bdev) {
-                    println!("Found bdev with blobstore: {}", bdev_name);
-                    
-                    // Try to get the blobstore name from the bdev
-                    if let Some(blobstore_name) = extract_blobstore_name(bdev) {
-                        let sync_result = call_spdk_rpc(rpc_url, &json!({
-                            "method": "blobstore_sync",
-                            "params": {
-                                "name": blobstore_name
-                            }
-                        })).await;
-                            
-                        if sync_result.is_ok() {
-                            synced_count += 1;
-                            println!("✓ Synced blobstore via bdev: {} -> {}", bdev_name, blobstore_name);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    Ok(synced_count)
-}
-
-fn has_blobstore_on_bdev(bdev: &serde_json::Value) -> bool {
-    // Check if this bdev has a blobstore
-    bdev.get("has_blobstore").and_then(|v| v.as_bool()).unwrap_or(false) ||
-    bdev["driver_specific"].get("blobstore").is_some() ||
-    bdev["driver_specific"]["nvme"]
-        .as_object()
-        .and_then(|nvme| nvme.get("blobstore_initialized"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-fn extract_blobstore_name(bdev: &serde_json::Value) -> Option<String> {
-    // Try to extract the blobstore name from bdev metadata
-    bdev["driver_specific"]["blobstore"]["name"].as_str().map(String::from)
-        .or_else(|| {
-            // For NVMe bdevs, blobstore name might be derived from bdev name
-            bdev["name"].as_str().map(|name| format!("blobstore_{}", name))
-        })
-}
-
-// Most robust approach: Try multiple methods in order of preference
-async fn sync_blob_metadata(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Starting robust blobstore metadata sync for node: {}", agent.node_name);
-    
-    // Try methods in order of preference:
-    
-    // 1. Direct blobstore access (best)
-    if let Ok(()) = sync_blob_metadata_correct(agent).await {
-        return Ok(());
-    }
-    
-    // 2. Global sync (second best)
-    if let Ok(()) = try_global_blobstore_sync(agent).await {
-        return Ok(());
-    }
-    
-    // 3. Lvol store sync (common case)
-    if let Ok(count) = sync_lvol_stores_metadata(&agent.spdk_rpc_url).await {
-        if count > 0 {
-            println!("Successfully synced {} lvol stores", count);
-            return Ok(());
-        }
-    }
-    
-    // 4. Last resort: bdev-based approach
-    sync_blob_metadata_fallback(agent).await
-}
-
-async fn try_global_blobstore_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method": "blobstore_sync_all"})).await;
-        
-    match result {
-        Ok(_) => {
-            println!("✓ Global blobstore sync successful");
-            Ok(())
-        }
-        Err(_e) => {
-            Err("Global blobstore sync failed".into())
-        }
-    }
-}
 
 
-/// Enhanced shutdown handler that performs final metadata sync before exit
-async fn perform_graceful_shutdown_with_sync(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Performing graceful shutdown with final metadata sync...");
-    
-    // Perform final metadata sync before shutdown
-    if agent.metadata_sync_enabled {
-        println!("Performing final metadata sync before shutdown...");
-        if let Err(e) = sync_blob_metadata(agent).await {
-            eprintln!("Warning: Final metadata sync failed: {}", e);
-        } else {
-            println!("Final metadata sync completed successfully");
-        }
-    }
-    
-    // Then proceed with normal SPDK shutdown
-    println!("Initiating SPDK application shutdown...");
-    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "spdk_app_stop",
-        "params": {}
-    })).await;
 
-    match result {
-        Ok(_) => {
-            println!("SPDK shutdown initiated successfully");
-        }
-        Err(e) => {
-            eprintln!("Failed to send SPDK shutdown RPC: {}", e);
-        }
-    }
-    
-    Ok(())
-}
 
 async fn start_api_server(agent: NodeAgent) {
     let cors = warp::cors()
@@ -575,30 +275,6 @@ async fn start_api_server(agent: NodeAgent) {
                 .and(warp::post())
                 .and(agent_filter.clone())
                 .and_then(refresh_disk_discovery)
-        )
-        .or(
-            // Enhanced shutdown with metadata sync
-            warp::path("spdk")
-                .and(warp::path("shutdown"))
-                .and(warp::post())
-                .and(agent_filter.clone())
-                .and_then(shutdown_spdk_process_with_sync)
-        )
-        .or(
-            // Manual metadata sync trigger
-            warp::path("spdk")
-                .and(warp::path("sync-metadata"))
-                .and(warp::post())
-                .and(agent_filter.clone())
-                .and_then(trigger_metadata_sync)
-        )
-        .or(
-            // Get metadata sync status
-            warp::path("spdk")
-                .and(warp::path("sync-status"))
-                .and(warp::get())
-                .and(agent_filter.clone())
-                .and_then(get_metadata_sync_status)
         )
         .or(
             // Generic SPDK RPC proxy for cross-node communication
@@ -764,64 +440,9 @@ async fn refresh_disk_discovery(agent: NodeAgent) -> Result<impl warp::Reply, wa
     }
 }
 
-/// Enhanced shutdown handler that performs metadata sync before shutdown
-async fn shutdown_spdk_process_with_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
-    println!("Received request to gracefully shut down SPDK process with metadata sync.");
-    
-    match perform_graceful_shutdown_with_sync(&agent).await {
-        Ok(_) => {
-            let reply = reply::json(&json!({
-                "success": true,
-                "message": "SPDK shutdown with metadata sync initiated successfully."
-            }));
-            Ok(reply::with_status(reply, StatusCode::OK))
-        }
-        Err(e) => {
-            eprintln!("Failed to perform graceful shutdown: {}", e);
-            let reply = reply::json(&json!({
-                "success": false,
-                "error": format!("Graceful shutdown failed: {}", e)
-            }));
-            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
-        }
-    }
-}
 
-/// API handler to manually trigger metadata sync
-async fn trigger_metadata_sync(agent: NodeAgent) -> Result<impl Reply, Rejection> {
-    println!("Received request to manually trigger metadata sync.");
-    
-    match sync_blob_metadata(&agent).await {
-        Ok(_) => {
-            let reply = reply::json(&json!({
-                "success": true,
-                "message": "Metadata sync completed successfully.",
-                "synced_at": Utc::now().to_rfc3339()
-            }));
-            Ok(reply::with_status(reply, StatusCode::OK))
-        }
-        Err(e) => {
-            eprintln!("Manual metadata sync failed: {}", e);
-            let reply = reply::json(&json!({
-                "success": false,
-                "error": format!("Metadata sync failed: {}", e)
-            }));
-            Ok(reply::with_status(reply, StatusCode::INTERNAL_SERVER_ERROR))
-        }
-    }
-}
 
-/// API handler to get metadata sync configuration and status
-async fn get_metadata_sync_status(agent: NodeAgent) -> Result<impl Reply, Rejection> {
-    let reply = reply::json(&json!({
-        "success": true,
-        "metadata_sync_enabled": agent.metadata_sync_enabled,
-        "metadata_sync_interval": agent.metadata_sync_interval,
-        "node": agent.node_name,
-        "checked_at": Utc::now().to_rfc3339()
-    }));
-    Ok(reply::with_status(reply, StatusCode::OK))
-}
+
 
 /// Generic SPDK RPC proxy for cross-node communication
 /// Forwards JSON-RPC calls to the local SPDK instance via Unix socket
@@ -3075,9 +2696,7 @@ impl NodeAgent {
             "spdk_ready_disks": disk_statuses.iter().filter(|d| d["spdk_ready"].as_bool().unwrap_or(false)).count(),
             "uninitialized_disks": disk_statuses.iter().filter(|d| !d["spdk_ready"].as_bool().unwrap_or(true) && !d["is_system_disk"].as_bool().unwrap_or(true)).count(),
             "disks": disk_statuses,
-            "checked_at": Utc::now().to_rfc3339(),
-            "metadata_sync_enabled": self.metadata_sync_enabled,
-            "metadata_sync_interval": self.metadata_sync_interval
+            "checked_at": Utc::now().to_rfc3339()
         }))
     }
 
@@ -3322,5 +2941,7 @@ impl NodeAgent {
             }
         }
     }
+
+
 }
             
