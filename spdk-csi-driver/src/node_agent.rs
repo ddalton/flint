@@ -848,7 +848,7 @@ async fn proxy_spdk_rpc(
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let max_retries = 30; // 5 minutes
-    let mut last_error = String::new();
+    let mut last_error = String::from("No error recorded yet");
     
     for attempt in 1..=max_retries {
         // Use the new SPDK RPC client to check if SPDK is ready
@@ -1807,16 +1807,79 @@ impl NodeAgent {
 
     /// Quick system disk check without full mount analysis
     async fn quick_system_disk_check(&self, device_name: &str) -> bool {
-        // Check if device name suggests it's likely a system disk
-        if device_name.contains("nvme0n1") || device_name.contains("sda") || device_name.contains("vda") {
-            // Additional check: see if it's mounted on root
-            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
-                let root_source = String::from_utf8_lossy(&output.stdout);
-                if root_source.contains(device_name) {
+        println!("🔍 [SYSTEM_CHECK] Checking if {} is a system disk", device_name);
+        
+        // Method 1: Check if it's mounted on root filesystem
+        if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
+            let root_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            println!("🔍 [SYSTEM_CHECK] Root filesystem source: '{}'", root_source);
+            
+            // Check direct device match
+            if root_source.contains(device_name) {
+                println!("✅ [SYSTEM_CHECK] {} is system disk (direct root match)", device_name);
+                return true;
+            }
+            
+            // Check if root source is a partition of this device
+            if root_source.starts_with(&format!("/dev/{}", device_name)) {
+                println!("✅ [SYSTEM_CHECK] {} is system disk (root partition)", device_name);
+                return true;
+            }
+        }
+        
+        // Method 2: Check if any partition of this device contains critical system mounts
+        let device_path = format!("/dev/{}", device_name);
+        let critical_mounts = ["/", "/boot", "/boot/efi", "/usr", "/var"];
+        
+        for critical_mount in &critical_mounts {
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", critical_mount]).output() {
+                let mount_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !mount_source.is_empty() && (mount_source.contains(device_name) || mount_source.starts_with(&device_path)) {
+                    println!("✅ [SYSTEM_CHECK] {} is system disk (critical mount {} on {})", device_name, critical_mount, mount_source);
                     return true;
                 }
             }
         }
+        
+        // Method 3: Check if this device has mounted partitions with system-like paths
+        if let Ok(output) = Command::new("lsblk").args(["-ln", "-o", "NAME,MOUNTPOINT", &device_path]).output() {
+            let lsblk_output = String::from_utf8_lossy(&output.stdout);
+            for line in lsblk_output.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let mountpoint = parts[1];
+                    if critical_mounts.contains(&mountpoint) {
+                        println!("✅ [SYSTEM_CHECK] {} is system disk (lsblk shows {} mounted on {})", device_name, parts[0], mountpoint);
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        // Method 4: Check if this device is in the root device hierarchy
+        if let Ok(output) = Command::new("lsblk").args(["-ln", "-o", "NAME,TYPE,MOUNTPOINT"]).output() {
+            let lsblk_output = String::from_utf8_lossy(&output.stdout);
+            let mut found_root_device = false;
+            let mut root_device_family = String::new();
+            
+            // First pass: find the device that contains root
+            for line in lsblk_output.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[2] == "/" {
+                    root_device_family = parts[0].chars().take_while(|c| !c.is_ascii_digit()).collect();
+                    found_root_device = true;
+                    break;
+                }
+            }
+            
+            // Second pass: check if our device is part of the same family
+            if found_root_device && device_name.starts_with(&root_device_family) {
+                println!("✅ [SYSTEM_CHECK] {} is system disk (same device family as root: {})", device_name, root_device_family);
+                return true;
+            }
+        }
+        
+        println!("✅ [SYSTEM_CHECK] {} is NOT a system disk", device_name);
         false
     }
 
@@ -2152,11 +2215,15 @@ impl NodeAgent {
     }
 
     async fn is_system_disk(&self, device_name: &str, mounted_partitions: &[String]) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [SYSTEM_DISK] Comprehensive system disk check for: {}", device_name);
+        println!("🔍 [SYSTEM_DISK] Mounted partitions: {:?}", mounted_partitions);
+        
         // Check if any partition is mounted on critical system paths
         let critical_mounts = ["/", "/boot", "/boot/efi", "/var", "/usr", "/home"];
         
         for mount in mounted_partitions {
             if critical_mounts.contains(&mount.as_str()) {
+                println!("✅ [SYSTEM_DISK] {} is system disk (critical mount: {})", device_name, mount);
                 return Ok(true);
             }
         }
@@ -2170,19 +2237,44 @@ impl NodeAgent {
         
         for mount in mounted_partitions {
             if container_system_mounts.contains(&mount.as_str()) {
-                println!("Detected system disk {} due to container system mount: {}", device_name, mount);
+                println!("✅ [SYSTEM_DISK] {} is system disk (container system mount: {})", device_name, mount);
                 return Ok(true);
             }
         }
 
-        // Check if device contains the root filesystem
+        // Enhanced root filesystem detection
         let output = Command::new("findmnt")
             .args(["-n", "-o", "SOURCE", "/"])
             .output()?;
 
         let root_device = String::from_utf8(output.stdout)?;
+        let root_device = root_device.trim();
+        println!("🔍 [SYSTEM_DISK] Root filesystem source: '{}'", root_device);
+        
+        // Check direct device name match
         if root_device.contains(device_name) {
+            println!("✅ [SYSTEM_DISK] {} is system disk (root filesystem match)", device_name);
             return Ok(true);
+        }
+        
+        // Check if root device is a partition of this device
+        if root_device.starts_with(&format!("/dev/{}", device_name)) {
+            println!("✅ [SYSTEM_DISK] {} is system disk (root device partition)", device_name);
+            return Ok(true);
+        }
+
+        // Enhanced mount analysis - check all critical mount points
+        for critical_path in &critical_mounts {
+            if let Ok(mount_output) = Command::new("findmnt")
+                .args(["-n", "-o", "SOURCE", critical_path])
+                .output() 
+            {
+                let mount_source = String::from_utf8_lossy(&mount_output.stdout).trim().to_string();
+                if !mount_source.is_empty() && mount_source.contains(device_name) {
+                    println!("✅ [SYSTEM_DISK] {} is system disk (critical path {} mounted from {})", device_name, critical_path, mount_source);
+                    return Ok(true);
+                }
+            }
         }
 
         // Additional check: see if this device is mounted to critical system paths
@@ -2197,14 +2289,34 @@ impl NodeAgent {
                     // Check if this device is mounted to any critical system location
                     for critical_mount in &critical_mounts {
                         if line.contains(&format!(" on {} ", critical_mount)) {
-                            println!("Detected system disk {} mounted on critical path: {}", device_name, critical_mount);
+                            println!("✅ [SYSTEM_DISK] {} is system disk (mount analysis: {})", device_name, line.trim());
                             return Ok(true);
                         }
                     }
                 }
             }
         }
+        
+        // Final check: Use lsblk to get comprehensive device hierarchy
+        let lsblk_output = Command::new("lsblk")
+            .args(["-ln", "-o", "NAME,MOUNTPOINT", &format!("/dev/{}", device_name)])
+            .output();
+            
+        if let Ok(output) = lsblk_output {
+            let lsblk_info = String::from_utf8_lossy(&output.stdout);
+            for line in lsblk_info.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let mountpoint = parts[1];
+                    if critical_mounts.contains(&mountpoint) {
+                        println!("✅ [SYSTEM_DISK] {} is system disk (lsblk hierarchy: {} -> {})", device_name, parts[0], mountpoint);
+                        return Ok(true);
+                    }
+                }
+            }
+        }
 
+        println!("✅ [SYSTEM_DISK] {} is NOT a system disk", device_name);
         Ok(false)
     }
 
