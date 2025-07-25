@@ -867,22 +867,24 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
 
 
 async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let disk_crd_name = disk.metadata.name.as_ref().unwrap();
     
-    // Use consistent naming: if we have the actual device name, use it for both bdev and LVS
+    // Discover actual device name for consistent LVS naming
     let actual_device_name = match agent.find_nvme_device_name(&disk.spec.pcie_addr).await {
         Ok(name) => {
-            println!("✅ [SPDK_INIT] Using actual device name for consistent naming: {}", name);
-            format!("{}-{}", disk.spec.node_id, name)
+            println!("✅ [SPDK_INIT] Found actual device name: {}", name);
+            name
         }
         Err(_) => {
-            println!("⚠️ [SPDK_INIT] Could not find actual device name, using CRD name: {}", disk_name);
-            disk_name.clone()
+            println!("⚠️ [SPDK_INIT] Could not find actual device name, using spec nvme_controller_id: {:?}", disk.spec.nvme_controller_id);
+            disk.spec.nvme_controller_id.clone().unwrap_or_else(|| "unknown".to_string())
         }
     };
-    let lvs_name = format!("lvs_{}", actual_device_name);
     
-    println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_name);
+    // Generate LVS name based on node and actual device name (consistent with SPDK naming)
+    let lvs_name = format!("lvs_{}-{}", disk.spec.node_id, actual_device_name);
+    
+    println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_crd_name);
     println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {}", lvs_name, disk.spec.pcie_addr);
     
     // First, try to attach the NVMe device to SPDK if it's not already attached
@@ -1017,12 +1019,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                 });
                 
                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status to reflect existing LVS: {}", disk_name),
+                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status to reflect existing LVS: {}", disk_crd_name),
                     Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
                 }
                 
-                    println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_name);
+                    println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_crd_name);
                     return Ok(());
                 } else {
                     println!("🔍 [SPDK_INIT] No existing LVS found on bdev '{}', will create new one: {}", bdev_name, lvs_name);
@@ -1090,12 +1092,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                 });
                                 
                                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_name),
-                                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
-                                }
-                                
-                                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_name);
+                                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
+                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                }
+                
+                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_crd_name);
                             } else {
                                 let error_msg = format!("File exists error but our LVS '{}' not found", lvs_name);
                                 println!("❌ [SPDK_INIT] {}", error_msg);
@@ -1143,12 +1145,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                 });
                                 
                                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_name),
-                                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
-                                }
-                                
-                                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_name);
+                                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
+                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                }
+                
+                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_crd_name);
                             } else {
                                 let error_msg = format!("Operation not permitted but our LVS '{}' not found - bdev might be claimed by different LVS", lvs_name);
                                 println!("❌ [SPDK_INIT] {}", error_msg);
@@ -1182,12 +1184,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                 });
                 
                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_name),
-                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
-                }
-                
-                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_name);
+                            match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_crd_name),
+                Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+            }
+            
+            println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_crd_name);
             }
         }
         Err(e) => {
@@ -1351,6 +1353,14 @@ async fn update_disk_blobstore_status(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
+    /// Generate stable CRD name based on PCI address (immutable hardware identity)
+    /// Example: 0000:00:1f.0 → flnt-2-pci-0000-00-1f-0
+    fn disk_crd_name(&self, pci_addr: &str) -> String {
+        // Convert PCI address to valid Kubernetes name: 0000:00:1f.0 → 0000-00-1f-0
+        let pci_safe = pci_addr.replace(":", "-").replace(".", "-");
+        format!("{}-pci-{}", self.node_name, pci_safe)
+    }
+
     async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DISCOVERY] Starting discover_all_disks for node: {}", self.node_name);
         let mut all_disks = Vec::new();
@@ -2452,23 +2462,35 @@ impl NodeAgent {
         // Step 4: Initialize LVS/blobstore for complete setup
         println!("🔧 [SETUP] Step 4: Initializing LVS/blobstore...");
         
-        // Create or find the SpdkDisk CRD
+        // Create or find the SpdkDisk CRD using stable PCI-based naming
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        let disk_crd_name = self.disk_crd_name(pci_addr);
         
-        let disk_crd = match spdk_disks.get(&disk_name).await {
+        // Discover actual device name for status fields (dynamic)
+        let actual_device_name = match self.find_nvme_device_name(pci_addr).await {
+            Ok(name) => {
+                println!("✅ [SETUP] Found actual device name: {}", name);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [SETUP] Could not find actual device name, using discovered name: {}", disk_info.device_name);
+                disk_info.device_name.clone()
+            }
+        };
+        
+        let disk_crd = match spdk_disks.get(&disk_crd_name).await {
             Ok(existing_disk) => existing_disk,
             Err(_) => {
-                println!("🔧 [SETUP] Creating SpdkDisk CRD: {}", disk_name);
+                println!("🔧 [SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
                 let new_disk = SpdkDisk::new_with_metadata(
-                    &disk_name,
+                    &disk_crd_name,
                     SpdkDiskSpec {
                         node_id: self.node_name.clone(),
-                        device_path: format!("/dev/{}", disk_info.device_name),
+                        device_path: format!("/dev/{}", actual_device_name),
                         size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
-                        pcie_addr: disk_info.pci_address.clone(),
+                        pcie_addr: pci_addr.to_string(),  // Use PCI address from parameter
                         blobstore_uuid: None,
-                        nvme_controller_id: Some(disk_info.device_name.clone()),
+                        nvme_controller_id: Some(actual_device_name.clone()),
                     },
                     &self.target_namespace
                 );
@@ -2835,23 +2857,35 @@ impl NodeAgent {
         // Step 4: Initialize LVS/blobstore for complete kernel setup
         println!("🔧 [KERNEL_SETUP] Step 4: Initializing LVS/blobstore...");
         
-        // Create or find the SpdkDisk CRD
+        // Create or find the SpdkDisk CRD using stable PCI-based naming
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        let disk_crd_name = self.disk_crd_name(pci_addr);
         
-        let disk_crd = match spdk_disks.get(&disk_name).await {
+        // Discover actual device name for status fields (dynamic)
+        let actual_device_name = match self.find_nvme_device_name(pci_addr).await {
+            Ok(name) => {
+                println!("✅ [KERNEL_SETUP] Found actual device name: {}", name);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [KERNEL_SETUP] Could not find actual device name, using discovered name: {}", disk_info.device_name);
+                disk_info.device_name.clone()
+            }
+        };
+        
+        let disk_crd = match spdk_disks.get(&disk_crd_name).await {
             Ok(existing_disk) => existing_disk,
             Err(_) => {
-                println!("🔧 [KERNEL_SETUP] Creating SpdkDisk CRD: {}", disk_name);
+                println!("🔧 [KERNEL_SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
                 let new_disk = SpdkDisk::new_with_metadata(
-                    &disk_name,
+                    &disk_crd_name,
                     SpdkDiskSpec {
                         node_id: self.node_name.clone(),
-                        device_path: format!("/dev/{}", disk_info.device_name),
+                        device_path: format!("/dev/{}", actual_device_name),
                         size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
-                        pcie_addr: disk_info.pci_address.clone(),
+                        pcie_addr: pci_addr.to_string(),  // Use PCI address from parameter
                         blobstore_uuid: None,
-                        nvme_controller_id: Some(disk_info.device_name.clone()),
+                        nvme_controller_id: Some(actual_device_name.clone()),
                     },
                     &self.target_namespace
                 );
