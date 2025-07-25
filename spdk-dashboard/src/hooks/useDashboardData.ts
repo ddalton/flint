@@ -1319,12 +1319,22 @@ export const useDiskSetup = () => {
       if (response.ok) {
         const result = await response.json();
         
+        // Normalize response to ensure it has the expected structure
+        const normalizedResult: DiskSetupResult = {
+          success: result.success || false,
+          setup_disks: result.setup_disks || [],
+          failed_disks: result.failed_disks || [],
+          warnings: result.warnings || (result.error ? [result.error] : []),
+          huge_pages_configured: result.huge_pages_configured,
+          completed_at: result.completed_at || new Date().toISOString()
+        };
+        
         // Refresh node data after initialization
-        if (result.success) {
+        if (normalizedResult.success) {
           setTimeout(() => refreshNodeDisks(nodeName), 2000);
         }
         
-        return result;
+        return normalizedResult;
       } else {
         throw new Error(`Initialize blobstore request failed: ${response.statusText}`);
       }

@@ -1140,19 +1140,24 @@ export const DiskSetupTab: React.FC = () => {
                     {new Date(result.completed_at).toLocaleString()}
                   </span>
                 </div>
-                {result.setup_disks.length > 0 && (
+                {result.setup_disks && result.setup_disks.length > 0 && (
                   <div className="text-sm text-green-700 mb-1">
                     ✓ Setup: {result.setup_disks.length} disk{result.setup_disks.length !== 1 ? 's' : ''}
                   </div>
                 )}
-                {result.failed_disks.length > 0 && (
+                {result.failed_disks && result.failed_disks.length > 0 && (
                   <div className="text-sm text-red-700 mb-1">
                     ✗ Failed: {result.failed_disks.length} disk{result.failed_disks.length !== 1 ? 's' : ''}
                   </div>
                 )}
-                {result.warnings.length > 0 && (
+                {result.warnings && result.warnings.length > 0 && (
                   <div className="text-sm text-yellow-700">
                     ⚠ {result.warnings.join(', ')}
+                  </div>
+                )}
+                {(result as any).error && (
+                  <div className="text-sm text-red-700">
+                    ❌ Error: {(result as any).error}
                   </div>
                 )}
               </div>

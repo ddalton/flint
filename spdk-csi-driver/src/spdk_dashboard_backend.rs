@@ -1661,22 +1661,28 @@ async fn initialize_node_disks(node: String, request: serde_json::Value, state: 
                     Ok(data) => Ok(warp::reply::json(&data)),
                     Err(_) => Ok(warp::reply::json(&json!({
                         "success": false,
-                        "error": "Failed to parse node-agent response",
-                        "node": node
+                        "setup_disks": [],
+                        "failed_disks": [],
+                        "warnings": ["Failed to parse node-agent response"],
+                        "completed_at": chrono::Utc::now().to_rfc3339()
                     })))
                 }
             }
             Err(e) => Ok(warp::reply::json(&json!({
                 "success": false,
-                "error": format!("Failed to connect to node-agent: {}", e),
-                "node": node
+                "setup_disks": [],
+                "failed_disks": [],
+                "warnings": [format!("Failed to connect to node-agent: {}", e)],
+                "completed_at": chrono::Utc::now().to_rfc3339()
             })))
         }
     } else {
         Ok(warp::reply::json(&json!({
             "success": false,
-            "error": "Node-agent not found", 
-            "node": node
+            "setup_disks": [],
+            "failed_disks": [],
+            "warnings": ["Node-agent not found"],
+            "completed_at": chrono::Utc::now().to_rfc3339()
         })))
     }
 }

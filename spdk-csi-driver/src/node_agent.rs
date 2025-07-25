@@ -574,7 +574,7 @@ async fn proxy_spdk_rpc(
 
 async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let max_retries = 30; // 5 minutes
-    let mut last_error = String::from("No error recorded yet");
+    let mut last_error = String::new();
     
     for attempt in 1..=max_retries {
         // Use the new SPDK RPC client to check if SPDK is ready
@@ -950,28 +950,52 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
             let mut our_lvs_exists = false;
             
             if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                let mut existing_lvstore_info = None;
                 for lvstore in lvstore_list {
                     if let Some(name) = lvstore["name"].as_str() {
                         if name == lvs_name {
                             our_lvs_exists = true;
+                            existing_lvstore_info = Some(lvstore.clone());
                             println!("✅ [SPDK_INIT] Found existing LVS: {}", lvs_name);
                             println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
                             break;
                         }
                     }
                 }
-            }
             
-            if our_lvs_exists {
-                println!("✅ [SPDK_INIT] LVS already exists, updating Kubernetes status to match SPDK reality");
+                if our_lvs_exists {
+                    println!("✅ [SPDK_INIT] LVS already exists, updating Kubernetes status to match SPDK reality");
                 
-                // Update status to reflect that LVS exists
-                let patch = json!({
-                    "status": {
-                        "blobstore_initialized": true,
-                        "lvs_name": lvs_name,
-                        "last_checked": Utc::now().to_rfc3339()
+                // Update status to reflect that LVS exists with detailed info
+                let mut patch_status = json!({
+                    "blobstore_initialized": true,
+                    "lvs_name": lvs_name,
+                    "last_checked": Utc::now().to_rfc3339(),
+                    "healthy": true
+                });
+
+                // Extract detailed LVS information for better status reporting
+                if let Some(lvstore_info) = existing_lvstore_info {
+                    if let Some(total_clusters) = lvstore_info["total_data_clusters"].as_u64() {
+                        if let Some(free_clusters) = lvstore_info["free_clusters"].as_u64() {
+                            if let Some(cluster_size) = lvstore_info["cluster_size"].as_u64() {
+                                let total_capacity = (total_clusters * cluster_size) as i64;
+                                let free_space = (free_clusters * cluster_size) as i64;
+                                let used_space = total_capacity - free_space;
+                                
+                                patch_status.as_object_mut().unwrap().insert("total_capacity".to_string(), json!(total_capacity));
+                                patch_status.as_object_mut().unwrap().insert("free_space".to_string(), json!(free_space));
+                                patch_status.as_object_mut().unwrap().insert("used_space".to_string(), json!(used_space));
+                                
+                                println!("📊 [SPDK_INIT] LVS capacity - Total: {} bytes, Free: {} bytes, Used: {} bytes", 
+                                         total_capacity, free_space, used_space);
+                            }
+                        }
                     }
+                }
+
+                let patch = json!({
+                    "status": patch_status
                 });
                 
                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
@@ -980,10 +1004,11 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
                 }
                 
-                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_name);
-                return Ok(());
-            } else {
-                println!("🔍 [SPDK_INIT] No existing LVS found, will create new one: {}", lvs_name);
+                    println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_name);
+                    return Ok(());
+                } else {
+                    println!("🔍 [SPDK_INIT] No existing LVS found, will create new one: {}", lvs_name);
+                }
             }
         }
         Err(e) => {
@@ -3410,10 +3435,226 @@ impl NodeAgent {
 
         // Initialize the blobstore
         println!("🔧 [INIT_SINGLE_BLOBSTORE] Initializing blobstore for: {}", disk_name);
-        initialize_blobstore_on_device(self, &disk_crd).await?;
         
-        println!("✅ [INIT_SINGLE_BLOBSTORE] Successfully initialized blobstore for: {}", disk_name);
+        // Attempt initialization (may succeed, fail, or discover existing state)
+        let init_result = initialize_blobstore_on_device(self, &disk_crd).await;
+        
+        // Always reconcile state after any operation to ensure idempotency
+        println!("🔄 [INIT_SINGLE_BLOBSTORE] Performing state reconciliation...");
+        if let Err(e) = self.reconcile_disk_state_with_spdk(&disk_name).await {
+            println!("⚠️ [INIT_SINGLE_BLOBSTORE] State reconciliation failed: {}", e);
+        }
+        
+        // Return the original initialization result
+        match init_result {
+            Ok(_) => {
+                println!("✅ [INIT_SINGLE_BLOBSTORE] Successfully initialized blobstore for: {}", disk_name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [INIT_SINGLE_BLOBSTORE] Initialization had issues, but state has been reconciled: {}", e);
+                // Even if initialization "failed", reconciliation might have discovered the LVS exists
+                // Check the final state and potentially return success
+                let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+                if let Ok(final_disk) = spdk_disks.get(&disk_name).await {
+                    if final_disk.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
+                        println!("✅ [INIT_SINGLE_BLOBSTORE] Reconciliation discovered LVS exists - treating as success: {}", disk_name);
+                        return Ok(());
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Comprehensive idempotency helper: reconcile SPDK reality with Kubernetes CRD state
+    async fn reconcile_disk_state_with_spdk(&self, disk_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔄 [RECONCILE] Starting state reconciliation for disk: {}", disk_name);
+        
+        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        
+        // Get current CRD state
+        let disk_crd = match spdk_disks.get(disk_name).await {
+            Ok(crd) => crd,
+            Err(e) => {
+                println!("⚠️ [RECONCILE] Could not find CRD for {}: {}", disk_name, e);
+                return Ok(()); // Can't reconcile without CRD
+            }
+        };
+        
+        let lvs_name = format!("lvs_{}", disk_name);
+        let mut needs_update = false;
+        let mut updated_status = disk_crd.status.clone().unwrap_or_default();
+        
+        // Query actual SPDK state
+        println!("🔍 [RECONCILE] Querying SPDK for actual LVS state...");
+        match call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores"
+        })).await {
+            Ok(lvstores_result) => {
+                let mut spdk_lvs_exists = false;
+                let mut spdk_lvs_info = None;
+                
+                if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                    for lvstore in lvstore_list {
+                        if let Some(name) = lvstore["name"].as_str() {
+                            if name == lvs_name {
+                                spdk_lvs_exists = true;
+                                spdk_lvs_info = Some(lvstore.clone());
+                                println!("✅ [RECONCILE] Found LVS in SPDK: {}", lvs_name);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                let crd_thinks_initialized = updated_status.blobstore_initialized;
+                
+                // Reconcile the state differences
+                if spdk_lvs_exists && !crd_thinks_initialized {
+                    println!("🔧 [RECONCILE] SPDK has LVS but CRD thinks uninitialized - updating CRD to match reality");
+                    updated_status.blobstore_initialized = true;
+                    updated_status.lvs_name = Some(lvs_name.clone());
+                    updated_status.healthy = true;
+                    
+                    // Extract capacity information
+                    if let Some(lvstore_info) = &spdk_lvs_info {
+                        if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
+                            lvstore_info["total_data_clusters"].as_u64(),
+                            lvstore_info["free_clusters"].as_u64(),
+                            lvstore_info["cluster_size"].as_u64()
+                        ) {
+                            let total_capacity = (total_clusters * cluster_size) as i64;
+                            let free_space = (free_clusters * cluster_size) as i64;
+                            let used_space = total_capacity - free_space;
+                            
+                            updated_status.total_capacity = total_capacity;
+                            updated_status.free_space = free_space;
+                            updated_status.used_space = used_space;
+                            
+                            println!("📊 [RECONCILE] Updated capacity info - Total: {}, Free: {}, Used: {}", 
+                                     total_capacity, free_space, used_space);
+                        }
+                    }
+                } else if !spdk_lvs_exists && crd_thinks_initialized {
+                    println!("🔧 [RECONCILE] CRD thinks initialized but no LVS in SPDK - updating CRD to match reality");
+                    updated_status.blobstore_initialized = false;
+                    updated_status.lvs_name = None;
+                    updated_status.healthy = false;
+                    updated_status.total_capacity = 0;
+                    updated_status.free_space = 0;
+                    updated_status.used_space = 0;
+                } else if spdk_lvs_exists && crd_thinks_initialized {
+                    // Both agree it's initialized - just refresh the capacity info
+                    if let Some(lvstore_info) = &spdk_lvs_info {
+                        if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
+                            lvstore_info["total_data_clusters"].as_u64(),
+                            lvstore_info["free_clusters"].as_u64(),
+                            lvstore_info["cluster_size"].as_u64()
+                        ) {
+                            let total_capacity = (total_clusters * cluster_size) as i64;
+                            let free_space = (free_clusters * cluster_size) as i64;
+                            let used_space = total_capacity - free_space;
+                            
+                            if updated_status.total_capacity != total_capacity || 
+                               updated_status.free_space != free_space {
+                                updated_status.total_capacity = total_capacity;
+                                updated_status.free_space = free_space;
+                                updated_status.used_space = used_space;
+                                println!("📊 [RECONCILE] Refreshed capacity info");
+                            }
+                        }
+                    }
+                } else {
+                    println!("✅ [RECONCILE] SPDK and CRD states are consistent");
+                }
+                
+                // Always update the last_checked timestamp
+                updated_status.last_checked = Utc::now().to_rfc3339();
+                needs_update = true; // Always need to update for timestamp
+                
+            }
+            Err(e) => {
+                println!("⚠️ [RECONCILE] Could not query SPDK LVS stores: {}", e);
+                // Mark as potentially unhealthy if we can't communicate with SPDK
+                if updated_status.healthy {
+                    updated_status.healthy = false;
+                    needs_update = true;
+                }
+            }
+        }
+        
+        // Apply updates if needed
+        if needs_update {
+            let patch = json!({
+                "status": updated_status
+            });
+            
+            match spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                Ok(_) => println!("✅ [RECONCILE] Successfully updated CRD status for: {}", disk_name),
+                Err(e) => println!("⚠️ [RECONCILE] Failed to update CRD status: {}", e),
+            }
+        }
+        
+        println!("🎉 [RECONCILE] State reconciliation completed for: {}", disk_name);
         Ok(())
+    }
+
+    /// Idempotent wrapper for disk operations - ensures state consistency regardless of operation outcome
+    async fn with_idempotency<F, R>(&self, operation_name: &str, disk_pci_addr: &str, operation: F) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>,
+    {
+        println!("🔄 [IDEMPOTENT] Starting {} for disk: {}", operation_name, disk_pci_addr);
+        
+        // Get disk name for reconciliation
+        let disk_info = self.get_disk_info(disk_pci_addr).await?;
+        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        
+        // Pre-operation reconciliation
+        println!("🔄 [IDEMPOTENT] Pre-operation state reconciliation...");
+        let _ = self.reconcile_disk_state_with_spdk(&disk_name).await;
+        
+        // Execute the actual operation
+        let result = operation().await;
+        
+        // Post-operation reconciliation (always happens)
+        println!("🔄 [IDEMPOTENT] Post-operation state reconciliation...");
+        let _ = self.reconcile_disk_state_with_spdk(&disk_name).await;
+        
+        // Evaluate final result based on both operation outcome and reconciled state
+        match result {
+            Ok(value) => {
+                println!("✅ [IDEMPOTENT] {} completed successfully for: {}", operation_name, disk_pci_addr);
+                Ok(value)
+            }
+            Err(e) => {
+                println!("⚠️ [IDEMPOTENT] {} had issues: {}", operation_name, e);
+                
+                // Check if reconciliation resolved the intended state
+                let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+                if let Ok(final_disk) = spdk_disks.get(&disk_name).await {
+                    if let Some(status) = &final_disk.status {
+                        // For initialization operations, success means blobstore_initialized = true
+                        if operation_name.contains("initialize") && status.blobstore_initialized {
+                            println!("✅ [IDEMPOTENT] Reconciliation shows {} ultimately succeeded for: {}", operation_name, disk_pci_addr);
+                            // We can't return the original value type, so we still return the error
+                            // but log that the end state is correct
+                        }
+                        // For setup operations, success means healthy = true (driver setup completed)  
+                        else if operation_name.contains("setup") && status.healthy {
+                            println!("✅ [IDEMPOTENT] Reconciliation shows {} ultimately succeeded for: {}", operation_name, disk_pci_addr);
+                        }
+                        // For deletion operations, success means blobstore_initialized = false
+                        else if operation_name.contains("delete") && !status.blobstore_initialized {
+                            println!("✅ [IDEMPOTENT] Reconciliation shows {} ultimately succeeded for: {}", operation_name, disk_pci_addr);
+                        }
+                    }
+                }
+                
+                Err(e)
+            }
+        }
     }
 }
 
