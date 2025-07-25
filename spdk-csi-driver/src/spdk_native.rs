@@ -330,9 +330,9 @@ impl SpdkNative {
         Ok(())
     }
     
-    /// Get blobstores - matches SPDK v25.05.x bdev_get_blobstores RPC
-    pub async fn get_blobstores(&self) -> Result<Vec<Value>> {
-        let result = self.call_rpc("bdev_get_blobstores", None).await?;
+    /// Get logical volume stores - matches SPDK v25.05.x bdev_lvol_get_lvstores RPC
+    pub async fn get_lvstores(&self) -> Result<Vec<Value>> {
+        let result = self.call_rpc("bdev_lvol_get_lvstores", None).await?;
         let empty_vec = Vec::new();
         Ok(result.as_array().unwrap_or(&empty_vec).clone())
     }
