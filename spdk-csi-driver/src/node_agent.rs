@@ -2479,7 +2479,10 @@ impl NodeAgent {
         };
         
         let disk_crd = match spdk_disks.get(&disk_crd_name).await {
-            Ok(existing_disk) => existing_disk,
+            Ok(existing_disk) => {
+                println!("✅ [SETUP] Found existing SpdkDisk CRD: {}", disk_crd_name);
+                existing_disk
+            }
             Err(_) => {
                 println!("🔧 [SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
                 let new_disk = SpdkDisk::new_with_metadata(
@@ -2495,7 +2498,15 @@ impl NodeAgent {
                     &self.target_namespace
                 );
                 
-                spdk_disks.create(&PostParams::default(), &new_disk).await?
+                // Handle race condition: if CRD was created between get() and create()
+                match spdk_disks.create(&PostParams::default(), &new_disk).await {
+                    Ok(created_disk) => created_disk,
+                    Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
+                        println!("🔄 [SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
+                        spdk_disks.get(&disk_crd_name).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
         };
 
@@ -2874,7 +2885,10 @@ impl NodeAgent {
         };
         
         let disk_crd = match spdk_disks.get(&disk_crd_name).await {
-            Ok(existing_disk) => existing_disk,
+            Ok(existing_disk) => {
+                println!("✅ [KERNEL_SETUP] Found existing SpdkDisk CRD: {}", disk_crd_name);
+                existing_disk
+            }
             Err(_) => {
                 println!("🔧 [KERNEL_SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
                 let new_disk = SpdkDisk::new_with_metadata(
@@ -2890,7 +2904,15 @@ impl NodeAgent {
                     &self.target_namespace
                 );
                 
-                spdk_disks.create(&PostParams::default(), &new_disk).await?
+                // Handle race condition: if CRD was created between get() and create()
+                match spdk_disks.create(&PostParams::default(), &new_disk).await {
+                    Ok(created_disk) => created_disk,
+                    Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
+                        println!("🔄 [KERNEL_SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
+                        spdk_disks.get(&disk_crd_name).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
         };
 
