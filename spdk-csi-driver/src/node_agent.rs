@@ -2830,9 +2830,20 @@ impl NodeAgent {
         println!("🔧 [SPDK_ATTACH] PCI address: {}", pci_addr);
         println!("🔧 [SPDK_ATTACH] SPDK RPC URL: {}", self.spdk_rpc_url);
         
-        // Try to create a kernel bdev in SPDK for this device  
-        let bdev_name = format!("kernel_{}", device_name);
-        let device_path = format!("/dev/{}", device_name);
+        // Try to create a kernel bdev in SPDK for this device
+        // Use actual device name for consistent naming (e.g., nvme1n1 instead of nvme-0000-00-1f.0)
+        let actual_device_name = match self.find_nvme_device_name(&pci_addr).await {
+            Ok(name) => {
+                println!("✅ [SPDK_ATTACH] Found actual device name: {} for PCI {}", name, pci_addr);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [SPDK_ATTACH] Could not find actual device name for {}, using synthesized name: {}", pci_addr, device_name);
+                device_name.to_string()
+            }
+        };
+        let bdev_name = format!("kernel_{}", actual_device_name);
+        let device_path = format!("/dev/{}", actual_device_name);
         println!("🔧 [SPDK_ATTACH] Target bdev name: {}", bdev_name);
         println!("🔧 [SPDK_ATTACH] Target device path: {}", device_path);
 
