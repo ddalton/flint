@@ -171,8 +171,30 @@ export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
-  // UI State
-  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
+  // Helper functions for persistent disk selection
+  const loadSelectedDisks = (): Set<string> => {
+    try {
+      const saved = localStorage.getItem('spdk-selected-disks');
+      if (saved) {
+        const diskArray = JSON.parse(saved);
+        return new Set(diskArray);
+      }
+    } catch (error) {
+      console.warn('Failed to load selected disks from localStorage:', error);
+    }
+    return new Set();
+  };
+
+  const saveSelectedDisks = (selection: Set<string>) => {
+    try {
+      localStorage.setItem('spdk-selected-disks', JSON.stringify(Array.from(selection)));
+    } catch (error) {
+      console.warn('Failed to save selected disks to localStorage:', error);
+    }
+  };
+  
+  // UI State with persistent disk selection
+  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(loadSelectedDisks);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -206,6 +228,27 @@ export const DiskSetupTab: React.FC = () => {
     'worker-node-2', 
     'worker-node-3'
   ];
+
+  // Cleanup invalid selections after data refresh (preserve selection across auto-refresh)
+  useEffect(() => {
+    const allDisks = Object.entries(nodeData).flatMap(([nodeName, nodeInfo]) =>
+      (nodeInfo.disks || []).map(disk => `${nodeName}:${disk.pci_address}`)
+    );
+    
+    setSelectedDisks(prev => {
+      const validSelections = new Set(Array.from(prev).filter(diskKey => 
+        allDisks.includes(diskKey)
+      ));
+      
+      // Only save if there were invalid selections removed
+      if (validSelections.size !== prev.size) {
+        saveSelectedDisks(validSelections);
+        console.log(`Cleaned up ${prev.size - validSelections.size} invalid disk selections after refresh`);
+      }
+      
+      return validSelections;
+    });
+  }, [nodeData]); // Run when nodeData changes (after refresh)
 
   useEffect(() => {
     const initialData: Record<string, any> = {};
@@ -422,6 +465,7 @@ export const DiskSetupTab: React.FC = () => {
       } else {
         newSelection.delete(diskKey);
       }
+      saveSelectedDisks(newSelection); // Persist to localStorage
       return newSelection;
     });
   };
@@ -431,12 +475,17 @@ export const DiskSetupTab: React.FC = () => {
       const selectableDisks = paginatedDisks
         .filter(disk => !disk.is_system_disk)
         .map(disk => `${disk.nodeName}:${disk.pci_address}`);
-      setSelectedDisks(prev => new Set([...prev, ...selectableDisks]));
+      setSelectedDisks(prev => {
+        const newSelection = new Set([...prev, ...selectableDisks]);
+        saveSelectedDisks(newSelection); // Persist to localStorage
+        return newSelection;
+      });
     } else {
       const pageDisks = paginatedDisks.map(disk => `${disk.nodeName}:${disk.pci_address}`);
       setSelectedDisks(prev => {
         const newSelection = new Set(prev);
         pageDisks.forEach(key => newSelection.delete(key));
+        saveSelectedDisks(newSelection); // Persist to localStorage
         return newSelection;
       });
     }
@@ -480,6 +529,7 @@ export const DiskSetupTab: React.FC = () => {
         setSelectedDisks(prev => {
           const newSelection = new Set(prev);
           diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
+          saveSelectedDisks(newSelection); // Persist to localStorage
           return newSelection;
         });
       }
@@ -531,6 +581,7 @@ export const DiskSetupTab: React.FC = () => {
         setSelectedDisks(prev => {
           const newSelection = new Set(prev);
           diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
+          saveSelectedDisks(newSelection); // Persist to localStorage
           return newSelection;
         });
       }
@@ -596,6 +647,7 @@ export const DiskSetupTab: React.FC = () => {
           setSelectedDisks(prev => {
             const newSelection = new Set(prev);
             diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
+            saveSelectedDisks(newSelection); // Persist to localStorage
             return newSelection;
           });
           
@@ -643,7 +695,9 @@ export const DiskSetupTab: React.FC = () => {
 
       if (result.success) {
         // Remove from selection and refresh
-        setSelectedDisks(new Set());
+        const newSelection = new Set<string>();
+        setSelectedDisks(newSelection);
+        saveSelectedDisks(newSelection); // Persist to localStorage
         setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
       }
     } catch (error) {
@@ -947,7 +1001,11 @@ export const DiskSetupTab: React.FC = () => {
                 {selectedDisks.size} disk{selectedDisks.size !== 1 ? 's' : ''} selected
               </span>
               <button
-                onClick={() => setSelectedDisks(new Set())}
+                onClick={() => {
+                  const newSelection = new Set<string>();
+                  setSelectedDisks(newSelection);
+                  saveSelectedDisks(newSelection); // Persist to localStorage
+                }}
                 className="text-sm text-gray-600 hover:text-gray-800"
               >
                 Clear Selection
