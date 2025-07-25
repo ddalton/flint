@@ -906,7 +906,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
-    // Find existing bdev for this device - Pure LVS operation requires existing bdev
+    // Find existing bdev for this device - LVS repair/recovery operation
     println!("🔍 [SPDK_INIT] Discovering existing bdev for device: {}", disk.spec.pcie_addr);
     
     let bdev_name = match agent.find_existing_bdev_for_device(&disk.spec.pcie_addr, controller_id).await {
@@ -916,8 +916,23 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
         Err(e) => {
             println!("❌ [SPDK_INIT] No existing bdev found for device {}: {}", disk.spec.pcie_addr, e);
-            println!("💡 [SPDK_INIT] Hint: Run 'Setup SPDK' first to bind driver and create bdev");
-            return Err(format!("Device {} must be set up first before initializing LVS. No bdev found: {}", disk.spec.pcie_addr, e).into());
+            println!("🔧 [SPDK_INIT] This is a repair operation - checking if device needs basic setup first");
+            
+            // Check current driver state for better error messaging
+            let current_driver = agent.get_current_driver(&disk.spec.pcie_addr).await
+                .unwrap_or_else(|_| "unknown".to_string());
+                
+            if current_driver == "unbound" {
+                println!("💡 [SPDK_INIT] Device is unbound - run 'Setup SPDK' for complete initialization");
+                return Err("Device is unbound. Run 'Setup SPDK' for complete initialization.".into());
+            } else if current_driver == "nvme" {
+                println!("🔧 [SPDK_INIT] Device is kernel-bound but missing SPDK bdev - this may need 'Setup SPDK' instead");
+                println!("💡 [SPDK_INIT] Hint: 'Initialize LVS' is for repair/recovery. For new devices, use 'Setup SPDK'");
+                return Err(format!("Device {} is driver-bound but missing SPDK bdev. For new devices, use 'Setup SPDK'. This operation is for LVS repair/recovery only.", disk.spec.pcie_addr).into());
+            } else {
+                println!("💡 [SPDK_INIT] Unexpected device state - try 'Setup SPDK' for complete setup");
+                return Err(format!("Device {} has unexpected state. Use 'Setup SPDK' for complete setup.", disk.spec.pcie_addr).into());
+            }
         }
     };
 
@@ -2440,7 +2455,11 @@ impl NodeAgent {
             }
         };
 
-        println!("🎉 [SETUP] Disk setup completed successfully for PCI address: {} (driver + bdev ready for LVS)", pci_addr);
+        // Initialize the blobstore to complete SPDK setup
+        initialize_blobstore_on_device(self, &disk_crd).await?;
+        println!("✅ [SETUP] LVS/blobstore initialization completed successfully");
+
+        println!("🎉 [SETUP] Complete SPDK setup finished successfully for PCI address: {} (fully SPDK ready)", pci_addr);
         Ok(())
     }
 
@@ -2819,8 +2838,12 @@ impl NodeAgent {
             }
         };
 
+        // Initialize the blobstore to complete SPDK setup
+        initialize_blobstore_on_device(self, &disk_crd).await?;
+        println!("✅ [KERNEL_SETUP] LVS/blobstore initialization completed successfully");
+
         // Step 5: Mark as ready for SPDK (kernel mode)
-        println!("🎉 [KERNEL_SETUP] Disk setup completed successfully: {} (kernel-bound + bdev ready for LVS)", pci_addr);
+        println!("🎉 [KERNEL_SETUP] Complete SPDK setup finished successfully: {} (fully SPDK ready)", pci_addr);
         Ok(())
     }
 
