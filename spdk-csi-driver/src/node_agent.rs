@@ -895,49 +895,19 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
-    // Determine bdev name and create AIO bdev if needed
-    let bdev_name = if disk.spec.device_path.starts_with("/dev/") {
-        // For kernel-bound devices, create an AIO bdev first
-        println!("🔗 [SPDK_INIT] Creating AIO bdev for kernel device: {}", disk.spec.device_path);
-        
-        // Extract device name from path (e.g., "/dev/nvme1n1" -> "nvme1n1")
-        let device_name = disk.spec.device_path.trim_start_matches("/dev/");
-        
-        let aio_bdev_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-            "method": "bdev_aio_create",
-            "params": {
-                "name": format!("aio_{}", device_name),
-                "filename": format!("/dev/{}", device_name),
-                "block_size": 4096
-            }
-        })).await;
-
-        match aio_bdev_result {
-            Ok(result) => {
-                if let Some(error) = result.get("error") {
-                    // AIO bdev might already exist, which is fine
-                    if error["code"].as_i64() == Some(-17) {
-                        println!("✅ [SPDK_INIT] AIO bdev already exists: aio_{}", device_name);
-                    } else {
-                        println!("❌ [SPDK_INIT] Failed to create AIO bdev: {}", error);
-                        return Err(format!("Failed to create AIO bdev: {}", error).into());
-                    }
-                } else {
-                    println!("✅ [SPDK_INIT] Successfully created AIO bdev: aio_{}", device_name);
-                }
-            }
-            Err(e) => {
-                println!("❌ [SPDK_INIT] Failed to create AIO bdev: {}", e);
-                return Err(e);
-            }
+    // Find existing bdev for this device - Initialize LVS should NOT create bdevs
+    println!("🔍 [SPDK_INIT] Discovering existing bdev for device: {}", disk.spec.pcie_addr);
+    
+    let bdev_name = match agent.find_existing_bdev_for_device(&disk.spec.pcie_addr, controller_id).await {
+        Ok(name) => {
+            println!("✅ [SPDK_INIT] Found existing bdev: {}", name);
+            name
         }
-
-        format!("aio_{}", device_name)
-    } else {
-        // Use SPDK controller name for SPDK-attached devices
-        let name = format!("{}n1", controller_id);
-        println!("🔗 [SPDK_INIT] Using SPDK bdev name: {}", name);
-        name
+        Err(e) => {
+            println!("❌ [SPDK_INIT] No existing bdev found for device {}: {}", disk.spec.pcie_addr, e);
+            println!("💡 [SPDK_INIT] Hint: Run 'Setup Disks' first to bind device and create bdev");
+            return Err(format!("Device {} must be set up first before initializing LVS. No bdev found: {}", disk.spec.pcie_addr, e).into());
+        }
     };
 
     // Now handle LVS creation with discovery-first approach
@@ -3392,9 +3362,13 @@ impl NodeAgent {
             return Err("Cannot initialize blobstore on system disk".into());
         }
 
-        if !disk_info.spdk_ready {
-            println!("❌ [INIT_SINGLE_BLOBSTORE] Disk is not SPDK-ready, use full setup instead");
-            return Err("Disk is not SPDK-ready, use full setup instead".into());
+        // Check if device has been set up (has driver bound and bdev available)
+        let current_driver = self.get_current_driver(pci_addr).await?;
+        println!("🔍 [INIT_SINGLE_BLOBSTORE] Current driver: {}", current_driver);
+        
+        if current_driver == "unbound" {
+            println!("❌ [INIT_SINGLE_BLOBSTORE] Device is unbound - run 'Setup Disks' first");
+            return Err("Device is unbound. Run 'Setup Disks' to bind driver first.".into());
         }
 
         // Find or create the SpdkDisk CRD
@@ -3655,6 +3629,84 @@ impl NodeAgent {
                 Err(e)
             }
         }
+    }
+
+    /// Find existing bdev for a device by querying SPDK - used by Initialize LVS
+    async fn find_existing_bdev_for_device(&self, pci_addr: &str, controller_id: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [FIND_BDEV] Searching for existing bdev for device: {}", pci_addr);
+        
+        // Query all existing bdevs from SPDK
+        let bdevs_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs"
+        })).await?;
+        
+        if let Some(bdev_list) = bdevs_result["result"].as_array() {
+            println!("🔍 [FIND_BDEV] Found {} total bdevs in SPDK", bdev_list.len());
+            
+            // Get device info to help with matching
+            let device_info = self.get_disk_info(pci_addr).await?;
+            let device_name = device_info.device_name;
+            
+            // Search strategies in order of preference:
+            // 1. Direct SPDK NVMe bdev (for SPDK-bound devices)
+            // 2. AIO bdev (for kernel-bound devices) 
+            // 3. Any bdev that matches device characteristics
+            
+            let possible_names = vec![
+                format!("{}n1", controller_id),              // Direct SPDK: nvme0n1
+                format!("aio_{}", device_name),              // AIO: aio_nvme1n1  
+                device_name.clone(),                         // Direct: nvme1n1
+                format!("nvme_{}n1", controller_id),         // Alt SPDK format
+            ];
+            
+            println!("🔍 [FIND_BDEV] Checking for bdev names: {:?}", possible_names);
+            
+            for bdev in bdev_list {
+                if let Some(bdev_name) = bdev["name"].as_str() {
+                    println!("🔍 [FIND_BDEV] Examining bdev: {}", bdev_name);
+                    
+                    // Check if this bdev matches any of our expected names
+                    if possible_names.iter().any(|name| name == bdev_name) {
+                        println!("✅ [FIND_BDEV] Found matching bdev: {}", bdev_name);
+                        
+                        // Additional validation: check if bdev is accessible
+                        if let Some(product_name) = bdev.get("product_name") {
+                            println!("📋 [FIND_BDEV] Bdev details: product={}", product_name);
+                        }
+                        
+                        return Ok(bdev_name.to_string());
+                    }
+                    
+                    // For AIO bdevs, also check if filename matches device path
+                    if let Some(filename) = bdev.get("filename") {
+                        if let Some(filename_str) = filename.as_str() {
+                            let expected_path = format!("/dev/{}", device_name);
+                            if filename_str == expected_path {
+                                println!("✅ [FIND_BDEV] Found AIO bdev by filename match: {} -> {}", bdev_name, filename_str);
+                                return Ok(bdev_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            
+            println!("❌ [FIND_BDEV] No existing bdev found for device {} ({})", pci_addr, device_name);
+            println!("📋 [FIND_BDEV] Available bdevs:");
+            for bdev in bdev_list {
+                if let Some(name) = bdev["name"].as_str() {
+                    let bdev_type = bdev.get("driver_specific").and_then(|d| d.get("nvme"))
+                        .map(|_| "nvme")
+                        .or_else(|| bdev.get("filename").map(|_| "aio"))
+                        .unwrap_or("unknown");
+                    println!("   - {} (type: {})", name, bdev_type);
+                }
+            }
+            
+        } else {
+            println!("❌ [FIND_BDEV] Failed to get bdev list from SPDK");
+        }
+        
+        Err(format!("No bdev found for device {}. Device may need to be set up first.", pci_addr).into())
     }
 }
 
