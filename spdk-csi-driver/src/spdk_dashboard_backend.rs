@@ -334,6 +334,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warp::path("nodes")
                 .and(warp::path::param::<String>())
                 .and(warp::path("disks"))
+                .and(warp::path("initialize"))
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(initialize_node_disks)
+        )
+        .or(
+            warp::path("nodes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("disks"))
                 .and(warp::path("status"))
                 .and(warp::get())
                 .and(state_filter.clone())
@@ -1630,6 +1640,42 @@ async fn reset_node_disks(node: String, request: serde_json::Value, state: AppSt
         Ok(warp::reply::json(&json!({
             "success": false,
             "error": "Node-agent not found",
+            "node": node
+        })))
+    }
+}
+
+async fn initialize_node_disks(node: String, request: serde_json::Value, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    let spdk_nodes = state.spdk_nodes.read().await;
+    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
+        let http_client = HttpClient::new();
+        
+        match http_client
+            .post(&format!("{}/api/disks/initialize", node_agent_url))
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => Ok(warp::reply::json(&data)),
+                    Err(_) => Ok(warp::reply::json(&json!({
+                        "success": false,
+                        "error": "Failed to parse node-agent response",
+                        "node": node
+                    })))
+                }
+            }
+            Err(e) => Ok(warp::reply::json(&json!({
+                "success": false,
+                "error": format!("Failed to connect to node-agent: {}", e),
+                "node": node
+            })))
+        }
+    } else {
+        Ok(warp::reply::json(&json!({
+            "success": false,
+            "error": "Node-agent not found", 
             "node": node
         })))
     }
