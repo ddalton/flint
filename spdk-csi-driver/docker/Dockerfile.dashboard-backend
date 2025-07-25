@@ -1,18 +1,22 @@
 # Multi-stage Dockerfile for SPDK CSI driver dashboard backend
-FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+FROM ubuntu:22.04 AS builder
 
-# --- System-level setup ---
-# Switch to root to install build dependencies.
-# - perl: Required by the openssl-sys crate.
-# - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
-# - openssl-dev: Required by the openssl-sys crate for SSL/TLS functionality.
-# - pkgconf: Required to locate OpenSSL libraries (Alpine's pkg-config).
-USER root
-RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
-    (echo "Failed to install build dependencies" && exit 1)
+# Install build dependencies and Rust 1.85
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust 1.85
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Create app user
-RUN adduser -D -s /bin/sh -u 1001 appuser
+RUN useradd -m -u 1001 appuser
 
 # Set working directory
 WORKDIR /app
@@ -29,15 +33,16 @@ COPY proto/ ./proto/
 RUN cargo build --release --bin spdk-dashboard-backend
 
 # Runtime stage
-FROM alpine:3.19
+FROM ubuntu:22.04
 
 # Install runtime dependencies
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     ca-certificates \
-    curl
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create app user  
-RUN adduser -D -s /bin/sh -u 1001 appuser
+RUN useradd -m -u 1001 appuser
 
 # Copy the compiled binary
 COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/spdk-dashboard-backend
