@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for SPDK CSI driver dashboard backend
-FROM rust:1.75-alpine3.18 AS builder
+FROM rust:1.84-alpine3.19 AS builder
 
 # Install build dependencies  
 RUN apk add --no-cache \
@@ -23,10 +23,10 @@ COPY proto/ ./proto/
 # Dashboard backend only needs HTTP APIs - no SPDK bindings
 
 # Build the dashboard backend
-RUN cargo build --release --bin dashboard-backend
+RUN cargo build --release --bin spdk-dashboard-backend
 
 # Runtime stage
-FROM alpine:3.18
+FROM alpine:3.19
 
 # Install runtime dependencies
 RUN apk add --no-cache \
@@ -37,9 +37,9 @@ RUN apk add --no-cache \
 RUN adduser -D -s /bin/sh -u 1001 appuser
 
 # Copy the compiled binary
-COPY --from=builder /app/target/release/dashboard-backend /usr/local/bin/
-RUN chown appuser:appuser /usr/local/bin/dashboard-backend && \
-    chmod +x /usr/local/bin/dashboard-backend
+COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/
+RUN chown appuser:appuser /usr/local/bin/spdk-dashboard-backend && \
+    chmod +x /usr/local/bin/spdk-dashboard-backend
 
 # Switch to non-root user
 USER appuser
@@ -55,4 +55,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Command to run the application
-CMD ["/usr/local/bin/dashboard-backend"] 
+CMD ["/usr/local/bin/spdk-dashboard-backend"] 
