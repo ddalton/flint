@@ -105,6 +105,8 @@ spec:
               value: "{{ .Values.logging.level | default "info" }}"
             - name: API_PORT
               value: "8081"
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
           securityContext:
             privileged: true
           ports:
@@ -164,6 +166,8 @@ spec:
               value: "{{ .Values.logging.level | default "info" }}"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
           securityContext:
             runAsUser: 65532
             runAsGroup: 0
@@ -193,6 +197,8 @@ spec:
               value: "embedded"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
           securityContext:
             privileged: true
           ports:

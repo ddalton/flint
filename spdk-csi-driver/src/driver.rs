@@ -17,6 +17,7 @@ pub struct SpdkCsiDriver {
     pub spdk_node_urls: Arc<Mutex<HashMap<String, String>>>,
     pub nvmeof_target_port: u16,
     pub nvmeof_transport: String,
+    pub target_namespace: String,
 }
 
 impl SpdkCsiDriver {

@@ -23,7 +23,7 @@ impl ControllerService {
 
     /// Get count of available healthy disks with initialized LVS
     async fn get_available_disk_count(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let disk_list = disks.list(&ListParams::default()).await?;
         
         let count = disk_list.items.iter()
@@ -49,7 +49,7 @@ impl ControllerService {
         // Validate inputs
         self.validate_volume_request(volume_id, capacity, num_replicas).await?;
         
-        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let available_disks = self.get_available_disks(&disks, capacity).await?;
 
         // Enhanced validation with better error messages
@@ -70,10 +70,11 @@ impl ControllerService {
                 nvmeof_target_port: Some(self.driver.nvmeof_target_port),
                 ..Default::default()
             },
+            &self.driver.target_namespace,
         );
 
         // Create CRD
-        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         crd_api.create(&PostParams::default(), &spdk_volume).await
             .map_err(|e| Status::internal(format!("Failed to create SpdkVolume CRD: {}", e)))?;
 
@@ -142,7 +143,7 @@ impl ControllerService {
         }
 
         // Check if volume already exists
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         if volumes_api.get(volume_id).await.is_ok() {
             return Err(Status::already_exists(format!("Volume {} already exists", volume_id)));
         }
@@ -511,7 +512,7 @@ impl Controller for ControllerService {
             return Err(Status::invalid_argument("Missing volume ID"));
         }
 
-        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let spdk_volume = match crd_api.get(&volume_id).await {
             Ok(vol) => vol,
             Err(_) => return Ok(Response::new(DeleteVolumeResponse {})),
@@ -521,7 +522,7 @@ impl Controller for ControllerService {
         self.delete_volume_replicas(&spdk_volume).await?;
 
         // Update disk statuses
-        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let mut disk_refs = Vec::new();
         for replica in &spdk_volume.spec.replicas {
             if let Ok(disk) = disks.get(&replica.disk_ref).await {
@@ -564,7 +565,7 @@ impl Controller for ControllerService {
             return Err(Status::invalid_argument("Volume ID is required"));
         }
 
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         match volumes_api.get(&volume_id).await {
             Ok(_) => {
                 let confirmed_capabilities: Vec<_> = req.volume_capabilities.into_iter()
@@ -616,7 +617,7 @@ impl Controller for ControllerService {
         &self,
         _request: Request<ListVolumesRequest>,
     ) -> Result<Response<ListVolumesResponse>, Status> {
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let volume_list = volumes_api.list(&ListParams::default()).await
             .map_err(|e| Status::internal(format!("Failed to list volumes: {}", e)))?;
 
@@ -653,7 +654,7 @@ impl Controller for ControllerService {
         &self,
         _request: Request<GetCapacityRequest>,
     ) -> Result<Response<GetCapacityResponse>, Status> {
-        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let disk_list = disks_api.list(&ListParams::default()).await
             .map_err(|e| Status::internal(format!("Failed to list disks: {}", e)))?;
 
@@ -705,7 +706,7 @@ impl Controller for ControllerService {
             return Err(Status::invalid_argument("Volume ID and new capacity are required"));
         }
 
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let volume = volumes_api.get(&volume_id).await
             .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
 
@@ -768,7 +769,7 @@ impl Controller for ControllerService {
             return Err(Status::invalid_argument("Volume ID is required"));
         }
 
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let volume = volumes_api.get(&volume_id).await
             .map_err(|_| Status::not_found(format!("Volume {} not found", volume_id)))?;
 

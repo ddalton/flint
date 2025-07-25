@@ -34,6 +34,8 @@ spec:
               value: "{{ .Values.spdkOperator.healthCheckInterval }}"
             - name: REBUILD_ENABLED
               value: "{{ .Values.spdkOperator.rebuildEnabled }}"
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
           ports:
             - name: healthz
               containerPort: 9809

@@ -42,6 +42,33 @@ async fn start_health_server() {
         .await;
 }
 
+/// Get the current pod's namespace from the service account token
+async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
+    // Try environment variable first (allows override)
+    if let Ok(namespace) = std::env::var("FLINT_NAMESPACE") {
+        return Ok(namespace);
+    }
+    
+    // Read namespace from service account token file
+    let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+    if std::path::Path::new(namespace_path).exists() {
+        match tokio::fs::read_to_string(namespace_path).await {
+            Ok(namespace) => {
+                let namespace = namespace.trim().to_string();
+                println!("📍 [NAMESPACE] Detected current namespace: {}", namespace);
+                return Ok(namespace);
+            }
+            Err(e) => {
+                println!("⚠️ [NAMESPACE] Failed to read namespace file: {}", e);
+            }
+        }
+    }
+    
+    // Fallback to default if running outside cluster
+    println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
+    Ok("flint-system".to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kube_client = Client::try_default().await?;
@@ -60,6 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: Unknown NVMe-oF transport '{}', using 'tcp'", nvmeof_transport);
     }
     
+    // Detect the namespace for custom resources
+    let target_namespace = get_current_namespace().await?;
+    
     let driver = Arc::new(SpdkCsiDriver {
         node_id: node_id.clone(),
         kube_client,
@@ -67,7 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
+        target_namespace,
     });
+    
+    println!("🎯 [CONFIG] Using namespace for custom resources: {}", driver.target_namespace);
     
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {

@@ -19,6 +19,7 @@ struct Context {
     spdk_rpc_url: String,
     health_interval: u64,
     rebuild_enabled: bool,
+    target_namespace: String,
 }
 
 // Custom error type that is Send + Sync
@@ -67,10 +68,38 @@ impl From<Box<dyn std::error::Error>> for ControllerError {
     }
 }
 
+/// Get the current pod's namespace from the service account token
+async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
+    // Try environment variable first (allows override)
+    if let Ok(namespace) = env::var("FLINT_NAMESPACE") {
+        return Ok(namespace);
+    }
+    
+    // Read namespace from service account token file
+    let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+    if std::path::Path::new(namespace_path).exists() {
+        match tokio::fs::read_to_string(namespace_path).await {
+            Ok(namespace) => {
+                let namespace = namespace.trim().to_string();
+                println!("📍 [NAMESPACE] Detected current namespace: {}", namespace);
+                return Ok(namespace);
+            }
+            Err(e) => {
+                println!("⚠️ [NAMESPACE] Failed to read namespace file: {}", e);
+            }
+        }
+    }
+    
+    // Fallback to default if running outside cluster
+    println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
+    Ok("flint-system".to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(client.clone(), "default");
+    let target_namespace = get_current_namespace().await?;
+    println!("🎯 [OPERATOR] Using namespace for custom resources: {}", target_namespace);
     
     let ctx = Arc::new(Context {
         client: client.clone(),
@@ -83,7 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("true".to_string())
             .parse()
             .unwrap_or(true),
+        target_namespace,
     });
+    
+    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(client.clone(), &ctx.target_namespace);
 
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
@@ -117,8 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
+    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let volume_id = &spdk_volume.spec.volume_id;
     let mut status = spdk_volume.status.clone().unwrap_or_default();
     let mut status_update_needed = false;
@@ -434,7 +466,7 @@ async fn update_replica_after_replacement(
         ..Default::default()
     };
     
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
+    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     spdk_volumes
         .patch(volume_id, &PatchParams::default(), &Patch::Merge(json!({
             "spec": new_spec
@@ -442,7 +474,7 @@ async fn update_replica_after_replacement(
         .await?;
 
     // Update disk status
-    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), "default");
+    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let disk_name = replacement_disk.metadata.name.clone().unwrap_or_default();
     let mut disk_status = replacement_disk.status.unwrap_or_default();
     
@@ -600,7 +632,7 @@ async fn health_monitor_task(ctx: Arc<Context>) {
 }
 
 async fn perform_periodic_health_check(ctx: &Context) -> Result<(), ControllerError> {
-    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), "default");
+    let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let volumes = spdk_volumes.list(&ListParams::default()).await
         .map_err(|e| ControllerError { message: format!("Failed to list volumes: {}", e) })?;
     

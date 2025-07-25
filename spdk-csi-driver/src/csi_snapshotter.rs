@@ -184,7 +184,7 @@ pub async fn create_snapshot_impl(
     }
 
     // Get the source SpdkVolume CR
-    let volumes_api: Api<SpdkVolume> = Api::namespaced(driver.kube_client.clone(), "default");
+    let volumes_api: Api<SpdkVolume> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
     let source_volume = volumes_api.get(&source_volume_id).await
         .map_err(|e| Status::not_found(format!("Source volume {} not found: {}", source_volume_id, e)))?;
 
@@ -230,9 +230,10 @@ pub async fn create_snapshot_impl(
             nvmeof_access_enabled: source_volume.spec.nvmeof_transport.is_some(),
             nvmeof_transport: source_volume.spec.nvmeof_transport.clone(),
         },
+        &driver.target_namespace,
     );
 
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), "default");
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
     snapshots_api.create(&PostParams::default(), &snapshot_crd).await
         .map_err(|e| Status::internal(format!("Failed to create SpdkSnapshot CRD: {}", e)))?;
 
@@ -334,7 +335,7 @@ pub async fn delete_snapshot_impl(
         return Err(Status::invalid_argument("Snapshot ID is required"));
     }
 
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), "default");
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
     let snapshot_crd = match snapshots_api.get(&snapshot_id).await {
         Ok(crd) => crd,
         Err(_) => return Ok(Response::new(DeleteSnapshotResponse {})),
@@ -366,7 +367,7 @@ pub async fn list_snapshots_impl(
     driver: &Arc<SpdkCsiDriver>,
     _request: Request<ListSnapshotsRequest>,
 ) -> Result<Response<ListSnapshotsResponse>, Status> {
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), "default");
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
     let crd_list = snapshots_api.list(&ListParams::default()).await
         .map_err(|e| Status::internal(format!("Failed to list SpdkSnapshots: {}", e)))?;
 

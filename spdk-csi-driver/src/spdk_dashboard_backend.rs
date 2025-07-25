@@ -176,11 +176,43 @@ struct AppState {
     spdk_nodes: Arc<RwLock<HashMap<String, String>>>,
     cache: Arc<RwLock<Option<DashboardData>>>,
     last_update: Arc<RwLock<DateTime<Utc>>>,
+    target_namespace: String,
+}
+
+/// Get the current pod's namespace from the service account token
+async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
+    // Try environment variable first (allows override)
+    if let Ok(namespace) = std::env::var("FLINT_NAMESPACE") {
+        return Ok(namespace);
+    }
+    
+    // Read namespace from service account token file
+    let namespace_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+    if std::path::Path::new(namespace_path).exists() {
+        match tokio::fs::read_to_string(namespace_path).await {
+            Ok(namespace) => {
+                let namespace = namespace.trim().to_string();
+                println!("📍 [NAMESPACE] Detected current namespace: {}", namespace);
+                return Ok(namespace);
+            }
+            Err(e) => {
+                println!("⚠️ [NAMESPACE] Failed to read namespace file: {}", e);
+            }
+        }
+    }
+    
+    // Fallback to default if running outside cluster
+    println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
+    Ok("flint-system".to_string())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kube_client = Client::try_default().await?;
+    
+    // Detect the namespace for custom resources
+    let target_namespace = get_current_namespace().await?;
+    println!("🎯 [DASHBOARD] Using namespace for custom resources: {}", target_namespace);
     
     let mut spdk_nodes = HashMap::new();
     
@@ -203,6 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spdk_nodes: Arc::new(RwLock::new(spdk_nodes)),
         cache: Arc::new(RwLock::new(None)),
         last_update: Arc::new(RwLock::new(Utc::now())),
+        target_namespace,
     };
     
     let refresh_state = app_state.clone();
@@ -388,10 +421,10 @@ async fn refresh_loop(state: AppState) {
 }
 
 async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
-    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
+    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let volumes_list = volumes_api.list(&ListParams::default()).await?;
     
-    let disks_api: Api<SpdkDisk> = Api::namespaced(state.kube_client.clone(), "default");
+    let disks_api: Api<SpdkDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let disks_list = disks_api.list(&ListParams::default()).await?;
     
     let mut dashboard_volumes = Vec::new();
@@ -1173,7 +1206,7 @@ async fn get_node_raid_status(node: String, state: AppState) -> Result<impl warp
 }
 
 async fn get_all_snapshots(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let http_client = HttpClient::new();
     let spdk_nodes = state.spdk_nodes.read().await;
 
@@ -1249,7 +1282,7 @@ async fn get_snapshot_details(
     snapshot_id: String,
     state: AppState,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), "default");
+    let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     
     match snapshots_api.get(&snapshot_id).await {
         Ok(snapshot_crd) => {
@@ -1423,7 +1456,7 @@ async fn trace_snapshot_chain_on_node(
 }
 
 async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), "default");
+    let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
 
     let all_volumes = match volumes_api.list(&ListParams::default()).await {
         Ok(list) => list,

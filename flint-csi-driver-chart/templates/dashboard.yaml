@@ -30,6 +30,8 @@ spec:
               value: {{ .Values.logLevel | default "info" | quote }}
             - name: KUBE_NAMESPACE
               value: {{ .Release.Namespace }}
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: SPDK_NODE_URLS
               value: ""  # Will auto-discover via K8s API
           ports:

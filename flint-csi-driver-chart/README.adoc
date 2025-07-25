@@ -1,1 +1,49 @@
-when you install the chart, you can simply set --set crds.install=false if the CRDs already exist, preventing any conflicts.
+= Flint CSI Driver Helm Chart
+
+This Helm chart deploys the Flint CSI driver for Kubernetes, providing high-performance block storage using SPDK (Storage Performance Development Kit).
+
+== Features
+
+- **High Performance**: SPDK-based userspace storage for maximum IOPS and minimum latency
+- **Cloud Native**: Full Kubernetes CSI integration with dynamic provisioning
+- **Multi-Replica Volumes**: Automatic data replication across nodes for high availability
+- **Real-time Monitoring**: Integrated dashboard for cluster-wide storage visibility
+- **Snapshot Support**: Volume snapshots and clones via CSI snapshot controller
+- **Topology Awareness**: Intelligent scheduling based on storage locality
+- **Custom Resource Management**: All storage resources managed in the same namespace as the CSI driver
+
+== Quick Start
+
+[source,bash]
+----
+# Add the Flint repository (replace with your actual repository)
+helm repo add flint https://your-helm-repo.com/flint
+
+# Install Flint CSI driver in the flint-system namespace
+helm install flint-csi flint/flint-csi-driver --create-namespace --namespace flint-system
+
+# Verify installation
+kubectl get pods -n flint-system
+kubectl get storageclass flint
+----
+
+== Configuration
+
+=== Custom Resource Namespace
+
+**NEW**: The Flint CSI driver now creates all custom resources (SpdkDisk, SpdkVolume, SpdkSnapshot) in the same namespace where it is installed. This eliminates cross-namespace access issues and simplifies RBAC management.
+
+[source,yaml]
+----
+driver:
+  # Custom Resources Namespace Configuration
+  # By default, all Flint custom resources are created in .Release.Namespace
+  # This eliminates cross-namespace access issues and simplifies RBAC
+  customResourceNamespace: ""  # Empty means use .Release.Namespace
+  
+  # Override only if you need custom resources in a different namespace
+  # Note: Ensure RBAC permissions are configured appropriately
+  # customResourceNamespace: "my-storage-namespace"
+----
+
+**Environment Variable**: All components receive `FLINT_NAMESPACE` environment variable that specifies where custom resources should be created.

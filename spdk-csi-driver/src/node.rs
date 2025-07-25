@@ -198,7 +198,7 @@ impl NodeService {
 
     /// Updates the SpdkVolume CRD to mark pod as scheduled on this node
     async fn update_volume_scheduling_status(&self, volume_id: &str, pod_scheduled: bool) -> Result<(), Status> {
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         match volumes_api.get(volume_id).await {
             Ok(mut volume) => {
@@ -476,7 +476,7 @@ impl Node for NodeService {
         println!("Staging volume {} to {}", volume_id, staging_target_path);
 
         // Get volume information from CRD
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let volume = volumes_api.get(&volume_id).await
             .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
 
@@ -549,7 +549,7 @@ impl Node for NodeService {
         self.unmount_device(&staging_target_path).await.ok();
 
         // Step 2: Get volume information for cleanup decisions
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         match volumes_api.get(&volume_id).await {
             Ok(volume) => {
                 // Step 3: Clean up ublk device (replaces NVMe-oF loopback cleanup)
@@ -883,7 +883,7 @@ impl Node for NodeService {
         let mut max_volumes_per_node = 0i64;
         
         // Query local SPDK disks to determine maximum volumes
-        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         if let Ok(disk_list) = disks_api.list(&kube::api::ListParams::default()).await {
             let local_disks: Vec<_> = disk_list.items.iter()
                 .filter(|disk| disk.spec.node_id == self.driver.node_id)
@@ -918,7 +918,7 @@ impl NodeService {
         volume_id: &str,
         ublk_device: Option<UblkDevice>,
     ) -> Result<(), Status> {
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         // Get current volume
         let volume = volumes_api.get(volume_id).await

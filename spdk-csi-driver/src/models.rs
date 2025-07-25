@@ -328,13 +328,13 @@ impl RaidStatus {
 
 /// Create a new SpdkVolume instance with proper metadata
 impl SpdkVolume {
-    pub fn new_with_metadata(name: &str, spec: SpdkVolumeSpec) -> Self {
+    pub fn new_with_metadata(name: &str, spec: SpdkVolumeSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
         
         SpdkVolume {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some("default".to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec,
@@ -345,13 +345,13 @@ impl SpdkVolume {
 
 /// Create a new SpdkSnapshot instance with proper metadata  
 impl SpdkSnapshot {
-    pub fn new_with_metadata(name: &str, spec: SpdkSnapshotSpec) -> Self {
+    pub fn new_with_metadata(name: &str, spec: SpdkSnapshotSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
         
         SpdkSnapshot {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some("default".to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec,
@@ -362,13 +362,13 @@ impl SpdkSnapshot {
 
 /// Create a new SpdkDisk instance with proper metadata
 impl SpdkDisk {
-    pub fn new_with_metadata(name: &str, spec: SpdkDiskSpec) -> Self {
+    pub fn new_with_metadata(name: &str, spec: SpdkDiskSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
         
         SpdkDisk {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
-                namespace: Some("default".to_string()),
+                namespace: Some(namespace.to_string()),
                 ..Default::default()
             },
             spec,

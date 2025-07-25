@@ -34,6 +34,8 @@ spec:
               value: "unix:///csi/csi.sock"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
+            - name: FLINT_NAMESPACE
+              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
           args:
             - "--v={{ .Values.logLevel }}"
           ports:

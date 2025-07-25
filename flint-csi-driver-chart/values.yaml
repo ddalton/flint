@@ -64,6 +64,15 @@ driver:
   # Set to false for managed clusters (Rancher, EKS, GKE, AKS) that protect these labels
   useHostnameTopology: false
   
+  # Custom Resources Namespace Configuration
+  # By default, all Flint custom resources (SpdkDisk, SpdkVolume, SpdkSnapshot) 
+  # are created in the same namespace as the CSI driver installation
+  # This eliminates cross-namespace access issues and simplifies RBAC
+  # 
+  # Override this only if you need custom resources in a different namespace
+  # Note: Make sure RBAC permissions are configured appropriately if changed
+  customResourceNamespace: ""  # Empty means use .Release.Namespace
+  
   # Examples:
   # Self-managed clusters (kubeadm, etc.): useHostnameTopology: true
   # Rancher-managed clusters: useHostnameTopology: false

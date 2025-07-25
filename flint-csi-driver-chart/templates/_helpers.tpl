@@ -68,3 +68,14 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.node.name }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Custom Resource Namespace - determines where SpdkDisk, SpdkVolume, SpdkSnapshot should be created
+*/}}
+{{- define "flint-csi-driver-chart.customResourceNamespace" -}}
+{{- if .Values.driver.customResourceNamespace }}
+{{- .Values.driver.customResourceNamespace }}
+{{- else }}
+{{- .Release.Namespace }}
+{{- end }}
+{{- end -}}
