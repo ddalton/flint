@@ -3065,20 +3065,19 @@ impl NodeAgent {
             self.unbind_from_driver(pci_addr, &current_driver).await?;
         }
 
-        // Bind back to nvme driver
-        self.load_driver_module("nvme").await?;
+        // For "Unbind SPDK", we want the device to remain unbound (free)
+        // Don't rebind to nvme - let user decide next action
         
-        // Use PCI rescan to rebind to nvme
-        fs::write("/sys/bus/pci/rescan", "1")?;
-        
-        // Wait for device to reappear
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Wait a moment for unbinding to complete
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
-        // Verify reset
+        // Verify unbind was successful
         let new_driver = self.get_current_driver(pci_addr).await?;
-        if new_driver != "nvme" {
-            return Err(format!("Reset verification failed. Current driver: {}", new_driver).into());
+        if new_driver != "unbound" {
+            return Err(format!("Unbind verification failed. Device still bound to driver: {}", new_driver).into());
         }
+        
+        println!("✅ [RESET] Successfully unbound device {} from SPDK - now free for other uses", pci_addr);
 
         Ok(())
     }
