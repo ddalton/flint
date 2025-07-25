@@ -1,12 +1,15 @@
 # Multi-stage Dockerfile for SPDK CSI driver dashboard backend
-FROM rust:1.84-alpine3.19 AS builder
+FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
 
-# Install build dependencies  
-RUN apk add --no-cache \
-    musl-dev \
-    pkgconfig \
-    openssl-dev \
-    protobuf-dev
+# --- System-level setup ---
+# Switch to root to install build dependencies.
+# - perl: Required by the openssl-sys crate.
+# - protobuf-dev: Provides standard Google .proto files (e.g., timestamp.proto).
+# - openssl-dev: Required by the openssl-sys crate for SSL/TLS functionality.
+# - pkgconf: Required to locate OpenSSL libraries (Alpine's pkg-config).
+USER root
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    (echo "Failed to install build dependencies" && exit 1)
 
 # Create app user
 RUN adduser -D -s /bin/sh -u 1001 appuser
