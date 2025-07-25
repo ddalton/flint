@@ -1099,7 +1099,9 @@ async fn create_new_disk_resource_internal(
 async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
     let mut devices = Vec::new();
     
-    // Get all NVMe controllers that are already attached to SPDK
+    println!("🔍 [SPDK_DISCOVERY] Querying SPDK for attached NVMe controllers...");
+    
+    // Primary discovery: Get all NVMe controllers that are already attached to SPDK
     let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_nvme_get_controllers"
     })).await;
@@ -1108,14 +1110,17 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         if let Some(controller_list) = controllers_result["result"].as_array() {
             for controller in controller_list {
                 if let Some(device) = parse_nvme_controller(controller) {
+                    println!("✅ [SPDK_DISCOVERY] Found SPDK controller: {} at {}", device.controller_id, device.pcie_addr);
                     devices.push(device);
                 }
             }
         }
     }
     
-    // ALSO get kernel-bound SPDK-ready devices that should be included in discovery
-    // This fixes the issue where SPDK-ready kernel-bound disks were ignored in periodic discovery
+    println!("🔍 [SPDK_DISCOVERY] Found {} SPDK-attached devices, checking for additional devices...", devices.len());
+    
+    // Secondary discovery: Check for SPDK-ready devices not yet attached
+    // This ensures we don't miss devices that should be available to SPDK
     let pci_devices = agent.get_nvme_pci_devices().await.unwrap_or_default();
     
     for pci_addr in pci_devices {
@@ -1128,19 +1133,28 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         if let Ok(disk_info) = agent.get_disk_info(&pci_addr).await {
             if disk_info.spdk_ready && !disk_info.is_system_disk {
                 // Convert to NvmeDevice format for consistency
+                // Only use devices that SPDK knows about - skip devices not in SPDK
+                let controller_id = if let Some(spdk_name) = agent.get_spdk_device_by_pci(&pci_addr).await.unwrap_or(None) {
+                    spdk_name
+                } else {
+                    println!("⚠️ [SPDK_DISCOVERY] Skipping device not available in SPDK: {} ({})", disk_info.device_name, pci_addr);
+                    continue;
+                };
+                
                 let device = NvmeDevice {
-                    controller_id: disk_info.device_name.clone(),
+                    controller_id,
                     pcie_addr: disk_info.pci_address.clone(),
                     capacity: disk_info.size_bytes as i64,
                     model: disk_info.model.clone(),
                 };
-                println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
+                println!("✅ [SPDK_DISCOVERY] Included SPDK-ready kernel-bound device: {} ({})", 
                          device.controller_id, device.pcie_addr);
                 devices.push(device);
             }
         }
     }
     
+    println!("🔍 [SPDK_DISCOVERY] Total devices discovered: {}", devices.len());
     Ok(devices)
 }
 
@@ -1241,10 +1255,14 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
 
         format!("aio_{}", device_name)
     } else {
-        // Use SPDK controller name for SPDK-attached devices
-        let name = format!("{}n1", controller_id);
-        println!("🔗 [SPDK_INIT] Using SPDK bdev name: {}", name);
-        name
+        // Use SPDK's actual device name - no fallback to manual construction
+        if let Some(spdk_device_name) = agent.get_spdk_device_by_pci(&disk.spec.pcie_addr).await? {
+            println!("🔗 [SPDK_INIT] Using SPDK device name: {}", spdk_device_name);
+            spdk_device_name
+        } else {
+            println!("❌ [SPDK_INIT] Device not found in SPDK: {}", disk.spec.pcie_addr);
+            return Err(format!("Device {} not available in SPDK", disk.spec.pcie_addr).into());
+        }
     };
 
     // Now handle LVS creation with discovery-first approach
@@ -1522,8 +1540,15 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
 }
 
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if device is accessible via SPDK
-    let bdev_name = format!("{}n1", device.controller_id);
+    // Check if device is accessible via SPDK using actual device name
+    let bdev_name = if let Some(spdk_name) = agent.get_spdk_device_by_pci(&device.pcie_addr).await.unwrap_or(None) {
+        spdk_name
+    } else {
+        // If device not found in SPDK, it's not healthy
+        println!("❌ [HEALTH_CHECK] Device not found in SPDK: {}", device.pcie_addr);
+        return Ok(false);
+    };
+    
     let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_get_bdevs",
         "params": {
@@ -1669,6 +1694,59 @@ async fn update_lvol_store_statistics(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
+    /// Get device name using SPDK's native APIs instead of manual construction
+    async fn get_spdk_device_by_pci(&self, pci_addr: &str) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [SPDK_LOOKUP] Looking up device name for PCI address: {}", pci_addr);
+        
+        // First try to get from attached NVMe controllers
+        let controllers_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_nvme_get_controllers"
+        })).await;
+        
+        if let Ok(controllers) = controllers_result {
+            if let Some(controller_list) = controllers["result"].as_array() {
+                for controller in controller_list {
+                    if let Some(traddr) = controller["trid"]["traddr"].as_str() {
+                        if traddr == pci_addr {
+                            if let Some(name) = controller["name"].as_str() {
+                                println!("✅ [SPDK_LOOKUP] Found attached controller: {} -> {}", pci_addr, name);
+                                return Ok(Some(name.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If not found in controllers, check all available bdevs
+        let bdevs_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs"
+        })).await;
+        
+        if let Ok(bdevs) = bdevs_result {
+            if let Some(bdev_list) = bdevs["result"].as_array() {
+                for bdev in bdev_list {
+                    // Check if this bdev corresponds to our PCI address
+                    if let Some(driver_specific) = bdev["driver_specific"].as_object() {
+                        if let Some(nvme_info) = driver_specific.get("nvme") {
+                            if let Some(traddr) = nvme_info["trid"]["traddr"].as_str() {
+                                if traddr == pci_addr {
+                                    if let Some(name) = bdev["name"].as_str() {
+                                        println!("✅ [SPDK_LOOKUP] Found bdev: {} -> {}", pci_addr, name);
+                                        return Ok(Some(name.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("❌ [SPDK_LOOKUP] No SPDK device found for PCI address: {}", pci_addr);
+        Ok(None)
+    }
+
     async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DISCOVERY] Starting discover_all_disks for node: {}", self.node_name);
         let mut all_disks = Vec::new();
@@ -1775,8 +1853,13 @@ impl NodeAgent {
                 )
             } else {
                 println!("🔍 [DISK_INFO] Device is bound to '{}', getting block device information", driver);
-                // For bound devices, get the actual block device information
-                let device_name = self.find_nvme_device_name(pci_addr).await?;
+                // For bound devices, use SPDK to get the actual device name
+                let device_name = if let Some(spdk_name) = self.get_spdk_device_by_pci(pci_addr).await? {
+                    spdk_name
+                } else {
+                    println!("❌ [DISK_INFO] Device not found in SPDK, skipping: {}", pci_addr);
+                    return Err(format!("Device {} not available in SPDK", pci_addr).into());
+                };
                 println!("🔍 [DISK_INFO] Found block device name: {}", device_name);
                 let (size_bytes, model, serial, firmware_version) = self.get_nvme_details(&device_name).await?;
                 let mounted_partitions = self.get_mounted_partitions(&device_name).await?;
@@ -1838,37 +1921,7 @@ impl NodeAgent {
         }
     }
 
-    async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let nvme_path = format!("/sys/bus/pci/devices/{}/nvme", pci_addr);
-        
-        if let Ok(entries) = fs::read_dir(&nvme_path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with("nvme") {
-                        return Ok(format!("{}n1", name));
-                    }
-                }
-            }
-        }
-        
-        // Fallback: try to find by PCI address in /sys/block
-        for entry in fs::read_dir("/sys/block")? {
-            let entry = entry?;
-            let device_name = entry.file_name().to_string_lossy().to_string();
-            
-            if device_name.starts_with("nvme") {
-                let device_path = format!("/sys/block/{}/device", device_name);
-                if let Ok(real_path) = fs::read_link(&device_path) {
-                    if real_path.to_string_lossy().contains(pci_addr) {
-                        return Ok(device_name);
-                    }
-                }
-            }
-        }
-        
-        Err("NVMe device not found".into())
-    }
+
 
     async fn get_nvme_details(&self, device_name: &str) -> Result<(u64, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
         // Use nvme-cli to get device information
@@ -2768,8 +2821,9 @@ impl NodeAgent {
             println!("❌ [KERNEL_SETUP] Block device {} not found", block_device);
             // Try to find the actual device name
             println!("🔧 [KERNEL_SETUP] Searching for actual device name...");
-            match self.find_nvme_device_name(pci_addr).await {
-                Ok(actual_name) => {
+            // Use SPDK to find the actual device name
+            match self.get_spdk_device_by_pci(pci_addr).await {
+                Ok(Some(actual_name)) => {
                     println!("🔧 [KERNEL_SETUP] Found actual device name: {}", actual_name);
                     let actual_block_device = format!("/dev/{}", actual_name);
                     if std::path::Path::new(&actual_block_device).exists() {
@@ -2779,8 +2833,12 @@ impl NodeAgent {
                         return Err(format!("Block device not found: neither {} nor {}", block_device, actual_block_device).into());
                     }
                 }
+                Ok(None) => {
+                    println!("❌ [KERNEL_SETUP] Device not found in SPDK: {}", pci_addr);
+                    return Err(format!("Device {} not available in SPDK", pci_addr).into());
+                }
                 Err(e) => {
-                    println!("❌ [KERNEL_SETUP] Could not find device name: {}", e);
+                    println!("❌ [KERNEL_SETUP] SPDK lookup failed: {}", e);
                     return Err(format!("Block device {} not found after nvme binding: {}", block_device, e).into());
                 }
             }
