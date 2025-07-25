@@ -887,7 +887,18 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     })).await;
     
     match attach_result {
-        Ok(_) => println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id),
+        Ok(response) => {
+            if let Some(error) = response.get("error") {
+                let error_code = error["code"].as_i64().unwrap_or(0);
+                if error_code == -17 || error_code == -22 {
+                    println!("✅ [SPDK_INIT] Controller already attached (idempotent): {}", controller_id);
+                } else {
+                    println!("⚠️ [SPDK_INIT] Controller attach warning: {}", error);
+                }
+            } else {
+                println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id);
+            }
+        }
         Err(e) => println!("⚠️ [SPDK_INIT] Controller attach failed (may already be attached): {}", e),
     }
     
@@ -895,7 +906,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
-    // Find existing bdev for this device - Initialize LVS should NOT create bdevs
+    // Find existing bdev for this device - Pure LVS operation requires existing bdev
     println!("🔍 [SPDK_INIT] Discovering existing bdev for device: {}", disk.spec.pcie_addr);
     
     let bdev_name = match agent.find_existing_bdev_for_device(&disk.spec.pcie_addr, controller_id).await {
@@ -905,7 +916,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
         Err(e) => {
             println!("❌ [SPDK_INIT] No existing bdev found for device {}: {}", disk.spec.pcie_addr, e);
-            println!("💡 [SPDK_INIT] Hint: Run 'Setup Disks' first to bind device and create bdev");
+            println!("💡 [SPDK_INIT] Hint: Run 'Setup SPDK' first to bind driver and create bdev");
             return Err(format!("Device {} must be set up first before initializing LVS. No bdev found: {}", disk.spec.pcie_addr, e).into());
         }
     };
@@ -2429,11 +2440,7 @@ impl NodeAgent {
             }
         };
 
-        // Initialize the blobstore
-        initialize_blobstore_on_device(self, &disk_crd).await?;
-        println!("✅ [SETUP] LVS/blobstore initialization completed successfully");
-
-        println!("🎉 [SETUP] Complete disk setup finished successfully for PCI address: {} (driver + LVS)", pci_addr);
+        println!("🎉 [SETUP] Disk setup completed successfully for PCI address: {} (driver + bdev ready for LVS)", pci_addr);
         Ok(())
     }
 
@@ -2812,12 +2819,8 @@ impl NodeAgent {
             }
         };
 
-        // Initialize the blobstore
-        initialize_blobstore_on_device(self, &disk_crd).await?;
-        println!("✅ [KERNEL_SETUP] LVS/blobstore initialization completed successfully");
-
         // Step 5: Mark as ready for SPDK (kernel mode)
-        println!("🎉 [KERNEL_SETUP] Complete disk setup finished successfully: {} (kernel-bound + LVS)", pci_addr);
+        println!("🎉 [KERNEL_SETUP] Disk setup completed successfully: {} (kernel-bound + bdev ready for LVS)", pci_addr);
         Ok(())
     }
 
@@ -2827,7 +2830,7 @@ impl NodeAgent {
         println!("🔧 [SPDK_ATTACH] PCI address: {}", pci_addr);
         println!("🔧 [SPDK_ATTACH] SPDK RPC URL: {}", self.spdk_rpc_url);
         
-        // Try to create a kernel bdev in SPDK for this device
+        // Try to create a kernel bdev in SPDK for this device  
         let bdev_name = format!("kernel_{}", device_name);
         let device_path = format!("/dev/{}", device_name);
         println!("🔧 [SPDK_ATTACH] Target bdev name: {}", bdev_name);
@@ -2854,6 +2857,16 @@ impl NodeAgent {
 
         match call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
             Ok(response) => {
+                if let Some(error) = response.get("error") {
+                    let error_code = error["code"].as_i64().unwrap_or(0);
+                    if error_code == -17 {
+                        println!("✅ [SPDK_ATTACH] AIO bdev already exists (idempotent): {}", bdev_name);
+                        return Ok(());
+                    } else {
+                        println!("❌ [SPDK_ATTACH] AIO bdev creation error: {}", error);
+                        return Err(format!("AIO bdev creation failed: {}", error).into());
+                    }
+                }
                 println!("✅ [SPDK_ATTACH] Successfully created SPDK aio bdev '{}' for kernel device {}", bdev_name, device_path);
                 println!("🔧 [SPDK_ATTACH] AIO response: {:?}", response);
                 Ok(())
@@ -2875,6 +2888,16 @@ impl NodeAgent {
 
                 match call_spdk_rpc(&self.spdk_rpc_url, &uring_request).await {
                     Ok(response) => {
+                        if let Some(error) = response.get("error") {
+                            let error_code = error["code"].as_i64().unwrap_or(0);
+                            if error_code == -17 {
+                                println!("✅ [SPDK_ATTACH] URING bdev already exists (idempotent): {}", bdev_name);
+                                return Ok(());
+                            } else {
+                                println!("❌ [SPDK_ATTACH] URING bdev creation error: {}", error);
+                                return Err(format!("URING bdev creation failed: {}", error).into());
+                            }
+                        }
                         println!("✅ [SPDK_ATTACH] Successfully created SPDK uring bdev '{}' for kernel device {}", bdev_name, device_path);
                         println!("🔧 [SPDK_ATTACH] URING response: {:?}", response);
                         Ok(())
@@ -3654,6 +3677,7 @@ impl NodeAgent {
             
             let possible_names = vec![
                 format!("{}n1", controller_id),              // Direct SPDK: nvme0n1
+                format!("kernel_{}", device_name),           // Kernel AIO: kernel_nvme1n1 (created by setup)
                 format!("aio_{}", device_name),              // AIO: aio_nvme1n1  
                 device_name.clone(),                         // Direct: nvme1n1
                 format!("nvme_{}n1", controller_id),         // Alt SPDK format
