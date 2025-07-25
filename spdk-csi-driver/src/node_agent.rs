@@ -868,7 +868,19 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
 
 async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let disk_name = disk.metadata.name.as_ref().unwrap();
-    let lvs_name = format!("lvs_{}", disk_name);
+    
+    // Use consistent naming: if we have the actual device name, use it for both bdev and LVS
+    let actual_device_name = match agent.find_nvme_device_name(&disk.spec.pcie_addr).await {
+        Ok(name) => {
+            println!("✅ [SPDK_INIT] Using actual device name for consistent naming: {}", name);
+            format!("{}-{}", disk.spec.node_id, name)
+        }
+        Err(_) => {
+            println!("⚠️ [SPDK_INIT] Could not find actual device name, using CRD name: {}", disk_name);
+            disk_name.clone()
+        }
+    };
+    let lvs_name = format!("lvs_{}", actual_device_name);
     
     println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_name);
     println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {}", lvs_name, disk.spec.pcie_addr);
@@ -936,8 +948,8 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
     };
 
-    // Now handle LVS creation with discovery-first approach
-    println!("🔍 [SPDK_INIT] Checking if LVS already exists: {}", lvs_name);
+    // Now handle LVS creation with discovery-first approach (check by bdev, not name)
+    println!("🔍 [SPDK_INIT] Checking if any LVS exists on bdev: {}", bdev_name);
     
     match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_get_lvstores"
@@ -948,11 +960,21 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
             if let Some(lvstore_list) = lvstores_result["result"].as_array() {
                 let mut existing_lvstore_info = None;
                 for lvstore in lvstore_list {
-                    if let Some(name) = lvstore["name"].as_str() {
-                        if name == lvs_name {
+                    // Check by base_bdev instead of name to handle naming inconsistencies
+                    if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
+                        if base_bdev == bdev_name {
                             our_lvs_exists = true;
                             existing_lvstore_info = Some(lvstore.clone());
-                            println!("✅ [SPDK_INIT] Found existing LVS: {}", lvs_name);
+                            let existing_name = lvstore["name"].as_str().unwrap_or("unknown");
+                            
+                            if existing_name == lvs_name {
+                                println!("✅ [SPDK_INIT] Found existing LVS with correct name: {}", existing_name);
+                            } else {
+                                println!("✅ [SPDK_INIT] Found existing LVS on bdev '{}': {}", base_bdev, existing_name);
+                                println!("⚠️ [SPDK_INIT] LVS name mismatch - expected: '{}', found: '{}'", lvs_name, existing_name);
+                                println!("✅ [SPDK_INIT] Using existing LVS (name differences are OK)");
+                            }
+                            
                             println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
                             break;
                         }
@@ -1003,7 +1025,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_name);
                     return Ok(());
                 } else {
-                    println!("🔍 [SPDK_INIT] No existing LVS found, will create new one: {}", lvs_name);
+                    println!("🔍 [SPDK_INIT] No existing LVS found on bdev '{}', will create new one: {}", bdev_name, lvs_name);
                 }
             }
         }
