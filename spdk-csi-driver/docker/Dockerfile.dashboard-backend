@@ -40,7 +40,7 @@ RUN apk add --no-cache \
 RUN adduser -D -s /bin/sh -u 1001 appuser
 
 # Copy the compiled binary
-COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/
+COPY --from=builder /app/target/release/spdk-dashboard-backend /usr/local/bin/spdk-dashboard-backend
 RUN chown appuser:appuser /usr/local/bin/spdk-dashboard-backend && \
     chmod +x /usr/local/bin/spdk-dashboard-backend
 
