@@ -1183,11 +1183,28 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
         needs_update = true;
     }
     
-    // Initialize blobstore if needed
-    if !updated_status.blobstore_initialized && agent.auto_initialize_blobstore {
+    // Verify actual SPDK state matches custom resource state
+    let expected_lvs_name = format!("lvs_{}", disk_name);
+    let actual_lvs_exists = verify_lvs_exists_in_spdk(agent, &expected_lvs_name).await.unwrap_or(false);
+    
+    if updated_status.blobstore_initialized && !actual_lvs_exists {
+        // Custom resource thinks LVS exists but SPDK doesn't have it - correct the state
+        println!("🔄 [STATE_SYNC] Custom resource shows blobstore_initialized=true but LVS '{}' not found in SPDK, correcting state", expected_lvs_name);
+        updated_status.blobstore_initialized = false;
+        updated_status.lvs_name = None;
+        needs_update = true;
+    } else if !updated_status.blobstore_initialized && actual_lvs_exists {
+        // SPDK has LVS but custom resource doesn't know - update the state
+        println!("🔄 [STATE_SYNC] Found existing LVS '{}' in SPDK but custom resource shows blobstore_initialized=false, correcting state", expected_lvs_name);
+        updated_status.blobstore_initialized = true;
+        updated_status.lvs_name = Some(expected_lvs_name.clone());
+        needs_update = true;
+    } else if !updated_status.blobstore_initialized && agent.auto_initialize_blobstore {
+        // Neither SPDK nor custom resource have LVS, and auto-init is enabled - create it
+        println!("🔄 [STATE_SYNC] No LVS found and auto-initialization enabled, creating LVS: {}", expected_lvs_name);
         initialize_blobstore_on_device(agent, disk).await?;
         updated_status.blobstore_initialized = true;
-        updated_status.lvs_name = Some(format!("lvs_{}", disk_name));
+        updated_status.lvs_name = Some(expected_lvs_name);
         needs_update = true;
     }
     
@@ -1201,6 +1218,34 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     }
     
     Ok(())
+}
+
+/// Verify if a specific LVS exists in SPDK
+async fn verify_lvs_exists_in_spdk(agent: &NodeAgent, lvs_name: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 [LVS_VERIFY] Checking if LVS '{}' exists in SPDK", lvs_name);
+    
+    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_lvol_get_lvstores"
+    })).await {
+        Ok(lvstores_result) => {
+            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                for lvstore in lvstore_list {
+                    if let Some(name) = lvstore["name"].as_str() {
+                        if name == lvs_name {
+                            println!("✅ [LVS_VERIFY] Found LVS '{}' in SPDK", lvs_name);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            println!("❌ [LVS_VERIFY] LVS '{}' not found in SPDK", lvs_name);
+            Ok(false)
+        }
+        Err(e) => {
+            println!("⚠️ [LVS_VERIFY] Failed to query SPDK for LVS '{}': {}", lvs_name, e);
+            Err(e)
+        }
+    }
 }
 
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
