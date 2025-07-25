@@ -13,7 +13,7 @@ import {
 } from '../../hooks/useDashboardData';
 
 type ViewMode = 'grid' | 'compact' | 'table';
-type StatusFilter = 'all' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready';
+type StatusFilter = 'all' | 'free' | 'driver-bound' | 'lvs-ready' | 'setup-ready' | 'initialize-ready' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready' | 'driver-ready';
 type SizeFilter = 'all' | 'small' | 'medium' | 'large' | 'xlarge';
 
 interface CompactDiskCardProps {
@@ -31,15 +31,17 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
   const getStatusColor = () => {
     if (disk.is_system_disk) return 'border-red-200 bg-red-50';
     if (needsUnmount) return 'border-yellow-200 bg-yellow-50';
-    if (disk.spdk_ready) return 'border-indigo-200 bg-indigo-50';
-    return 'border-green-200 bg-green-50';
+    if (disk.blobstore_initialized) return 'border-green-200 bg-green-50';
+    if (disk.driver_ready) return 'border-blue-200 bg-blue-50';
+    return 'border-gray-200 bg-gray-50';
   };
 
   const getStatusIcon = () => {
     if (disk.is_system_disk) return <Shield className="w-4 h-4 text-red-600" />;
     if (needsUnmount) return <AlertTriangle className="w-4 h-4 text-yellow-600" />;
-    if (disk.spdk_ready) return <Settings className="w-4 h-4 text-indigo-600" />;
-    return <CheckCircle className="w-4 h-4 text-green-600" />;
+    if (disk.blobstore_initialized) return <CheckCircle className="w-4 h-4 text-green-600" />;
+    if (disk.driver_ready) return <Settings className="w-4 h-4 text-blue-600" />;
+    return <CheckCircle className="w-4 h-4 text-gray-600" />;
   };
 
   return (
@@ -106,8 +108,18 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
   const getStatusBadge = () => {
     if (disk.is_system_disk) return <span className="px-2 py-0.5 text-xs bg-red-100 text-red-700 rounded-full">System</span>;
     if (needsUnmount) return <span className="px-2 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded-full">Unmount</span>;
-    if (disk.spdk_ready) return <span className="px-2 py-0.5 text-xs bg-indigo-100 text-indigo-700 rounded-full">SPDK</span>;
-    return <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">Ready</span>;
+    
+    // Enhanced status logic based on driver and blobstore state
+    if (disk.blobstore_initialized) {
+      // Both driver and blobstore ready
+      return <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">LVS Ready</span>;
+    } else if (disk.driver_ready) {
+      // Driver ready but needs blobstore initialization
+      return <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full">Driver Bound</span>;
+    } else {
+      // Needs full setup (driver binding + blobstore)
+      return <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-700 rounded-full">Free</span>;
+    }
   };
 
   return (
@@ -156,7 +168,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 };
 
 export const DiskSetupTab: React.FC = () => {
-  const { nodeData, refreshNodeDisks, setupDisksOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
+  const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
   // UI State
@@ -243,10 +255,17 @@ export const DiskSetupTab: React.FC = () => {
     if (statusFilter !== 'all') {
       result = result.filter(disk => {
         switch (statusFilter) {
-          case 'ready': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && !disk.spdk_ready;
+          case 'free': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && !disk.driver_ready;
+          case 'driver-bound': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && disk.driver_ready && !disk.blobstore_initialized;
           case 'needs-unmount': return !disk.is_system_disk && disk.mounted_partitions.length > 0;
           case 'system': return disk.is_system_disk;
-          case 'spdk-ready': return disk.spdk_ready;
+          case 'lvs-ready': return disk.blobstore_initialized;
+          // Legacy support for existing filters
+          case 'setup-ready': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && !disk.driver_ready;
+          case 'initialize-ready': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && disk.driver_ready && !disk.blobstore_initialized;
+          case 'driver-ready': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && disk.driver_ready && !disk.blobstore_initialized;
+          case 'spdk-ready': return disk.blobstore_initialized;
+          case 'ready': return !disk.is_system_disk && disk.mounted_partitions.length === 0 && !disk.blobstore_initialized;
           default: return true;
         }
       });
@@ -269,7 +288,7 @@ export const DiskSetupTab: React.FC = () => {
     return result;
   }, [allDisks, searchTerm, selectedNodes, statusFilter, sizeFilter]);
 
-  // Check if deletion is allowed (single SPDK Ready disk selected)
+  // Check if deletion is allowed (single LVS Ready disk selected)
   const canDeleteSelectedDisk = useMemo(() => {
     if (selectedDisks.size !== 1) return false;
     
@@ -279,10 +298,11 @@ export const DiskSetupTab: React.FC = () => {
     const pciAddr = selectedDiskKey.substring(colonIndex + 1);
     const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     
-    return disk && disk.spdk_ready && !disk.is_system_disk;
+    return disk && disk.blobstore_initialized && !disk.is_system_disk;
   }, [selectedDisks, allDisks]);
 
-  // Check if setup is allowed (selected disks are NOT already SPDK ready and are suitable for setup)
+  // Check if setup is allowed (Free disks or Needs Unmount disks with force_unmount)
+  // This will do FULL setup: driver binding + LVS initialization
   const canSetupSelected = useMemo(() => {
     if (selectedDisks.size === 0) return false;
     
@@ -293,12 +313,59 @@ export const DiskSetupTab: React.FC = () => {
       return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
     }).filter(Boolean);
     
-    // All selected disks must be suitable for setup (not system disks, not already SPDK ready, no mounted partitions)
+    // All selected disks must be Free or (Needs Unmount with force_unmount enabled)
+    // This will do complete setup from start to LVS Ready
     const result = selectedDiskDetails.every(disk => 
       disk && 
       !disk.is_system_disk && 
-      !disk.spdk_ready && 
-      disk.mounted_partitions.length === 0
+      !disk.blobstore_initialized &&  // Not already LVS Ready
+      (
+        (!disk.driver_ready && disk.mounted_partitions.length === 0) ||  // Free disks
+        (!disk.driver_ready && disk.mounted_partitions.length > 0 && setupOptions.force_unmount)  // Needs Unmount with force
+      )
+    );
+    return result;
+  }, [selectedDisks, allDisks, setupOptions.force_unmount]);
+
+  // Check if LVS initialization is allowed (Driver Ready disks - RECOVERY ONLY)
+  // This is for when setup partially failed and disk is stuck in Driver Ready state
+  const canInitializeLVS = useMemo(() => {
+    if (selectedDisks.size === 0) return false;
+    
+    const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
+      const colonIndex = diskKey.indexOf(':');
+      const nodeName = diskKey.substring(0, colonIndex);
+      const pciAddr = diskKey.substring(colonIndex + 1);
+      return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+    }).filter(Boolean);
+    
+    // All selected disks must be Driver Ready (recovery scenario)
+    const result = selectedDiskDetails.every(disk => 
+      disk && 
+      !disk.is_system_disk && 
+      disk.driver_ready &&
+      !disk.blobstore_initialized
+    );
+    return result;
+  }, [selectedDisks, allDisks]);
+
+  // Check if driver unbinding is allowed (Driver Bound disks only)
+  const canUnbindDriver = useMemo(() => {
+    if (selectedDisks.size === 0) return false;
+    
+    const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
+      const colonIndex = diskKey.indexOf(':');
+      const nodeName = diskKey.substring(0, colonIndex);
+      const pciAddr = diskKey.substring(colonIndex + 1);
+      return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+    }).filter(Boolean);
+    
+    // All selected disks must be Driver Bound (has driver, no LVS)
+    const result = selectedDiskDetails.every(disk => 
+      disk && 
+      !disk.is_system_disk && 
+      disk.driver_ready &&
+      !disk.blobstore_initialized
     );
     return result;
   }, [selectedDisks, allDisks]);
@@ -332,12 +399,18 @@ export const DiskSetupTab: React.FC = () => {
   const stats = useMemo(() => {
     return {
       total: allDisks.length,
-      ready: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && !d.spdk_ready).length,
+      free: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && !d.driver_ready).length,
+      driverBound: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && d.driver_ready && !d.blobstore_initialized).length,
       needsUnmount: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length > 0).length,
       system: allDisks.filter(d => d.is_system_disk).length,
-      spdkReady: allDisks.filter(d => d.spdk_ready).length,
+      lvsReady: allDisks.filter(d => d.blobstore_initialized).length,
       selected: selectedDisks.size,
-      filtered: filteredDisks.length
+      filtered: filteredDisks.length,
+      // Legacy support
+      setupReady: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && !d.driver_ready).length,
+      initializeReady: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && d.driver_ready && !d.blobstore_initialized).length,
+      spdkReady: allDisks.filter(d => d.blobstore_initialized).length,
+      ready: allDisks.filter(d => !d.is_system_disk && d.mounted_partitions.length === 0 && !d.blobstore_initialized).length,
     };
   }, [allDisks, filteredDisks, selectedDisks]);
 
@@ -409,6 +482,128 @@ export const DiskSetupTab: React.FC = () => {
           diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
           return newSelection;
         });
+      }
+    } catch (error) {
+      const errorResult: DiskSetupResult = {
+        success: false,
+        setup_disks: [],
+        failed_disks: diskPciAddresses.map(addr => [addr, error instanceof Error ? error.message : 'Unknown error']),
+        warnings: [],
+        completed_at: new Date().toISOString()
+      };
+      setSetupResults(prev => ({ ...prev, [node]: errorResult }));
+    } finally {
+      setSetupInProgress(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(node);
+        return newSet;
+      });
+    }
+  };
+
+  const initializeLVSSelectedDisks = async () => {
+    const disksByNode = Object.groupBy(
+      Array.from(selectedDisks).map(diskKey => {
+        const firstColonIndex = diskKey.indexOf(':');
+        const nodeName = diskKey.substring(0, firstColonIndex);
+        const pciAddr = diskKey.substring(firstColonIndex + 1);
+        return { nodeName, pciAddr };
+      }),
+      ({ nodeName }) => nodeName
+    );
+
+    for (const [nodeName, disks] of Object.entries(disksByNode)) {
+      if (disks && disks.length > 0) {
+        await initializeLVSOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
+      }
+    }
+  };
+
+  const initializeLVSOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
+    setSetupInProgress(prev => new Set([...prev, node]));
+
+    try {
+      const result = await initializeBlobstoreOnNode(node, diskPciAddresses);
+      
+      setSetupResults(prev => ({ ...prev, [node]: result }));
+
+      if (result.success) {
+        setSelectedDisks(prev => {
+          const newSelection = new Set(prev);
+          diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
+          return newSelection;
+        });
+      }
+    } catch (error) {
+      const errorResult: DiskSetupResult = {
+        success: false,
+        setup_disks: [],
+        failed_disks: diskPciAddresses.map(addr => [addr, error instanceof Error ? error.message : 'Unknown error']),
+        warnings: [],
+        completed_at: new Date().toISOString()
+      };
+      setSetupResults(prev => ({ ...prev, [node]: errorResult }));
+    } finally {
+      setSetupInProgress(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(node);
+        return newSet;
+      });
+    }
+  };
+
+  const unbindDriverSelectedDisks = async () => {
+    const disksByNode = Object.groupBy(
+      Array.from(selectedDisks).map(diskKey => {
+        const firstColonIndex = diskKey.indexOf(':');
+        const nodeName = diskKey.substring(0, firstColonIndex);
+        const pciAddr = diskKey.substring(firstColonIndex + 1);
+        return { nodeName, pciAddr };
+      }),
+      ({ nodeName }) => nodeName
+    );
+
+    for (const [nodeName, disks] of Object.entries(disksByNode)) {
+      if (disks && disks.length > 0) {
+        await unbindDriverOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
+      }
+    }
+  };
+
+  const unbindDriverOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
+    setSetupInProgress(prev => new Set([...prev, node]));
+
+    try {
+      // Call reset/unbind API endpoint
+      const response = await fetch(`/api/nodes/${node}/disks/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pci_addresses: diskPciAddresses })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        setSetupResults(prev => ({ ...prev, [node]: {
+          success: result.success,
+          setup_disks: result.reset_disks || [],
+          failed_disks: result.failed_disks || [],
+          warnings: result.warnings || [],
+          completed_at: result.completed_at || new Date().toISOString()
+        }}));
+
+        if (result.success) {
+          setSelectedDisks(prev => {
+            const newSelection = new Set(prev);
+            diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
+            return newSelection;
+          });
+          
+          // Refresh node data after unbind
+          setTimeout(() => refreshNodeDisks(node), 2000);
+        }
+      } else {
+        throw new Error(`Unbind request failed: ${response.statusText}`);
       }
     } catch (error) {
       const errorResult: DiskSetupResult = {
@@ -517,12 +712,17 @@ export const DiskSetupTab: React.FC = () => {
             </div>
           </div>
           
-          {/* Disk State Cards - vibrant colors */}
-          <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-green-50 rounded-lg p-4 text-center border border-green-200">
-              <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-green-600">{stats.ready}</p>
-              <p className="text-sm text-gray-600">Setup Ready</p>
+          {/* Disk State Cards - clear progression from gray to green */}
+          <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="bg-gray-50 rounded-lg p-4 text-center border border-gray-200">
+              <CheckCircle className="w-6 h-6 text-gray-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-gray-600">{stats.free}</p>
+              <p className="text-sm text-gray-600">Free</p>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-4 text-center border border-blue-200">
+              <Settings className="w-6 h-6 text-blue-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-blue-600">{stats.driverBound}</p>
+              <p className="text-sm text-gray-600">Driver Bound</p>
             </div>
             <div className="bg-yellow-50 rounded-lg p-4 text-center border border-yellow-200">
               <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
@@ -534,10 +734,10 @@ export const DiskSetupTab: React.FC = () => {
               <p className="text-xl font-bold text-red-600">{stats.system}</p>
               <p className="text-sm text-gray-600">System Disks</p>
             </div>
-            <div className="bg-indigo-50 rounded-lg p-4 text-center border border-indigo-200">
-              <Settings className="w-6 h-6 text-indigo-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-indigo-600">{stats.spdkReady}</p>
-              <p className="text-sm text-gray-600">SPDK Ready</p>
+            <div className="bg-green-50 rounded-lg p-4 text-center border border-green-200">
+              <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
+              <p className="text-xl font-bold text-green-600">{stats.lvsReady}</p>
+              <p className="text-sm text-gray-600">LVS Ready</p>
             </div>
           </div>
         </div>
@@ -640,10 +840,11 @@ export const DiskSetupTab: React.FC = () => {
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="all">All Disks</option>
-                  <option value="ready">Setup Ready</option>
+                  <option value="free">Free</option>
+                  <option value="driver-bound">Driver Bound</option>
+                  <option value="lvs-ready">LVS Ready</option>
                   <option value="needs-unmount">Needs Unmount</option>
                   <option value="system">System Disks</option>
-                  <option value="spdk-ready">SPDK Ready</option>
                 </select>
               </div>
 
@@ -792,7 +993,47 @@ export const DiskSetupTab: React.FC = () => {
                   ) : (
                     <>
                       <Play className="w-4 h-4" />
-                      Setup Selected
+                      Setup SPDK
+                    </>
+                  )}
+                </button>
+              )}
+              {canInitializeLVS && (
+                <button
+                  onClick={initializeLVSSelectedDisks}
+                  disabled={Array.from(setupInProgress).length > 0}
+                  className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2"
+                  title="Recovery: Initialize LVS on disks that already have SPDK driver"
+                >
+                  {Array.from(setupInProgress).length > 0 ? (
+                    <>
+                      <Settings className="w-4 h-4 animate-spin" />
+                      Initializing...
+                    </>
+                  ) : (
+                    <>
+                      <Database className="w-4 h-4" />
+                      Initialize LVS
+                    </>
+                  )}
+                </button>
+              )}
+              {canUnbindDriver && (
+                <button
+                  onClick={unbindDriverSelectedDisks}
+                  disabled={Array.from(setupInProgress).length > 0}
+                  className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
+                  title="Unbind SPDK driver from selected disks"
+                >
+                  {Array.from(setupInProgress).length > 0 ? (
+                    <>
+                      <Settings className="w-4 h-4 animate-spin" />
+                      Unbinding...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4" />
+                      Unbind SPDK
                     </>
                   )}
                 </button>

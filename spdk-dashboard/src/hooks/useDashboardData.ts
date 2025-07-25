@@ -844,6 +844,9 @@ export interface UnimplementedDisk {
   spdk_ready: boolean;
   discovered_at: string;
   nodeName?: string; // Added for frontend display
+  // Enhanced status tracking
+  driver_ready?: boolean; // True if driver is SPDK-compatible (original spdk_ready)
+  blobstore_initialized?: boolean; // True if LVS/blobstore is initialized
 }
 
 export interface DiskSetupRequest {
@@ -875,6 +878,9 @@ export interface NodeDiskData {
 export const useDiskSetup = () => {
   const [nodeData, setNodeData] = useState<Record<string, NodeDiskData>>({});
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
+  
+  // Get dashboard data to cross-reference SpdkDisk CRD status
+  const { data: dashboardData } = useDashboardData(false);
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     try {
@@ -884,8 +890,9 @@ export const useDiskSetup = () => {
         [nodeName]: { ...prev[nodeName], loading: true, error: undefined }
       }));
 
-      // Mock API call for development/demo
+      // Enhanced mock API call for development/demo with varied disk states
       const mockDisks: UnimplementedDisk[] = [
+        // FREE DISKS - Need full setup (driver + LVS)
         {
           pci_address: "0000:3d:00.0",
           device_name: "nvme0n1",
@@ -905,8 +912,35 @@ export const useDiskSetup = () => {
           is_system_disk: false,
           spdk_ready: false,
           discovered_at: new Date().toISOString(),
-          nodeName
+          nodeName,
+          driver_ready: false,
+          blobstore_initialized: false
         },
+        {
+          pci_address: "0000:3f:00.0",
+          device_name: "nvme2n1",
+          vendor_id: "0x15b7",
+          device_id: "0x5006",
+          subsystem_vendor_id: "0x15b7",
+          subsystem_device_id: "0x5006",
+          numa_node: 1,
+          driver: "nvme",
+          size_bytes: 512110190592,
+          model: "WD Black SN750 500GB",
+          serial: "WDS500G3X0C123",
+          firmware_version: "111130WD",
+          namespace_id: 1,
+          mounted_partitions: [],
+          filesystem_type: undefined,
+          is_system_disk: false,
+          spdk_ready: false,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: false,
+          blobstore_initialized: false
+        },
+        
+        // DRIVER READY DISKS - Have SPDK driver, need LVS initialization
         {
           pci_address: "0000:3e:00.0", 
           device_name: "nvme1n1",
@@ -914,6 +948,54 @@ export const useDiskSetup = () => {
           device_id: "0xa80a",
           subsystem_vendor_id: "0x144d",
           subsystem_device_id: "0xa801", 
+          numa_node: 0,
+          driver: "vfio-pci",
+          size_bytes: 1000204886016,
+          model: "Samsung SSD 980 PRO 1TB",
+          serial: "S5P2NG0R654321",
+          firmware_version: "5B2QGXA7",
+          namespace_id: 1,
+          mounted_partitions: [],
+          filesystem_type: undefined,
+          is_system_disk: false,
+          spdk_ready: true,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: true,
+          blobstore_initialized: false
+        },
+        {
+          pci_address: "0000:5a:00.0",
+          device_name: "nvme3n1",
+          vendor_id: "0x15b7",
+          device_id: "0x5006",
+          subsystem_vendor_id: "0x15b7",
+          subsystem_device_id: "0x5006",
+          numa_node: 1,
+          driver: "uio_pci_generic",
+          size_bytes: 2000398934016,
+          model: "WD Black SN850 2TB",
+          serial: "WDS200T1X0E456",
+          firmware_version: "613000WD",
+          namespace_id: 1,
+          mounted_partitions: [],
+          filesystem_type: undefined,
+          is_system_disk: false,
+          spdk_ready: true,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: true,
+          blobstore_initialized: false
+        },
+        
+        // LVS READY DISKS - Fully configured and ready for volumes
+        {
+          pci_address: "0000:4b:00.0",
+          device_name: "nvme4n1",
+          vendor_id: "0x144d",
+          device_id: "0xa80a",
+          subsystem_vendor_id: "0x144d",
+          subsystem_device_id: "0xa801",
           numa_node: 0,
           driver: "vfio-pci",
           size_bytes: 1000204886016,
@@ -926,53 +1008,126 @@ export const useDiskSetup = () => {
           is_system_disk: false,
           spdk_ready: true,
           discovered_at: new Date().toISOString(),
-          nodeName
+          nodeName,
+          driver_ready: true,
+          blobstore_initialized: true
         },
         {
-          pci_address: "0000:3f:00.0",
-          device_name: "nvme2n1", 
+          pci_address: "0000:6c:00.0",
+          device_name: "nvme5n1",
+          vendor_id: "0x1c5c",
+          device_id: "0x1327",
+          subsystem_vendor_id: "0x1c5c",
+          subsystem_device_id: "0x0000",
+          numa_node: 1,
+          driver: "vfio-pci",
+          size_bytes: 3840755982336,
+          model: "Micron 7450 PRO 3.84TB",
+          serial: "MSA2642KFXG45T",
+          firmware_version: "E013",
+          namespace_id: 1,
+          mounted_partitions: [],
+          filesystem_type: undefined,
+          is_system_disk: false,
+          spdk_ready: true,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: true,
+          blobstore_initialized: true
+        },
+        
+        // NEEDS UNMOUNT - Has mounted filesystems
+        {
+          pci_address: "0000:7d:00.0",
+          device_name: "nvme6n1",
           vendor_id: "0x144d",
           device_id: "0xa80a",
           subsystem_vendor_id: "0x144d",
           subsystem_device_id: "0xa801",
-          numa_node: 1,
+          numa_node: 0,
           driver: "nvme",
-          size_bytes: 2000398934016,
-          model: "Samsung SSD 980 PRO 2TB",
+          size_bytes: 500107862016,
+          model: "Samsung SSD 980 500GB",
           serial: "S5P2NG0R345678",
           firmware_version: "5B2QGXA7",
           namespace_id: 1,
-          mounted_partitions: ["/data"],
+          mounted_partitions: ["/data", "/logs"],
           filesystem_type: "ext4",
           is_system_disk: false,
           spdk_ready: false,
           discovered_at: new Date().toISOString(),
-          nodeName
+          nodeName,
+          driver_ready: false,
+          blobstore_initialized: false
+        },
+        
+        // SYSTEM DISK - Cannot be used for SPDK
+        {
+          pci_address: "0000:8e:00.0",
+          device_name: "nvme7n1",
+          vendor_id: "0x144d",
+          device_id: "0xa80a",
+          subsystem_vendor_id: "0x144d",
+          subsystem_device_id: "0xa801",
+          numa_node: 0,
+          driver: "nvme",
+          size_bytes: 256060514304,
+          model: "Samsung SSD 980 256GB",
+          serial: "S5P2NG0R567890",
+          firmware_version: "5B2QGXA7",
+          namespace_id: 1,
+          mounted_partitions: ["/", "/boot", "/var"],
+          filesystem_type: "ext4",
+          is_system_disk: true,
+          spdk_ready: false,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: false,
+          blobstore_initialized: false
         }
       ];
-
-      // Add some variety based on node name
-      const nodeVariants = mockDisks.map((disk, index) => ({
-        ...disk,
-        pci_address: disk.pci_address.replace('3d', `${3 + index}${nodeName.slice(-1)}`),
-        device_name: `nvme${index}n1`,
-        serial: `${disk.serial.slice(0, -1)}${nodeName.slice(-1)}`,
-        mounted_partitions: index === 2 && nodeName === 'worker-node-2' ? ["/var/data"] : disk.mounted_partitions,
-        driver: index === 1 && nodeName === 'worker-node-1' ? 'vfio-pci' : 'nvme',
-        spdk_ready: index === 1 && nodeName === 'worker-node-1',
-        is_system_disk: index === 0 && nodeName === 'worker-node-1' // Make first disk on node-1 a system disk
-      }));
 
       try {
         const response = await fetch(`/api/nodes/${nodeName}/disks/uninitialized`);
         if (response.ok) {
           const data = await response.json();
           if (data.success && data.disks) {
+            // Enhance disk data with SpdkDisk CRD information
+            const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
+              const enhancedDisk = { ...disk, nodeName };
+              
+              // Find corresponding SpdkDisk CRD data
+              const spdkDiskName = `${nodeName}-${disk.device_name}`;
+              const spdkDisk = dashboardData.disks.find(d => 
+                d.id === spdkDiskName || 
+                d.pci_addr === disk.pci_address ||
+                d.node === nodeName
+              );
+              
+              if (spdkDisk) {
+                // Enhanced status logic:
+                // - spdk_ready: true if blobstore is initialized (ready for volumes)
+                // - spdk_ready: false if needs setup (driver binding or blobstore init)
+                // - Add new field to track driver vs blobstore state
+                enhancedDisk.spdk_ready = spdkDisk.blobstore_initialized;
+                enhancedDisk.driver_ready = disk.spdk_ready; // Original driver compatibility
+                enhancedDisk.blobstore_initialized = spdkDisk.blobstore_initialized;
+                
+                console.log(`Enhanced disk ${disk.device_name}: driver_ready=${disk.spdk_ready}, blobstore_initialized=${spdkDisk.blobstore_initialized}, final_spdk_ready=${enhancedDisk.spdk_ready}`);
+              } else {
+                console.log(`No SpdkDisk CRD found for ${disk.device_name}, using original spdk_ready=${disk.spdk_ready}`);
+                enhancedDisk.driver_ready = disk.spdk_ready;
+                enhancedDisk.blobstore_initialized = false;
+              }
+              
+              return enhancedDisk;
+            });
+            
             setNodeData(prev => ({
               ...prev,
               [nodeName]: {
                 node: nodeName,
-                disks: data.disks.map((disk: UnimplementedDisk) => ({ ...disk, nodeName })),
+                disks: enhancedDisks,
                 loading: false,
                 last_updated: new Date().toISOString()
               }
@@ -989,7 +1144,7 @@ export const useDiskSetup = () => {
         ...prev,
         [nodeName]: {
           node: nodeName,
-          disks: nodeVariants,
+          disks: mockDisks,
           loading: false,
           last_updated: new Date().toISOString()
         }
@@ -1012,7 +1167,7 @@ export const useDiskSetup = () => {
         return newSet;
       });
     }
-  }, []);
+  }, [dashboardData.disks]);
 
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 
@@ -1146,6 +1301,54 @@ export const useDiskSetup = () => {
     }
   }, [refreshNodeDisks, setNodeData]);
 
+  const initializeBlobstoreOnNode = useCallback(async (
+    nodeName: string, 
+    pciAddresses: string[]
+  ): Promise<DiskSetupResult> => {
+    try {
+      const response = await fetch(`/api/nodes/${nodeName}/disks/initialize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          pci_addresses: pciAddresses,
+          force_unmount: false,
+          backup_data: false
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        // Refresh node data after initialization
+        if (result.success) {
+          setTimeout(() => refreshNodeDisks(nodeName), 2000);
+        }
+        
+        return result;
+      } else {
+        throw new Error(`Initialize blobstore request failed: ${response.statusText}`);
+      }
+    } catch (apiError) {
+      console.warn(`Disk initialize blobstore API not available for ${nodeName}, using mock result:`, apiError);
+      
+      // Mock successful initialization for demo
+      const mockResult: DiskSetupResult = {
+        success: true,
+        setup_disks: pciAddresses,
+        failed_disks: [],
+        warnings: ["This is a mock result for development"],
+        completed_at: new Date().toISOString()
+      };
+
+      // Simulate progress updates
+      setTimeout(() => {
+        mockResult.warnings.push("Blobstore initialization completed (mock)");
+      }, 1000);
+
+      return mockResult;
+    }
+  }, [refreshNodeDisks]);
+
   const deleteDiskOnNode = useCallback(async (
     nodeName: string,
     pciAddress: string
@@ -1222,6 +1425,7 @@ export const useDiskSetup = () => {
     refreshNodeDisks,
     setupDisksOnNode,
     resetDisksOnNode,
+    initializeBlobstoreOnNode,
     deleteDiskOnNode,
     refreshing: refreshing.size > 0
   };
