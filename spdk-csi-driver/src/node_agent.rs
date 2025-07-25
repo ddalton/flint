@@ -675,7 +675,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     
     // Process each discovered device
     for device in discovered_devices {
-        let disk_name = format!("{}-{}", agent.node_name, device.controller_id);
+        let disk_name = agent.disk_crd_name(&device.pcie_addr);  // Use PCI-based naming
         match get_or_create_disk_resource(agent, &spdk_disks, &disk_name, &device).await {
             Ok(_) => {
                 println!("✅ [DISCOVERY] Successfully processed disk: {}", disk_name);
