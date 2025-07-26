@@ -574,14 +574,13 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
   const [usingMockData, setUsingMockData] = useState(false);
   
   // Check if operations or selections are active to prevent refresh interference
-  const operationsContext = (() => {
-    try {
-      return useOperations();
-    } catch {
-      // Context not available, assume no operations or selections
-      return { shouldPauseRefresh: false };
-    }
-  })();
+  let operationsContext;
+  try {
+    operationsContext = useOperations();
+  } catch {
+    // Context not available, assume no operations or selections
+    operationsContext = { shouldPauseRefresh: false };
+  }
 
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
