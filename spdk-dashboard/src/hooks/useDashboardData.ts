@@ -900,6 +900,16 @@ export const useDiskSetup = () => {
   
   // Get dashboard data to cross-reference SpdkDisk CRD status
   const { data: dashboardData } = useDashboardData(false);
+  
+  // Get operations context to respect active selections
+  const operationsContext = (() => {
+    try {
+      return useOperations();
+    } catch {
+      // Context not available, assume no active selections
+      return { hasActiveSelections: false };
+    }
+  })();
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     try {
@@ -1202,7 +1212,7 @@ export const useDiskSetup = () => {
       if (response.ok) {
         const result = await response.json();
         
-        // Refresh node data after setup
+        // Refresh node data after setup to show new status
         if (result.success) {
           setTimeout(() => refreshNodeDisks(nodeName), 2000);
         }
@@ -1269,7 +1279,7 @@ export const useDiskSetup = () => {
       if (response.ok) {
         const result = await response.json();
         
-        // Refresh node data after reset
+        // Refresh node data after reset to show new status
         if (result.success) {
           setTimeout(() => refreshNodeDisks(nodeName), 2000);
         }
@@ -1348,7 +1358,7 @@ export const useDiskSetup = () => {
           completed_at: result.completed_at || new Date().toISOString()
         };
         
-        // Refresh node data after initialization
+        // Refresh node data after initialization to show new status
         if (normalizedResult.success) {
           setTimeout(() => refreshNodeDisks(nodeName), 2000);
         }
@@ -1392,7 +1402,7 @@ export const useDiskSetup = () => {
       if (response.ok) {
         const result = await response.json();
         
-        // Refresh node data after deletion
+        // Refresh node data after deletion to show new status
         if (result.success) {
           setTimeout(() => refreshNodeDisks(nodeName), 2000);
         }

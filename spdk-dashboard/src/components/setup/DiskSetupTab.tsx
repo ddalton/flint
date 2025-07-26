@@ -211,7 +211,7 @@ export const DiskSetupTab: React.FC = () => {
     'worker-node-3'
   ];
 
-  // Cleanup invalid selections after data refresh (preserve selection across auto-refresh)
+  // Cleanup invalid selections after data refresh - only remove disks that no longer exist
   useEffect(() => {
     const allDisks = Object.entries(nodeData).flatMap(([nodeName, nodeInfo]) =>
       (nodeInfo.disks || []).map(disk => `${nodeName}:${disk.pci_address}`)
@@ -222,14 +222,25 @@ export const DiskSetupTab: React.FC = () => {
         allDisks.includes(diskKey)
       ));
       
-      // Only update if there were invalid selections removed
+      // Only update if there were invalid selections removed (disks that no longer exist)
       if (validSelections.size !== prev.size) {
-        console.log(`Cleaned up ${prev.size - validSelections.size} invalid disk selections after refresh`);
+        console.log(`✅ [SELECTION_CLEANUP] Cleaned up ${prev.size - validSelections.size} invalid disk selections after refresh`);
+        return validSelections;
       }
       
-      return validSelections;
+      // If no invalid selections, keep existing state
+      return prev;
     });
-  }, [nodeData]); // Run when nodeData changes (after refresh)
+  }, [nodeData]); // Run when nodeData changes to clean up invalid selections
+
+  // Debug logging to track nodeData changes
+  useEffect(() => {
+    if (selectedDisks.size > 0) {
+      console.log('🔍 [DEBUG] nodeData changed while disks are selected. This could indicate unwanted refresh.');
+      console.log('   - Selected disks count:', selectedDisks.size);
+      console.log('   - NodeData keys:', Object.keys(nodeData));
+    }
+  }, [nodeData, selectedDisks.size]);
 
   useEffect(() => {
     const initialData: Record<string, any> = {};
@@ -672,14 +683,8 @@ export const DiskSetupTab: React.FC = () => {
             return newSelection;
           });
           
-          // Refresh node data after unbind, but only if no other disks are selected
-          setTimeout(() => {
-            if (selectedDisks.size === 0) {
-              refreshNodeDisks(node);
-            } else {
-              console.log('⏸️ [POST_UNBIND] Skipping refresh after unbind - other disks still selected');
-            }
-          }, 2000);
+          // Refresh node data after unbind to show new status
+          setTimeout(() => refreshNodeDisks(node), 2000);
         }
       } else {
         throw new Error(`Unbind request failed: ${response.statusText}`);
@@ -724,17 +729,7 @@ export const DiskSetupTab: React.FC = () => {
         // Remove from selection and refresh
         const newSelection = new Set<string>();
         setSelectedDisks(newSelection);
-        setTimeout(() => {
-          // Check current selection state at execution time, not when scheduled
-          setSelectedDisks(current => {
-            if (current.size === 0) {
-              refreshNodeDisks(diskToDelete.nodeName);
-            } else {
-              console.log('⏸️ [POST_DELETE] Skipping refresh after delete - new disks selected');
-            }
-            return current;
-          });
-        }, 2000);
+        setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
       }
     } catch (error) {
       console.error('Failed to delete disk:', error);
