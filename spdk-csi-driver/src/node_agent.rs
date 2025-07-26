@@ -2360,7 +2360,7 @@ impl NodeAgent {
 
         // Check if disk is already fully setup (has LVS) rather than just driver-ready
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        let disk_name = self.disk_crd_name(pci_addr);
         
         if let Ok(existing_disk) = spdk_disks.get(&disk_name).await {
             if existing_disk.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
@@ -3176,7 +3176,7 @@ impl NodeAgent {
         
         // Get the disk name from PCI address
         let disk_info = self.get_disk_info(pci_address).await?;
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name.replace("nvme", "").replace("n1", ""));
+        let disk_name = self.disk_crd_name(pci_address);
         
         // Query Kubernetes for SpdkVolume CRDs that use this disk
         let volumes_api: Api<spdk_csi_driver::SpdkVolume> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
@@ -3342,8 +3342,12 @@ impl NodeAgent {
         println!("🗑️ [LVS_DELETE] Deleting LVS from disk: {}", pci_address);
         
         let disk_info = self.get_disk_info(pci_address).await?;
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name.replace("nvme", "").replace("n1", ""));
-        let lvs_name = format!("lvs_{}", disk_name);
+        let disk_name = self.disk_crd_name(pci_address);
+        let actual_device_name = match self.find_nvme_device_name(pci_address).await {
+            Ok(name) => name,
+            Err(_) => disk_info.device_name.clone(),
+        };
+        let lvs_name = format!("lvs_{}-{}", self.node_name, actual_device_name);
         
         // Delete the LVS
         let result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
@@ -3383,7 +3387,7 @@ impl NodeAgent {
         println!("📝 [CRD_UPDATE] Updating SpdkDisk CRD after deletion: {}", pci_address);
         
         let disk_info = self.get_disk_info(pci_address).await?;
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name.replace("nvme", "").replace("n1", ""));
+        let disk_name = self.disk_crd_name(pci_address);
         
         let disks_api: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
         
@@ -3507,7 +3511,7 @@ impl NodeAgent {
 
         // Find or create the SpdkDisk CRD
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        let disk_name = self.disk_crd_name(pci_addr);
         
         println!("🔧 [INIT_SINGLE_BLOBSTORE] Looking for SpdkDisk CRD: {}", disk_name);
         
@@ -3717,7 +3721,7 @@ impl NodeAgent {
         
         // Get disk name for reconciliation
         let disk_info = self.get_disk_info(disk_pci_addr).await?;
-        let disk_name = format!("{}-{}", self.node_name, disk_info.device_name);
+        let disk_name = self.disk_crd_name(disk_pci_addr);
         
         // Pre-operation reconciliation
         println!("🔄 [IDEMPOTENT] Pre-operation state reconciliation...");
