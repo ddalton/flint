@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useOperations } from '../contexts/OperationsContext';
 
 // --- Start of new/updated interfaces ---
@@ -582,6 +582,10 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     operationsContext = { shouldPauseRefresh: false };
   }
 
+  // Use ref to avoid stale closure issues in setInterval
+  const operationsContextRef = useRef(operationsContext);
+  operationsContextRef.current = operationsContext;
+
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
     const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
@@ -657,9 +661,10 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
-      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${operationsContext.shouldPauseRefresh}`);
+      const currentOperationsContext = operationsContextRef.current;
+      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${currentOperationsContext.shouldPauseRefresh}`);
       // Prevent discovery interference during active operations or selections
-      if (!operationsContext.shouldPauseRefresh) {
+      if (!currentOperationsContext.shouldPauseRefresh) {
         console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
         refreshData();
       } else {
@@ -668,7 +673,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     }, 30000); // Refresh every 30 seconds
     
     return () => clearInterval(interval);
-  }, [autoRefresh, refreshData, operationsContext.shouldPauseRefresh]);
+  }, [autoRefresh, refreshData]);
 
   return {
     data,
