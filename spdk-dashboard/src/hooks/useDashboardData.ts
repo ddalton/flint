@@ -906,10 +906,25 @@ export const useDiskSetup = () => {
   
   // Get dashboard data to cross-reference SpdkDisk CRD status
   const { data: dashboardData } = useDashboardData(false);
+  
+  // Get operations context to respect global pause state
+  let operationsContext;
+  try {
+    operationsContext = useOperations();
+  } catch {
+    // Context not available, assume no operations or selections
+    operationsContext = { shouldPauseRefresh: false };
+  }
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
     console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
+    
+    // Respect global pause state - don't refresh during active operations or selections
+    if (operationsContext.shouldPauseRefresh) {
+      console.log(`⏸️ [REFRESH_TRIGGER] Skipping refreshNodeDisks for ${nodeName} due to global pause (shouldPauseRefresh: true)`);
+      return;
+    }
     
     try {
       setRefreshing(prev => new Set([...prev, nodeName]));
@@ -1195,7 +1210,7 @@ export const useDiskSetup = () => {
         return newSet;
       });
     }
-  }, [dashboardData.disks]);
+  }, [dashboardData.disks, operationsContext.shouldPauseRefresh]);
 
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 
