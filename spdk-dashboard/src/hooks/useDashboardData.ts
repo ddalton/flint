@@ -574,17 +574,14 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
   const [usingMockData, setUsingMockData] = useState(false);
   
   // Check if operations or selections are active to prevent refresh interference
-  let operationsContext;
+  let shouldPauseRefresh;
   try {
-    operationsContext = useOperations();
+    const operationsContext = useOperations();
+    shouldPauseRefresh = operationsContext.shouldPauseRefresh;
   } catch {
     // Context not available, assume no operations or selections
-    operationsContext = { shouldPauseRefresh: false };
+    shouldPauseRefresh = false;
   }
-
-  // Use ref to avoid stale closure issues in setInterval
-  const operationsContextRef = useRef(operationsContext);
-  operationsContextRef.current = operationsContext;
 
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
@@ -661,10 +658,9 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
-      const currentOperationsContext = operationsContextRef.current;
-      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${currentOperationsContext.shouldPauseRefresh}`);
+      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${shouldPauseRefresh}`);
       // Prevent discovery interference during active operations or selections
-      if (!currentOperationsContext.shouldPauseRefresh) {
+      if (!shouldPauseRefresh) {
         console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
         refreshData();
       } else {
@@ -673,7 +669,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     }, 30000); // Refresh every 30 seconds
     
     return () => clearInterval(interval);
-  }, [autoRefresh, refreshData]);
+  }, [autoRefresh, refreshData, shouldPauseRefresh]);
 
   return {
     data,
@@ -908,12 +904,13 @@ export const useDiskSetup = () => {
   const { data: dashboardData } = useDashboardData(false);
   
   // Get operations context to respect global pause state
-  let operationsContext;
+  let shouldPauseRefresh;
   try {
-    operationsContext = useOperations();
+    const operationsContext = useOperations();
+    shouldPauseRefresh = operationsContext.shouldPauseRefresh;
   } catch {
     // Context not available, assume no operations or selections
-    operationsContext = { shouldPauseRefresh: false };
+    shouldPauseRefresh = false;
   }
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
@@ -921,7 +918,7 @@ export const useDiskSetup = () => {
     console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
     
     // Respect global pause state - don't refresh during active operations or selections
-    if (operationsContext.shouldPauseRefresh) {
+    if (shouldPauseRefresh) {
       console.log(`⏸️ [REFRESH_TRIGGER] Skipping refreshNodeDisks for ${nodeName} due to global pause (shouldPauseRefresh: true)`);
       return;
     }
@@ -1210,7 +1207,7 @@ export const useDiskSetup = () => {
         return newSet;
       });
     }
-  }, [dashboardData.disks, operationsContext.shouldPauseRefresh]);
+  }, [dashboardData.disks, shouldPauseRefresh]);
 
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 
