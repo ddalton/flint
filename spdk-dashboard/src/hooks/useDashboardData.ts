@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useOperations } from '../contexts/OperationsContext';
 
 // --- Start of new/updated interfaces ---
