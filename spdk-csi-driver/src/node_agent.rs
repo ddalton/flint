@@ -2583,7 +2583,46 @@ impl NodeAgent {
                     Ok(created_disk) => created_disk,
                     Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
                         println!("🔄 [SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
-                        spdk_disks.get(&disk_crd_name).await?
+                        
+                        match spdk_disks.get(&disk_crd_name).await {
+                            Ok(existing_disk) => {
+                                println!("✅ [SETUP] Successfully fetched existing CRD after race condition: {}", disk_crd_name);
+                                println!("🔍 [SETUP] Existing CRD details:");
+                                println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
+                                println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
+                                println!("   - Spec: {:?}", existing_disk.spec);
+                                println!("   - Status: {:?}", existing_disk.status);
+                                existing_disk
+                            }
+                            Err(race_err) => {
+                                println!("❌ [SETUP] DETAILED ERROR - Failed to fetch CRD {} after race condition: {:?}", disk_crd_name, race_err);
+                                
+                                match &race_err {
+                                    kube::Error::Api(api_err) => {
+                                        println!("❌ [SETUP] Kubernetes API Error:");
+                                        println!("   - Code: {}", api_err.code);
+                                        println!("   - Message: {}", api_err.message);
+                                        println!("   - Reason: {}", api_err.reason);
+                                        println!("   - Status: {}", api_err.status);
+                                    }
+                                    kube::Error::SerdeError(serde_err) => {
+                                        println!("❌ [SETUP] Serde Deserialization Error:");
+                                        println!("   - Error: {}", serde_err);
+                                        println!("   - This suggests the CRD {} has incompatible format", disk_crd_name);
+                                        println!("   - Try: kubectl get spdkdisk {} -o yaml", disk_crd_name);
+                                    }
+                                    kube::Error::HttpError(http_err) => {
+                                        println!("❌ [SETUP] HTTP Error:");
+                                        println!("   - Error: {}", http_err);
+                                    }
+                                    _ => {
+                                        println!("❌ [SETUP] Other error type: {}", race_err);
+                                    }
+                                }
+                                
+                                return Err(race_err.into());
+                            }
+                        }
                     }
                     Err(e) => return Err(e.into()),
                 }
@@ -2989,7 +3028,46 @@ impl NodeAgent {
                     Ok(created_disk) => created_disk,
                     Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
                         println!("🔄 [KERNEL_SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
-                        spdk_disks.get(&disk_crd_name).await?
+                        
+                        match spdk_disks.get(&disk_crd_name).await {
+                            Ok(existing_disk) => {
+                                println!("✅ [KERNEL_SETUP] Successfully fetched existing CRD after race condition: {}", disk_crd_name);
+                                println!("🔍 [KERNEL_SETUP] Existing CRD details:");
+                                println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
+                                println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
+                                println!("   - Spec: {:?}", existing_disk.spec);
+                                println!("   - Status: {:?}", existing_disk.status);
+                                existing_disk
+                            }
+                            Err(race_err) => {
+                                println!("❌ [KERNEL_SETUP] DETAILED ERROR - Failed to fetch CRD {} after race condition: {:?}", disk_crd_name, race_err);
+                                
+                                match &race_err {
+                                    kube::Error::Api(api_err) => {
+                                        println!("❌ [KERNEL_SETUP] Kubernetes API Error:");
+                                        println!("   - Code: {}", api_err.code);
+                                        println!("   - Message: {}", api_err.message);
+                                        println!("   - Reason: {}", api_err.reason);
+                                        println!("   - Status: {}", api_err.status);
+                                    }
+                                    kube::Error::SerdeError(serde_err) => {
+                                        println!("❌ [KERNEL_SETUP] Serde Deserialization Error:");
+                                        println!("   - Error: {}", serde_err);
+                                        println!("   - This suggests the CRD {} has incompatible format", disk_crd_name);
+                                        println!("   - Try: kubectl get spdkdisk {} -o yaml", disk_crd_name);
+                                    }
+                                    kube::Error::HttpError(http_err) => {
+                                        println!("❌ [KERNEL_SETUP] HTTP Error:");
+                                        println!("   - Error: {}", http_err);
+                                    }
+                                    _ => {
+                                        println!("❌ [KERNEL_SETUP] Other error type: {}", race_err);
+                                    }
+                                }
+                                
+                                return Err(race_err.into());
+                            }
+                        }
                     }
                     Err(e) => return Err(e.into()),
                 }
