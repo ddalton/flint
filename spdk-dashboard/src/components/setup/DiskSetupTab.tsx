@@ -169,38 +169,12 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 };
 
 export const DiskSetupTab: React.FC = () => {
-  // Add component mount debugging
-  const mountId = useRef(Math.random().toString(36).substr(2, 9));
-  console.log(`🚀 [COMPONENT] DiskSetupTab rendered with mountId: ${mountId.current}`);
-  
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
-  // UI State with debugging wrapper
-  const [selectedDisksInternal, setSelectedDisksInternal] = useState<Set<string>>(new Set());
-  
-  // Wrap setSelectedDisks to track all changes
-  const setSelectedDisks = (value: React.SetStateAction<Set<string>>) => {
-    console.log(`🔍 [SELECTION_CHANGE] setSelectedDisks called`);
-    console.log(`🔍 [SELECTION_CHANGE] Call stack:`, new Error().stack);
-    
-    setSelectedDisksInternal(prev => {
-      const newValue = typeof value === 'function' ? value(prev) : value;
-      console.log(`🔍 [SELECTION_CHANGE] Previous: ${prev.size} disks, New: ${newValue.size} disks`);
-      console.log(`🔍 [SELECTION_CHANGE] Previous disks:`, Array.from(prev));
-      console.log(`🔍 [SELECTION_CHANGE] New disks:`, Array.from(newValue));
-      
-      if (prev.size > 0 && newValue.size === 0) {
-        console.log(`🚨 [SELECTION_CLEARED] Selection cleared from ${prev.size} to 0!`);
-        console.log(`🚨 [SELECTION_CLEARED] Call stack:`, new Error().stack);
-      }
-      
-      return newValue;
-    });
-  };
-  
-  const selectedDisks = selectedDisksInternal;
+  // UI State
+  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -245,14 +219,7 @@ export const DiskSetupTab: React.FC = () => {
   }, [nodeData]);
   */
 
-  // Debug logging to track nodeData changes
-  useEffect(() => {
-    if (selectedDisks.size > 0) {
-      console.log('🔍 [DEBUG] nodeData changed while disks are selected. This could indicate unwanted refresh.');
-      console.log('   - Selected disks count:', selectedDisks.size);
-      console.log('   - NodeData keys:', Object.keys(nodeData));
-    }
-  }, [nodeData, selectedDisks.size]);
+
 
   useEffect(() => {
     const initialData: Record<string, any> = {};
@@ -286,9 +253,6 @@ export const DiskSetupTab: React.FC = () => {
   }, [selectedDisks, setActiveSelectionsCount]);
 
   const refreshAllNodes = async () => {
-    console.log(`🚨 [REFRESH_ALL] refreshAllNodes called! hasActiveOperations: ${hasActiveOperations}, selectedDisks.size: ${selectedDisks.size}`);
-    console.log(`🔍 [REFRESH_ALL] Call stack:`, new Error().stack);
-    
     // Prevent discovery interference during active operations or selections
     if (hasActiveOperations) {
       console.log('⏸️ [REFRESH] Skipping auto-refresh during active operations to prevent interference');
@@ -299,7 +263,6 @@ export const DiskSetupTab: React.FC = () => {
       return;
     }
     
-    console.log('✅ [REFRESH_ALL] Proceeding with refresh - no blocks detected');
     setGlobalRefreshing(true);
     const promises = knownNodes.map(node => refreshNodeDisks(node));
     await Promise.allSettled(promises);
@@ -310,18 +273,8 @@ export const DiskSetupTab: React.FC = () => {
   const selectedDisksRef = useRef(selectedDisks);
   const operationsRef = useRef({ setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress });
   
-  // Component lifecycle debugging
-  useEffect(() => {
-    console.log(`🚀 [COMPONENT] DiskSetupTab mounted with mountId: ${mountId.current}`);
-    return () => {
-      console.log(`💀 [COMPONENT] DiskSetupTab unmounting with mountId: ${mountId.current}`);
-    };
-  }, []);
-  
   // Update refs when state changes
   useEffect(() => {
-    console.log(`🔄 [REF_UPDATE] Updating selectedDisksRef: ${selectedDisks.size} disks, mountId: ${mountId.current}`);
-    console.log(`🔄 [REF_UPDATE] Selected disks:`, Array.from(selectedDisks));
     selectedDisksRef.current = selectedDisks;
   }, [selectedDisks]);
   
@@ -339,9 +292,6 @@ export const DiskSetupTab: React.FC = () => {
                                   operationsRef.current.deleteInProgress.size > 0;
       
       const currentSelectedCount = selectedDisksRef.current.size;
-      const actualStateCount = selectedDisks.size;
-      
-      console.log(`🔍 [AUTO_REFRESH_DETAILED] mountId: ${mountId.current}, ref: ${currentSelectedCount}, state: ${actualStateCount}, ops: ${currentHasOperations}`);
       
       if (!currentHasOperations && currentSelectedCount === 0) {
         console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');

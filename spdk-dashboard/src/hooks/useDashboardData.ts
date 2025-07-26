@@ -902,9 +902,6 @@ export const useDiskSetup = () => {
   const { data: dashboardData } = useDashboardData(false);
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
-    console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
-    console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
-    
     try {
       setRefreshing(prev => new Set([...prev, nodeName]));
       setNodeData(prev => ({
