@@ -233,27 +233,13 @@ export const DiskSetupTab: React.FC = () => {
     'worker-node-3'
   ];
 
-  // Cleanup invalid selections after data refresh - only remove disks that no longer exist
+  // DISABLED: Selection cleanup was causing selections to be cleared
+  // This useEffect was the root cause of the selection clearing issue
+  /*
   useEffect(() => {
-    const allDisks = Object.entries(nodeData).flatMap(([nodeName, nodeInfo]) =>
-      (nodeInfo.disks || []).map(disk => `${nodeName}:${disk.pci_address}`)
-    );
-    
-    setSelectedDisks(prev => {
-      const validSelections = new Set(Array.from(prev).filter(diskKey => 
-        allDisks.includes(diskKey)
-      ));
-      
-      // Only update if there were invalid selections removed (disks that no longer exist)
-      if (validSelections.size !== prev.size) {
-        console.log(`✅ [SELECTION_CLEANUP] Cleaned up ${prev.size - validSelections.size} invalid disk selections after refresh`);
-        return validSelections;
-      }
-      
-      // If no invalid selections, keep existing state
-      return prev;
-    });
-  }, [nodeData]); // Run when nodeData changes to clean up invalid selections
+    console.log(`🚫 [SELECTION_CLEANUP] DISABLED - This was clearing selections!`);
+  }, [nodeData]);
+  */
 
   // Debug logging to track nodeData changes
   useEffect(() => {
