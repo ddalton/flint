@@ -4159,6 +4159,21 @@ impl NodeAgent {
                     println!("✅ [RECONCILE] SPDK and CRD states are consistent");
                 }
                 
+                // Since we successfully communicated with SPDK, ensure healthy status is true
+                if !updated_status.healthy {
+                    println!("🔄 [RECONCILE] SPDK is reachable again - restoring healthy status");
+                    updated_status.healthy = true;
+                    needs_update = true;
+                }
+                
+                // Ensure blobstore_initialized reflects actual SPDK state
+                if spdk_lvs_exists && !updated_status.blobstore_initialized {
+                    println!("🔄 [RECONCILE] SPDK has LVS - ensuring blobstore_initialized is true");
+                    updated_status.blobstore_initialized = true;
+                    updated_status.lvs_name = Some(lvs_name.clone());
+                    needs_update = true;
+                }
+                
                 // Always update the last_checked timestamp
                 updated_status.last_checked = Utc::now().to_rfc3339();
                 needs_update = true; // Always need to update for timestamp
@@ -4166,11 +4181,15 @@ impl NodeAgent {
             }
             Err(e) => {
                 println!("⚠️ [RECONCILE] Could not query SPDK LVS stores: {}", e);
-                // Mark as potentially unhealthy if we can't communicate with SPDK
-                if updated_status.healthy {
-                    updated_status.healthy = false;
-                    needs_update = true;
-                }
+                // Don't immediately mark as unhealthy on communication errors
+                // SPDK might be temporarily unavailable due to restart, initialization, etc.
+                // Instead, only update the last_checked timestamp and preserve existing state
+                println!("🔄 [RECONCILE] Preserving current state while SPDK is unreachable");
+                updated_status.last_checked = Utc::now().to_rfc3339();
+                needs_update = true; // Update timestamp only
+                
+                // TODO: Consider implementing retry logic with exponential backoff
+                // or mark as unhealthy only after consecutive failures over a threshold period
             }
         }
         
