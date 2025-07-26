@@ -2591,91 +2591,97 @@ impl NodeAgent {
         let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
         let disk_name = self.disk_crd_name(pci_addr);
         
-        if let Ok(existing_disk) = spdk_disks.get(&disk_name).await {
-            if existing_disk.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
-                println!("🔍 [SETUP] CRD indicates LVS initialized, verifying actual SPDK state...");
+        if let Ok(_existing_disk) = spdk_disks.get(&disk_name).await {
+            // Always check SPDK state as source of truth, regardless of CRD status
+            println!("🔍 [SETUP] Checking actual SPDK state for disk {}...", pci_addr);
                 
-                // Check if LVS actually exists in SPDK and has capacity
-                let expected_lvs_name = format!("lvs_{}", disk_name.replace('-', "_"));
+            // Get all LVS stores from SPDK (no filtering by name or uuid)
+            let lvs_query_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_lvol_get_lvstores"
+            })).await;
                 
-                let lvs_query_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-                    "method": "bdev_lvol_get_lvstores",
-                    "params": {
-                        "lvs_name": expected_lvs_name
-                    }
-                })).await;
-                
-                if let Ok(lvs_result) = lvs_query_result {
-                    if let Some(lvstore_list) = lvs_result["result"].as_array() {
-                        if let Some(lvs_info) = lvstore_list.first() {
-                    // LVS exists, check if it has capacity
-                    if let (Some(total_clusters), Some(cluster_size)) = (
-                        lvs_info["total_data_clusters"].as_u64(),
-                        lvs_info["cluster_size"].as_u64()
-                    ) {
-                        let total_capacity = (total_clusters * cluster_size) as i64;
-                        if total_capacity > 0 {
-                            println!("✅ [SETUP] LVS exists and has capacity ({} bytes), updating CRD and completing setup", total_capacity);
-                            
-                            // Update CRD with correct capacity information
-                            let free_clusters = lvs_info["free_clusters"].as_u64().unwrap_or(0);
-                            let free_space = (free_clusters * cluster_size) as i64;
-                            let used_space = total_capacity - free_space;
-                            
-                            let patch = json!({
-                                "status": {
-                                    "blobstore_initialized": true,
-                                    "lvs_name": expected_lvs_name,
-                                    "total_capacity": total_capacity,
-                                    "free_space": free_space,
-                                    "used_space": used_space,
-                                    "healthy": true,
-                                    "last_checked": Utc::now().to_rfc3339()
-                                }
-                            });
-                            
-                            if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                                println!("⚠️ [SETUP] Failed to update CRD with capacity info: {}", e);
+            if let Ok(lvs_result) = lvs_query_result {
+                if let Some(lvstore_list) = lvs_result["result"].as_array() {
+                    // Search for LVS that matches our disk by base_bdev containing PCI address
+                    let mut found_lvs = None;
+                    for lvstore in lvstore_list {
+                        if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
+                            // Check if this LVS is on our disk (PCI address match)
+                            if base_bdev.contains(pci_addr) || base_bdev.contains(&pci_addr.replace(":", "-")) {
+                                let lvs_name = lvstore["name"].as_str().unwrap_or("unknown");
+                                println!("🔍 [SETUP] Found LVS for our disk: {} on base_bdev: {}", lvs_name, base_bdev);
+                                found_lvs = Some(lvstore.clone());
+                                break;
                             }
-                            
-                            return Err("Disk is already fully setup with LVS initialized".into());
-                        } else {
-                            println!("⚠️ [SETUP] LVS exists but has no capacity, will reset and re-initialize");
                         }
-                    } else {
-                        println!("⚠️ [SETUP] LVS exists but capacity info unavailable, will reset and re-initialize");
                     }
+                        
+                    if let Some(lvs_info) = found_lvs {
+                        // LVS exists on our disk, check if it has capacity
+                        if let (Some(total_clusters), Some(cluster_size)) = (
+                            lvs_info["total_data_clusters"].as_u64(),
+                            lvs_info["cluster_size"].as_u64()
+                        ) {
+                            let total_capacity = (total_clusters * cluster_size) as i64;
+                            if total_capacity > 0 {
+                                let actual_lvs_name = lvs_info["name"].as_str().unwrap_or("unknown");
+                                let free_clusters = lvs_info["free_clusters"].as_u64().unwrap_or(0);
+                                let free_space = (free_clusters * cluster_size) as i64;
+                                let used_space = total_capacity - free_space;
+                                
+                                println!("✅ [SETUP] LVS '{}' exists and has capacity ({} bytes), updating CRD to match SPDK state", actual_lvs_name, total_capacity);
+                                
+                                // Update CRD to match actual SPDK state
+                                let sync_patch = json!({
+                                    "status": {
+                                        "blobstore_initialized": true,
+                                        "lvs_name": actual_lvs_name,
+                                        "total_capacity": total_capacity,
+                                        "free_space": free_space,
+                                        "used_space": used_space,
+                                        "healthy": true,
+                                        "last_checked": Utc::now().to_rfc3339()
+                                    }
+                                });
+                                
+                                if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(sync_patch)).await {
+                                    println!("⚠️ [SETUP] Failed to sync CRD with SPDK state: {}", e);
+                                }
+                                
+                                return Err("Disk is already fully setup with LVS initialized".into());
+                            } else {
+                                let actual_lvs_name = lvs_info["name"].as_str().unwrap_or("unknown");
+                                println!("⚠️ [SETUP] LVS '{}' exists but has no capacity, will clean up and re-initialize", actual_lvs_name);
+                            }
                         } else {
-                            println!("⚠️ [SETUP] No LVS found in query result, will reset and re-initialize");
+                            println!("⚠️ [SETUP] LVS exists but capacity info unavailable, will clean up and re-initialize");
                         }
                     } else {
-                        println!("⚠️ [SETUP] No LVS found in query result, will reset and re-initialize");
+                        println!("✅ [SETUP] No LVS found for disk {}, proceeding with fresh setup", pci_addr);
                     }
                 } else {
-                    println!("⚠️ [SETUP] CRD says initialized but no LVS found in SPDK, will reset and re-initialize");
+                    println!("✅ [SETUP] No LVS stores found in SPDK, proceeding with fresh setup");
                 }
-                
-                // Reset CRD state since LVS is invalid/missing
-                let reset_patch = json!({
-                    "status": {
-                        "blobstore_initialized": false,
-                        "lvs_name": null,
-                        "total_capacity": 0,
-                        "free_space": 0,
-                        "used_space": 0,
-                        "healthy": false,
-                        "last_checked": Utc::now().to_rfc3339()
-                    }
-                });
-                
-                if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(reset_patch)).await {
-                    println!("⚠️ [SETUP] Failed to reset CRD state: {}", e);
-                }
-                
-                println!("🔄 [SETUP] CRD state reset, proceeding with fresh setup");
-            } else if disk_info.spdk_ready {
-                println!("🔄 [SETUP] Disk has SPDK driver but no LVS - will complete setup");
+            } else {
+                println!("⚠️ [SETUP] Failed to query SPDK for LVS stores, proceeding with setup anyway");
             }
+                
+            // Reset CRD state to ensure clean setup
+            let reset_patch = json!({
+                "status": {
+                    "blobstore_initialized": false,
+                    "lvs_name": null,
+                    "total_capacity": 0,
+                    "free_space": 0,
+                    "used_space": 0,
+                    "healthy": false,
+                    "last_checked": Utc::now().to_rfc3339()
+                }
+            });
+            if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(reset_patch)).await {
+                println!("⚠️ [SETUP] Failed to reset CRD state: {}", e);
+            }
+            println!("🔄 [SETUP] CRD state reset, proceeding with setup");
         } else if disk_info.spdk_ready {
             println!("🔄 [SETUP] Disk has SPDK driver but no CRD - will complete setup");
         }
