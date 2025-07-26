@@ -300,10 +300,15 @@ impl SpdkNative {
     
     /// Create logical volume - matches SPDK v25.05.x bdev_lvol_create RPC
     pub async fn create_lvol(&self, lvs_name: &str, lvol_name: &str, size: u64, _cluster_size: u64) -> Result<String> {
+        // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+        let size_in_mib = (size + 1048575) / 1048576; // Round up to nearest MiB
+        
         let params = json!({
             "lvs_name": lvs_name,
             "lvol_name": lvol_name,
-            "size": size
+            "size_in_mib": size_in_mib,
+            "thin_provision": false,
+            "clear_method": "unmap"
         });
         
         let result = self.call_rpc("bdev_lvol_create", Some(params)).await?;
@@ -345,7 +350,9 @@ impl SpdkNative {
     }
     
     pub async fn get_raid_bdevs(&self) -> Result<Vec<Value>> {
-        let result = self.call_rpc("bdev_raid_get_bdevs", None).await?;
+        // Fixed: Added required "category" parameter per SPDK documentation
+        let params = json!({"category": "all"});
+        let result = self.call_rpc("bdev_raid_get_bdevs", Some(params)).await?;
         let empty_vec = Vec::new();
         Ok(result.as_array().unwrap_or(&empty_vec).clone())
     }

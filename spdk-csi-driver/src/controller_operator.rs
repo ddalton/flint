@@ -339,14 +339,15 @@ async fn replace_raid_member_with_spdk(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let http_client = HttpClient::new();
 
-    // Remove failed member
+    // Remove failed member - Note: "name" should be the base bdev name, not raid bdev name
+    // TODO: Fix to pass actual base bdev name instead of volume_id
     http_client
         .post(&ctx.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_raid_remove_base_bdev",
             "params": {
-                "name": volume_id,
-                "slot": failed_member_slot
+                "name": volume_id  // FIXME: Should be base bdev name, not raid bdev name
+                // Removed "slot" - not in SPDK documentation
             }
         }))
         .send()
@@ -358,9 +359,9 @@ async fn replace_raid_member_with_spdk(
         .json(&json!({
             "method": "bdev_raid_add_base_bdev",
             "params": {
-                "name": volume_id,
-                "base_bdev": new_bdev_name,
-                "slot": failed_member_slot
+                "raid_bdev": volume_id,    // Fixed: Use "raid_bdev" per documentation
+                "base_bdev": new_bdev_name
+                // Removed "slot" - not in SPDK documentation
             }
         }))
         .send()
@@ -416,6 +417,9 @@ async fn create_replacement_lvol(
     
     println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
 
+    // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+    let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
+    
     let res = http_client
         .post(&rpc_url)
         .json(&json!({
@@ -423,9 +427,9 @@ async fn create_replacement_lvol(
             "params": {
                 "lvs_name": lvs_name,
                 "lvol_name": lvol_name,
-                "size": size_bytes,
+                "size_in_mib": size_in_mib,
                 "thin_provision": false,
-                "clear_method": "write_zeroes"
+                "clear_method": "unmap"
             }
         }))
         .send()

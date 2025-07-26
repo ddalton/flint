@@ -119,7 +119,7 @@ impl NodeService {
             "method": "bdev_raid_create",
             "params": {
                 "name": raid_name,
-                "raid_level": 1,
+                "raid_level": "1",  // Fixed: RAID level must be string
                 "base_bdevs": base_bdevs,
                 "strip_size_kb": 64,
                 "superblock": true
@@ -144,7 +144,7 @@ impl NodeService {
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": bdev_name,
-                "trtype": transport.to_uppercase(),
+                "trtype": transport.to_lowercase(),  // Fixed: SPDK expects lowercase per documentation
                 "traddr": target_ip,
                 "trsvcid": target_port,
                 "subnqn": nqn,

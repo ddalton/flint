@@ -995,7 +995,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     "method": "bdev_nvme_attach_controller",
                     "params": {
                         "name": controller_id,
-                        "trtype": "PCIe",
+                        "trtype": "pcie",  // Fixed: SPDK expects lowercase per documentation
                         "traddr": disk.spec.pcie_addr
                     }
                 })).await;
