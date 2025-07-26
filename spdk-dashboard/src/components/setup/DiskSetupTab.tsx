@@ -672,8 +672,14 @@ export const DiskSetupTab: React.FC = () => {
             return newSelection;
           });
           
-          // Refresh node data after unbind
-          setTimeout(() => refreshNodeDisks(node), 2000);
+          // Refresh node data after unbind, but only if no other disks are selected
+          setTimeout(() => {
+            if (selectedDisks.size === 0) {
+              refreshNodeDisks(node);
+            } else {
+              console.log('⏸️ [POST_UNBIND] Skipping refresh after unbind - other disks still selected');
+            }
+          }, 2000);
         }
       } else {
         throw new Error(`Unbind request failed: ${response.statusText}`);
@@ -718,7 +724,17 @@ export const DiskSetupTab: React.FC = () => {
         // Remove from selection and refresh
         const newSelection = new Set<string>();
         setSelectedDisks(newSelection);
-        setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
+        setTimeout(() => {
+          // Check current selection state at execution time, not when scheduled
+          setSelectedDisks(current => {
+            if (current.size === 0) {
+              refreshNodeDisks(diskToDelete.nodeName);
+            } else {
+              console.log('⏸️ [POST_DELETE] Skipping refresh after delete - new disks selected');
+            }
+            return current;
+          });
+        }, 2000);
       }
     } catch (error) {
       console.error('Failed to delete disk:', error);
