@@ -75,6 +75,8 @@ spec:
                       type: string
                     nvmf_target:
                       type: string
+    subresources:
+      status: {}    
     additionalPrinterColumns:
     - name: State
       type: string
@@ -194,6 +196,8 @@ spec:
                 type: string
                 nullable: true
                 description: "Name of the logical volume store on this disk"
+    subresources:
+      status: {}    
     additionalPrinterColumns:
     - name: Healthy
       type: boolean
@@ -261,6 +265,8 @@ spec:
                 type: string
               size:
                 type: string
+    subresources:
+      status: {}    
     additionalPrinterColumns:
     - name: State
       type: string
