@@ -307,7 +307,9 @@ impl ControllerService {
         size_bytes: i64,
         volume_id: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        println!("🚀 [DEBUG] create_volume_lvol called - volume_id: {}, size: {} bytes", volume_id, size_bytes);
         let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await?;
+        println!("🚀 [DEBUG] RPC URL: {}", rpc_url);
         let http_client = HttpClient::new();
         
         // Get the actual LVS name from the disk status (don't guess it from metadata name)
