@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Database } from 'lucide-react';
 import { Dashboard } from './components/Dashboard';
 import { useAuth, useDashboardData } from './hooks/useDashboardData';
+import { OperationsProvider } from './contexts/OperationsContext';
 
 // Login Component
 const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) => {
@@ -116,16 +117,18 @@ const App: React.FC = () => {
   }
   
   return (
-    <Dashboard
-      data={dashboardHook.data}
-      loading={dashboardHook.loading}
-      stats={dashboardHook.stats}
-      autoRefresh={autoRefresh}
-      onAutoRefreshChange={setAutoRefresh}
-      onRefresh={handleRefresh}
-      onLogout={handleLogout}
-      usingMockData={dashboardHook.usingMockData}
-    />
+    <OperationsProvider>
+      <Dashboard
+        data={dashboardHook.data}
+        loading={dashboardHook.loading}
+        stats={dashboardHook.stats}
+        autoRefresh={autoRefresh}
+        onAutoRefreshChange={setAutoRefresh}
+        onRefresh={handleRefresh}
+        onLogout={handleLogout}
+        usingMockData={dashboardHook.usingMockData}
+      />
+    </OperationsProvider>
   );
 };
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useOperations } from '../contexts/OperationsContext';
 
 // --- Start of new/updated interfaces ---
 
@@ -571,6 +572,16 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
   });
   const [loading, setLoading] = useState(true);
   const [usingMockData, setUsingMockData] = useState(false);
+  
+  // Check if operations or selections are active to prevent refresh interference
+  const operationsContext = (() => {
+    try {
+      return useOperations();
+    } catch {
+      // Context not available, assume no operations or selections
+      return { shouldPauseRefresh: false };
+    }
+  })();
 
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
@@ -646,9 +657,17 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
   useEffect(() => {
     if (!autoRefresh) return;
 
-    const interval = setInterval(refreshData, 30000); // Refresh every 30 seconds
+    const interval = setInterval(() => {
+      // Prevent discovery interference during active operations or selections
+      if (!operationsContext.shouldPauseRefresh) {
+        refreshData();
+      } else {
+        console.log('⏸️ [DASHBOARD_REFRESH] Pausing main dashboard auto-refresh during active operations or disk selections');
+      }
+    }, 30000); // Refresh every 30 seconds
+    
     return () => clearInterval(interval);
-  }, [autoRefresh, refreshData]);
+  }, [autoRefresh, refreshData, operationsContext.shouldPauseRefresh]);
 
   return {
     data,

@@ -11,6 +11,7 @@ import {
   type DiskSetupRequest,
   type DiskSetupResult
 } from '../../hooks/useDashboardData';
+import { useOperations } from '../../contexts/OperationsContext';
 
 type ViewMode = 'grid' | 'compact' | 'table';
 type StatusFilter = 'all' | 'free' | 'driver-bound' | 'lvs-ready' | 'setup-ready' | 'initialize-ready' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready' | 'driver-ready';
@@ -170,6 +171,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
+  const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -238,12 +240,58 @@ export const DiskSetupTab: React.FC = () => {
     refreshAllNodes();
   }, [knownNodes]);
 
+  // Check if any operations are in progress to avoid discovery interference
+  const hasActiveOperations = useMemo(() => {
+    return setupInProgress.size > 0 || 
+           initializeLVSInProgress.size > 0 || 
+           unbindDriverInProgress.size > 0 ||
+           deleteInProgress.size > 0;
+  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress]);
+
+  // Sync local operation state with global context
+  useEffect(() => {
+    const totalOperations = setupInProgress.size + 
+                            initializeLVSInProgress.size + 
+                            unbindDriverInProgress.size + 
+                            deleteInProgress.size;
+    setActiveOperationsCount(totalOperations);
+  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress, setActiveOperationsCount]);
+
+  // Sync selected disks count with global context to prevent auto-refresh during selection
+  useEffect(() => {
+    setActiveSelectionsCount(selectedDisks.size);
+  }, [selectedDisks, setActiveSelectionsCount]);
+
   const refreshAllNodes = async () => {
+    // Prevent discovery interference during active operations or selections
+    if (hasActiveOperations) {
+      console.log('⏸️ [REFRESH] Skipping auto-refresh during active operations to prevent interference');
+      return;
+    }
+    if (selectedDisks.size > 0) {
+      console.log('⏸️ [REFRESH] Skipping auto-refresh while disks are selected to preserve user state');
+      return;
+    }
+    
     setGlobalRefreshing(true);
     const promises = knownNodes.map(node => refreshNodeDisks(node));
     await Promise.allSettled(promises);
     setGlobalRefreshing(false);
   };
+
+  // Auto-refresh disk data every 15 seconds, but pause during operations or selections
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!hasActiveOperations && selectedDisks.size === 0) {
+        refreshAllNodes();
+      } else {
+        const reason = hasActiveOperations ? 'active operations' : 'disk selections';
+        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason}`);
+      }
+    }, 15000); // 15 second intervals
+
+    return () => clearInterval(interval);
+  }, [hasActiveOperations, selectedDisks.size, knownNodes]); // Re-setup interval when dependencies change
 
   // Flatten all disks from all nodes
   const allDisks = useMemo(() => {
