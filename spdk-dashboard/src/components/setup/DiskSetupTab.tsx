@@ -173,8 +173,30 @@ export const DiskSetupTab: React.FC = () => {
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
-  // UI State
-  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
+  // UI State with debugging wrapper
+  const [selectedDisksInternal, setSelectedDisksInternal] = useState<Set<string>>(new Set());
+  
+  // Wrap setSelectedDisks to track all changes
+  const setSelectedDisks = (value: React.SetStateAction<Set<string>>) => {
+    console.log(`🔍 [SELECTION_CHANGE] setSelectedDisks called`);
+    console.log(`🔍 [SELECTION_CHANGE] Call stack:`, new Error().stack);
+    
+    setSelectedDisksInternal(prev => {
+      const newValue = typeof value === 'function' ? value(prev) : value;
+      console.log(`🔍 [SELECTION_CHANGE] Previous: ${prev.size} disks, New: ${newValue.size} disks`);
+      console.log(`🔍 [SELECTION_CHANGE] Previous disks:`, Array.from(prev));
+      console.log(`🔍 [SELECTION_CHANGE] New disks:`, Array.from(newValue));
+      
+      if (prev.size > 0 && newValue.size === 0) {
+        console.log(`🚨 [SELECTION_CLEARED] Selection cleared from ${prev.size} to 0!`);
+        console.log(`🚨 [SELECTION_CLEARED] Call stack:`, new Error().stack);
+      }
+      
+      return newValue;
+    });
+  };
+  
+  const selectedDisks = selectedDisksInternal;
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
