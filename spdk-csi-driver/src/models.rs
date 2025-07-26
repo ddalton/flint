@@ -177,13 +177,21 @@ pub struct SpdkDiskSpec {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
 pub struct SpdkDiskStatus {
+    #[serde(default)]
     pub total_capacity: i64,
+    #[serde(default)]
     pub free_space: i64,
+    #[serde(default)]
     pub used_space: i64,
+    #[serde(default)]
     pub healthy: bool,
+    #[serde(default)]
     pub last_checked: String,
+    #[serde(default)]
     pub lvol_count: u32,
+    #[serde(default)]
     pub blobstore_initialized: bool,
+    #[serde(default)]
     pub io_stats: IoStatistics,
     pub lvs_name: Option<String>,
 }
