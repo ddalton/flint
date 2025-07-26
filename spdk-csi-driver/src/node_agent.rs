@@ -211,6 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     // Detect the namespace for custom resources
     let target_namespace = get_current_namespace().await?;
+    println!("🎯 [STARTUP] Node-agent will operate in namespace: {}", target_namespace);
     
     let agent = NodeAgent {
         node_name: node_name.clone(),
@@ -1106,10 +1107,83 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     "status": patch_status
                 });
                 
+                println!("🔍 [CRD_UPDATE] Preparing to update CRD status...");
+                println!("   - CRD Name: {}", disk_crd_name);
+                println!("   - Target Namespace: {}", agent.target_namespace);
+                println!("   - Patch Content: {}", serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "Invalid JSON".to_string()));
+                
                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status to reflect existing LVS: {}", disk_crd_name),
-                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                
+                // First, verify the CRD exists before attempting update
+                println!("🔍 [CRD_UPDATE] Checking if CRD exists before update...");
+                match spdk_disks.get(disk_crd_name).await {
+                    Ok(existing_crd) => {
+                        println!("✅ [CRD_UPDATE] CRD exists, proceeding with status update");
+                        println!("   - Resource Version: {:?}", existing_crd.metadata.resource_version);
+                        println!("   - Current Status: {:?}", existing_crd.status);
+                        
+                        match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                            Ok(updated_crd) => {
+                                println!("✅ [SPDK_INIT] Successfully updated disk status to reflect existing LVS: {}", disk_crd_name);
+                                println!("   - New Resource Version: {:?}", updated_crd.metadata.resource_version);
+                                println!("   - Updated Status: {:?}", updated_crd.status);
+                            },
+                            Err(e) => {
+                                println!("❌ [CRD_UPDATE] DETAILED ERROR - Failed to patch status even though CRD exists:");
+                                println!("   - CRD Name: {}", disk_crd_name);
+                                println!("   - Namespace: {}", agent.target_namespace);
+                                println!("   - Error: {}", e);
+                                
+                                match &e {
+                                    kube::Error::Api(api_err) => {
+                                        println!("   - API Error Code: {}", api_err.code);
+                                        println!("   - API Error Message: {}", api_err.message);
+                                        println!("   - API Error Reason: {}", api_err.reason);
+                                    }
+                                    _ => println!("   - Error Type: {:?}", e),
+                                }
+                            },
+                        }
+                    }
+                    Err(get_err) => {
+                        println!("❌ [CRD_UPDATE] DETAILED ERROR - CRD not found during pre-update check:");
+                        println!("   - CRD Name: {}", disk_crd_name);
+                        println!("   - Namespace: {}", agent.target_namespace);
+                        println!("   - Get Error: {}", get_err);
+                        
+                        // Try to list all SpdkDisks in this namespace to see what exists
+                        println!("🔍 [CRD_UPDATE] Listing all SpdkDisks in namespace '{}' for debugging:", agent.target_namespace);
+                        match spdk_disks.list(&Default::default()).await {
+                            Ok(disk_list) => {
+                                println!("   - Found {} SpdkDisks in namespace:", disk_list.items.len());
+                                for disk in &disk_list.items {
+                                    if let Some(name) = &disk.metadata.name {
+                                        println!("     * {}", name);
+                                    }
+                                }
+                            }
+                            Err(list_err) => println!("   - Failed to list SpdkDisks: {}", list_err),
+                        }
+                        
+                        // Also try to check other namespaces
+                        println!("🔍 [CRD_UPDATE] Checking if CRD exists in cluster-wide scope...");
+                        let cluster_api: Api<SpdkDisk> = Api::all(agent.kube_client.clone());
+                        match cluster_api.list(&Default::default()).await {
+                            Ok(all_disks) => {
+                                println!("   - Found {} SpdkDisks cluster-wide:", all_disks.items.len());
+                                for disk in &all_disks.items {
+                                    if let Some(name) = &disk.metadata.name {
+                                        let ns = disk.metadata.namespace.as_deref().unwrap_or("default");
+                                        println!("     * {} (namespace: {})", name, ns);
+                                        if name == disk_crd_name {
+                                            println!("       ^ THIS IS THE ONE WE'RE LOOKING FOR!");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(cluster_err) => println!("   - Failed to list cluster-wide SpdkDisks: {}", cluster_err),
+                        }
+                    }
                 }
                 
                     println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_crd_name);
@@ -1180,10 +1254,15 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                 });
                                 
                                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
-                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
-                }
+                                println!("🔍 [CRD_UPDATE_2] Updating CRD {} in namespace {} (LVS pre-existed)", disk_crd_name, agent.target_namespace);
+                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
+                                    Err(e) => {
+                                        println!("❌ [CRD_UPDATE_2] Failed to update disk status:");
+                                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
+                                        println!("   - Error: {}", e);
+                                    },
+                                }
                 
                 println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_crd_name);
                             } else {
@@ -1233,10 +1312,15 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                 });
                                 
                                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
-                    Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
-                }
+                                println!("🔍 [CRD_UPDATE_3] Updating CRD {} in namespace {} (LVS already claimed bdev)", disk_crd_name, agent.target_namespace);
+                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
+                                    Err(e) => {
+                                        println!("❌ [CRD_UPDATE_3] Failed to update disk status:");
+                                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
+                                        println!("   - Error: {}", e);
+                                    },
+                                }
                 
                 println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_crd_name);
                             } else {
@@ -1272,9 +1356,14 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                 });
                 
                 let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                            match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_crd_name),
-                Err(e) => println!("⚠️ [SPDK_INIT] Failed to update disk status: {}", e),
+                println!("🔍 [CRD_UPDATE_4] Updating CRD {} in namespace {} (new LVS created)", disk_crd_name, agent.target_namespace);
+                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_crd_name),
+                    Err(e) => {
+                        println!("❌ [CRD_UPDATE_4] Failed to update disk status:");
+                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
+                        println!("   - Error: {}", e);
+                    },
             }
             
             println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_crd_name);
