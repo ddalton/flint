@@ -702,6 +702,11 @@ async fn get_or_create_disk_resource(
     match spdk_disks.get(disk_name).await {
         Ok(existing_disk) => {
             println!("✅ [DISK_RESOURCE] Found existing resource: {}", disk_name);
+            println!("🔍 [DISK_RESOURCE] CRD details:");
+            println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
+            println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
+            println!("   - Spec: {:?}", existing_disk.spec);
+            println!("   - Status: {:?}", existing_disk.status);
             println!("🔍 [DISK_RESOURCE] Checking if update needed for: {}", disk_name);
             
             // Resource exists - update it if needed
@@ -709,7 +714,33 @@ async fn get_or_create_disk_resource(
             
             // Fetch the updated resource
             println!("📥 [DISK_RESOURCE] Fetching updated resource: {}", disk_name);
-            Ok(spdk_disks.get(disk_name).await?)
+            match spdk_disks.get(disk_name).await {
+                Ok(updated_disk) => {
+                    println!("✅ [DISK_RESOURCE] Successfully fetched updated resource: {}", disk_name);
+                    println!("🔍 [DISK_RESOURCE] Updated CRD details:");
+                    println!("   - API Version: {:?}", updated_disk.metadata.resource_version);
+                    println!("   - Namespace: {:?}", updated_disk.metadata.namespace);
+                    println!("   - Spec: {:?}", updated_disk.spec);
+                    println!("   - Status: {:?}", updated_disk.status);
+                    Ok(updated_disk)
+                }
+                Err(update_err) => {
+                    println!("❌ [DISK_RESOURCE] Detailed error fetching updated resource {}: {:?}", disk_name, update_err);
+                    
+                    match &update_err {
+                        kube::Error::SerdeError(serde_err) => {
+                            println!("❌ [DISK_RESOURCE] Update Fetch Serde Deserialization Error:");
+                            println!("   - Error: {}", serde_err);
+                            println!("   - This suggests the CRD was updated but now has incompatible format");
+                        }
+                        _ => {
+                            println!("❌ [DISK_RESOURCE] Update fetch other error type: {}", update_err);
+                        }
+                    }
+                    
+                    Err(update_err.into())
+                }
+            }
         }
         Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
             println!("❌ [DISK_RESOURCE] Resource not found, creating new: {}", disk_name);
@@ -730,9 +761,34 @@ async fn get_or_create_disk_resource(
                     match spdk_disks.get(disk_name).await {
                         Ok(disk) => {
                             println!("🔄 [DISK_RESOURCE] Found existing resource {} after creation conflict (race condition resolved)", disk_name);
+                            println!("🔍 [DISK_RESOURCE] Retry CRD details:");
+                            println!("   - API Version: {:?}", disk.metadata.resource_version);
+                            println!("   - Namespace: {:?}", disk.metadata.namespace);
+                            println!("   - Spec: {:?}", disk.spec);
+                            println!("   - Status: {:?}", disk.status);
                             Ok(disk)
                         }
                         Err(get_err) => {
+                            println!("❌ [DISK_RESOURCE] Detailed retry error getting {}: {:?}", disk_name, get_err);
+                            
+                            match &get_err {
+                                kube::Error::Api(api_err) => {
+                                    println!("❌ [DISK_RESOURCE] Retry Kubernetes API Error:");
+                                    println!("   - Code: {}", api_err.code);
+                                    println!("   - Message: {}", api_err.message);
+                                    println!("   - Reason: {}", api_err.reason);
+                                    println!("   - Status: {}", api_err.status);
+                                }
+                                kube::Error::SerdeError(serde_err) => {
+                                    println!("❌ [DISK_RESOURCE] Retry Serde Deserialization Error:");
+                                    println!("   - Error: {}", serde_err);
+                                    println!("   - This suggests the CRD data format doesn't match the expected SpdkDisk struct");
+                                }
+                                _ => {
+                                    println!("❌ [DISK_RESOURCE] Retry other error type: {}", get_err);
+                                }
+                            }
+                            
                             let error_msg = format!("Failed to create and retrieve {}: create_err={}, get_err={}", 
                                                    disk_name, e, get_err);
                             println!("❌ [DISK_RESOURCE] {}", error_msg);
@@ -743,6 +799,30 @@ async fn get_or_create_disk_resource(
             }
         }
         Err(e) => {
+            println!("❌ [DISK_RESOURCE] Detailed error getting {}: {:?}", disk_name, e);
+            
+            match &e {
+                kube::Error::Api(api_err) => {
+                    println!("❌ [DISK_RESOURCE] Kubernetes API Error:");
+                    println!("   - Code: {}", api_err.code);
+                    println!("   - Message: {}", api_err.message);
+                    println!("   - Reason: {}", api_err.reason);
+                    println!("   - Status: {}", api_err.status);
+                }
+                kube::Error::SerdeError(serde_err) => {
+                    println!("❌ [DISK_RESOURCE] Serde Deserialization Error:");
+                    println!("   - Error: {}", serde_err);
+                    println!("   - This suggests the CRD data format doesn't match the expected SpdkDisk struct");
+                }
+                kube::Error::HttpError(http_err) => {
+                    println!("❌ [DISK_RESOURCE] HTTP Error:");
+                    println!("   - Error: {}", http_err);
+                }
+                _ => {
+                    println!("❌ [DISK_RESOURCE] Other error type: {}", e);
+                }
+            }
+            
             let error_msg = format!("Unexpected error getting {}: {}", disk_name, e);
             println!("❌ [DISK_RESOURCE] {}", error_msg);
             Err(error_msg.into())
