@@ -309,34 +309,80 @@ impl ControllerService {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await?;
         let http_client = HttpClient::new();
-        let lvs_name = format!("lvs_{}", disk.metadata.name.as_ref().unwrap());
+        
+        // Get the actual LVS name from the disk status (don't guess it from metadata name)
+        let lvs_name = disk.status.as_ref()
+            .and_then(|s| s.lvs_name.as_ref())
+            .ok_or("Disk does not have LVS initialized or LVS name missing")?
+            .clone();
+        
         let lvol_name = format!("vol_{}", volume_id);
+
+        let create_params = json!({
+            "method": "bdev_lvol_create",
+            "params": {
+                "lvs_name": lvs_name,
+                "lvol_name": lvol_name,
+                "size": size_bytes,
+                "thin_provision": false,
+                "clear_method": "write_zeroes"
+            }
+        });
+
+        println!("🔧 [CREATE_LVOL] Creating logical volume with parameters:");
+        println!("   LVS name: '{}'", lvs_name);
+        println!("   LVOL name: '{}'", lvol_name);
+        println!("   Size: {} bytes", size_bytes);
+        println!("   RPC URL: {}", rpc_url);
+        println!("   Full JSON payload: {}", serde_json::to_string_pretty(&create_params).unwrap_or_else(|_| "Failed to serialize".to_string()));
 
         let lvol_response = http_client
             .post(&rpc_url)
-            .json(&json!({
-                "method": "bdev_lvol_create",
-                "params": {
-                    "lvs_name": lvs_name,
-                    "lvol_name": lvol_name,
-                    "size": size_bytes,
-                    "thin_provision": false,
-                    "clear_method": "write_zeroes"
-                }
-            }))
+            .json(&create_params)
             .send()
             .await?;
 
-        if !lvol_response.status().is_success() {
+        let response_status = lvol_response.status();
+        println!("📥 [CREATE_LVOL] Response status: {}", response_status);
+        
+        if !response_status.is_success() {
             let error_text = lvol_response.text().await?;
+            println!("❌ [CREATE_LVOL] HTTP request failed with status {}: {}", response_status, error_text);
             return Err(format!("Failed to create lvol: {}", error_text).into());
         }
 
-        let lvol_info: serde_json::Value = lvol_response.json().await?;
+        // Get the response text first to log it, then parse as JSON
+        let response_text = lvol_response.text().await?;
+        println!("📥 [CREATE_LVOL] Raw response: {}", response_text);
+        
+        let lvol_info: serde_json::Value = match serde_json::from_str(&response_text) {
+            Ok(json) => {
+                println!("✅ [CREATE_LVOL] Successfully parsed response JSON");
+                json
+            }
+            Err(e) => {
+                println!("❌ [CREATE_LVOL] Failed to parse response as JSON: {}", e);
+                println!("❌ [CREATE_LVOL] Raw response was: {}", response_text);
+                return Err(format!("Failed to parse SPDK response as JSON: {}", e).into());
+            }
+        };
+
+        // Check if the response contains an error
+        if let Some(error) = lvol_info.get("error") {
+            println!("❌ [CREATE_LVOL] SPDK returned error: {}", serde_json::to_string_pretty(error).unwrap_or_else(|_| format!("{:?}", error)));
+            return Err(format!("SPDK RPC error: {}", serde_json::to_string(error).unwrap_or_else(|_| format!("{:?}", error))).into());
+        }
+        println!("🔍 [CREATE_LVOL] Extracting UUID from result...");
         let lvol_uuid = lvol_info["result"]["uuid"]
             .as_str()
-            .ok_or("Failed to get lvol UUID")?
+            .ok_or_else(|| {
+                let result = lvol_info.get("result").cloned().unwrap_or(json!(null));
+                println!("❌ [CREATE_LVOL] No UUID found in result. Result section: {}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| format!("{:?}", result)));
+                "Failed to get lvol UUID from SPDK response"
+            })?
             .to_string();
+
+        println!("✅ [CREATE_LVOL] Successfully created logical volume with UUID: {}", lvol_uuid);
 
         Ok(lvol_uuid)
     }
@@ -382,7 +428,14 @@ impl ControllerService {
 
             // Delete lvol
             if let Some(lvol_uuid) = &replica.lvol_uuid {
-                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                // Get the actual LVS name from the disk CRD status
+                let lvs_name = match self.get_actual_lvs_name(&replica.disk_ref).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        println!("⚠️ [DELETE_VOLUME] Failed to get LVS name for disk {}: {}, using fallback", replica.disk_ref, e);
+                        format!("lvs_{}", replica.disk_ref) // Fallback to old naming
+                    }
+                };
                 let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
                 
                 let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
@@ -430,6 +483,21 @@ impl ControllerService {
             ("transport".to_string(), self.driver.nvmeof_transport.clone()),
             ("port".to_string(), self.driver.nvmeof_target_port.to_string())
         ].into_iter().collect()
+    }
+
+    /// Get the actual LVS name from the SpdkDisk CRD status
+    async fn get_actual_lvs_name(&self, disk_ref: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        let disk = spdk_disks.get(disk_ref).await?;
+        
+        if let Some(status) = &disk.status {
+            if let Some(lvs_name) = &status.lvs_name {
+                return Ok(lvs_name.clone());
+            }
+        }
+        
+        Err(format!("No LVS name found in status for disk {}", disk_ref).into())
     }
 }
 
@@ -720,7 +788,15 @@ impl Controller for ControllerService {
             if let Some(lvol_uuid) = &replica.lvol_uuid {
                 let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
                 let http_client = HttpClient::new();
-                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                
+                // Get the actual LVS name from the disk CRD status
+                let lvs_name = match self.get_actual_lvs_name(&replica.disk_ref).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        println!("⚠️ [EXPAND_VOLUME] Failed to get LVS name for disk {}: {}, using fallback", replica.disk_ref, e);
+                        format!("lvs_{}", replica.disk_ref) // Fallback to old naming
+                    }
+                };
                 let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
                 let response = http_client

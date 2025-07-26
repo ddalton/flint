@@ -1417,8 +1417,8 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     }
     
     // Verify actual SPDK state matches custom resource state
-    // Search for LVS by PCI address match rather than guessing the name
-    let (actual_lvs_exists, actual_lvs_name) = find_lvs_for_disk(agent, &disk.spec.pcie_addr).await.unwrap_or((false, None));
+    // Get all LVS stores from SPDK and find ours by base_bdev analysis
+    let (actual_lvs_exists, actual_lvs_name) = find_lvs_for_disk_by_spdk_query(agent, disk).await.unwrap_or((false, None));
     
     if updated_status.blobstore_initialized && !actual_lvs_exists {
         // Custom resource thinks LVS exists but SPDK doesn't have it - correct the state
@@ -1455,9 +1455,60 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     Ok(())
 }
 
-/// Find LVS for a specific disk by PCI address match
+/// Find LVS for a specific disk by querying SPDK and correlating with disk info
+async fn find_lvs_for_disk_by_spdk_query(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(bool, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 [LVS_SEARCH] Searching for LVS for disk: {} (device: {})", disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), disk.spec.device_path);
+    
+    // Query SPDK for all LVS stores
+    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_lvol_get_lvstores"
+    })).await {
+        Ok(lvstores_result) => {
+            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                // Extract device name from device path (e.g., /dev/nvme1n1 -> nvme1n1)
+                let device_name = disk.spec.device_path.trim_start_matches("/dev/");
+                
+                println!("🔍 [LVS_SEARCH] Looking for LVS with base_bdev matching device: {}", device_name);
+                
+                for lvstore in lvstore_list {
+                    if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
+                        // Check if this LVS is on our disk
+                        // base_bdev is typically "kernel_nvme1n1" or similar
+                        if base_bdev.contains(device_name) {
+                            let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
+                            println!("✅ [LVS_SEARCH] Found LVS '{}' for disk {} on base_bdev: {}", lvs_name, device_name, base_bdev);
+                            return Ok((true, Some(lvs_name)));
+                        }
+                    }
+                }
+                println!("❌ [LVS_SEARCH] No LVS found for disk {} (device: {})", disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), device_name);
+            } else {
+                println!("❌ [LVS_SEARCH] No LVS stores found in SPDK");
+            }
+            Ok((false, None))
+        }
+        Err(e) => {
+            println!("⚠️ [LVS_SEARCH] Failed to query SPDK for LVS stores: {}", e);
+            Err(e)
+        }
+    }
+}
+
+/// Find LVS for a specific disk by PCI address match (legacy function for setup)
 async fn find_lvs_for_disk(agent: &NodeAgent, pci_addr: &str) -> Result<(bool, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     println!("🔍 [LVS_SEARCH] Searching for LVS for disk with PCI address: {}", pci_addr);
+    
+    // First, find the device name for this PCI address
+    let device_name = match agent.find_nvme_device_name(pci_addr).await {
+        Ok(name) => {
+            println!("🔍 [LVS_SEARCH] Found device name '{}' for PCI address: {}", name, pci_addr);
+            name
+        }
+        Err(e) => {
+            println!("⚠️ [LVS_SEARCH] Could not find device name for PCI {}: {}", pci_addr, e);
+            return Ok((false, None));
+        }
+    };
     
     match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_get_lvstores"
@@ -1466,16 +1517,16 @@ async fn find_lvs_for_disk(agent: &NodeAgent, pci_addr: &str) -> Result<(bool, O
             if let Some(lvstore_list) = lvstores_result["result"].as_array() {
                 for lvstore in lvstore_list {
                     if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                        // Check if this LVS is on our disk (PCI address match)
-                        if base_bdev.contains(pci_addr) || base_bdev.contains(&pci_addr.replace(":", "-")) {
+                        // Check if this LVS is on our disk (device name match)
+                        if base_bdev.contains(&device_name) {
                             let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
-                            println!("✅ [LVS_SEARCH] Found LVS '{}' for disk {} on base_bdev: {}", lvs_name, pci_addr, base_bdev);
+                            println!("✅ [LVS_SEARCH] Found LVS '{}' for disk {} (device: {}) on base_bdev: {}", lvs_name, pci_addr, device_name, base_bdev);
                             return Ok((true, Some(lvs_name)));
                         }
                     }
                 }
             }
-            println!("❌ [LVS_SEARCH] No LVS found for disk with PCI address: {}", pci_addr);
+            println!("❌ [LVS_SEARCH] No LVS found for disk {} (device: {})", pci_addr, device_name);
             Ok((false, None))
         }
         Err(e) => {
@@ -2634,14 +2685,18 @@ impl NodeAgent {
                 
             if let Ok(lvs_result) = lvs_query_result {
                 if let Some(lvstore_list) = lvs_result["result"].as_array() {
-                    // Search for LVS that matches our disk by base_bdev containing PCI address
+                    // Get the expected device path from disk info to match against base_bdev
+                    let expected_device = disk_info.device_name.as_str();
+                    println!("🔍 [SETUP] Looking for LVS with base_bdev matching device: {}", expected_device);
+                    
+                    // Search for LVS that matches our disk by device name in base_bdev
                     let mut found_lvs = None;
                     for lvstore in lvstore_list {
                         if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                            // Check if this LVS is on our disk (PCI address match)
-                            if base_bdev.contains(pci_addr) || base_bdev.contains(&pci_addr.replace(":", "-")) {
+                            // Check if this LVS is on our disk (device name match)
+                            if base_bdev.contains(expected_device) {
                                 let lvs_name = lvstore["name"].as_str().unwrap_or("unknown");
-                                println!("🔍 [SETUP] Found LVS for our disk: {} on base_bdev: {}", lvs_name, base_bdev);
+                                println!("🔍 [SETUP] Found LVS for our disk: {} (device: {}) on base_bdev: {}", lvs_name, expected_device, base_bdev);
                                 found_lvs = Some(lvstore.clone());
                                 break;
                             }
@@ -2689,7 +2744,7 @@ impl NodeAgent {
                             println!("⚠️ [SETUP] LVS exists but capacity info unavailable, will clean up and re-initialize");
                         }
                     } else {
-                        println!("✅ [SETUP] No LVS found for disk {}, proceeding with fresh setup", pci_addr);
+                        println!("✅ [SETUP] No LVS found for disk {} (device: {}), proceeding with fresh setup", pci_addr, expected_device);
                     }
                 } else {
                     println!("✅ [SETUP] No LVS stores found in SPDK, proceeding with fresh setup");
