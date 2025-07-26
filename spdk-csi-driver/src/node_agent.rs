@@ -2593,8 +2593,86 @@ impl NodeAgent {
         
         if let Ok(existing_disk) = spdk_disks.get(&disk_name).await {
             if existing_disk.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
-                println!("❌ [SETUP] Disk already has LVS initialized - setup complete");
-                return Err("Disk is already fully setup with LVS initialized".into());
+                println!("🔍 [SETUP] CRD indicates LVS initialized, verifying actual SPDK state...");
+                
+                // Check if LVS actually exists in SPDK and has capacity
+                let expected_lvs_name = format!("lvs_{}", disk_name.replace('-', "_"));
+                
+                let lvs_query_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                    "method": "bdev_lvol_get_lvstores",
+                    "params": {
+                        "lvs_name": expected_lvs_name
+                    }
+                })).await;
+                
+                if let Ok(lvs_result) = lvs_query_result {
+                    if let Some(lvstore_list) = lvs_result["result"].as_array() {
+                        if let Some(lvs_info) = lvstore_list.first() {
+                    // LVS exists, check if it has capacity
+                    if let (Some(total_clusters), Some(cluster_size)) = (
+                        lvs_info["total_data_clusters"].as_u64(),
+                        lvs_info["cluster_size"].as_u64()
+                    ) {
+                        let total_capacity = (total_clusters * cluster_size) as i64;
+                        if total_capacity > 0 {
+                            println!("✅ [SETUP] LVS exists and has capacity ({} bytes), updating CRD and completing setup", total_capacity);
+                            
+                            // Update CRD with correct capacity information
+                            let free_clusters = lvs_info["free_clusters"].as_u64().unwrap_or(0);
+                            let free_space = (free_clusters * cluster_size) as i64;
+                            let used_space = total_capacity - free_space;
+                            
+                            let patch = json!({
+                                "status": {
+                                    "blobstore_initialized": true,
+                                    "lvs_name": expected_lvs_name,
+                                    "total_capacity": total_capacity,
+                                    "free_space": free_space,
+                                    "used_space": used_space,
+                                    "healthy": true,
+                                    "last_checked": Utc::now().to_rfc3339()
+                                }
+                            });
+                            
+                            if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+                                println!("⚠️ [SETUP] Failed to update CRD with capacity info: {}", e);
+                            }
+                            
+                            return Err("Disk is already fully setup with LVS initialized".into());
+                        } else {
+                            println!("⚠️ [SETUP] LVS exists but has no capacity, will reset and re-initialize");
+                        }
+                    } else {
+                        println!("⚠️ [SETUP] LVS exists but capacity info unavailable, will reset and re-initialize");
+                    }
+                        } else {
+                            println!("⚠️ [SETUP] No LVS found in query result, will reset and re-initialize");
+                        }
+                    } else {
+                        println!("⚠️ [SETUP] No LVS found in query result, will reset and re-initialize");
+                    }
+                } else {
+                    println!("⚠️ [SETUP] CRD says initialized but no LVS found in SPDK, will reset and re-initialize");
+                }
+                
+                // Reset CRD state since LVS is invalid/missing
+                let reset_patch = json!({
+                    "status": {
+                        "blobstore_initialized": false,
+                        "lvs_name": null,
+                        "total_capacity": 0,
+                        "free_space": 0,
+                        "used_space": 0,
+                        "healthy": false,
+                        "last_checked": Utc::now().to_rfc3339()
+                    }
+                });
+                
+                if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(reset_patch)).await {
+                    println!("⚠️ [SETUP] Failed to reset CRD state: {}", e);
+                }
+                
+                println!("🔄 [SETUP] CRD state reset, proceeding with fresh setup");
             } else if disk_info.spdk_ready {
                 println!("🔄 [SETUP] Disk has SPDK driver but no LVS - will complete setup");
             }
