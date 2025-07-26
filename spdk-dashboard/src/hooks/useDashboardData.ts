@@ -658,8 +658,10 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
+      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${operationsContext.shouldPauseRefresh}`);
       // Prevent discovery interference during active operations or selections
       if (!operationsContext.shouldPauseRefresh) {
+        console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
         refreshData();
       } else {
         console.log('⏸️ [DASHBOARD_REFRESH] Pausing main dashboard auto-refresh during active operations or disk selections');
@@ -902,6 +904,9 @@ export const useDiskSetup = () => {
   const { data: dashboardData } = useDashboardData(false);
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
+    console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
+    console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
+    
     try {
       setRefreshing(prev => new Set([...prev, nodeName]));
       setNodeData(prev => ({
