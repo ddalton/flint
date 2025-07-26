@@ -188,9 +188,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const renderTabContent = () => {
-    return (
-      <>
-        <div style={{ display: activeTab === 'overview' ? 'block' : 'none' }}>
+    switch (activeTab) {
+      case 'overview':
+        return (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <VolumeStatusChart volumes={data.volumes} />
             <DiskStatusChart disks={data.disks} />
@@ -198,9 +198,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks}/>
             </div>
           </div>
-        </div>
+        );
 
-        <div style={{ display: activeTab === 'volumes' ? 'block' : 'none' }}>
+      case 'volumes':
+        return (
           <VolumesTable 
             volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
             disks={data.disks}
@@ -210,9 +211,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
             onClearDiskFilter={handleClearDiskFilter}
             onReplicaClick={handleReplicaClick}
           />
-        </div>
+        );
 
-        <div style={{ display: activeTab === 'disks' ? 'block' : 'none' }}>
+      case 'disks':
+        return (
           <DisksTable 
             disks={data.disks}
             volumes={data.volumes}
@@ -223,26 +225,27 @@ export const Dashboard: React.FC<DashboardProps> = ({
             onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
             onDiskVolumeFilter={handleDiskClick}
           />
-        </div>
+        );
 
-        <div style={{ display: activeTab === 'disk-setup' ? 'block' : 'none' }}>
-          <DiskSetupTab />
-        </div>
+      case 'disk-setup':
+        return <DiskSetupTab />;
 
-        <div style={{ display: activeTab === 'nodes' ? 'block' : 'none' }}>
+      case 'nodes':
+        return (
           <FilteredNodesView 
             data={data}
             activeFilter={volumeFilter}
             onClearFilter={handleClearFilter}
             onDiskVolumeFilter={handleDiskClick}
           />
-        </div>
+        );
 
-        <div style={{ display: activeTab === 'snapshots' ? 'block' : 'none' }}>
-          <EnhancedSnapshotsTab />
-        </div>
-      </>
-    );
+      case 'snapshots':
+        return <EnhancedSnapshotsTab />;
+
+      default:
+        return null;
+    }
   };
 
   return (

@@ -3,7 +3,6 @@ import {
   Server, Activity, Database, HardDrive, Network, 
   RefreshCw, AlertTriangle, Info, X, Shield, Settings
 } from 'lucide-react';
-import { useOperations } from '../../contexts/OperationsContext';
 
 interface NodeMetricsAPIProps {
   nodeName: string;
@@ -25,9 +24,6 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  
-  // Respect active operations and selections
-  const { shouldPauseRefresh } = useOperations();
 
   const fetchNodeMetrics = async () => {
     try {
@@ -165,17 +161,12 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
-      // Respect active operations and selections to prevent interference
-      if (!shouldPauseRefresh) {
-        fetchNodeMetrics();
-        fetchRaidStatus();
-      } else {
-        console.log('⏸️ [NODE_METRICS] Pausing auto-refresh during active operations or disk selections');
-      }
+      fetchNodeMetrics();
+      fetchRaidStatus();
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, nodeName, shouldPauseRefresh]);
+  }, [autoRefresh, nodeName]);
 
   const handleRefresh = () => {
     fetchNodeMetrics();

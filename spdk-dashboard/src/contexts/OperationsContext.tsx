@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 
 interface OperationsContextType {
@@ -32,6 +32,13 @@ export const OperationsProvider: React.FC<OperationsProviderProps> = ({ children
   const hasActiveOperations = activeOperationsCount > 0;
   const hasActiveSelections = activeSelectionsCount > 0;
   const shouldPauseRefresh = hasActiveOperations || hasActiveSelections;
+  
+  // Debug when pause state changes
+  const prevShouldPause = useRef(shouldPauseRefresh);
+  if (prevShouldPause.current !== shouldPauseRefresh) {
+    console.log(`🔄 [CONTEXT_STATE_CHANGE] shouldPauseRefresh changed: ${prevShouldPause.current} → ${shouldPauseRefresh} (ops: ${activeOperationsCount}, selections: ${activeSelectionsCount})`);
+    prevShouldPause.current = shouldPauseRefresh;
+  }
 
   const incrementOperations = () => {
     setActiveOperationsCount(prev => prev + 1);
@@ -46,7 +53,10 @@ export const OperationsProvider: React.FC<OperationsProviderProps> = ({ children
   };
 
   const setActiveSelectionsCountDirect = (count: number) => {
-    setActiveSelectionsCount(Math.max(0, count));
+    console.log(`🔄 [CONTEXT_UPDATE] setActiveSelectionsCount called with: ${count}`);
+    const newCount = Math.max(0, count);
+    console.log(`🔄 [CONTEXT_UPDATE] Setting activeSelectionsCount to: ${newCount}`);
+    setActiveSelectionsCount(newCount);
   };
 
   return (

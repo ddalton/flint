@@ -249,6 +249,7 @@ export const DiskSetupTab: React.FC = () => {
 
   // Sync selected disks count with global context to prevent auto-refresh during selection
   useEffect(() => {
+    console.log(`🔄 [CONTEXT_SYNC] Updating global selections count: ${selectedDisks.size}`);
     setActiveSelectionsCount(selectedDisks.size);
   }, [selectedDisks, setActiveSelectionsCount]);
 
