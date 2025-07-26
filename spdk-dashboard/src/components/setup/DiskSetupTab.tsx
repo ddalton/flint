@@ -169,6 +169,10 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 };
 
 export const DiskSetupTab: React.FC = () => {
+  // Add component mount debugging
+  const mountId = useRef(Math.random().toString(36).substr(2, 9));
+  console.log(`🚀 [COMPONENT] DiskSetupTab rendered with mountId: ${mountId.current}`);
+  
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
@@ -306,8 +310,18 @@ export const DiskSetupTab: React.FC = () => {
   const selectedDisksRef = useRef(selectedDisks);
   const operationsRef = useRef({ setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress });
   
+  // Component lifecycle debugging
+  useEffect(() => {
+    console.log(`🚀 [COMPONENT] DiskSetupTab mounted with mountId: ${mountId.current}`);
+    return () => {
+      console.log(`💀 [COMPONENT] DiskSetupTab unmounting with mountId: ${mountId.current}`);
+    };
+  }, []);
+  
   // Update refs when state changes
   useEffect(() => {
+    console.log(`🔄 [REF_UPDATE] Updating selectedDisksRef: ${selectedDisks.size} disks, mountId: ${mountId.current}`);
+    console.log(`🔄 [REF_UPDATE] Selected disks:`, Array.from(selectedDisks));
     selectedDisksRef.current = selectedDisks;
   }, [selectedDisks]);
   
@@ -325,6 +339,9 @@ export const DiskSetupTab: React.FC = () => {
                                   operationsRef.current.deleteInProgress.size > 0;
       
       const currentSelectedCount = selectedDisksRef.current.size;
+      const actualStateCount = selectedDisks.size;
+      
+      console.log(`🔍 [AUTO_REFRESH_DETAILED] mountId: ${mountId.current}, ref: ${currentSelectedCount}, state: ${actualStateCount}, ops: ${currentHasOperations}`);
       
       if (!currentHasOperations && currentSelectedCount === 0) {
         console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
