@@ -117,7 +117,10 @@ const App: React.FC = () => {
   }
   
   return (
-    <OperationsProvider>
+    <OperationsProvider 
+      autoRefresh={autoRefresh}
+      onAutoRefreshChange={setAutoRefresh}
+    >
       <Dashboard
         data={dashboardHook.data}
         loading={dashboardHook.loading}

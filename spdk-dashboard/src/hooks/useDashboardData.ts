@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useOperations } from '../contexts/OperationsContext';
 
 // --- Start of new/updated interfaces ---
 
@@ -573,15 +572,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
   const [loading, setLoading] = useState(true);
   const [usingMockData, setUsingMockData] = useState(false);
   
-  // Check if operations or selections are active to prevent refresh interference
-  let shouldPauseRefresh;
-  try {
-    const operationsContext = useOperations();
-    shouldPauseRefresh = operationsContext.shouldPauseRefresh;
-  } catch {
-    // Context not available, assume no operations or selections
-    shouldPauseRefresh = false;
-  }
+  // No need for complex pause logic - auto-refresh checkbox is managed automatically
 
   const stats = useMemo((): DashboardStats => {
     const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
@@ -658,18 +649,12 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
-      console.log(`🔍 [DASHBOARD_AUTO_REFRESH] Checking if should refresh. shouldPauseRefresh: ${shouldPauseRefresh}`);
-      // Prevent discovery interference during active operations or selections
-      if (!shouldPauseRefresh) {
-        console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
-        refreshData();
-      } else {
-        console.log('⏸️ [DASHBOARD_REFRESH] Pausing main dashboard auto-refresh during active operations or disk selections');
-      }
+      console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
+      refreshData();
     }, 30000); // Refresh every 30 seconds
     
     return () => clearInterval(interval);
-  }, [autoRefresh, refreshData, shouldPauseRefresh]);
+  }, [autoRefresh, refreshData]);
 
   return {
     data,
@@ -903,25 +888,11 @@ export const useDiskSetup = () => {
   // Get dashboard data to cross-reference SpdkDisk CRD status
   const { data: dashboardData } = useDashboardData(false);
   
-  // Get operations context to respect global pause state
-  let shouldPauseRefresh;
-  try {
-    const operationsContext = useOperations();
-    shouldPauseRefresh = operationsContext.shouldPauseRefresh;
-  } catch {
-    // Context not available, assume no operations or selections
-    shouldPauseRefresh = false;
-  }
+  // No need for complex pause logic - auto-refresh checkbox is managed automatically
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
     console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
-    
-    // Respect global pause state - don't refresh during active operations or selections
-    if (shouldPauseRefresh) {
-      console.log(`⏸️ [REFRESH_TRIGGER] Skipping refreshNodeDisks for ${nodeName} due to global pause (shouldPauseRefresh: true)`);
-      return;
-    }
     
     try {
       setRefreshing(prev => new Set([...prev, nodeName]));
@@ -1207,7 +1178,7 @@ export const useDiskSetup = () => {
         return newSet;
       });
     }
-  }, [dashboardData.disks, shouldPauseRefresh]);
+  }, [dashboardData.disks]);
 
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 

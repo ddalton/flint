@@ -171,7 +171,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
-  const { setActiveOperationsCount, setActiveSelectionsCount, shouldPauseRefresh } = useOperations();
+  const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -294,19 +294,18 @@ export const DiskSetupTab: React.FC = () => {
       
       const currentSelectedCount = selectedDisksRef.current.size;
       
-      // Check both local state and global operations context
-      if (!currentHasOperations && currentSelectedCount === 0 && !shouldPauseRefresh) {
+      // Check only local state - global selections are handled by auto-refresh checkbox
+      if (!currentHasOperations && currentSelectedCount === 0) {
         console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
         refreshAllNodes();
       } else {
-        const reason = currentHasOperations ? 'active operations' : 
-                      currentSelectedCount > 0 ? 'disk selections' : 'global pause';
-        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount}, globalPause: ${shouldPauseRefresh})`);
+        const reason = currentHasOperations ? 'active operations' : 'disk selections';
+        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount})`);
       }
     }, 15000);
 
     return () => clearInterval(interval);
-  }, [knownNodes, shouldPauseRefresh]); // Added shouldPauseRefresh to dependencies
+  }, [knownNodes]); // Stable dependency - won't recreate interval unnecessarily
 
   // Flatten all disks from all nodes
   const allDisks = useMemo(() => {
