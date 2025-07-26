@@ -1107,24 +1107,25 @@ export const useDiskSetup = () => {
             const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
               const enhancedDisk = { ...disk, nodeName };
               
-              // Find corresponding SpdkDisk CRD data
-              const spdkDiskName = `${nodeName}-${disk.device_name}`;
+              // Find corresponding SpdkDisk CRD data using precise matching
               const spdkDisk = dashboardData.disks.find(d => 
-                d.id === spdkDiskName || 
                 d.pci_addr === disk.pci_address ||
-                d.node === nodeName
+                d.id.includes(disk.pci_address.replace(':', '-')) ||
+                (d.node === nodeName && d.id.includes(disk.device_name))
               );
               
               if (spdkDisk) {
-                // Enhanced status logic:
-                // - spdk_ready: true if blobstore is initialized (ready for volumes)
-                // - spdk_ready: false if needs setup (driver binding or blobstore init)
-                // - Add new field to track driver vs blobstore state
-                enhancedDisk.spdk_ready = spdkDisk.blobstore_initialized;
-                enhancedDisk.driver_ready = disk.spdk_ready; // Original driver compatibility
-                enhancedDisk.blobstore_initialized = spdkDisk.blobstore_initialized;
+                // Enhanced status logic with validation:
+                // Check if blobstore_initialized status is consistent with actual functionality
+                // A truly initialized blobstore should have capacity or be ready for use
+                const hasValidBlobstore = spdkDisk.blobstore_initialized && 
+                  (spdkDisk.capacity > 0 || spdkDisk.free_space > 0);
                 
-                console.log(`Enhanced disk ${disk.device_name}: driver_ready=${disk.spdk_ready}, blobstore_initialized=${spdkDisk.blobstore_initialized}, final_spdk_ready=${enhancedDisk.spdk_ready}`);
+                enhancedDisk.spdk_ready = hasValidBlobstore;
+                enhancedDisk.driver_ready = disk.spdk_ready; // Original driver compatibility  
+                enhancedDisk.blobstore_initialized = hasValidBlobstore;
+                
+                console.log(`Enhanced disk ${disk.device_name}: driver_ready=${disk.spdk_ready}, blobstore_initialized=${hasValidBlobstore}, final_spdk_ready=${enhancedDisk.spdk_ready}, CRD_id=${spdkDisk.id}`);
               } else {
                 console.log(`No SpdkDisk CRD found for ${disk.device_name}, using original spdk_ready=${disk.spdk_ready}`);
                 enhancedDisk.driver_ready = disk.spdk_ready;
