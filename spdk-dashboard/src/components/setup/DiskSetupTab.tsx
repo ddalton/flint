@@ -171,30 +171,8 @@ export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   
-  // Helper functions for persistent disk selection
-  const loadSelectedDisks = (): Set<string> => {
-    try {
-      const saved = localStorage.getItem('spdk-selected-disks');
-      if (saved) {
-        const diskArray = JSON.parse(saved);
-        return new Set(diskArray);
-      }
-    } catch (error) {
-      console.warn('Failed to load selected disks from localStorage:', error);
-    }
-    return new Set();
-  };
-
-  const saveSelectedDisks = (selection: Set<string>) => {
-    try {
-      localStorage.setItem('spdk-selected-disks', JSON.stringify(Array.from(selection)));
-    } catch (error) {
-      console.warn('Failed to save selected disks to localStorage:', error);
-    }
-  };
-  
-  // UI State with persistent disk selection
-  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(loadSelectedDisks);
+  // UI State
+  const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -213,6 +191,8 @@ export const DiskSetupTab: React.FC = () => {
     driver_override: 'vfio-pci'
   });
   const [setupInProgress, setSetupInProgress] = useState<Set<string>>(new Set());
+  const [initializeLVSInProgress, setInitializeLVSInProgress] = useState<Set<string>>(new Set());
+  const [unbindDriverInProgress, setUnbindDriverInProgress] = useState<Set<string>>(new Set());
   const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult>>({});
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
@@ -240,9 +220,8 @@ export const DiskSetupTab: React.FC = () => {
         allDisks.includes(diskKey)
       ));
       
-      // Only save if there were invalid selections removed
+      // Only update if there were invalid selections removed
       if (validSelections.size !== prev.size) {
-        saveSelectedDisks(validSelections);
         console.log(`Cleaned up ${prev.size - validSelections.size} invalid disk selections after refresh`);
       }
       
@@ -465,7 +444,6 @@ export const DiskSetupTab: React.FC = () => {
       } else {
         newSelection.delete(diskKey);
       }
-      saveSelectedDisks(newSelection); // Persist to localStorage
       return newSelection;
     });
   };
@@ -477,7 +455,6 @@ export const DiskSetupTab: React.FC = () => {
         .map(disk => `${disk.nodeName}:${disk.pci_address}`);
       setSelectedDisks(prev => {
         const newSelection = new Set([...prev, ...selectableDisks]);
-        saveSelectedDisks(newSelection); // Persist to localStorage
         return newSelection;
       });
     } else {
@@ -485,7 +462,6 @@ export const DiskSetupTab: React.FC = () => {
       setSelectedDisks(prev => {
         const newSelection = new Set(prev);
         pageDisks.forEach(key => newSelection.delete(key));
-        saveSelectedDisks(newSelection); // Persist to localStorage
         return newSelection;
       });
     }
@@ -529,7 +505,6 @@ export const DiskSetupTab: React.FC = () => {
         setSelectedDisks(prev => {
           const newSelection = new Set(prev);
           diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
-          saveSelectedDisks(newSelection); // Persist to localStorage
           return newSelection;
         });
       }
@@ -570,7 +545,7 @@ export const DiskSetupTab: React.FC = () => {
   };
 
   const initializeLVSOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
-    setSetupInProgress(prev => new Set([...prev, node]));
+    setInitializeLVSInProgress(prev => new Set([...prev, node]));
 
     try {
       const result = await initializeBlobstoreOnNode(node, diskPciAddresses);
@@ -581,7 +556,6 @@ export const DiskSetupTab: React.FC = () => {
         setSelectedDisks(prev => {
           const newSelection = new Set(prev);
           diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
-          saveSelectedDisks(newSelection); // Persist to localStorage
           return newSelection;
         });
       }
@@ -595,7 +569,7 @@ export const DiskSetupTab: React.FC = () => {
       };
       setSetupResults(prev => ({ ...prev, [node]: errorResult }));
     } finally {
-      setSetupInProgress(prev => {
+      setInitializeLVSInProgress(prev => {
         const newSet = new Set(prev);
         newSet.delete(node);
         return newSet;
@@ -622,7 +596,7 @@ export const DiskSetupTab: React.FC = () => {
   };
 
   const unbindDriverOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
-    setSetupInProgress(prev => new Set([...prev, node]));
+    setUnbindDriverInProgress(prev => new Set([...prev, node]));
 
     try {
       // Call reset/unbind API endpoint
@@ -647,7 +621,6 @@ export const DiskSetupTab: React.FC = () => {
           setSelectedDisks(prev => {
             const newSelection = new Set(prev);
             diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
-            saveSelectedDisks(newSelection); // Persist to localStorage
             return newSelection;
           });
           
@@ -667,7 +640,7 @@ export const DiskSetupTab: React.FC = () => {
       };
       setSetupResults(prev => ({ ...prev, [node]: errorResult }));
     } finally {
-      setSetupInProgress(prev => {
+      setUnbindDriverInProgress(prev => {
         const newSet = new Set(prev);
         newSet.delete(node);
         return newSet;
@@ -697,7 +670,6 @@ export const DiskSetupTab: React.FC = () => {
         // Remove from selection and refresh
         const newSelection = new Set<string>();
         setSelectedDisks(newSelection);
-        saveSelectedDisks(newSelection); // Persist to localStorage
         setTimeout(() => refreshNodeDisks(diskToDelete.nodeName), 2000);
       }
     } catch (error) {
@@ -1004,7 +976,6 @@ export const DiskSetupTab: React.FC = () => {
                 onClick={() => {
                   const newSelection = new Set<string>();
                   setSelectedDisks(newSelection);
-                  saveSelectedDisks(newSelection); // Persist to localStorage
                 }}
                 className="text-sm text-gray-600 hover:text-gray-800"
               >
@@ -1059,11 +1030,11 @@ export const DiskSetupTab: React.FC = () => {
               {canInitializeLVS && (
                 <button
                   onClick={initializeLVSSelectedDisks}
-                  disabled={Array.from(setupInProgress).length > 0}
+                  disabled={Array.from(initializeLVSInProgress).length > 0}
                   className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2"
                   title="Recovery: Initialize LVS on disks that already have SPDK driver"
                 >
-                  {Array.from(setupInProgress).length > 0 ? (
+                  {Array.from(initializeLVSInProgress).length > 0 ? (
                     <>
                       <Settings className="w-4 h-4 animate-spin" />
                       Initializing...
@@ -1079,11 +1050,11 @@ export const DiskSetupTab: React.FC = () => {
               {canUnbindDriver && (
                 <button
                   onClick={unbindDriverSelectedDisks}
-                  disabled={Array.from(setupInProgress).length > 0}
+                  disabled={Array.from(unbindDriverInProgress).length > 0}
                   className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
                   title="Unbind SPDK driver from selected disks"
                 >
-                  {Array.from(setupInProgress).length > 0 ? (
+                  {Array.from(unbindDriverInProgress).length > 0 ? (
                     <>
                       <Settings className="w-4 h-4 animate-spin" />
                       Unbinding...
