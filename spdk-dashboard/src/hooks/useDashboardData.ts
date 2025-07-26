@@ -900,16 +900,6 @@ export const useDiskSetup = () => {
   
   // Get dashboard data to cross-reference SpdkDisk CRD status
   const { data: dashboardData } = useDashboardData(false);
-  
-  // Get operations context to respect active selections
-  const operationsContext = (() => {
-    try {
-      return useOperations();
-    } catch {
-      // Context not available, assume no active selections
-      return { hasActiveSelections: false };
-    }
-  })();
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     try {
