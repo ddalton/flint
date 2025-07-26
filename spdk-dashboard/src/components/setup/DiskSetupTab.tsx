@@ -171,7 +171,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 export const DiskSetupTab: React.FC = () => {
   const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
-  const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
+  const { setActiveOperationsCount, setActiveSelectionsCount, shouldPauseRefresh } = useOperations();
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
@@ -294,17 +294,19 @@ export const DiskSetupTab: React.FC = () => {
       
       const currentSelectedCount = selectedDisksRef.current.size;
       
-      if (!currentHasOperations && currentSelectedCount === 0) {
+      // Check both local state and global operations context
+      if (!currentHasOperations && currentSelectedCount === 0 && !shouldPauseRefresh) {
         console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
         refreshAllNodes();
       } else {
-        const reason = currentHasOperations ? 'active operations' : 'disk selections';
-        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount})`);
+        const reason = currentHasOperations ? 'active operations' : 
+                      currentSelectedCount > 0 ? 'disk selections' : 'global pause';
+        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount}, globalPause: ${shouldPauseRefresh})`);
       }
     }, 15000);
 
     return () => clearInterval(interval);
-  }, [knownNodes]); // Stable dependency - won't recreate interval unnecessarily
+  }, [knownNodes, shouldPauseRefresh]); // Added shouldPauseRefresh to dependencies
 
   // Flatten all disks from all nodes
   const allDisks = useMemo(() => {
