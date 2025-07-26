@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, 
   Play, Database, Shield, Info, ChevronLeft, ChevronRight,
@@ -294,30 +294,41 @@ export const DiskSetupTab: React.FC = () => {
     setGlobalRefreshing(false);
   };
 
+  // Track selection state with ref to avoid stale closures
+  const selectedDisksRef = useRef(selectedDisks);
+  const operationsRef = useRef({ setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress });
+  
+  // Update refs when state changes
+  useEffect(() => {
+    selectedDisksRef.current = selectedDisks;
+  }, [selectedDisks]);
+  
+  useEffect(() => {
+    operationsRef.current = { setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress };
+  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress]);
+
   // Auto-refresh disk data every 15 seconds, but pause during operations or selections
   useEffect(() => {
     const interval = setInterval(() => {
-      // Use current state at execution time, not when interval was created
-      setSelectedDisks(currentSelectedDisks => {
-        const currentHasOperations = setupInProgress.size > 0 || 
-                                    initializeLVSInProgress.size > 0 || 
-                                    unbindDriverInProgress.size > 0 ||
-                                    deleteInProgress.size > 0;
-        
-        if (!currentHasOperations && currentSelectedDisks.size === 0) {
-          console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
-          refreshAllNodes();
-        } else {
-          const reason = currentHasOperations ? 'active operations' : 'disk selections';
-          console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedDisks.size})`);
-        }
-        
-        return currentSelectedDisks; // Return unchanged state
-      });
-    }, 15000); // 15 second intervals
+      // Use refs to get current state without causing re-renders
+      const currentHasOperations = operationsRef.current.setupInProgress.size > 0 || 
+                                  operationsRef.current.initializeLVSInProgress.size > 0 || 
+                                  operationsRef.current.unbindDriverInProgress.size > 0 ||
+                                  operationsRef.current.deleteInProgress.size > 0;
+      
+      const currentSelectedCount = selectedDisksRef.current.size;
+      
+      if (!currentHasOperations && currentSelectedCount === 0) {
+        console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
+        refreshAllNodes();
+      } else {
+        const reason = currentHasOperations ? 'active operations' : 'disk selections';
+        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount})`);
+      }
+    }, 15000);
 
     return () => clearInterval(interval);
-  }, [knownNodes]); // Only recreate when nodes change, not when selections change
+  }, [knownNodes]); // Stable dependency - won't recreate interval unnecessarily
 
   // Flatten all disks from all nodes
   const allDisks = useMemo(() => {
