@@ -967,68 +967,76 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
     println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_crd_name);
     println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {}", lvs_name, disk.spec.pcie_addr);
     
-    // First, try to attach the NVMe device to SPDK if it's not already attached
-    let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
-    println!("🔌 [SPDK_INIT] Attempting to attach controller: {} at PCIe: {}", controller_id, disk.spec.pcie_addr);
+    // Check if this is a kernel-bound device (has AIO bdev) or userspace device (needs PCIe attach)
+    let kernel_bdev_name = format!("kernel_{}", actual_device_name);
+    println!("🔍 [SPDK_INIT] Checking for existing AIO bdev: {}", kernel_bdev_name);
     
-    let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_nvme_attach_controller",
-        "params": {
-            "name": controller_id,
-            "trtype": "PCIe",
-            "traddr": disk.spec.pcie_addr
-        }
+    // Get list of existing bdevs to check if AIO bdev exists
+    let bdev_list_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_bdevs"
     })).await;
     
-    match attach_result {
-        Ok(response) => {
-            if let Some(error) = response.get("error") {
-                let error_code = error["code"].as_i64().unwrap_or(0);
-                if error_code == -17 || error_code == -22 {
-                    println!("✅ [SPDK_INIT] Controller already attached (idempotent): {}", controller_id);
-                } else {
-                    println!("⚠️ [SPDK_INIT] Controller attach warning: {}", error);
-                }
+    let bdev_name = if let Ok(response) = &bdev_list_result {
+        if let Some(bdevs) = response["result"].as_array() {
+            let aio_bdev_exists = bdevs.iter().any(|bdev| {
+                bdev["name"].as_str() == Some(&kernel_bdev_name)
+            });
+            
+            if aio_bdev_exists {
+                println!("✅ [SPDK_INIT] Found existing AIO bdev, using kernel path: {}", kernel_bdev_name);
+                kernel_bdev_name
             } else {
-                println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id);
+                println!("🔌 [SPDK_INIT] No AIO bdev found, attempting PCIe attach for userspace device");
+                let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
+                println!("🔌 [SPDK_INIT] Attempting to attach controller: {} at PCIe: {}", controller_id, disk.spec.pcie_addr);
+                
+                let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+                    "method": "bdev_nvme_attach_controller",
+                    "params": {
+                        "name": controller_id,
+                        "trtype": "PCIe",
+                        "traddr": disk.spec.pcie_addr
+                    }
+                })).await;
+                
+                match attach_result {
+                    Ok(response) => {
+                        if let Some(error) = response.get("error") {
+                            let error_code = error["code"].as_i64().unwrap_or(0);
+                            if error_code == -17 || error_code == -22 {
+                                println!("✅ [SPDK_INIT] Controller already attached (idempotent): {}", controller_id);
+                            } else {
+                                println!("⚠️ [SPDK_INIT] Controller attach warning: {}", error);
+                                return Err(format!("PCIe attach failed: {}", error).into());
+                            }
+                        } else {
+                            println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id);
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [SPDK_INIT] Controller attach failed: {}", e);
+                        return Err(format!("PCIe attach failed: {}", e).into());
+                    }
+                }
+                
+                // For PCIe attached devices, the bdev name is the controller name
+                controller_id.to_string()
             }
+        } else {
+            println!("❌ [SPDK_INIT] Failed to get bdev list");
+            return Err("Failed to get bdev list".into());
         }
-        Err(e) => println!("⚠️ [SPDK_INIT] Controller attach failed (may already be attached): {}", e),
-    }
+    } else {
+        println!("❌ [SPDK_INIT] Failed to query existing bdevs");
+        return Err("Failed to query existing bdevs".into());
+    };
     
     // Wait a moment for the device to be ready
     println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
     tokio::time::sleep(Duration::from_secs(1)).await;
     
-    // Find existing bdev for this device - LVS repair/recovery operation
-    println!("🔍 [SPDK_INIT] Discovering existing bdev for device: {}", disk.spec.pcie_addr);
-    
-    let bdev_name = match agent.find_existing_bdev_for_device(&disk.spec.pcie_addr, controller_id).await {
-        Ok(name) => {
-            println!("✅ [SPDK_INIT] Found existing bdev: {}", name);
-            name
-        }
-        Err(e) => {
-            println!("❌ [SPDK_INIT] No existing bdev found for device {}: {}", disk.spec.pcie_addr, e);
-            println!("🔧 [SPDK_INIT] This is a repair operation - checking if device needs basic setup first");
-            
-            // Check current driver state for better error messaging
-            let current_driver = agent.get_current_driver(&disk.spec.pcie_addr).await
-                .unwrap_or_else(|_| "unknown".to_string());
-                
-            if current_driver == "unbound" {
-                println!("💡 [SPDK_INIT] Device is unbound - run 'Setup SPDK' for complete initialization");
-                return Err("Device is unbound. Run 'Setup SPDK' for complete initialization.".into());
-            } else if current_driver == "nvme" {
-                println!("🔧 [SPDK_INIT] Device is kernel-bound but missing SPDK bdev - this may need 'Setup SPDK' instead");
-                println!("💡 [SPDK_INIT] Hint: 'Initialize LVS' is for repair/recovery. For new devices, use 'Setup SPDK'");
-                return Err(format!("Device {} is driver-bound but missing SPDK bdev. For new devices, use 'Setup SPDK'. This operation is for LVS repair/recovery only.", disk.spec.pcie_addr).into());
-            } else {
-                println!("💡 [SPDK_INIT] Unexpected device state - try 'Setup SPDK' for complete setup");
-                return Err(format!("Device {} has unexpected state. Use 'Setup SPDK' for complete setup.", disk.spec.pcie_addr).into());
-            }
-        }
-    };
+    // Use the bdev name we determined above (either AIO kernel_* or PCIe controller name)
+    println!("✅ [SPDK_INIT] Using determined bdev for LVS operations: {}", bdev_name);
 
     // Now handle LVS creation with discovery-first approach (check by bdev, not name)
     println!("🔍 [SPDK_INIT] Checking if any LVS exists on bdev: {}", bdev_name);
@@ -1384,26 +1392,78 @@ async fn verify_lvs_exists_in_spdk(agent: &NodeAgent, lvs_name: &str) -> Result<
     }
 }
 
+/// Extract NVMe controller name from device name (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
+fn extract_nvme_controller_name(device_name: &str) -> String {
+    // Use robust parsing to extract controller part: nvme(\d+)n(\d+) -> nvme\1
+    if let Some(pos) = device_name.rfind('n') {
+        // Check if the part after 'n' is a number (namespace)
+        let after_n = &device_name[pos + 1..];
+        if after_n.chars().all(|c| c.is_ascii_digit()) {
+            // Valid namespace, return controller part
+            return device_name[..pos].to_string();
+        }
+    }
+    
+    // Fallback: if pattern doesn't match, return as-is
+    device_name.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_extract_nvme_controller_name() {
+        assert_eq!(extract_nvme_controller_name("nvme0n1"), "nvme0");
+        assert_eq!(extract_nvme_controller_name("nvme1n1"), "nvme1");
+        assert_eq!(extract_nvme_controller_name("nvme2n3"), "nvme2");
+        assert_eq!(extract_nvme_controller_name("nvme10n15"), "nvme10");
+        assert_eq!(extract_nvme_controller_name("nvme"), "nvme");         // No namespace
+        assert_eq!(extract_nvme_controller_name("sda"), "sda");           // Non-NVMe
+        assert_eq!(extract_nvme_controller_name("nvme1np1"), "nvme1np1"); // Invalid pattern
+    }
+}
+
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if device is accessible via SPDK
-    let bdev_name = format!("{}n1", device.controller_id);
-    let result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+    // Check if device is accessible via SPDK by trying both possible bdev names:
+    // 1. Kernel AIO bdev: kernel_nvme1n1 (for kernel-bound devices)
+    // 2. Direct controller bdev: nvme1 (for userspace-bound devices)
+    
+    let kernel_bdev_name = format!("kernel_{}", device.controller_id);  // e.g., kernel_nvme1n1
+    
+    // Extract controller name dynamically (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
+    let direct_bdev_name = extract_nvme_controller_name(&device.controller_id);
+    
+    // Try kernel AIO bdev first (most common for our setup)
+    let kernel_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_get_bdevs",
         "params": {
-            "name": bdev_name
+            "name": kernel_bdev_name
         }
     })).await;
     
-    if result.is_err() {
-        return Ok(false);
+    if kernel_result.is_ok() {
+        return Ok(true);
+    }
+    
+    // Try direct controller bdev for userspace devices
+    let direct_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+        "method": "bdev_get_bdevs", 
+        "params": {
+            "name": direct_bdev_name
+        }
+    })).await;
+    
+    if direct_result.is_ok() {
+        return Ok(true);
     }
     
     // Additional health checks could be added here
     // - SMART data analysis
-    // - Temperature monitoring
+    // - Temperature monitoring  
     // - Error rate checking
     
-    Ok(true)
+    Ok(false)
 }
 
 #[allow(dead_code)]
@@ -3948,12 +4008,20 @@ impl NodeAgent {
             // 2. AIO bdev (for kernel-bound devices) 
             // 3. Any bdev that matches device characteristics
             
+            // Extract controller part dynamically (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
+            let controller_part = extract_nvme_controller_name(controller_id);
+            
             let possible_names = vec![
-                format!("{}n1", controller_id),              // Direct SPDK: nvme0n1
+                controller_id.to_string(),                   // Direct controller ID (nvme1n1)
                 format!("kernel_{}", device_name),           // Kernel AIO: kernel_nvme1n1 (created by setup)
+                format!("kernel_{}", controller_id),         // Kernel AIO alt: kernel_nvme1n1
                 format!("aio_{}", device_name),              // AIO: aio_nvme1n1  
-                device_name.clone(),                         // Direct: nvme1n1
-                format!("nvme_{}n1", controller_id),         // Alt SPDK format
+                format!("aio_{}", controller_id),            // AIO alt: aio_nvme1n1
+                device_name.clone(),                         // Direct device name: nvme1n1
+                controller_part.clone(),                     // Controller only: nvme1
+                format!("nvme_{}", controller_id),           // Alt format: nvme_nvme1n1
+                format!("nvme_{}", device_name),             // Alt format: nvme_nvme1n1
+                format!("{}n1", controller_part),            // Fallback: nvme1n1 (if controller_part was nvme1)
             ];
             
             println!("🔍 [FIND_BDEV] Checking for bdev names: {:?}", possible_names);
