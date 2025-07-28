@@ -6,6 +6,11 @@ FROM ${BASE_IMAGE}
 
 # Dashboard backend specific dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools needed for spdk_flint compilation
+    cmake \
+    make \
+    g++ \
+    pkg-config \
     # JSON processing tools
     jq \
     # Network diagnostics
