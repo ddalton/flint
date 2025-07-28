@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Development libraries
     libcurl4-openssl-dev \
     libssl-dev \
+    # System libraries needed for SPDK
+    libuuid1-dev \
+    libnuma-dev \
     # C++ libraries (avoid FetchContent/git dependencies)
     nlohmann-json3-dev \
     # Abseil (protobuf dependency) - try a more complete installation

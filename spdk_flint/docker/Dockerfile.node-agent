@@ -35,6 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     strace \
     ltrace \
     gdb \
+    # System libraries needed for SPDK linking
+    libuuid1-dev \
+    libnuma-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source code and build the business logic
