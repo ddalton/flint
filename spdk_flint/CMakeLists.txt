@@ -162,7 +162,7 @@ include_directories(
 )
 
 # Generate protobuf and gRPC files
-set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../spdk-csi-driver/proto")
+set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 set(GENERATED_PROTOBUF_PATH "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY ${GENERATED_PROTOBUF_PATH})
 
