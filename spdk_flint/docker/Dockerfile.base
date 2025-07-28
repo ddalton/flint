@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     protobuf-compiler \
     libcurl4-openssl-dev \
+    # FIPS-compliant crypto dependencies
+    libssl-dev \
+    openssl \
     # Additional tools
     nasm \
     yasm \
@@ -42,10 +45,13 @@ RUN apt-get update && apt-get install -y \
     libtool \
     meson \
     ninja-build \
-    # Additional build tools  
+    # Additional build tools for ISA-L crypto  
     autotools-dev \
     libtool-bin \
     make \
+    # ISA-L crypto autogen dependencies
+    pkg-config \
+    m4 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory and environment
@@ -99,17 +105,26 @@ RUN git clone https://github.com/spdk/spdk.git && \
     which nasm && nasm --version && \
     echo "Checking if nasm version is adequate..." && \
     nasm --version | grep -E "version 2\.(1[4-9]|[2-9][0-9])" && \
-    echo "Starting SPDK configure (disabling crypto to avoid build issues)..." && \
-    AS=nasm ./configure \
+    echo "Fixing ISA-L-crypto nasm detection..." && \
+    export NASM_CFLAGS="-f elf64" && \
+    export AS=/usr/bin/nasm && \
+    export NASM=/usr/bin/nasm && \
+    echo "Pre-configuring ISA-L-crypto to fix detection..." && \
+    (cd isa-l-crypto && \
+     echo "Running autogen for ISA-L-crypto..." && \
+     ./autogen.sh && \
+     echo "Configuring ISA-L-crypto manually..." && \
+     ./configure --prefix=/tmp/isal-crypto && \
+     echo "ISA-L-crypto pre-configured successfully") && \
+    echo "Starting SPDK configure (with working ISA-L crypto)..." && \
+    AS=nasm NASM=/usr/bin/nasm ./configure \
         --with-ublk \
         --disable-tests \
         --disable-unit-tests \
         --without-shared \
         --without-nvme-cuse \
         --without-fuse \
-        --with-uring \
-        --without-isal-crypto \
-        --without-crypto 2>&1 | tee configure.log && \
+        --with-uring 2>&1 | tee configure.log && \
     echo "Verifying SPDK configure success..." && \
     if [ ! -f mk/config.mk ]; then \
         echo "ERROR: SPDK configure failed - config.mk not generated!" && \
