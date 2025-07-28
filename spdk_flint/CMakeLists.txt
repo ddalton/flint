@@ -159,7 +159,6 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/proto
     ${SPDK_INCLUDE_DIRS}
-    ${CROW_INCLUDE_DIR}
 )
 
 # Generate protobuf and gRPC files
@@ -192,20 +191,21 @@ set(SOURCES
     src/main.cpp
     src/app.cpp
     src/logging.cpp
-    src/csi/identity_service.cpp
-    src/csi/controller_service.cpp
-    src/csi/node_service.cpp
     src/spdk/spdk_wrapper.cpp
-    src/spdk/volume_manager.cpp
-    src/spdk/raid_manager.cpp
-    src/spdk/nvmeof_manager.cpp
-    src/dashboard/dashboard_service.cpp
-    src/node_agent/node_agent.cpp
-    src/controller_operator/controller_operator.cpp
     src/utils/config.cpp
     src/utils/kube_client.cpp
     ${CSI_PB_CPP_FILE}
     ${CSI_GRPC_CPP_FILE}
+    # TODO: Add these files as they are implemented:
+    # src/csi/identity_service.cpp
+    # src/csi/controller_service.cpp
+    # src/csi/node_service.cpp
+    # src/spdk/volume_manager.cpp
+    # src/spdk/raid_manager.cpp
+    # src/spdk/nvmeof_manager.cpp
+    # src/dashboard/dashboard_service.cpp
+    # src/node_agent/node_agent.cpp
+    # src/controller_operator/controller_operator.cpp
 )
 
 # Main executable
@@ -222,10 +222,7 @@ target_include_directories(spdk_flint PRIVATE
     ${CURL_INCLUDE_DIRS}
 )
 
-# Add Crow include directories (if found)
-if(CROW_INCLUDE_DIR)
-    target_include_directories(spdk_flint PRIVATE ${CROW_INCLUDE_DIR})
-endif()
+# Crow includes handled by target linkage (FetchContent provides Crow::Crow target)
 
 # Link libraries
 target_link_libraries(spdk_flint
