@@ -27,9 +27,12 @@ WORKDIR /workspace/spdk_flint
 
 # Build the spdk_flint binary (needs SPDK libraries for direct C API calls)
 RUN mkdir build && cd build && \
+    export CMAKE_PREFIX_PATH="/usr/local:$CMAKE_PREFIX_PATH" && \
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" && \
     cmake .. \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
-        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH="/usr/local" && \
     make -j$(nproc) && \
     make install
 
