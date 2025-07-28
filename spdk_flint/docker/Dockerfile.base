@@ -106,15 +106,19 @@ RUN git clone https://github.com/spdk/spdk.git && \
     echo "Checking if nasm version is adequate..." && \
     nasm --version | grep -E "version 2\.(1[4-9]|[2-9][0-9])" && \
     echo "Fixing ISA-L-crypto nasm detection..." && \
-    export NASM_CFLAGS="-f elf64" && \
-    export AS=/usr/bin/nasm && \
+    echo "Current nasm location: $(which nasm)" && \
+    echo "Ensuring nasm is available at expected path..." && \
+    ln -sf $(which nasm) /usr/bin/nasm 2>/dev/null || echo "nasm already at /usr/bin/nasm" && \
+    ls -la /usr/bin/nasm && \
     export NASM=/usr/bin/nasm && \
-    echo "Pre-configuring ISA-L-crypto to fix detection..." && \
+    export AS=/usr/bin/nasm && \
+    export NASM_CFLAGS="-f elf64" && \
+    echo "Pre-configuring ISA-L-crypto with explicit nasm path..." && \
     (cd isa-l-crypto && \
      echo "Running autogen for ISA-L-crypto..." && \
      ./autogen.sh && \
-     echo "Configuring ISA-L-crypto manually..." && \
-     ./configure --prefix=/tmp/isal-crypto && \
+     echo "Configuring ISA-L-crypto with NASM=$NASM..." && \
+     NASM=/usr/bin/nasm AS=/usr/bin/nasm ./configure --prefix=/tmp/isal-crypto && \
      echo "ISA-L-crypto pre-configured successfully") && \
     echo "Starting SPDK configure (with working ISA-L crypto)..." && \
     AS=nasm NASM=/usr/bin/nasm ./configure \
