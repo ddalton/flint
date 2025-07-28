@@ -1,6 +1,7 @@
 # Dashboard Backend (Service)
 # Web API service for monitoring dashboard
 ARG BASE_IMAGE=flint-base:latest
+ARG CMAKE_BUILD_TYPE=Release
 FROM ${BASE_IMAGE}
 
 # Dashboard backend specific dependencies
@@ -22,7 +23,7 @@ WORKDIR /workspace/spdk_flint
 # Build the spdk_flint binary (needs SPDK libraries for direct C API calls)
 RUN mkdir build && cd build && \
     cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DCMAKE_INSTALL_PREFIX=/usr/local && \
     make -j$(nproc) && \
     make install

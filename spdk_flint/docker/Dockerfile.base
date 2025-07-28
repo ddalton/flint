@@ -36,11 +36,16 @@ RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     # Additional tools
     nasm \
+    yasm \
     autoconf \
     automake \
     libtool \
     meson \
     ninja-build \
+    # Additional build tools for ISA-L/ISA-L-crypto
+    autotools-dev \
+    libtool-bin \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory and environment
@@ -90,6 +95,9 @@ RUN git clone https://github.com/spdk/spdk.git && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
     echo "Configuring SPDK with UBLK support..." && \
+    echo "Checking configure dependencies..." && \
+    which nasm && nasm --version && \
+    echo "Starting SPDK configure..." && \
     AS=nasm ./configure \
         --with-ublk \
         --disable-tests \
@@ -98,7 +106,13 @@ RUN git clone https://github.com/spdk/spdk.git && \
         --without-crypto \
         --without-nvme-cuse \
         --without-fuse \
-        --with-uring && \
+        --with-uring 2>&1 | tee configure.log && \
+    echo "SPDK configure completed successfully" || \
+    (echo "Configure failed! Checking logs..." && \
+     cat configure.log && \
+     [ -f .spdk-isal-crypto.log ] && echo "ISA-L-crypto log:" && cat .spdk-isal-crypto.log && \
+     [ -f .spdk-isal.log ] && echo "ISA-L log:" && cat .spdk-isal.log && \
+     exit 1) && \
     make -j$(nproc) && \
     echo "Installing SPDK libraries and headers..." && \
     make -C lib install && \

@@ -1,6 +1,7 @@
 # CSI Node Plugin (DaemonSet)
 # Requires privileged access and host filesystem tools
 ARG BASE_IMAGE=flint-base:latest
+ARG CMAKE_BUILD_TYPE=Release
 FROM ${BASE_IMAGE}
 
 # Install additional tools needed for CSI node operations
@@ -35,7 +36,7 @@ WORKDIR /workspace/spdk_flint
 # Build the spdk_flint binary
 RUN mkdir build && cd build && \
     cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DCMAKE_INSTALL_PREFIX=/usr/local && \
     make -j$(nproc) && \
     make install

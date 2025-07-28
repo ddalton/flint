@@ -17,9 +17,28 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Compiler flags
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -DDEBUG")
+# Compiler flags with enhanced memory safety
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+
+# Memory safety warnings for all builds
+add_compile_options(
+    -Wall -Wextra -Wpedantic
+    -Wold-style-cast
+    -Wnon-virtual-dtor
+    -Woverloaded-virtual
+)
+
+# Debug builds with runtime memory checking
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(
+        -fsanitize=address,leak,undefined
+        -fno-omit-frame-pointer
+    )
+    add_link_options(
+        -fsanitize=address,leak,undefined
+    )
+endif()
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
