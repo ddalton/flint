@@ -24,7 +24,7 @@ static bool g_shutdown_requested = false;
 static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
     (void)wrapper; // Suppress unused variable warning
-    LOG_INFO("SPDK application started successfully");
+    spdk_flint::logger()->info("SPDK application started successfully");
     g_spdk_initialized = true;
     // Signal that initialization is complete
 }
@@ -54,7 +54,7 @@ void SpdkWrapper::throwOnError(int rc, const std::string& operation) {
     if (rc != 0) {
         auto error = convertErrno(rc);
         std::string message = operation + " failed with code " + std::to_string(rc);
-        LOG_SPDK_ERROR("{}", message);
+        spdk_flint::logger()->error("[SPDK] {}", message);
         throw SpdkException(error, message);
     }
 }
@@ -62,7 +62,7 @@ void SpdkWrapper::throwOnError(int rc, const std::string& operation) {
 // Constructor/Destructor
 SpdkWrapper::SpdkWrapper(const std::string& config_file) 
     : config_file_(config_file) {
-    LOG_SPDK_INFO("Creating SPDK wrapper");
+    spdk_flint::logger()->info("[SPDK] Creating SPDK wrapper");
 }
 
 SpdkWrapper::~SpdkWrapper() {
@@ -72,17 +72,17 @@ SpdkWrapper::~SpdkWrapper() {
 // Initialization
 bool SpdkWrapper::initialize() {
     if (g_spdk_initialized) {
-        LOG_SPDK_WARN("SPDK already initialized");
+        spdk_flint::logger()->warn("[SPDK] SPDK already initialized");
         return true;
     }
 
     try {
-        LOG_INFO("Initializing SPDK application framework");
+        spdk_flint::logger()->info("Initializing SPDK application framework");
         
         // Allocate and initialize SPDK options
         opts_ = reinterpret_cast<struct spdk_app_opts*>(spdk_dma_zmalloc(sizeof(struct spdk_app_opts), 64, nullptr));
         if (!opts_) {
-            LOG_SPDK_ERROR("Failed to allocate SPDK options");
+            spdk_flint::logger()->error("[SPDK] Failed to allocate SPDK options");
             return false;
         }
 
@@ -97,7 +97,7 @@ bool SpdkWrapper::initialize() {
         // Use SPDK's proper application startup - this sets up signal handlers
         int rc = spdk_app_start(opts_, spdk_app_started, this);
         if (rc != 0) {
-            LOG_SPDK_ERROR("Failed to start SPDK application: {}", rc);
+            spdk_flint::logger()->error("[SPDK] Failed to start SPDK application: {}", rc);
             if (opts_) {
                 spdk_dma_free(opts_);
                 opts_ = nullptr;
@@ -105,11 +105,11 @@ bool SpdkWrapper::initialize() {
             return false;
         }
 
-        LOG_INFO("SPDK application framework initialized successfully");
+        spdk_flint::logger()->info("SPDK application framework initialized successfully");
         return true;
         
     } catch (const std::exception& e) {
-        LOG_SPDK_ERROR("Exception during SPDK initialization: {}", e.what());
+        spdk_flint::logger()->error("[SPDK] Exception during SPDK initialization: {}", e.what());
         if (opts_) {
             spdk_dma_free(opts_);
             opts_ = nullptr;
@@ -120,12 +120,12 @@ bool SpdkWrapper::initialize() {
 
 void SpdkWrapper::shutdown() {
     if (!g_spdk_initialized) {
-        LOG_SPDK_WARN("SPDK not initialized");
+        spdk_flint::logger()->warn("[SPDK] SPDK not initialized");
         return;
     }
 
     try {
-        LOG_INFO("Shutting down SPDK application framework");
+        spdk_flint::logger()->info("Shutting down SPDK application framework");
         
         // Request shutdown - SPDK will handle the actual cleanup
         spdk_app_stop(0);
@@ -139,10 +139,10 @@ void SpdkWrapper::shutdown() {
         }
         
         g_spdk_initialized = false;
-        LOG_INFO("SPDK application framework shutdown complete");
+        spdk_flint::logger()->info("SPDK application framework shutdown complete");
         
     } catch (const std::exception& e) {
-        LOG_SPDK_ERROR("Exception during SPDK shutdown: {}", e.what());
+        spdk_flint::logger()->error("[SPDK] Exception during SPDK shutdown: {}", e.what());
     }
 }
 
@@ -161,11 +161,11 @@ std::vector<BdevInfo> SpdkWrapper::getBdevs(const std::string& name) const {
     std::vector<BdevInfo> result;
     
     if (!g_spdk_initialized) {
-        LOG_SPDK_ERROR("SPDK not initialized");
+        spdk_flint::logger()->error("[SPDK] SPDK not initialized");
         return result;
     }
     
-    LOG_RPC_CALL("bdev_get_bdevs", "name={}", name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_get_bdevs name={}", name);
     
     try {
         struct spdk_bdev* bdev = nullptr;
@@ -211,10 +211,10 @@ std::vector<BdevInfo> SpdkWrapper::getBdevs(const std::string& name) const {
             }
         }
         
-        LOG_RPC_SUCCESS("bdev_get_bdevs", "found {} bdevs", result.size());
+        spdk_flint::logger()->debug("[RPC] bdev_get_bdevs found {} bdevs", result.size());
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_get_bdevs failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_get_bdevs failed: Exception occurred");
     }
     
     return result;
@@ -222,49 +222,49 @@ std::vector<BdevInfo> SpdkWrapper::getBdevs(const std::string& name) const {
 
 bool SpdkWrapper::createAioBdev(const std::string& filename, const std::string& name, uint32_t block_size) {
     try {
-        LOG_RPC_CALL("bdev_aio_create", "name={}, filename={}, block_size={}", name, filename, block_size);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_aio_create name={}, filename={}, block_size={}", name, filename, block_size);
         
         // Create AIO bdev - simplified for now (SPDK API changes)
         // Note: Direct API may differ from RPC parameters
-        LOG_RPC_SUCCESS("bdev_aio_create", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] bdev_aio_create name={}", name);
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_aio_create failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_aio_create failed: Exception occurred");
         return false;
     }
 }
 
 bool SpdkWrapper::createUringBdev(const std::string& filename, const std::string& name, uint32_t block_size) {
     try {
-        LOG_RPC_CALL("bdev_uring_create", "name={}, filename={}, block_size={}", name, filename, block_size);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_uring_create name={}, filename={}, block_size={}", name, filename, block_size);
         
         // Create uring bdev - simplified for now (SPDK API changes)
-        LOG_RPC_SUCCESS("bdev_uring_create", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] bdev_uring_create name={}", name);
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_uring_create failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_uring_create failed: Exception occurred");
         return false;
     }
 }
 
 bool SpdkWrapper::deleteBdev(const std::string& name) {
     try {
-        LOG_RPC_CALL("bdev_delete", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_delete name={}", name);
         
         struct spdk_bdev* bdev = spdk_bdev_get_by_name(name.c_str());
         if (!bdev) {
-            LOG_RPC_ERROR("[RPC] SPDK method bdev_delete failed: Bdev not found");
+            spdk_flint::logger()->error("[RPC] SPDK method bdev_delete failed: Bdev not found");
             return false;
         }
         
         // Delete bdev - simplified (API may have changed)
-        LOG_RPC_SUCCESS("bdev_delete", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] bdev_delete name={}", name);
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_delete failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_delete failed: Exception occurred");
         return false;
     }
 }
@@ -272,28 +272,28 @@ bool SpdkWrapper::deleteBdev(const std::string& name) {
 // NVMe operations
 bool SpdkWrapper::attachNvmeController(const std::string& name, const std::string& traddr, const std::string& trtype) {
     try {
-        LOG_RPC_CALL("bdev_nvme_attach_controller", "name={}, traddr={}, trtype={}", name, traddr, trtype);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_nvme_attach_controller name={}, traddr={}, trtype={}", name, traddr, trtype);
         
         // Attach NVMe controller - simplified implementation
-        LOG_RPC_SUCCESS("bdev_nvme_attach_controller", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] bdev_nvme_attach_controller name={}", name);
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_attach_controller failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_nvme_attach_controller failed: Exception occurred");
         return false;
     }
 }
 
 bool SpdkWrapper::detachNvmeController(const std::string& name) {
     try {
-        LOG_RPC_CALL("bdev_nvme_detach_controller", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_nvme_detach_controller name={}", name);
         
         // Detach NVMe controller - simplified implementation
-        LOG_RPC_SUCCESS("bdev_nvme_detach_controller", "name={}", name);
+        spdk_flint::logger()->debug("[RPC] bdev_nvme_detach_controller name={}", name);
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_detach_controller failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_nvme_detach_controller failed: Exception occurred");
         return false;
     }
 }
@@ -302,19 +302,19 @@ std::vector<std::string> SpdkWrapper::getNvmeControllers() const {
     std::vector<std::string> result;
     
     if (!g_spdk_initialized) {
-        LOG_SPDK_ERROR("SPDK not initialized");
+        spdk_flint::logger()->error("[SPDK] SPDK not initialized");
         return result;
     }
     
-    LOG_RPC_CALL("bdev_nvme_get_controllers", "");
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_nvme_get_controllers");
     
     try {
         // TODO: Implement NVMe controller enumeration
         // This would require accessing SPDK's internal NVMe controller list
-        LOG_RPC_SUCCESS("bdev_nvme_get_controllers", "found {} controllers", result.size());
+        spdk_flint::logger()->debug("[RPC] bdev_nvme_get_controllers found {} controllers", result.size());
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_get_controllers failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_nvme_get_controllers failed: Exception occurred");
     }
     
     return result;
@@ -325,22 +325,22 @@ std::string SpdkWrapper::createLvstore(const std::string& bdev_name, const std::
                                        uint32_t cluster_size, const std::string& clear_method) {
     (void)clear_method; // Suppress unused parameter warning
     try {
-        LOG_RPC_CALL("bdev_lvol_create_lvstore", "bdev_name={}, lvs_name={}, cluster_size={}", 
-                     bdev_name, lvs_name, cluster_size);
+        spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_create_lvstore bdev_name={}, lvs_name={}, cluster_size={}", 
+                           bdev_name, lvs_name, cluster_size);
         
         struct spdk_bdev* bdev = spdk_bdev_get_by_name(bdev_name.c_str());
         if (!bdev) {
-            LOG_RPC_ERROR("[RPC] SPDK method bdev_lvol_create_lvstore failed: Base bdev not found");
+            spdk_flint::logger()->error("[RPC] SPDK method bdev_lvol_create_lvstore failed: Base bdev not found");
             return "";
         }
         
         // Create lvstore - simplified implementation (SPDK API changes frequently)
         std::string uuid = "12345678-1234-1234-1234-123456789abc";  // Mock UUID
-        LOG_RPC_SUCCESS("bdev_lvol_create_lvstore", "uuid={}", uuid);
+        spdk_flint::logger()->debug("[RPC] bdev_lvol_create_lvstore uuid={}", uuid);
         return uuid;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_lvol_create_lvstore failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_lvol_create_lvstore failed: Exception occurred");
         return "";
     }
 }
@@ -354,12 +354,12 @@ void SpdkWrapper::processEvents() {
 }
 
 void SpdkWrapper::runEventLoop() {
-    LOG_SPDK_INFO("Starting SPDK event loop");
+    spdk_flint::logger()->info("[SPDK] Starting SPDK event loop");
     while (g_spdk_initialized && !g_shutdown_requested) {
         processEvents();
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
-    LOG_SPDK_INFO("SPDK event loop stopped");
+    spdk_flint::logger()->info("[SPDK] SPDK event loop stopped");
 }
 
 void SpdkWrapper::stopEventLoop() {
@@ -371,45 +371,45 @@ std::string SpdkWrapper::createLvol(const std::string& lvs_name, const std::stri
                                    uint64_t size_mib, bool thin_provision, const std::string& clear_method) {
     (void)thin_provision; // Suppress unused parameter warning
     (void)clear_method; // Suppress unused parameter warning
-    LOG_RPC_CALL("bdev_lvol_create", "lvs_name={}, lvol_name={}, size_mib={}", lvs_name, lvol_name, size_mib);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_create lvs_name={}, lvol_name={}, size_mib={}", lvs_name, lvol_name, size_mib);
     // TODO: Implement using spdk_lvol_create
-    LOG_RPC_SUCCESS("bdev_lvol_create", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_create stub implementation");
     return lvol_name;
 }
 
 bool SpdkWrapper::deleteLvol(const std::string& lvol_name) {
-    LOG_RPC_CALL("bdev_lvol_delete", "lvol_name={}", lvol_name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_delete lvol_name={}", lvol_name);
     // TODO: Implement using spdk_lvol_destroy
-    LOG_RPC_SUCCESS("bdev_lvol_delete", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_delete stub implementation");
     return true;
 }
 
 bool SpdkWrapper::resizeLvol(const std::string& lvol_name, uint64_t new_size_mib) {
-    LOG_RPC_CALL("bdev_lvol_resize", "lvol_name={}, new_size_mib={}", lvol_name, new_size_mib);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_resize lvol_name={}, new_size_mib={}", lvol_name, new_size_mib);
     // TODO: Implement using spdk_lvol_resize
-    LOG_RPC_SUCCESS("bdev_lvol_resize", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_resize stub implementation");
     return true;
 }
 
 // More method stubs...
 std::string SpdkWrapper::createSnapshot(const std::string& lvol_name, const std::string& snapshot_name) {
-    LOG_RPC_CALL("bdev_lvol_snapshot", "lvol_name={}, snapshot_name={}", lvol_name, snapshot_name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_snapshot lvol_name={}, snapshot_name={}", lvol_name, snapshot_name);
     // TODO: Implement snapshot creation
-    LOG_RPC_SUCCESS("bdev_lvol_snapshot", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_snapshot stub implementation");
     return snapshot_name;
 }
 
 bool SpdkWrapper::deleteLvstore(const std::string& lvs_name) {
-    LOG_RPC_CALL("bdev_lvol_delete_lvstore", "lvs_name={}", lvs_name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_delete_lvstore lvs_name={}", lvs_name);
     // TODO: Implement lvstore deletion
-    LOG_RPC_SUCCESS("bdev_lvol_delete_lvstore", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_delete_lvstore stub implementation");
     return true;
 }
 
 std::vector<std::string> SpdkWrapper::getLvstores() const {
-    LOG_RPC_CALL("bdev_lvol_get_lvstores", "");
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_lvol_get_lvstores");
     // TODO: Implement lvstore enumeration
-    LOG_RPC_SUCCESS("bdev_lvol_get_lvstores", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_lvol_get_lvstores stub implementation");
     return {};
 }
 
@@ -417,90 +417,90 @@ std::vector<std::string> SpdkWrapper::getLvstores() const {
 std::string SpdkWrapper::createRaid(const std::string& name, const std::string& raid_level,
                                    const std::vector<std::string>& base_bdevs, uint32_t strip_size_kb) {
     (void)strip_size_kb; // Suppress unused parameter warning
-    LOG_RPC_CALL("bdev_raid_create", "name={}, raid_level={}, base_bdevs={}", name, raid_level, base_bdevs.size());
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_raid_create name={}, raid_level={}, base_bdevs={}", name, raid_level, base_bdevs.size());
     // TODO: Implement RAID creation
-    LOG_RPC_SUCCESS("bdev_raid_create", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_raid_create stub implementation");
     return name;
 }
 
 bool SpdkWrapper::deleteRaid(const std::string& name) {
-    LOG_RPC_CALL("bdev_raid_delete", "name={}", name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_raid_delete name={}", name);
     // TODO: Implement RAID deletion
-    LOG_RPC_SUCCESS("bdev_raid_delete", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_raid_delete stub implementation");
     return true;
 }
 
 std::vector<RaidInfo> SpdkWrapper::getRaidBdevs(const std::string& category) const {
-    LOG_RPC_CALL("bdev_raid_get_bdevs", "category={}", category);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_raid_get_bdevs category={}", category);
     // TODO: Implement RAID enumeration
-    LOG_RPC_SUCCESS("bdev_raid_get_bdevs", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_raid_get_bdevs stub implementation");
     return {};
 }
 
 bool SpdkWrapper::addRaidBaseBdev(const std::string& raid_bdev, const std::string& base_bdev) {
-    LOG_RPC_CALL("bdev_raid_add_base_bdev", "raid_bdev={}, base_bdev={}", raid_bdev, base_bdev);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_raid_add_base_bdev raid_bdev={}, base_bdev={}", raid_bdev, base_bdev);
     // TODO: Implement adding RAID member
-    LOG_RPC_SUCCESS("bdev_raid_add_base_bdev", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_raid_add_base_bdev stub implementation");
     return true;
 }
 
 bool SpdkWrapper::removeRaidBaseBdev(const std::string& base_bdev_name) {
-    LOG_RPC_CALL("bdev_raid_remove_base_bdev", "base_bdev_name={}", base_bdev_name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_raid_remove_base_bdev base_bdev_name={}", base_bdev_name);
     // TODO: Implement removing RAID member
-    LOG_RPC_SUCCESS("bdev_raid_remove_base_bdev", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] bdev_raid_remove_base_bdev stub implementation");
     return true;
 }
 
 // NVMe-oF operations - stubs
 bool SpdkWrapper::createNvmfSubsystem(const std::string& nqn, bool allow_any_host) {
-    LOG_RPC_CALL("nvmf_create_subsystem", "nqn={}, allow_any_host={}", nqn, allow_any_host);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: nvmf_create_subsystem nqn={}, allow_any_host={}", nqn, allow_any_host);
     // TODO: Implement NVMe-oF subsystem creation
-    LOG_RPC_SUCCESS("nvmf_create_subsystem", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] nvmf_create_subsystem stub implementation");
     return true;
 }
 
 bool SpdkWrapper::deleteNvmfSubsystem(const std::string& nqn) {
-    LOG_RPC_CALL("nvmf_delete_subsystem", "nqn={}", nqn);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: nvmf_delete_subsystem nqn={}", nqn);
     // TODO: Implement NVMe-oF subsystem deletion
-    LOG_RPC_SUCCESS("nvmf_delete_subsystem", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] nvmf_delete_subsystem stub implementation");
     return true;
 }
 
 bool SpdkWrapper::addNvmfNamespace(const std::string& nqn, const std::string& bdev_name, uint32_t nsid) {
-    LOG_RPC_CALL("nvmf_subsystem_add_ns", "nqn={}, bdev_name={}, nsid={}", nqn, bdev_name, nsid);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: nvmf_subsystem_add_ns nqn={}, bdev_name={}, nsid={}", nqn, bdev_name, nsid);
     // TODO: Implement namespace addition
-    LOG_RPC_SUCCESS("nvmf_subsystem_add_ns", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] nvmf_subsystem_add_ns stub implementation");
     return true;
 }
 
 bool SpdkWrapper::addNvmfListener(const std::string& nqn, const std::string& trtype,
                                  const std::string& traddr, const std::string& trsvcid) {
-    LOG_RPC_CALL("nvmf_subsystem_add_listener", "nqn={}, trtype={}, traddr={}, trsvcid={}", 
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: nvmf_subsystem_add_listener nqn={}, trtype={}, traddr={}, trsvcid={}", 
                  nqn, trtype, traddr, trsvcid);
     // TODO: Implement listener addition
-    LOG_RPC_SUCCESS("nvmf_subsystem_add_listener", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] nvmf_subsystem_add_listener stub implementation");
     return true;
 }
 
 std::vector<NvmfSubsystemInfo> SpdkWrapper::getNvmfSubsystems() const {
-    LOG_RPC_CALL("nvmf_get_subsystems", "");
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: nvmf_get_subsystems");
     // TODO: Implement subsystem enumeration
-    LOG_RPC_SUCCESS("nvmf_get_subsystems", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] nvmf_get_subsystems stub implementation");
     return {};
 }
 
 // UBLK operations - stubs
 bool SpdkWrapper::createUblkTarget(const std::string& cpumask) {
-    LOG_RPC_CALL("ublk_create_target", "cpumask={}", cpumask);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: ublk_create_target cpumask={}", cpumask);
     // TODO: Implement UBLK target creation
-    LOG_RPC_SUCCESS("ublk_create_target", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] ublk_create_target stub implementation");
     return true;
 }
 
 bool SpdkWrapper::destroyUblkTarget() {
-    LOG_RPC_CALL("ublk_destroy_target", "");
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: ublk_destroy_target");
     // TODO: Implement UBLK target destruction
-    LOG_RPC_SUCCESS("ublk_destroy_target", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] ublk_destroy_target stub implementation");
     return true;
 }
 
@@ -508,27 +508,27 @@ int SpdkWrapper::startUblkDisk(const std::string& bdev_name, uint32_t ublk_id,
                               uint32_t queue_depth, uint32_t num_queues) {
     (void)queue_depth; // Suppress unused parameter warning
     (void)num_queues; // Suppress unused parameter warning
-    LOG_RPC_CALL("ublk_start_disk", "bdev_name={}, ublk_id={}", bdev_name, ublk_id);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: ublk_start_disk bdev_name={}, ublk_id={}", bdev_name, ublk_id);
     // TODO: Implement UBLK disk start
-    LOG_RPC_SUCCESS("ublk_start_disk", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] ublk_start_disk stub implementation");
     return ublk_id;
 }
 
 bool SpdkWrapper::stopUblkDisk(uint32_t ublk_id) {
-    LOG_RPC_CALL("ublk_stop_disk", "ublk_id={}", ublk_id);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: ublk_stop_disk ublk_id={}", ublk_id);
     // TODO: Implement UBLK disk stop
-    LOG_RPC_SUCCESS("ublk_stop_disk", "stub implementation");
+    spdk_flint::logger()->debug("[RPC] ublk_stop_disk stub implementation");
     return true;
 }
 
 // Statistics
 std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& bdev_name) const {
-    LOG_RPC_CALL("bdev_get_iostat", "bdev_name={}", bdev_name);
+    spdk_flint::logger()->debug("[RPC] Calling SPDK method: bdev_get_iostat bdev_name={}", bdev_name);
     
     std::map<std::string, uint64_t> stats;
     
     if (!g_spdk_initialized) {
-        LOG_SPDK_ERROR("SPDK not initialized");
+        spdk_flint::logger()->error("[SPDK] SPDK not initialized");
         return stats;
     }
     
@@ -549,10 +549,10 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
                 stats["unmap_ops"] = io_stat.num_unmap_ops;
                 stats["unmap_bytes"] = io_stat.bytes_unmapped;
                 
-                LOG_RPC_SUCCESS("bdev_get_iostat", "got stats for bdev {}: {} reads, {} writes", 
-                              bdev_name, stats["read_ops"], stats["write_ops"]);
+                spdk_flint::logger()->debug("[RPC] bdev_get_iostat got stats for bdev {}: {} reads, {} writes",
+                           bdev_name, stats["read_ops"], stats["write_ops"]);
             } else {
-                LOG_RPC_ERROR("[RPC] SPDK method bdev_get_iostat failed: bdev {} not found", bdev_name);
+                spdk_flint::logger()->error("[RPC] SPDK method bdev_get_iostat failed: bdev {} not found", bdev_name);
             }
         } else {
             // Get aggregated stats for all bdevs
@@ -585,12 +585,12 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
             stats["total_unmap_ops"] = total_unmap_ops;
             stats["total_unmap_bytes"] = total_unmap_bytes;
             
-            LOG_RPC_SUCCESS("bdev_get_iostat", "got aggregated stats: {} total reads, {} total writes", 
+            spdk_flint::logger()->debug("[RPC] bdev_get_iostat got aggregated stats: {} total reads, {} total writes",
                           total_read_ops, total_write_ops);
         }
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("[RPC] SPDK method bdev_get_iostat failed: Exception occurred");
+        spdk_flint::logger()->error("[RPC] SPDK method bdev_get_iostat failed: Exception occurred");
     }
     
     return stats;

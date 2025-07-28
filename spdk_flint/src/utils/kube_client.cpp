@@ -352,7 +352,7 @@ std::shared_ptr<KubeClient> KubeClient::create_incluster() {
     try {
         std::string token = get_service_account_token();
         if (token.empty()) {
-            LOG_ERROR("Failed to read service account token");
+            spdk_flint::logger()->error("Failed to read service account token");
             return nullptr;
         }
         
@@ -361,7 +361,7 @@ std::shared_ptr<KubeClient> KubeClient::create_incluster() {
         
         return std::shared_ptr<KubeClient>(new KubeClient(api_server, token, ca_cert_path, true));
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to create in-cluster client: {}", e.what());
+        spdk_flint::logger()->error("Failed to create in-cluster client: {}", e.what());
         return nullptr;
     }
 }
@@ -369,7 +369,7 @@ std::shared_ptr<KubeClient> KubeClient::create_incluster() {
 std::shared_ptr<KubeClient> KubeClient::create_from_kubeconfig(const std::string& path) {
     (void)path; // Suppress unused parameter warning
     // TODO: Implement kubeconfig parsing
-    LOG_WARN("kubeconfig client not implemented yet");
+    spdk_flint::logger()->warn("kubeconfig client not implemented yet");
     return nullptr;
 }
 
@@ -429,7 +429,7 @@ std::future<std::vector<SpdkVolume>> KubeClient::list_spdk_volumes(const std::st
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to list SPDK volumes: HTTP {}", response.status_code);
+                spdk_flint::logger()->error("Failed to list SPDK volumes: HTTP {}", response.status_code);
                 return {};
             }
             
@@ -446,7 +446,7 @@ std::future<std::vector<SpdkVolume>> KubeClient::list_spdk_volumes(const std::st
             
             return volumes;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception listing SPDK volumes: {}", e.what());
+            spdk_flint::logger()->error("Exception listing SPDK volumes: {}", e.what());
             return {};
         }
     });
@@ -464,7 +464,7 @@ std::future<std::optional<SpdkVolume>> KubeClient::get_spdk_volume(const std::st
                 if (response.status_code == 404) {
                     return std::nullopt;
                 }
-                LOG_ERROR("Failed to get SPDK volume {}: HTTP {}", name, response.status_code);
+                spdk_flint::logger()->error("Failed to get SPDK volume {}: HTTP {}", name, response.status_code);
                 return std::nullopt;
             }
             
@@ -473,7 +473,7 @@ std::future<std::optional<SpdkVolume>> KubeClient::get_spdk_volume(const std::st
             volume.from_json(response_json);
             return volume;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception getting SPDK volume {}: {}", name, e.what());
+            spdk_flint::logger()->error("Exception getting SPDK volume {}: {}", name, e.what());
             return std::nullopt;
         }
     });
@@ -492,7 +492,7 @@ std::future<SpdkVolume> KubeClient::create_spdk_volume(const SpdkVolume& volume,
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to create SPDK volume: HTTP {}", response.status_code);
+                spdk_flint::logger()->error("Failed to create SPDK volume: HTTP {}", response.status_code);
                 throw std::runtime_error("Failed to create SPDK volume");
             }
             
@@ -501,7 +501,7 @@ std::future<SpdkVolume> KubeClient::create_spdk_volume(const SpdkVolume& volume,
             created_volume.from_json(response_json);
             return created_volume;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception creating SPDK volume: {}", e.what());
+            spdk_flint::logger()->error("Exception creating SPDK volume: {}", e.what());
             throw;
         }
     });
@@ -520,7 +520,7 @@ std::future<SpdkVolume> KubeClient::update_spdk_volume(const SpdkVolume& volume,
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to update SPDK volume {}: HTTP {}", volume.name(), response.status_code);
+                spdk_flint::logger()->error("Failed to update SPDK volume {}: HTTP {}", volume.name(), response.status_code);
                 throw std::runtime_error("Failed to update SPDK volume");
             }
             
@@ -529,7 +529,7 @@ std::future<SpdkVolume> KubeClient::update_spdk_volume(const SpdkVolume& volume,
             updated_volume.from_json(response_json);
             return updated_volume;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception updating SPDK volume {}: {}", volume.name(), e.what());
+            spdk_flint::logger()->error("Exception updating SPDK volume {}: {}", volume.name(), e.what());
             throw;
         }
     });
@@ -545,7 +545,7 @@ std::future<bool> KubeClient::delete_spdk_volume(const std::string& name,
             
             return response.success() || response.status_code == 404;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception deleting SPDK volume {}: {}", name, e.what());
+            spdk_flint::logger()->error("Exception deleting SPDK volume {}: {}", name, e.what());
             return false;
         }
     });
@@ -560,7 +560,7 @@ std::future<std::vector<SpdkNode>> KubeClient::list_spdk_nodes(const std::string
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to list SPDK nodes: HTTP {}", response.status_code);
+                spdk_flint::logger()->error("Failed to list SPDK nodes: HTTP {}", response.status_code);
                 return {};
             }
             
@@ -575,10 +575,10 @@ std::future<std::vector<SpdkNode>> KubeClient::list_spdk_nodes(const std::string
                 }
             }
             
-            LOG_INFO("Successfully listed {} SPDK nodes", nodes.size());
+            spdk_flint::logger()->info("Successfully listed {} SPDK nodes", nodes.size());
             return nodes;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception listing SPDK nodes: {}", e.what());
+            spdk_flint::logger()->error("Exception listing SPDK nodes: {}", e.what());
             return {};
         }
     });
@@ -594,10 +594,10 @@ std::future<std::optional<SpdkNode>> KubeClient::get_spdk_node(const std::string
             
             if (!response.success()) {
                 if (response.status_code == 404) {
-                    LOG_DEBUG("SPDK node {} not found", name);
+                    spdk_flint::logger()->debug("SPDK node {} not found", name);
                     return std::nullopt;
                 }
-                LOG_ERROR("Failed to get SPDK node {}: HTTP {}", name, response.status_code);
+                spdk_flint::logger()->error("Failed to get SPDK node {}: HTTP {}", name, response.status_code);
                 return std::nullopt;
             }
             
@@ -605,10 +605,10 @@ std::future<std::optional<SpdkNode>> KubeClient::get_spdk_node(const std::string
             SpdkNode node;
             node.from_json(response_json);
             
-            LOG_DEBUG("Successfully retrieved SPDK node {}", name);
+            spdk_flint::logger()->debug("Successfully retrieved SPDK node {}", name);
             return node;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception getting SPDK node {}: {}", name, e.what());
+            spdk_flint::logger()->error("Exception getting SPDK node {}: {}", name, e.what());
             return std::nullopt;
         }
     });
@@ -626,7 +626,7 @@ std::future<SpdkNode> KubeClient::create_spdk_node(const SpdkNode& node,
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to create SPDK node: HTTP {}", response.status_code);
+                spdk_flint::logger()->error("Failed to create SPDK node: HTTP {}", response.status_code);
                 throw std::runtime_error("Failed to create SPDK node");
             }
             
@@ -634,10 +634,10 @@ std::future<SpdkNode> KubeClient::create_spdk_node(const SpdkNode& node,
             SpdkNode created_node;
             created_node.from_json(response_json);
             
-            LOG_INFO("Successfully created SPDK node {}", created_node.get_name());
+            spdk_flint::logger()->info("Successfully created SPDK node {}", created_node.get_name());
             return created_node;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception creating SPDK node: {}", e.what());
+            spdk_flint::logger()->error("Exception creating SPDK node: {}", e.what());
             throw;
         }
     });
@@ -655,7 +655,7 @@ std::future<SpdkNode> KubeClient::update_spdk_node(const SpdkNode& node,
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to update SPDK node {}: HTTP {}", node.get_name(), response.status_code);
+                spdk_flint::logger()->error("Failed to update SPDK node {}: HTTP {}", node.get_name(), response.status_code);
                 throw std::runtime_error("Failed to update SPDK node");
             }
             
@@ -663,10 +663,10 @@ std::future<SpdkNode> KubeClient::update_spdk_node(const SpdkNode& node,
             SpdkNode updated_node;
             updated_node.from_json(response_json);
             
-            LOG_INFO("Successfully updated SPDK node {}", updated_node.get_name());
+            spdk_flint::logger()->info("Successfully updated SPDK node {}", updated_node.get_name());
             return updated_node;
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception updating SPDK node {}: {}", node.get_name(), e.what());
+            spdk_flint::logger()->error("Exception updating SPDK node {}: {}", node.get_name(), e.what());
             throw;
         }
     });
@@ -681,7 +681,7 @@ std::future<std::map<std::string, std::string>> KubeClient::discover_spdk_nodes(
             auto response = response_future.get();
             
             if (!response.success()) {
-                LOG_ERROR("Failed to list Kubernetes nodes: HTTP {}", response.status_code);
+                spdk_flint::logger()->error("Failed to list Kubernetes nodes: HTTP {}", response.status_code);
                 return {};
             }
             
@@ -730,17 +730,17 @@ std::future<std::map<std::string, std::string>> KubeClient::discover_spdk_nodes(
                         
                         if (is_storage_node || node_role == "potential-storage") {
                             discovered_nodes[node_name] = node_address;
-                            LOG_DEBUG("Discovered SPDK node candidate: {} ({})", node_name, node_address);
+                            spdk_flint::logger()->debug("Discovered SPDK node candidate: {} ({})", node_name, node_address);
                         }
                     }
                 }
             }
             
-            LOG_INFO("Discovered {} potential SPDK storage nodes", discovered_nodes.size());
+            spdk_flint::logger()->info("Discovered {} potential SPDK storage nodes", discovered_nodes.size());
             return discovered_nodes;
             
         } catch (const std::exception& e) {
-            LOG_ERROR("Exception discovering SPDK nodes: {}", e.what());
+            spdk_flint::logger()->error("Exception discovering SPDK nodes: {}", e.what());
             return {};
         }
     });

@@ -145,7 +145,7 @@ AppConfig loadConfigFromEnvironment() {
     if (config.nvmeof_transport != "tcp" && 
         config.nvmeof_transport != "rdma" && 
         config.nvmeof_transport != "fc") {
-        LOG_WARN("Unknown NVMe-oF transport '{}', using 'tcp'", config.nvmeof_transport);
+        spdk_flint::logger()->warn("Unknown NVMe-oF transport '{}', using 'tcp'", config.nvmeof_transport);
         config.nvmeof_transport = "tcp";
     }
     
