@@ -20,62 +20,117 @@ private:
     static bool initialized_;
 };
 
-// Core logging macros
-#define LOG_TRACE(...) ::spdk_flint::Logger::get()->trace(__VA_ARGS__)
-#define LOG_DEBUG(...) ::spdk_flint::Logger::get()->debug(__VA_ARGS__)
-#define LOG_INFO(...) ::spdk_flint::Logger::get()->info(__VA_ARGS__)
-#define LOG_WARN(...) ::spdk_flint::Logger::get()->warn(__VA_ARGS__)
-#define LOG_ERROR(...) ::spdk_flint::Logger::get()->error(__VA_ARGS__)
-#define LOG_CRITICAL(...) ::spdk_flint::Logger::get()->critical(__VA_ARGS__)
+// Core logging functions
+template<typename... Args>
+inline void LOG_TRACE(Args&&... args) {
+    ::spdk_flint::Logger::get()->trace(std::forward<Args>(args)...);
+}
 
-// Component-specific logging macros
-#define LOG_CSI_INFO(...) \
-    ::spdk_flint::Logger::get()->info("[CSI] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_DEBUG(Args&&... args) {
+    ::spdk_flint::Logger::get()->debug(std::forward<Args>(args)...);
+}
 
-#define LOG_CSI_ERROR(...) \
-    ::spdk_flint::Logger::get()->error("[CSI] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_INFO(Args&&... args) {
+    ::spdk_flint::Logger::get()->info(std::forward<Args>(args)...);
+}
 
-#define LOG_CONTROLLER_INFO(...) \
-    ::spdk_flint::Logger::get()->info("[CONTROLLER] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_WARN(Args&&... args) {
+    ::spdk_flint::Logger::get()->warn(std::forward<Args>(args)...);
+}
 
-#define LOG_CONTROLLER_ERROR(...) \
-    ::spdk_flint::Logger::get()->error("[CONTROLLER] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_ERROR(Args&&... args) {
+    ::spdk_flint::Logger::get()->error(std::forward<Args>(args)...);
+}
 
-#define LOG_CONTROLLER_DEBUG(...) \
-    ::spdk_flint::Logger::get()->debug("[CONTROLLER] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_CRITICAL(Args&&... args) {
+    ::spdk_flint::Logger::get()->critical(std::forward<Args>(args)...);
+}
 
-#define LOG_SPDK_INFO(...) \
-    ::spdk_flint::Logger::get()->info("[SPDK] " __VA_ARGS__)
+// Component-specific logging functions
+template<typename... Args>
+inline void LOG_CSI_INFO(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->info("[CSI] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_SPDK_WARN(...) \
-    ::spdk_flint::Logger::get()->warn("[SPDK] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_CSI_ERROR(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->error("[CSI] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_SPDK_ERROR(...) \
-    ::spdk_flint::Logger::get()->error("[SPDK] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_CONTROLLER_INFO(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->info("[CONTROLLER] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_DASHBOARD_INFO(...) \
-    ::spdk_flint::Logger::get()->info("[DASHBOARD] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_CONTROLLER_ERROR(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->error("[CONTROLLER] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_DASHBOARD_ERROR(...) \
-    ::spdk_flint::Logger::get()->error("[DASHBOARD] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_CONTROLLER_DEBUG(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->debug("[CONTROLLER] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_NODE_AGENT_INFO(...) \
-    ::spdk_flint::Logger::get()->info("[NODE_AGENT] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_SPDK_INFO(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->info("[SPDK] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_NODE_AGENT_DEBUG(...) \
-    ::spdk_flint::Logger::get()->debug("[NODE_AGENT] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_SPDK_WARN(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->warn("[SPDK] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_NODE_AGENT_ERROR(...) \
-    ::spdk_flint::Logger::get()->error("[NODE_AGENT] " __VA_ARGS__)
+template<typename... Args>
+inline void LOG_SPDK_ERROR(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->error("[SPDK] " + format, std::forward<Args>(args)...);
+}
 
-// RPC operation logging (to replace the Rust RPC logging)
-#define LOG_RPC_CALL(method, ...) \
-    ::spdk_flint::Logger::get()->debug("[RPC] Calling SPDK method: {}{}", method, ##__VA_ARGS__)
+template<typename... Args>
+inline void LOG_DASHBOARD_INFO(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->info("[DASHBOARD] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_RPC_SUCCESS(...) \
-    ::spdk_flint::Logger::get()->debug(__VA_ARGS__)
+template<typename... Args>
+inline void LOG_DASHBOARD_ERROR(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->error("[DASHBOARD] " + format, std::forward<Args>(args)...);
+}
 
-#define LOG_RPC_ERROR(...) \
-    ::spdk_flint::Logger::get()->error(__VA_ARGS__)
+template<typename... Args>
+inline void LOG_NODE_AGENT_INFO(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->info("[NODE_AGENT] " + format, std::forward<Args>(args)...);
+}
+
+template<typename... Args>
+inline void LOG_NODE_AGENT_DEBUG(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->debug("[NODE_AGENT] " + format, std::forward<Args>(args)...);
+}
+
+template<typename... Args>
+inline void LOG_NODE_AGENT_ERROR(const std::string& format, Args&&... args) {
+    ::spdk_flint::Logger::get()->error("[NODE_AGENT] " + format, std::forward<Args>(args)...);
+}
+
+// RPC operation logging functions
+template<typename... Args>
+inline void LOG_RPC_CALL(const std::string& method, Args&&... args) {
+    ::spdk_flint::Logger::get()->debug("[RPC] Calling SPDK method: " + method, std::forward<Args>(args)...);
+}
+
+template<typename... Args>
+inline void LOG_RPC_SUCCESS(Args&&... args) {
+    ::spdk_flint::Logger::get()->debug(std::forward<Args>(args)...);
+}
+
+template<typename... Args>
+inline void LOG_RPC_ERROR(Args&&... args) {
+    ::spdk_flint::Logger::get()->error(std::forward<Args>(args)...);
+}
 
 } // namespace spdk_flint 
