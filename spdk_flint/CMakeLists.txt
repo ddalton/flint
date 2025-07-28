@@ -238,26 +238,20 @@ target_include_directories(spdk_flint PRIVATE
 
 # Crow includes handled by target linkage (FetchContent provides Crow::Crow target)
 
-# Try to find DPDK libraries using pkg-config
+# Try to find DPDK via pkg-config 
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
     pkg_check_modules(DPDK QUIET libdpdk)
     if(DPDK_FOUND)
-        message(STATUS "Found DPDK via pkg-config: ${DPDK_LIBRARIES}")
-    else()
-        message(STATUS "DPDK not found via pkg-config, will use manual linking")
+        message(STATUS "Found DPDK via pkg-config")
     endif()
 endif()
 
 # Link libraries for the main library
 target_link_libraries(spdk_flint_lib
     ${SPDK_LIBRARIES}
-    # Add DPDK libraries if found, otherwise try common DPDK library names
+    # Add DPDK if found
     ${DPDK_LIBRARIES}
-    # Common DPDK libraries that SPDK typically depends on
-    -Wl,--whole-archive
-    -lrte_eal -lrte_mempool -lrte_ring -lrte_mbuf -lrte_bus_pci -lrte_pci -lrte_bus_vdev -lrte_timer -lrte_hash -lrte_kvargs
-    -Wl,--no-whole-archive
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
     ${spdlog_LIBRARIES}
@@ -265,10 +259,13 @@ target_link_libraries(spdk_flint_lib
     ${CURL_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
+    # System libraries
     dl
     rt
     uuid
     numa
+    pthread
+    m
 )
 
 # Link libraries for the main executable

@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # System libraries needed for SPDK linking
     uuid-dev \
     libnuma-dev \
+    # DPDK development libraries
+    libdpdk-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source code and build the business logic
