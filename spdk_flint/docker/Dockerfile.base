@@ -1,6 +1,6 @@
 # Base builder image for SPDK Flint
 # This builds the common binary used by all specialized images
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:22.04 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -44,8 +44,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-# Ensure Python and pip are properly set up
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# Python and pip are already set up in Ubuntu 22.04
 
 # Build and install spdlog
 RUN git clone https://github.com/gabime/spdlog.git && \
@@ -100,12 +99,12 @@ WORKDIR /workspace
 #--------------------------------------------------------------------
 # Base runtime image with common dependencies
 #--------------------------------------------------------------------
-FROM ubuntu:24.04 AS base-runtime
+FROM ubuntu:22.04 AS base-runtime
 
 # Install common runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # SPDK runtime dependencies
-    libaio1t64 \
+    libaio1 \
     libnuma1 \
     libssl3 \
     libpciaccess0 \
@@ -114,7 +113,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-3 \
     libuuid1 \
     # C++ runtime dependencies
-    libprotobuf32t64 \
+    libprotobuf23 \
     libcurl4 \
     libstdc++6 \
     zlib1g \

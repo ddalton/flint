@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . /workspace/spdk_flint/
 WORKDIR /workspace/spdk_flint
 
-# Build the spdk_flint binary
+# Build the spdk_flint binary (needs SPDK libraries for direct C API calls)
 RUN mkdir build && cd build && \
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
