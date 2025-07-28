@@ -47,6 +47,9 @@ public:
     explicit Application(const AppConfig& config);
     ~Application();
 
+    // Initialize application components
+    bool initialize();
+
     // Main entry point
     int run();
 
@@ -72,7 +75,6 @@ private:
 
     // Initialization methods
     void setupLogging();
-    void setupSignalHandlers();
     void initializeComponents();
     
     // Mode-specific startup

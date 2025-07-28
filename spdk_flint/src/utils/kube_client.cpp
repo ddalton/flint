@@ -57,7 +57,11 @@ public:
                          const std::map<std::string, std::string>& headers = {}) {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            return {0, "", {}, false};
+            Response error_response;
+            error_response.status_code = 0;
+            error_response.body = "";
+            error_response.headers = {};
+            return error_response;
         }
         
         Response response;

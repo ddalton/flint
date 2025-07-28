@@ -91,6 +91,7 @@ struct SpdkNode {
     void from_json(const json& j);
     
     std::string name() const;
+    std::string get_name() const { return name(); }  // Alias for compatibility
     std::string namespace_() const;
 };
 

@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     # C++ libraries (avoid FetchContent/git dependencies)
     nlohmann-json3-dev \
+    # Abseil (protobuf dependency)
+    libabsl-dev \
     # Boost libraries still needed for Crow FetchContent build
     libboost-dev \
     libboost-system-dev \

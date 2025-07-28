@@ -6,6 +6,11 @@
 #include <functional>
 #include <optional>
 #include <map>
+#include <future> // Added for std::future
+#include <mutex> // Added for std::mutex
+#include <thread> // Added for std::thread
+#include <atomic> // Added for std::atomic
+#include <chrono> // Added for std::chrono
 
 // SPDK headers
 extern "C" {
@@ -67,7 +72,7 @@ public:
     // Initialization and cleanup
     bool initialize();
     void shutdown();
-    bool isInitialized() const { return initialized_; }
+    bool isInitialized() const;
 
     // Version information (replaces spdk_get_version RPC)
     std::string getVersion() const;
@@ -136,12 +141,35 @@ public:
     void runEventLoop();
     void stopEventLoop();
 
+    // Thread-safe methods for cross-thread access (e.g., from dashboard)
+    std::future<std::vector<BdevInfo>> getBdevsAsync(const std::string& name = "") const;
+    std::future<std::map<std::string, uint64_t>> getBdevIoStatsAsync(const std::string& bdev_name = "") const;
+    std::future<std::string> getVersionAsync() const;
+    
+    // Alternative: Simple caching approach (recommended for monitoring dashboards)
+    // These are thread-safe and don't block, but data may be slightly stale
+    std::vector<BdevInfo> getCachedBdevs(const std::string& name = "") const;
+    std::map<std::string, uint64_t> getCachedBdevIoStats(const std::string& bdev_name = "") const;
+    void startPeriodicCacheUpdate(std::chrono::milliseconds interval = std::chrono::milliseconds(5000));
+    void stopPeriodicCacheUpdate();
+    
+    // Synchronous methods (use only from SPDK reactor thread)
+    std::vector<BdevInfo> getBdevs(const std::string& name = "") const;
+    std::map<std::string, uint64_t> getBdevIoStats(const std::string& bdev_name = "") const;
+
 private:
-    bool initialized_ = false;
     std::string config_file_;
     
     // SPDK application context
     struct spdk_app_opts* opts_ = nullptr;
+    
+    // Caching for thread-safe dashboard access
+    mutable std::mutex cache_mutex_;
+    std::vector<BdevInfo> cached_bdevs_;
+    std::map<std::string, std::map<std::string, uint64_t>> cached_stats_; // bdev_name -> stats
+    std::chrono::steady_clock::time_point last_cache_update_;
+    std::thread cache_update_thread_;
+    std::atomic<bool> cache_update_running_{false};
     
     // Internal helper methods
     static void appStarted(void* arg);

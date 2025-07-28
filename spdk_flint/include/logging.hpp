@@ -75,4 +75,12 @@ private:
     spdk_flint::Logger::get()->debug("[RPC] SPDK method {} succeeded " __VA_ARGS__, method)
 
 #define LOG_RPC_ERROR(method, error, ...) \
-    spdk_flint::Logger::get()->error("[RPC] SPDK method {} failed: {} " __VA_ARGS__, method, error) 
+    spdk_flint::Logger::get()->error("[RPC] SPDK method {} failed: {} " __VA_ARGS__, method, error)
+
+// SPDK-specific logging macros
+#define LOG_SPDK_WARN(...) spdk_flint::Logger::get()->warn(__VA_ARGS__)
+#define LOG_SPDK_ERROR(...) spdk_flint::Logger::get()->error(__VA_ARGS__)
+
+} // namespace spdk_flint
+
+#endif // SPDK_FLINT_LOGGING_HPP 

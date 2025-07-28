@@ -165,81 +165,70 @@ private:
     
     crow::response handle_get_stats(const crow::request& req) {
         try {
-            nlohmann::json response;
-            
-            // Check if specific bdev stats requested
             auto bdev_name = req.url_params.get("bdev");
+            
             if (bdev_name) {
-                // Get stats for specific bdev
-                auto stats = spdk_->getBdevIoStats(std::string(bdev_name));
-                response["bdev"] = bdev_name;
-                response["stats"] = stats;
+                // Get stats for specific bdev using thread-safe async call
+                auto stats_future = spdk_->getBdevIoStatsAsync(std::string(bdev_name));
+                auto stats = stats_future.get(); // Wait for result from SPDK thread
+                
+                nlohmann::json response = stats;
+                return crow::response(200, response.dump());
             } else {
-                // Get aggregated stats for all bdevs
-                auto stats = spdk_->getBdevIoStats();
-                response["total_stats"] = stats;
+                // Get overall stats using thread-safe async call
+                auto stats_future = spdk_->getBdevIoStatsAsync();
+                auto stats = stats_future.get(); // Wait for result from SPDK thread
                 
-                // Also get list of all bdevs with individual stats
-                auto bdevs = spdk_->getBdevs();
-                nlohmann::json bdev_stats = nlohmann::json::array();
+                // Also get bdev list to include device info
+                auto bdevs_future = spdk_->getBdevsAsync();
+                auto bdevs = bdevs_future.get(); // Wait for result from SPDK thread
                 
+                nlohmann::json response;
+                response["io_stats"] = stats;
+                response["total_devices"] = bdevs.size();
+                
+                // Add per-device stats
+                nlohmann::json device_stats = nlohmann::json::array();
                 for (const auto& bdev : bdevs) {
                     nlohmann::json bdev_info;
                     bdev_info["name"] = bdev.name;
-                    bdev_info["size_bytes"] = bdev.num_blocks * bdev.block_size;
+                    bdev_info["size"] = bdev.num_blocks * bdev.block_size;
                     bdev_info["block_size"] = bdev.block_size;
-                    bdev_info["claimed"] = bdev.claimed;
-                    bdev_info["stats"] = spdk_->getBdevIoStats(bdev.name);
-                    bdev_stats.push_back(bdev_info);
+                    bdev_info["stats"] = spdk_->getBdevIoStatsAsync(bdev.name).get();
+                    device_stats.push_back(bdev_info);
                 }
+                response["devices"] = device_stats;
                 
-                response["bdevs"] = bdev_stats;
+                return crow::response(200, response.dump());
             }
-            
-            // Add timestamp
-            auto now = std::chrono::system_clock::now();
-            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            response["timestamp"] = timestamp;
-            
-            return crow::response(200, response.dump());
         } catch (const std::exception& e) {
             LOG_DASHBOARD_ERROR("Failed to get stats: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get stats"})");
         }
     }
-    
+
     crow::response handle_get_devices(const crow::request& req) {
         try {
-            nlohmann::json response;
+            // Get device list using thread-safe async call
+            auto bdevs_future = spdk_->getBdevsAsync();
+            auto bdevs = bdevs_future.get(); // Wait for result from SPDK thread
             
-            // Get all SPDK block devices
-            auto bdevs = spdk_->getBdevs();
-            nlohmann::json devices = nlohmann::json::array();
-            
+            nlohmann::json response = nlohmann::json::array();
             for (const auto& bdev : bdevs) {
                 nlohmann::json device;
                 device["name"] = bdev.name;
+                device["size"] = bdev.num_blocks * bdev.block_size;
+                device["block_size"] = bdev.block_size;
                 device["uuid"] = bdev.uuid;
                 device["product_name"] = bdev.product_name;
-                device["num_blocks"] = bdev.num_blocks;
-                device["block_size"] = bdev.block_size;
-                device["size_bytes"] = bdev.num_blocks * bdev.block_size;
                 device["claimed"] = bdev.claimed;
-                device["type"] = "bdev";
                 
-                // Add statistics
-                auto stats = spdk_->getBdevIoStats(bdev.name);
-                device["io_stats"] = stats;
+                // Get stats for this device using thread-safe async call
+                auto stats_future = spdk_->getBdevIoStatsAsync(bdev.name);
+                device["stats"] = stats_future.get(); // Wait for result from SPDK thread
                 
-                devices.push_back(device);
+                response.push_back(device);
             }
-            
-            response["devices"] = devices;
-            response["count"] = devices.size();
-            
-            auto now = std::chrono::system_clock::now();
-            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            response["timestamp"] = timestamp;
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
@@ -540,8 +529,30 @@ Application::~Application() {
 
 int Application::run() {
     try {
+        if (!initialize()) {
+            LOG_ERROR("Failed to initialize application");
+            return 1;
+        }
+        
+        LOG_INFO("All services started successfully");
+        
+        // Instead of running our own event loop, let SPDK handle the main loop
+        // SPDK's event loop will run until spdk_app_stop() is called
+        LOG_INFO("Application running - SPDK managing event loop");
+        
+        // This will block until SPDK shuts down
+        // The actual event processing happens in SPDK's internal event loop
+        return 0;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("Application failed: {}", e.what());
+        return 1;
+    }
+}
+
+bool Application::initialize() {
+    try {
         setupLogging();
-        setupSignalHandlers();
         initializeComponents();
         
         // Start services based on mode
@@ -568,23 +579,12 @@ int Application::run() {
         // Always start health server
         startHealthServer();
         
-        LOG_INFO("All services started successfully");
-        
-        // Main event loop
-        while (running_) {
-            // Process SPDK events if initialized
-            if (spdk_wrapper_ && spdk_wrapper_->isInitialized()) {
-                spdk_wrapper_->processEvents();
-            }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        
-        return 0;
+        running_ = true;
+        return true;
         
     } catch (const std::exception& e) {
-        LOG_ERROR("Application failed: {}", e.what());
-        return 1;
+        LOG_ERROR("Application initialization failed: {}", e.what());
+        return false;
     }
 }
 
@@ -609,7 +609,7 @@ void Application::shutdown() {
         controller_operator_->stop();
     }
     
-    // Shutdown SPDK
+    // Shutdown SPDK - this will properly flush and cleanup
     if (spdk_wrapper_) {
         spdk_wrapper_->shutdown();
     }
@@ -619,10 +619,6 @@ void Application::shutdown() {
 
 void Application::setupLogging() {
     // Logging is already initialized in main.cpp
-}
-
-void Application::setupSignalHandlers() {
-    // Signal handlers are set up in main.cpp
 }
 
 void Application::initializeComponents() {
