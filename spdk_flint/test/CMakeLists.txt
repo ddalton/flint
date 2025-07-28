@@ -17,7 +17,7 @@ add_executable(spdk_flint_tests ${TEST_SOURCES})
 target_link_libraries(spdk_flint_tests
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
-    gRPC::grpc++
+    ${gRPC_LIBRARIES}
     spdlog::spdlog
     Threads::Threads
     dl
@@ -39,6 +39,8 @@ target_include_directories(spdk_flint_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${GENERATED_PROTOBUF_PATH}
+    ${gRPC_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
 )
 
 # Compiler definitions for tests
@@ -61,7 +63,7 @@ add_executable(spdk_flint_integration_tests
 target_link_libraries(spdk_flint_integration_tests
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
-    gRPC::grpc++
+    ${gRPC_LIBRARIES}
     spdlog::spdlog
     Threads::Threads
     dl
@@ -81,6 +83,8 @@ target_include_directories(spdk_flint_integration_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${GENERATED_PROTOBUF_PATH}
+    ${gRPC_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
 )
 
 target_compile_definitions(spdk_flint_integration_tests PRIVATE

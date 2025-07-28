@@ -27,19 +27,6 @@ WORKDIR /workspace/spdk_flint
 
 # Build the spdk_flint binary (needs SPDK libraries for direct C API calls)
 RUN mkdir build && cd build && \
-    echo "=== DEBUGGING LIBRARY LOCATIONS ===" && \
-    echo "Checking for gRPC installation..." && \
-    find /usr -name "*grpc*" -type f 2>/dev/null | head -20 && \
-    find /usr/local -name "*grpc*" -type f 2>/dev/null | head -20 && \
-    echo "Looking for gRPC CMake config files..." && \
-    find /usr -name "*gRPCConfig.cmake" -o -name "*grpc-config.cmake" 2>/dev/null && \
-    find /usr/local -name "*gRPCConfig.cmake" -o -name "*grpc-config.cmake" 2>/dev/null && \
-    echo "Checking CMAKE_PREFIX_PATH directories..." && \
-    ls -la /usr/local/lib/cmake/ 2>/dev/null || echo "No /usr/local/lib/cmake/" && \
-    ls -la /usr/local/share/cmake/ 2>/dev/null || echo "No /usr/local/share/cmake/" && \
-    echo "Checking for other libraries..." && \
-    ls -la /usr/local/lib/ | grep -E "(grpc|protobuf|spdk)" && \
-    echo "=== END DEBUGGING ===" && \
     export CMAKE_PREFIX_PATH="/usr/local:$CMAKE_PREFIX_PATH" && \
     export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" && \
     cmake .. \

@@ -43,7 +43,11 @@ endif()
 # Find required packages
 find_package(PkgConfig REQUIRED)
 find_package(Protobuf REQUIRED)
-find_package(gRPC REQUIRED)
+# Use pkg-config for gRPC (CMake config not available)
+pkg_check_modules(gRPC REQUIRED grpc++ grpc)
+
+# Find gRPC C++ plugin for protobuf code generation
+find_program(gRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
@@ -159,11 +163,20 @@ set(SOURCES
 # Main executable
 add_executable(spdk_flint ${SOURCES})
 
+# Include directories (including gRPC from pkg-config)
+target_include_directories(spdk_flint PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${GENERATED_PROTOBUF_PATH}
+    ${SPDK_INCLUDE_DIRS}
+    ${gRPC_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
+)
+
 # Link libraries
 target_link_libraries(spdk_flint
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
-    gRPC::grpc++
+    ${gRPC_LIBRARIES}
     spdlog::spdlog
     Threads::Threads
     CURL::libcurl
