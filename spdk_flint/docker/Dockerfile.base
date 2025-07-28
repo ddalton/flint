@@ -93,14 +93,8 @@ RUN git clone https://github.com/spdk/spdk.git && \
     # Create a temporary ublk module for configure script
     mkdir -p /lib/modules/$(uname -r 2>/dev/null || echo "5.15.0-generic")/kernel/drivers/block && \
     echo -e "filename:\t/lib/modules/$(uname -r 2>/dev/null || echo "5.15.0-generic")/kernel/drivers/block/ublk_drv.ko\nversion:\t1.0" > /tmp/ublk_modinfo && \
-    # Create temporary modinfo command that returns success for ublk_drv
-    echo '#!/bin/bash
-if [[ "$1" == "ublk_drv" ]]; then
-    cat /tmp/ublk_modinfo
-    exit 0
-else
-    /sbin/modinfo.real "$@"
-fi' > /usr/local/bin/modinfo_wrapper && \
+    # Create temporary modinfo wrapper script
+    printf '#!/bin/bash\nif [[ "$1" == "ublk_drv" ]]; then\n    cat /tmp/ublk_modinfo\n    exit 0\nelse\n    /sbin/modinfo.real "$@"\nfi\n' > /usr/local/bin/modinfo_wrapper && \
     chmod +x /usr/local/bin/modinfo_wrapper && \
     mv /sbin/modinfo /sbin/modinfo.real && \
     ln -sf /usr/local/bin/modinfo_wrapper /sbin/modinfo && \
@@ -177,18 +171,7 @@ COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
 RUN echo '#!/bin/bash\necho "SPDK libraries installed"\nls -la /usr/local/lib/libspdk* | head -5\necho "SPDK headers installed"\nls -la /usr/local/include/spdk/ | head -5' > /usr/local/bin/check-spdk && chmod +x /usr/local/bin/check-spdk
 
 # Create UBLK runtime check script for actual deployment
-RUN echo '#!/bin/bash
-echo "Checking UBLK support at runtime..."
-if modinfo ublk_drv >/dev/null 2>&1; then
-    echo "✅ UBLK driver is available"
-    modinfo ublk_drv | head -3
-else
-    echo "❌ UBLK driver not found"
-    echo "To enable UBLK support:"
-    echo "  sudo modprobe ublk_drv"
-    echo "  # or ensure ublk kernel module is installed"
-fi
-' > /usr/local/bin/check-ublk && chmod +x /usr/local/bin/check-ublk
+RUN printf '#!/bin/bash\necho "Checking UBLK support at runtime..."\nif modinfo ublk_drv >/dev/null 2>&1; then\n    echo "✅ UBLK driver is available"\n    modinfo ublk_drv | head -3\nelse\n    echo "❌ UBLK driver not found"\n    echo "To enable UBLK support:"\n    echo "  sudo modprobe ublk_drv"\n    echo "  # or ensure ublk kernel module is installed"\nfi\n' > /usr/local/bin/check-ublk && chmod +x /usr/local/bin/check-ublk
 
 # Copy built libraries (spdlog, gRPC, Crow)
 COPY --from=builder /usr/local/lib/libspdlog* /usr/local/lib/
