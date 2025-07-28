@@ -376,19 +376,8 @@ async fn replace_raid_member_with_spdk(
         .send()
         .await?;
 
-    // Try to start rebuild if not auto-started
-    http_client
-        .post(&ctx.spdk_rpc_url)
-        .json(&json!({
-            "method": "bdev_raid_start_rebuild",
-            "params": {
-                "name": volume_id,
-                "slot": failed_member_slot
-            }
-        }))
-        .send()
-        .await
-        .ok(); // This might fail if rebuild auto-starts, which is fine
+    // SPDK automatically starts rebuild when a replacement member is added
+    // No manual rebuild initiation needed
 
     Ok(())
 }

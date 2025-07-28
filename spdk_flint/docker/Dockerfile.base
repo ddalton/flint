@@ -1,0 +1,123 @@
+# Base builder image for SPDK Flint
+# This builds the common binary used by all specialized images
+FROM ubuntu:24.04 AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    git \
+    wget \
+    curl \
+    # SPDK dependencies
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libncurses5-dev \
+    liburing-dev \
+    libfuse3-dev \
+    uuid-dev \
+    # C++ dependencies
+    libspdlog-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libgrpc++-dev \
+    grpc-tools \
+    libcurl4-openssl-dev \
+    # Additional tools
+    python3 \
+    python3-pyelftools \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    meson \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up working directory
+WORKDIR /workspace
+
+# Clone and build SPDK v25.05.x
+RUN git clone https://github.com/spdk/spdk.git && \
+    cd spdk && \
+    git checkout v25.05.x && \
+    git submodule update --init --recursive && \
+    ./configure --with-ublk --disable-tests --disable-unit-tests && \
+    make -j$(nproc) && \
+    make install
+
+# Install Crow web framework
+RUN git clone https://github.com/CrowCpp/Crow.git && \
+    cd Crow && \
+    git checkout v1.0+5 && \
+    mkdir build && cd build && \
+    cmake .. -DCROW_BUILD_EXAMPLES=OFF && \
+    make -j$(nproc) && \
+    make install
+
+# Copy source code
+COPY . /workspace/spdk_flint/
+
+# Build the C++ application
+WORKDIR /workspace/spdk_flint
+RUN mkdir build && cd build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Run tests
+RUN cd build && ctest --output-on-failure
+
+#--------------------------------------------------------------------
+# Base runtime image with common dependencies
+#--------------------------------------------------------------------
+FROM ubuntu:24.04 AS base-runtime
+
+# Install common runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # SPDK runtime dependencies
+    libaio1t64 \
+    libnuma1 \
+    libssl3 \
+    libpciaccess0 \
+    libcunit1 \
+    liburing2 \
+    libfuse3-3 \
+    libuuid1 \
+    # C++ runtime dependencies
+    libspdlog1.12 \
+    libprotobuf32t64 \
+    libgrpc++1.51 \
+    libcurl4 \
+    # Basic utilities
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy SPDK binaries and libraries
+COPY --from=builder /usr/local/bin/spdk_* /usr/local/bin/
+COPY --from=builder /usr/local/lib/libspdk* /usr/local/lib/
+COPY --from=builder /usr/local/lib/pkgconfig/spdk* /usr/local/lib/pkgconfig/
+COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
+COPY --from=builder /usr/local/scripts/ /usr/local/scripts/
+
+# Copy our unified binary
+COPY --from=builder /usr/local/bin/spdk_flint /usr/local/bin/
+
+# Create necessary directories
+RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
+
+# Set up library paths
+RUN ldconfig
+
+# Create runtime user (will be overridden in specialized images if needed)
+RUN useradd -m -u 1001 spdk-flint
+
+# Set default environment variables
+ENV LOG_LEVEL=info
+ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock 

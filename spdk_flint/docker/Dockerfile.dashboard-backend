@@ -1,0 +1,85 @@
+# Dashboard Backend (Service)
+# Web API service for monitoring dashboard
+ARG BASE_IMAGE=spdk-flint:base
+FROM ${BASE_IMAGE}
+
+# Dashboard backend specific dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # JSON processing tools
+    jq \
+    # Network diagnostics
+    dnsutils \
+    netcat-openbsd \
+    # Monitoring tools
+    procps \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create health check script for dashboard
+RUN echo '#!/bin/bash\n\
+# Health check for dashboard backend\n\
+PORT=${DASHBOARD_PORT:-8080}\n\
+\n\
+# Check main API endpoint\n\
+if ! curl -f http://localhost:${PORT}/health >/dev/null 2>&1; then\n\
+    echo "Dashboard API not responding on port ${PORT}"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Check if we can reach Kubernetes API\n\
+if [ ! -z "$TARGET_NAMESPACE" ]; then\n\
+    if ! curl -f -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \\\n\
+        https://kubernetes.default.svc/api/v1/namespaces/$TARGET_NAMESPACE >/dev/null 2>&1; then\n\
+        echo "Warning: Cannot reach Kubernetes API"\n\
+    fi\n\
+fi\n\
+\n\
+echo "Dashboard backend healthy"\n\
+exit 0\n\
+' > /usr/local/bin/dashboard-health.sh && chmod +x /usr/local/bin/dashboard-health.sh
+
+# Create startup script with CORS and API documentation
+RUN echo '#!/bin/bash\n\
+echo "Starting SPDK Dashboard Backend"\n\
+echo "Dashboard will be available at: http://localhost:${DASHBOARD_PORT:-8080}"\n\
+echo "API Endpoints:"\n\
+echo "  GET  /health            - Health check"\n\
+echo "  GET  /api/v1/volumes    - List SPDK volumes (from Kubernetes)"\n\
+echo "  GET  /api/v1/nodes      - List SPDK nodes (from Kubernetes)"\n\
+echo "  GET  /api/v1/stats      - Get I/O statistics (real SPDK data)"\n\
+echo "  GET  /api/v1/stats?bdev=<name> - Get stats for specific device"\n\
+echo "  GET  /api/v1/devices    - List all SPDK block devices"\n\
+echo "  GET  /api/v1/discovery  - Discover storage nodes"\n\
+echo ""\n\
+echo "Features:"\n\
+echo "  ✅ Real SPDK C API integration"\n\
+echo "  ✅ Full Kubernetes custom resource support"\n\
+echo "  ✅ Live I/O statistics and device info"\n\
+echo "  ✅ Node discovery and management"\n\
+echo ""\n\
+exec "$@"\n\
+' > /usr/local/bin/dashboard-start.sh && chmod +x /usr/local/bin/dashboard-start.sh
+
+# Dashboard specific environment
+ENV CSI_MODE=dashboard-backend
+ENV DASHBOARD_PORT=8080
+ENV LOG_LEVEL=info
+ENV RUST_LOG=info
+
+# Expose dashboard port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD /usr/local/bin/dashboard-health.sh
+
+# Use non-root user for security
+USER spdk-flint
+
+# Add labels for service discovery
+LABEL service.type="dashboard-backend"
+LABEL service.port="8080"
+LABEL service.protocol="http"
+
+ENTRYPOINT ["/usr/local/bin/dashboard-start.sh", "/usr/local/bin/spdk_flint"]
+CMD ["--mode", "dashboard-backend", "--log-level", "info"] 
