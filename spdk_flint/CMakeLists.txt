@@ -59,8 +59,42 @@ find_package(Threads REQUIRED)
 pkg_check_modules(CURL REQUIRED libcurl)
 find_package(OpenSSL REQUIRED)
 
-# Find SPDK using pkg-config
-pkg_check_modules(SPDK REQUIRED spdk_env_dpdk spdk_util spdk_nvme spdk_bdev spdk_blob spdk_lvol spdk_nvmf spdk_rpc)
+# Manual SPDK detection (pkg-config files not available)
+# Based on debugging output, these libraries exist in /usr/local/lib/
+set(SPDK_LIBRARY_NAMES
+    spdk_env_dpdk
+    spdk_util
+    spdk_nvme
+    spdk_bdev
+    spdk_blob
+    spdk_lvol
+    spdk_nvmf
+    spdk_rpc
+    spdk_thread
+    spdk_log
+    spdk_sock
+    spdk_json
+    spdk_jsonrpc
+    spdk_trace
+    spdk_notify
+    spdk_init
+    spdk_event
+    spdk_accel
+    spdk_ublk
+    spdk_conf
+)
+
+set(SPDK_LIBRARIES "")
+foreach(lib_name ${SPDK_LIBRARY_NAMES})
+    find_library(SPDK_${lib_name}_LIBRARY 
+        NAMES ${lib_name} 
+        PATHS /usr/local/lib 
+        REQUIRED
+    )
+    list(APPEND SPDK_LIBRARIES ${SPDK_${lib_name}_LIBRARY})
+endforeach()
+
+set(SPDK_INCLUDE_DIRS /usr/local/include)
 
 # Find Crow (header-only, will be downloaded if not found)
 find_path(CROW_INCLUDE_DIR crow.h PATHS /usr/include /usr/local/include)
