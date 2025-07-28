@@ -60,7 +60,10 @@ endif()
 
 # Find gRPC C++ plugin for protobuf code generation
 find_program(gRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin REQUIRED)
-find_package(spdlog REQUIRED)
+# Manual spdlog detection (CMake config not available)
+find_library(spdlog_LIBRARY NAMES spdlog PATHS /usr/local/lib REQUIRED)
+set(spdlog_LIBRARIES ${spdlog_LIBRARY})
+set(spdlog_INCLUDE_DIRS /usr/local/include)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -182,6 +185,7 @@ target_include_directories(spdk_flint PRIVATE
     ${SPDK_INCLUDE_DIRS}
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
+    ${spdlog_INCLUDE_DIRS}
 )
 
 # Link libraries
@@ -189,7 +193,7 @@ target_link_libraries(spdk_flint
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
-    spdlog::spdlog
+    ${spdlog_LIBRARIES}
     Threads::Threads
     CURL::libcurl
     OpenSSL::SSL

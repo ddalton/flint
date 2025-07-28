@@ -18,7 +18,7 @@ target_link_libraries(spdk_flint_tests
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
-    spdlog::spdlog
+    ${spdlog_LIBRARIES}
     Threads::Threads
     dl
     rt
@@ -41,6 +41,7 @@ target_include_directories(spdk_flint_tests PRIVATE
     ${GENERATED_PROTOBUF_PATH}
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
+    ${spdlog_INCLUDE_DIRS}
 )
 
 # Compiler definitions for tests
@@ -64,7 +65,7 @@ target_link_libraries(spdk_flint_integration_tests
     ${SPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
-    spdlog::spdlog
+    ${spdlog_LIBRARIES}
     Threads::Threads
     dl
     rt
@@ -85,6 +86,7 @@ target_include_directories(spdk_flint_integration_tests PRIVATE
     ${GENERATED_PROTOBUF_PATH}
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
+    ${spdlog_INCLUDE_DIRS}
 )
 
 target_compile_definitions(spdk_flint_integration_tests PRIVATE
