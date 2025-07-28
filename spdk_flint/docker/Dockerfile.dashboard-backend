@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev \
     libssl-dev \
     # System libraries needed for SPDK
-    libuuid1-dev \
+    uuid-dev \
     libnuma-dev \
     # C++ libraries (avoid FetchContent/git dependencies)
     nlohmann-json3-dev \
