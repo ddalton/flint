@@ -43,8 +43,20 @@ endif()
 # Find required packages
 find_package(PkgConfig REQUIRED)
 find_package(Protobuf REQUIRED)
-# Use pkg-config for gRPC (CMake config not available)
-pkg_check_modules(gRPC REQUIRED grpc++ grpc)
+# Try gRPC via unsecure pkg-config (which might not need gpr)
+pkg_check_modules(gRPC_UNSECURE grpc_unsecure)
+if(gRPC_UNSECURE_FOUND)
+    # Use the unsecure version for simplicity
+    set(gRPC_LIBRARIES ${gRPC_UNSECURE_LIBRARIES})
+    set(gRPC_INCLUDE_DIRS ${gRPC_UNSECURE_INCLUDE_DIRS})
+    message(STATUS "Using gRPC unsecure via pkg-config")
+else()
+    # Fallback to manual library detection
+    find_library(gRPC_CPP_LIBRARY NAMES grpc++ PATHS /usr/local/lib REQUIRED)
+    set(gRPC_LIBRARIES ${gRPC_CPP_LIBRARY})
+    set(gRPC_INCLUDE_DIRS /usr/local/include)
+    message(STATUS "Using gRPC via manual library detection")
+endif()
 
 # Find gRPC C++ plugin for protobuf code generation
 find_program(gRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin REQUIRED)
