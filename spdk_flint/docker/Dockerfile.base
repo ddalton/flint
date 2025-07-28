@@ -107,13 +107,46 @@ RUN git clone https://github.com/spdk/spdk.git && \
     cd spdk && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
-    echo "Configuring SPDK with UBLK support (without ISA-L-crypto)..." && \
-    echo "Checking configure dependencies..." && \
-    which nasm && nasm --version && \
+    echo "Configuring SPDK with UBLK support - debugging ISA-L-crypto configure issue..." && \
+    echo "=== DEBUGGING NASM DETECTION ===" && \
+    which nasm && \
+    nasm --version && \
+    echo "File permissions:" && \
+    ls -la /usr/bin/nasm && \
+    echo "PATH: $PATH" && \
+    echo "Current working directory: $(pwd)" && \
+    echo "=== INVESTIGATING ISA-L-CRYPTO CONFIGURE SCRIPT ===" && \
+    cd isa-l-crypto && \
+    echo "ISA-L-crypto directory contents:" && \
+    ls -la && \
+    echo "Looking at configure script for nasm detection..." && \
+    grep -A 5 -B 5 "checking for.*nasm" configure 2>/dev/null || echo "configure script not yet generated" && \
+    echo "=== RUNNING ISA-L-CRYPTO AUTOGEN ===" && \
+    ./autogen.sh && \
+    echo "=== EXAMINING GENERATED CONFIGURE SCRIPT ===" && \
+    grep -A 10 -B 5 "checking for.*nasm" configure && \
+    echo "=== TESTING NASM DETECTION MANUALLY ===" && \
+    echo "Simulating configure nasm check..." && \
+    export NASM=/usr/bin/nasm && \
+    export AS=/usr/bin/nasm && \
+    if command -v /usr/bin/nasm >/dev/null 2>&1; then \
+        echo "✅ command -v /usr/bin/nasm works"; \
+    else \
+        echo "❌ command -v /usr/bin/nasm fails"; \
+    fi && \
+    if test -x /usr/bin/nasm; then \
+        echo "✅ test -x /usr/bin/nasm works"; \
+    else \
+        echo "❌ test -x /usr/bin/nasm fails"; \
+    fi && \
+    echo "=== RUNNING ISA-L-CRYPTO CONFIGURE WITH VERBOSE OUTPUT ===" && \
+    NASM=/usr/bin/nasm AS=/usr/bin/nasm ./configure --prefix=/tmp/isal-crypto --enable-debug && \
+    cd .. && \
+    echo "=== ISA-L-CRYPTO CONFIGURE COMPLETED ===" && \
     echo "Setting up environment for SPDK configure..." && \
     export NASM=/usr/bin/nasm && \
     export AS=/usr/bin/nasm && \
-    echo "Starting SPDK configure (core functionality only)..." && \
+    echo "Starting SPDK configure..." && \
     AS=nasm NASM=/usr/bin/nasm ./configure \
         --with-ublk \
         --disable-tests \
