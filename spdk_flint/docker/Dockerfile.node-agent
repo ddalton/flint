@@ -36,6 +36,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy source code and build the business logic
+COPY . /workspace/spdk_flint/
+WORKDIR /workspace/spdk_flint
+
+# Build the spdk_flint binary
+RUN mkdir build && cd build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    make -j$(nproc) && \
+    make install
+
+# Run tests
+RUN cd build && ctest --output-on-failure || true
+
 # Create backup directory with proper permissions
 RUN mkdir -p /var/lib/spdk-csi/backups && \
     chown spdk-flint:spdk-flint /var/lib/spdk-csi/backups && \

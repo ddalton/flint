@@ -17,10 +17,11 @@ flint-base:latest                   (Base runtime + unified binary)
 ## 📦 Image Descriptions
 
 ### 1. **Base Image** (`flint-base:latest`)
-- Contains the unified C++ binary
-- Common SPDK libraries and dependencies
-- Used as foundation for all specialized images
-- ~800MB (includes SPDK runtime)
+- **Infrastructure Only**: SPDK libraries, gRPC, spdlog, Crow
+- **No Business Logic**: Contains no application code
+- Build tools and development environment ready
+- Foundation for all specialized images
+- ~600MB (pure infrastructure)
 
 ### 2. **CSI Node** (`spdk-flint:csi-node`) 
 - **Deployment:** DaemonSet (one per node)

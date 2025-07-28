@@ -80,20 +80,10 @@ RUN git clone https://github.com/CrowCpp/Crow.git && \
     make install && \
     ldconfig
 
-# Copy source code
-COPY . /workspace/spdk_flint/
+# Set working directory for future builds
+WORKDIR /workspace
 
-# Build the C++ application
-WORKDIR /workspace/spdk_flint
-RUN mkdir build && cd build && \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr/local && \
-    make -j$(nproc) && \
-    make install
-
-# Run tests
-RUN cd build && ctest --output-on-failure
+# Base image is complete - no business logic here!
 
 #--------------------------------------------------------------------
 # Base runtime image with common dependencies
@@ -151,8 +141,7 @@ COPY --from=builder /usr/local/lib/pkgconfig/grpc* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/lib/pkgconfig/protobuf* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/lib/pkgconfig/absl* /usr/local/lib/pkgconfig/
 
-# Copy our unified binary
-COPY --from=builder /usr/local/bin/spdk_flint /usr/local/bin/
+# No business logic binary in base image!
 
 # Create necessary directories
 RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi

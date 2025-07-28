@@ -80,25 +80,25 @@ main() {
         exit 1
     fi
     
-    # Build base image first
+    # Build base image first (infrastructure only - no business logic)
     log "=== Building Base Image ==="
-    build_image "docker/Dockerfile.base" "flint-base" "Base runtime image"
+    build_image "docker/Dockerfile.base" "flint-base" "Base infrastructure image (SPDK + dependencies)"
     
-    # Build specialized images
+    # Build specialized images (each builds business logic from source)
     log ""
     log "=== Building Specialized Images ==="
     
     # CSI Node (DaemonSet)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-node" "csi-node" "CSI Node Plugin (DaemonSet)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-node" "csi-node" "CSI Node Plugin (DaemonSet + business logic)"
     
     # CSI Controller (Deployment)  
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-controller" "csi-controller" "CSI Controller Plugin (Deployment)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-controller" "csi-controller" "CSI Controller Plugin (Deployment + business logic)"
     
     # Dashboard Backend (Service)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.dashboard-backend" "dashboard-backend" "Dashboard Backend API (Service)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.dashboard-backend" "dashboard-backend" "Dashboard Backend API (Service + business logic)"
     
     # Node Agent (DaemonSet)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.node-agent" "node-agent" "Node Agent (DaemonSet)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.node-agent" "node-agent" "Node Agent (DaemonSet + business logic)"
     
     log ""
     log "=== Running Basic Tests ==="
