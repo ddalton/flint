@@ -20,11 +20,11 @@ public:
         logger()->info("[CSI] Starting CSI gRPC services on {}", config_.csi_endpoint);
         running_ = true;
         // TODO: Implement gRPC server setup
-        LOG_CSI_INFO("Service", "CSI services started successfully");
+        logger()->info("[CSI] CSI services started successfully");
     }
     
     void stop() {
-        LOG_CSI_INFO("Service", "Stopping CSI services");
+        logger()->info("[CSI] Stopping CSI services");
         running_ = false;
         // TODO: Implement graceful shutdown
     }
@@ -93,11 +93,11 @@ public:
         });
         
         running_ = true;
-        LOG_DASHBOARD_INFO("Dashboard backend started on port {}", config_.dashboard_port);
+        logger()->info("[DASHBOARD] Dashboard backend started on port {}", config_.dashboard_port);
     }
     
     void stop() {
-        LOG_DASHBOARD_INFO("Stopping dashboard backend");
+        logger()->info("[DASHBOARD] Stopping dashboard backend");
         running_ = false;
         app_.stop();
         if (server_thread_.joinable()) {
@@ -131,7 +131,7 @@ private:
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
-            LOG_DASHBOARD_ERROR("Failed to get volumes: {}", e.what());
+            logger()->error("[DASHBOARD] Failed to get volumes: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get volumes"})");
         }
     }
@@ -151,7 +151,7 @@ private:
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
-            LOG_DASHBOARD_ERROR("Failed to get nodes: {}", e.what());
+            logger()->error("[DASHBOARD] Failed to get nodes: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get nodes"})");
         }
     }
@@ -195,7 +195,7 @@ private:
                 return crow::response(200, response.dump());
             }
         } catch (const std::exception& e) {
-            LOG_DASHBOARD_ERROR("Failed to get stats: {}", e.what());
+            logger()->error("[DASHBOARD] Failed to get stats: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get stats"})");
         }
     }
@@ -226,7 +226,7 @@ private:
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
-            LOG_DASHBOARD_ERROR("Failed to get devices: {}", e.what());
+            logger()->error("[DASHBOARD] Failed to get devices: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get devices"})");
         }
     }
@@ -262,7 +262,7 @@ private:
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
-            LOG_DASHBOARD_ERROR("Failed to perform discovery: {}", e.what());
+            logger()->error("[DASHBOARD] Failed to perform discovery: {}", e.what());
             return crow::response(500, R"({"error": "Failed to perform discovery"})");
         }
     }
@@ -310,11 +310,11 @@ public:
         });
         
         running_ = true;
-        LOG_NODE_AGENT_INFO("Node agent started successfully");
+        logger()->info("[NODE_AGENT] Node agent started successfully");
     }
     
     void stop() {
-        LOG_NODE_AGENT_INFO("Stopping node agent");
+        logger()->info("[NODE_AGENT] Stopping node agent");
         running_ = false;
         app_.stop();
         
@@ -340,10 +340,10 @@ private:
     void discovery_loop() {
         while (running_) {
             try {
-                LOG_NODE_AGENT_DEBUG("Running disk discovery");
+                logger()->debug("[NODE_AGENT] Running disk discovery");
                 discover_and_setup_disks();
             } catch (const std::exception& e) {
-                LOG_NODE_AGENT_ERROR("Discovery failed: {}", e.what());
+                logger()->error("[NODE_AGENT] Discovery failed: {}", e.what());
             }
             
             // Sleep for discovery interval
@@ -359,7 +359,7 @@ private:
         
         for (const auto& bdev : bdevs) {
             if (!bdev.claimed) {
-                LOG_NODE_AGENT_INFO("Found unclaimed device: {}", bdev.name);
+                logger()->info("[NODE_AGENT] Found unclaimed device: {}", bdev.name);
                 // TODO: Implement automatic setup logic
             }
         }
@@ -385,7 +385,7 @@ private:
             
             return crow::response(200, response.dump());
         } catch (const std::exception& e) {
-            LOG_NODE_AGENT_ERROR("Failed to get disks: {}", e.what());
+            logger()->error("[NODE_AGENT] Failed to get disks: {}", e.what());
             return crow::response(500, R"({"error": "Failed to get disks"})");
         }
     }
@@ -409,7 +409,7 @@ private:
                 return crow::response(500, R"({"error": "Setup failed"})");
             }
         } catch (const std::exception& e) {
-            LOG_NODE_AGENT_ERROR("Failed to setup disk: {}", e.what());
+            logger()->error("[NODE_AGENT] Failed to setup disk: {}", e.what());
             return crow::response(400, R"({"error": "Invalid request"})");
         }
     }
@@ -432,11 +432,11 @@ public:
             operator_loop();
         });
         
-        LOG_CONTROLLER_INFO("Controller operator started");
+        logger()->info("[CONTROLLER] Controller operator started");
     }
     
     void stop() {
-        LOG_CONTROLLER_INFO("Stopping controller operator");
+        logger()->info("[CONTROLLER] Stopping controller operator");
         running_ = false;
         
         if (operator_thread_.joinable()) {
@@ -458,7 +458,7 @@ private:
             try {
                 reconcile_volumes();
             } catch (const std::exception& e) {
-                LOG_CONTROLLER_ERROR("Reconciliation failed: {}", e.what());
+                logger()->error("[CONTROLLER] Reconciliation failed: {}", e.what());
             }
             
             // Sleep before next reconciliation
@@ -477,14 +477,14 @@ private:
             try {
                 reconcile_single_volume(volume);
             } catch (const std::exception& e) {
-                LOG_CONTROLLER_ERROR("Failed to reconcile volume {}: {}", 
-                                   volume.name(), e.what());
+                logger()->error("[CONTROLLER] Failed to reconcile volume {}: {}",
+                               volume.name(), e.what());
             }
         }
     }
     
     void reconcile_single_volume(const kube::SpdkVolume& volume) {
-        LOG_CONTROLLER_DEBUG("Reconciling volume {}", volume.name());
+        logger()->debug("[CONTROLLER] Reconciling volume {}", volume.name());
         
         // Check if volume needs creation
         if (volume.spec.state == "Creating") {
@@ -497,12 +497,12 @@ private:
     }
     
     void create_volume_replicas(const kube::SpdkVolume& volume) {
-        LOG_CONTROLLER_INFO("Creating replicas for volume {}", volume.name());
+        logger()->info("[CONTROLLER] Creating replicas for volume {}", volume.name());
         // TODO: Implement replica creation logic
     }
     
     void repair_volume_replicas(const kube::SpdkVolume& volume) {
-        LOG_CONTROLLER_INFO("Repairing replicas for volume {}", volume.name());
+        logger()->info("[CONTROLLER] Repairing replicas for volume {}", volume.name());
         // TODO: Implement replica repair logic
     }
 };
@@ -631,7 +631,7 @@ void Application::initializeComponents() {
     // Initialize Kubernetes client
     auto kube_client = kube::KubeClient::create_incluster();
     if (!kube_client) {
-        LOG_WARN("Failed to create in-cluster client, trying kubeconfig");
+        logger()->warn("Failed to create in-cluster client, trying kubeconfig");
         kube_client = kube::KubeClient::create_from_kubeconfig();
     }
     if (!kube_client) {

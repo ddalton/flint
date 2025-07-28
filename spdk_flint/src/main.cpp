@@ -47,24 +47,24 @@ int main(int argc, char** argv) {
         // Initialize logging first
         spdk_flint::Logger::initialize("spdk_flint", log_level);
         
-        LOG_INFO("Starting SPDK Flint CSI Driver");
-        LOG_INFO("Mode: {}, Log Level: {}", mode, log_level);
+        spdk_flint::logger()->info("Starting SPDK Flint CSI Driver");
+        spdk_flint::logger()->info("Mode: {}, Log Level: {}", mode, log_level);
         
         // Create and run the application
         // Note: SPDK will handle signal management internally
         g_app = std::make_unique<spdk_flint::Application>(config);
         
         if (!g_app->initialize()) {
-            LOG_ERROR("Failed to initialize application");
+            spdk_flint::logger()->error("Failed to initialize application");
             return 1;
         }
         
-        LOG_INFO("Application initialized successfully");
+        spdk_flint::logger()->info("Application initialized successfully");
         
         // Run the application - this will block until shutdown
         int exit_code = g_app->run();
         
-        LOG_INFO("Application finished with exit code: {}", exit_code);
+        spdk_flint::logger()->info("Application finished with exit code: {}", exit_code);
         
         // Cleanup
         g_app->shutdown();
