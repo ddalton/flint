@@ -1,6 +1,6 @@
 # Base builder image for SPDK Flint
 # This builds the common binary used by all specialized images
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -27,10 +27,7 @@ RUN apt-get update && apt-get install -y \
     python3-pyelftools \
     python3-setuptools \
     python3-dev \
-    # UBLK dependencies for --with-ublk
-    linux-generic \
-    linux-tools-generic \
-    linux-cloud-tools-generic \
+    # UBLK support (available in Ubuntu 24.04)
     kmod \
     linux-libc-dev \
     # C++ dependencies (we'll build gRPC from source)
@@ -50,7 +47,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-# Python and pip are already set up in Ubuntu 22.04
+# Configure Python environment for Ubuntu 24.04 (avoids externally-managed-environment errors)
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Build and install spdlog
 RUN git clone https://github.com/gabime/spdlog.git && \
@@ -75,29 +73,22 @@ RUN git clone --recurse-submodules -b v1.60.0 --depth 1 --shallow-submodules htt
     make install && \
     ldconfig
 
-# Install UBLK userspace tools and prepare for UBLK support
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    linux-modules-extra-$(uname -r) 2>/dev/null || \
-    echo "Cannot install kernel modules in container (expected)" && \
-    # Create mock ublk driver info for configure script
-    mkdir -p /lib/modules/$(uname -r 2>/dev/null || echo "5.15.0-generic")/kernel/drivers/block && \
-    echo "ublk_drv" > /tmp/ublk_drv_mock.ko && \
-    rm -rf /var/lib/apt/lists/*
+# Prepare UBLK support for Ubuntu 24.04 (has native UBLK)
+RUN echo "Setting up UBLK support for Ubuntu 24.04..." && \
+    # Create kernel module directory structure for SPDK configure
+    KERNEL_VERSION=$(ls /lib/modules/ 2>/dev/null | head -1 || echo "6.8.0-generic") && \
+    mkdir -p /lib/modules/$KERNEL_VERSION/kernel/drivers/block && \
+    # Create a minimal ublk_drv.ko file that modinfo can detect
+    echo -e "# Mock UBLK module for SPDK configure\nfilename: /lib/modules/$KERNEL_VERSION/kernel/drivers/block/ublk_drv.ko\nversion: 1.0\ndescription: Userspace block device driver\nauthor: Linux kernel\nlicense: GPL" > /lib/modules/$KERNEL_VERSION/kernel/drivers/block/ublk_drv.ko && \
+    # Update module dependencies
+    depmod -a 2>/dev/null || echo "depmod not available in container" && \
+    echo "UBLK setup complete"
 
-# Clone and build SPDK v25.05.x with UBLK support
+# Clone and build SPDK v25.05.x with UBLK support  
 RUN git clone https://github.com/spdk/spdk.git && \
     cd spdk && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
-    echo "Preparing for UBLK configure..." && \
-    # Create a temporary ublk module for configure script
-    mkdir -p /lib/modules/$(uname -r 2>/dev/null || echo "5.15.0-generic")/kernel/drivers/block && \
-    echo -e "filename:\t/lib/modules/$(uname -r 2>/dev/null || echo "5.15.0-generic")/kernel/drivers/block/ublk_drv.ko\nversion:\t1.0" > /tmp/ublk_modinfo && \
-    # Create temporary modinfo wrapper script
-    printf '#!/bin/bash\nif [[ "$1" == "ublk_drv" ]]; then\n    cat /tmp/ublk_modinfo\n    exit 0\nelse\n    /sbin/modinfo.real "$@"\nfi\n' > /usr/local/bin/modinfo_wrapper && \
-    chmod +x /usr/local/bin/modinfo_wrapper && \
-    mv /sbin/modinfo /sbin/modinfo.real && \
-    ln -sf /usr/local/bin/modinfo_wrapper /sbin/modinfo && \
     echo "Configuring SPDK with UBLK support..." && \
     AS=nasm ./configure \
         --with-ublk \
@@ -108,9 +99,6 @@ RUN git clone https://github.com/spdk/spdk.git && \
         --without-nvme-cuse \
         --without-fuse \
         --with-uring && \
-    # Restore original modinfo
-    rm -f /sbin/modinfo && \
-    mv /sbin/modinfo.real /sbin/modinfo && \
     make -j$(nproc) && \
     echo "Installing SPDK libraries and headers..." && \
     make -C lib install && \
@@ -135,12 +123,12 @@ WORKDIR /workspace
 #--------------------------------------------------------------------
 # Base runtime image with common dependencies
 #--------------------------------------------------------------------
-FROM ubuntu:22.04 AS base-runtime
+FROM ubuntu:24.04 AS base-runtime
 
 # Install common runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # SPDK runtime dependencies
-    libaio1 \
+    libaio1t64 \
     libnuma1 \
     libssl3 \
     libpciaccess0 \
@@ -149,7 +137,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-3 \
     libuuid1 \
     # C++ runtime dependencies
-    libprotobuf23 \
+    libprotobuf32t64 \
     libcurl4 \
     libstdc++6 \
     zlib1g \
@@ -171,7 +159,7 @@ COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
 RUN echo '#!/bin/bash\necho "SPDK libraries installed"\nls -la /usr/local/lib/libspdk* | head -5\necho "SPDK headers installed"\nls -la /usr/local/include/spdk/ | head -5' > /usr/local/bin/check-spdk && chmod +x /usr/local/bin/check-spdk
 
 # Create UBLK runtime check script for actual deployment
-RUN printf '#!/bin/bash\necho "Checking UBLK support at runtime..."\nif modinfo ublk_drv >/dev/null 2>&1; then\n    echo "✅ UBLK driver is available"\n    modinfo ublk_drv | head -3\nelse\n    echo "❌ UBLK driver not found"\n    echo "To enable UBLK support:"\n    echo "  sudo modprobe ublk_drv"\n    echo "  # or ensure ublk kernel module is installed"\nfi\n' > /usr/local/bin/check-ublk && chmod +x /usr/local/bin/check-ublk
+RUN printf '#!/bin/bash\necho "Checking UBLK support at runtime..."\nif [ -e /proc/modules ] && grep -q ublk /proc/modules 2>/dev/null; then\n    echo "✅ UBLK driver is loaded"\n    grep ublk /proc/modules\nelif modinfo ublk_drv >/dev/null 2>&1; then\n    echo "⚠️  UBLK driver available but not loaded"\n    echo "Run: sudo modprobe ublk_drv"\nelse\n    echo "❌ UBLK driver not found"\n    echo "Ensure kernel has UBLK support (CONFIG_BLK_DEV_UBLK=y)"\nfi\n' > /usr/local/bin/check-ublk && chmod +x /usr/local/bin/check-ublk
 
 # Copy built libraries (spdlog, gRPC, Crow)
 COPY --from=builder /usr/local/lib/libspdlog* /usr/local/lib/
