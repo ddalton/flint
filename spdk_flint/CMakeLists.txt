@@ -247,9 +247,35 @@ if(PKG_CONFIG_FOUND)
     endif()
 endif()
 
-# Link libraries for the main library
+# Add library search directories for SPDK
+link_directories(/usr/local/lib)
+
+# Find common SPDK libraries explicitly
+find_library(SPDK_ENV_DPDK NAMES spdk_env_dpdk PATHS /usr/local/lib)
+find_library(SPDK_UTIL NAMES spdk_util PATHS /usr/local/lib)
+find_library(SPDK_LOG NAMES spdk_log PATHS /usr/local/lib)
+find_library(SPDK_THREAD NAMES spdk_thread PATHS /usr/local/lib)
+find_library(SPDK_TRACE NAMES spdk_trace PATHS /usr/local/lib)
+find_library(SPDK_NOTIFY NAMES spdk_notify PATHS /usr/local/lib)
+find_library(SPDK_JSON NAMES spdk_json PATHS /usr/local/lib)
+
+# Log what we found
+message(STATUS "SPDK ENV DPDK: ${SPDK_ENV_DPDK}")
+message(STATUS "SPDK UTIL: ${SPDK_UTIL}")
+message(STATUS "SPDK LOG: ${SPDK_LOG}")
+
+# Link libraries for the main library with proper SPDK dependency order
 target_link_libraries(spdk_flint_lib
+    # Link individual SPDK libraries in dependency order
     ${SPDK_LIBRARIES}
+    # Core SPDK libraries (link explicitly if found)
+    ${SPDK_ENV_DPDK}
+    ${SPDK_UTIL}
+    ${SPDK_LOG}
+    ${SPDK_THREAD}
+    ${SPDK_TRACE}
+    ${SPDK_NOTIFY}
+    ${SPDK_JSON}
     # Add DPDK if found
     ${DPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
