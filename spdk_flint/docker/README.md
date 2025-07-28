@@ -17,8 +17,9 @@ flint-base:latest                   (Base runtime + unified binary)
 ## 📦 Image Descriptions
 
 ### 1. **Base Image** (`flint-base:latest`)
-- **Infrastructure Only**: SPDK libraries, gRPC, spdlog, Crow
+- **Infrastructure Only**: SPDK libraries (with UBLK support), gRPC, spdlog, Crow
 - **No Business Logic**: Contains no application code
+- **UBLK Ready**: Built with UBLK support for volume exposure
 - Build tools and development environment ready
 - Foundation for all specialized images
 - ~600MB (pure infrastructure)
@@ -371,6 +372,23 @@ Each image includes specialized health checks:
 ### Non-Privileged Images (Deployments)
 - **CSI Controller**: Runs as non-root user
 - **Dashboard Backend**: Runs as non-root user
+
+## 🛠️ UBLK Runtime Requirements
+
+All images are built with **UBLK support** for volume exposure. At runtime, ensure:
+
+```bash
+# Check UBLK support
+/usr/local/bin/check-ublk
+
+# Enable UBLK driver (if needed)
+sudo modprobe ublk_drv
+
+# Verify UBLK is available
+lsmod | grep ublk
+```
+
+**Note**: UBLK kernel driver must be available on host nodes for volume operations.
 
 ### RBAC Requirements
 ```yaml
