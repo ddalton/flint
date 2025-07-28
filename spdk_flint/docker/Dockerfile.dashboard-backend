@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     # Development libraries
     libcurl4-openssl-dev \
+    libssl-dev \
     # JSON processing tools
     jq \
     # Network diagnostics
