@@ -213,7 +213,7 @@ std::vector<BdevInfo> SpdkWrapper::getBdevs(const std::string& name) const {
         LOG_RPC_SUCCESS("bdev_get_bdevs", "found {} bdevs", result.size());
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_get_bdevs", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_get_bdevs failed: Exception occurred");
     }
     
     return result;
@@ -229,7 +229,7 @@ bool SpdkWrapper::createAioBdev(const std::string& filename, const std::string& 
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_aio_create", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_aio_create failed: Exception occurred");
         return false;
     }
 }
@@ -243,7 +243,7 @@ bool SpdkWrapper::createUringBdev(const std::string& filename, const std::string
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_uring_create", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_uring_create failed: Exception occurred");
         return false;
     }
 }
@@ -254,7 +254,7 @@ bool SpdkWrapper::deleteBdev(const std::string& name) {
         
         struct spdk_bdev* bdev = spdk_bdev_get_by_name(name.c_str());
         if (!bdev) {
-            LOG_RPC_ERROR("bdev_delete", "Bdev not found");
+            LOG_RPC_ERROR("[RPC] SPDK method bdev_delete failed: Bdev not found");
             return false;
         }
         
@@ -263,7 +263,7 @@ bool SpdkWrapper::deleteBdev(const std::string& name) {
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_delete", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_delete failed: Exception occurred");
         return false;
     }
 }
@@ -278,7 +278,7 @@ bool SpdkWrapper::attachNvmeController(const std::string& name, const std::strin
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_nvme_attach_controller", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_attach_controller failed: Exception occurred");
         return false;
     }
 }
@@ -292,7 +292,7 @@ bool SpdkWrapper::detachNvmeController(const std::string& name) {
         return true;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_nvme_detach_controller", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_detach_controller failed: Exception occurred");
         return false;
     }
 }
@@ -313,7 +313,7 @@ std::vector<std::string> SpdkWrapper::getNvmeControllers() const {
         LOG_RPC_SUCCESS("bdev_nvme_get_controllers", "found {} controllers", result.size());
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_nvme_get_controllers", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_nvme_get_controllers failed: Exception occurred");
     }
     
     return result;
@@ -328,7 +328,7 @@ std::string SpdkWrapper::createLvstore(const std::string& bdev_name, const std::
         
         struct spdk_bdev* bdev = spdk_bdev_get_by_name(bdev_name.c_str());
         if (!bdev) {
-            LOG_RPC_ERROR("bdev_lvol_create_lvstore", "Base bdev not found");
+            LOG_RPC_ERROR("[RPC] SPDK method bdev_lvol_create_lvstore failed: Base bdev not found");
             return "";
         }
         
@@ -338,7 +338,7 @@ std::string SpdkWrapper::createLvstore(const std::string& bdev_name, const std::
         return uuid;
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_lvol_create_lvstore", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_lvol_create_lvstore failed: Exception occurred");
         return "";
     }
 }
@@ -545,7 +545,7 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
                 LOG_RPC_SUCCESS("bdev_get_iostat", "got stats for bdev {}: {} reads, {} writes", 
                               bdev_name, stats["read_ops"], stats["write_ops"]);
             } else {
-                LOG_RPC_ERROR("bdev_get_iostat", "bdev {} not found", bdev_name);
+                LOG_RPC_ERROR("[RPC] SPDK method bdev_get_iostat failed: bdev {} not found", bdev_name);
             }
         } else {
             // Get aggregated stats for all bdevs
@@ -583,7 +583,7 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
         }
         
     } catch (const std::exception& e) {
-        LOG_RPC_ERROR("bdev_get_iostat", "Exception occurred");
+        LOG_RPC_ERROR("[RPC] SPDK method bdev_get_iostat failed: Exception occurred");
     }
     
     return stats;

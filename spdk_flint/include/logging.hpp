@@ -72,10 +72,10 @@ private:
 #define LOG_RPC_CALL(method, ...) \
     spdk_flint::Logger::get()->debug("[RPC] Calling SPDK method: {}{}", method, ##__VA_ARGS__)
 
-#define LOG_RPC_SUCCESS(method, ...) \
-    spdk_flint::Logger::get()->debug("[RPC] SPDK method {} succeeded{}", method, ##__VA_ARGS__)
+#define LOG_RPC_SUCCESS(...) \
+    spdk_flint::Logger::get()->debug(__VA_ARGS__)
 
-#define LOG_RPC_ERROR(method, error, ...) \
-    spdk_flint::Logger::get()->error("[RPC] SPDK method {} failed: {}{}", method, error, ##__VA_ARGS__)
+#define LOG_RPC_ERROR(...) \
+    spdk_flint::Logger::get()->error(__VA_ARGS__)
 
 } // namespace spdk_flint 

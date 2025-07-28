@@ -40,16 +40,7 @@ namespace {
         return defaultValue;
     }
     
-    AppMode parseAppMode(const std::string& mode_str) {
-        if (mode_str == "csi-driver") return AppMode::CSI_DRIVER;
-        if (mode_str == "controller") return AppMode::CONTROLLER;
-        if (mode_str == "dashboard-backend") return AppMode::DASHBOARD_BACKEND;
-        if (mode_str == "node-agent") return AppMode::NODE_AGENT;
-        if (mode_str == "all") return AppMode::ALL;
-        
-        // Default to ALL if unknown
-        return AppMode::ALL;
-    }
+
     
     std::map<std::string, std::string> parseNodeUrls(const std::string& node_urls_str) {
         std::map<std::string, std::string> result;
@@ -105,6 +96,17 @@ namespace {
         }
         return node_id;
     }
+}
+
+AppMode parseAppMode(const std::string& mode_str) {
+    if (mode_str == "csi-driver") return AppMode::CSI_DRIVER;
+    if (mode_str == "controller") return AppMode::CONTROLLER;
+    if (mode_str == "dashboard-backend") return AppMode::DASHBOARD_BACKEND;
+    if (mode_str == "node-agent") return AppMode::NODE_AGENT;
+    if (mode_str == "all") return AppMode::ALL;
+    
+    // Default to ALL if unknown
+    return AppMode::ALL;
 }
 
 AppConfig loadConfigFromEnvironment() {
