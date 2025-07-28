@@ -1,4 +1,3 @@
-#define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_session.hpp>
 
@@ -46,27 +45,27 @@ TEST_CASE("Application Configuration", "[config]") {
 TEST_CASE("Logging System", "[logging]") {
     SECTION("Logger initialization") {
         // Initialize with debug level
-        REQUIRE_NOTHROW(Logger::initialize("debug"));
+        REQUIRE_NOTHROW(Logger::initialize("test_logger", "debug"));
         
         auto logger = Logger::get();
         REQUIRE(logger != nullptr);
         
         // Test different log levels
-        REQUIRE_NOTHROW(LOG_DEBUG("Debug message: {}", 42));
-        REQUIRE_NOTHROW(LOG_INFO("Info message: {}", "test"));
-        REQUIRE_NOTHROW(LOG_WARN("Warning message"));
-        REQUIRE_NOTHROW(LOG_ERROR("Error message"));
+        REQUIRE_NOTHROW(spdk_flint::logger()->debug("Debug message: {}", 42));
+        REQUIRE_NOTHROW(spdk_flint::logger()->info("Info message: {}", "test"));
+        REQUIRE_NOTHROW(spdk_flint::logger()->warn("Warning message"));
+        REQUIRE_NOTHROW(spdk_flint::logger()->error("Error message"));
         
         // Test context-aware logging
-        REQUIRE_NOTHROW(LOG_CSI_INFO("CreateVolume", "Creating volume {}", "test-vol"));
-        REQUIRE_NOTHROW(LOG_SPDK_INFO("Initializing SPDK"));
-        REQUIRE_NOTHROW(LOG_DASHBOARD_INFO("Starting dashboard on port {}", 8080));
+        REQUIRE_NOTHROW(spdk_flint::logger()->info("[CSI] Creating volume {}", "test-vol"));
+        REQUIRE_NOTHROW(spdk_flint::logger()->info("[SPDK] Initializing SPDK"));
+        REQUIRE_NOTHROW(spdk_flint::logger()->info("[DASHBOARD] Starting dashboard on port {}", 8080));
         
         Logger::shutdown();
     }
     
     SECTION("Log level setting") {
-        Logger::initialize("info");
+        Logger::initialize("test_logger", "info");
         
         // This should work
         REQUIRE_NOTHROW(Logger::setLevel("debug"));
