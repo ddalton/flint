@@ -186,9 +186,8 @@ add_custom_command(
     COMMENT "Generating protobuf files"
 )
 
-# Source files
-set(SOURCES
-    src/main.cpp
+# Library source files (excluding main.cpp for reuse in tests)
+set(LIB_SOURCES
     src/app.cpp
     src/logging.cpp
     src/spdk/spdk_wrapper.cpp
@@ -209,10 +208,24 @@ set(SOURCES
     # src/controller_operator/controller_operator.cpp
 )
 
-# Main executable
-add_executable(spdk_flint ${SOURCES})
+# Create shared library from main application code
+add_library(spdk_flint_lib STATIC ${LIB_SOURCES})
 
-# Include directories (including gRPC from pkg-config)
+# Main executable
+add_executable(spdk_flint src/main.cpp)
+
+# Include directories for the library (PUBLIC so they propagate to tests)
+target_include_directories(spdk_flint_lib PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+    ${GENERATED_PROTOBUF_PATH}
+    ${SPDK_INCLUDE_DIRS}
+    ${gRPC_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
+    ${spdlog_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
+)
+
+# Include directories for the main executable
 target_include_directories(spdk_flint PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${GENERATED_PROTOBUF_PATH}
@@ -225,9 +238,26 @@ target_include_directories(spdk_flint PRIVATE
 
 # Crow includes handled by target linkage (FetchContent provides Crow::Crow target)
 
-# Link libraries
-target_link_libraries(spdk_flint
+# Try to find DPDK libraries using pkg-config
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(DPDK QUIET libdpdk)
+    if(DPDK_FOUND)
+        message(STATUS "Found DPDK via pkg-config: ${DPDK_LIBRARIES}")
+    else()
+        message(STATUS "DPDK not found via pkg-config, will use manual linking")
+    endif()
+endif()
+
+# Link libraries for the main library
+target_link_libraries(spdk_flint_lib
     ${SPDK_LIBRARIES}
+    # Add DPDK libraries if found, otherwise try common DPDK library names
+    ${DPDK_LIBRARIES}
+    # Common DPDK libraries that SPDK typically depends on
+    -Wl,--whole-archive
+    -lrte_eal -lrte_mempool -lrte_ring -lrte_mbuf -lrte_bus_pci -lrte_pci -lrte_bus_vdev -lrte_timer -lrte_hash -lrte_kvargs
+    -Wl,--no-whole-archive
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
     ${spdlog_LIBRARIES}
@@ -241,11 +271,16 @@ target_link_libraries(spdk_flint
     numa
 )
 
+# Link libraries for the main executable
+target_link_libraries(spdk_flint
+    spdk_flint_lib
+)
+
 # Link Crow (FetchContent or manually found)
 if(TARGET Crow::Crow)
-    target_link_libraries(spdk_flint Crow::Crow)
+    target_link_libraries(spdk_flint_lib Crow::Crow)
 elseif(CROW_LIBRARY)
-    target_link_libraries(spdk_flint ${CROW_LIBRARY})
+    target_link_libraries(spdk_flint_lib ${CROW_LIBRARY})
 endif()
 
 # Link nlohmann_json

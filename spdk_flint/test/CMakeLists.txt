@@ -14,17 +14,9 @@ set(TEST_SOURCES
 # Create test executable
 add_executable(spdk_flint_tests ${TEST_SOURCES})
 
-# Link against main libraries and Catch2
+# Link against main application library and Catch2
 target_link_libraries(spdk_flint_tests
-    ${SPDK_LIBRARIES}
-    ${Protobuf_LIBRARIES}
-    ${gRPC_LIBRARIES}
-    ${spdlog_LIBRARIES}
-    Threads::Threads
-    dl
-    rt
-    uuid
-    numa
+    spdk_flint_lib
 )
 
 # Link Catch2
