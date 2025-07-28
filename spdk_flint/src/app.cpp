@@ -6,14 +6,6 @@
 #include <chrono>
 #include <crow.h>
 
-// Forward declare service classes
-namespace spdk_flint {
-class CSIService;
-class DashboardService;
-class NodeAgent;
-class ControllerOperator;
-}
-
 using namespace spdk_flint;
 
 namespace spdk_flint {
