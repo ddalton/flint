@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     g++ \
     pkg-config \
+    # Development libraries
+    libcurl4-openssl-dev \
     # JSON processing tools
     jq \
     # Network diagnostics

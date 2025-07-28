@@ -43,20 +43,10 @@ endif()
 # Find required packages
 find_package(PkgConfig REQUIRED)
 find_package(Protobuf REQUIRED)
-# Try gRPC via unsecure pkg-config (which might not need gpr)
-pkg_check_modules(gRPC_UNSECURE grpc_unsecure)
-if(gRPC_UNSECURE_FOUND)
-    # Use the unsecure version for simplicity
-    set(gRPC_LIBRARIES ${gRPC_UNSECURE_LIBRARIES})
-    set(gRPC_INCLUDE_DIRS ${gRPC_UNSECURE_INCLUDE_DIRS})
-    message(STATUS "Using gRPC unsecure via pkg-config")
-else()
-    # Fallback to manual library detection
-    find_library(gRPC_CPP_LIBRARY NAMES grpc++ PATHS /usr/local/lib REQUIRED)
-    set(gRPC_LIBRARIES ${gRPC_CPP_LIBRARY})
-    set(gRPC_INCLUDE_DIRS /usr/local/include)
-    message(STATUS "Using gRPC via manual library detection")
-endif()
+# Manual gRPC detection (pkg-config has dependency issues)
+find_library(gRPC_CPP_LIBRARY NAMES grpc++ PATHS /usr/local/lib REQUIRED)
+set(gRPC_LIBRARIES ${gRPC_CPP_LIBRARY})
+set(gRPC_INCLUDE_DIRS /usr/local/include)
 
 # Find gRPC C++ plugin for protobuf code generation
 find_program(gRPC_CPP_PLUGIN_EXECUTABLE grpc_cpp_plugin REQUIRED)
@@ -65,7 +55,8 @@ find_library(spdlog_LIBRARY NAMES spdlog PATHS /usr/local/lib REQUIRED)
 set(spdlog_LIBRARIES ${spdlog_LIBRARY})
 set(spdlog_INCLUDE_DIRS /usr/local/include)
 find_package(Threads REQUIRED)
-find_package(CURL REQUIRED)
+# Use pkg-config for CURL (more reliable than find_package)
+pkg_check_modules(CURL REQUIRED libcurl)
 find_package(OpenSSL REQUIRED)
 
 # Find SPDK using pkg-config
@@ -186,6 +177,7 @@ target_include_directories(spdk_flint PRIVATE
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
     ${spdlog_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
 )
 
 # Link libraries
@@ -195,7 +187,7 @@ target_link_libraries(spdk_flint
     ${gRPC_LIBRARIES}
     ${spdlog_LIBRARIES}
     Threads::Threads
-    CURL::libcurl
+    ${CURL_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
     dl
