@@ -1,6 +1,6 @@
 # Dashboard Backend (Service)
 # Web API service for monitoring dashboard
-ARG BASE_IMAGE=flint-base:latest
+ARG BASE_IMAGE=docker-sandbox.infra.cloudera.com/ddalton/flint-base:latest
 ARG CMAKE_BUILD_TYPE=Release
 FROM ${BASE_IMAGE}
 
@@ -54,33 +54,10 @@ echo "Dashboard backend healthy"\n\
 exit 0\n\
 ' > /usr/local/bin/dashboard-health.sh && chmod +x /usr/local/bin/dashboard-health.sh
 
-# Create startup script with CORS and API documentation
-RUN echo '#!/bin/bash\n\
-echo "Starting SPDK Dashboard Backend"\n\
-echo "Dashboard will be available at: http://localhost:${DASHBOARD_PORT:-8080}"\n\
-echo "API Endpoints:"\n\
-echo "  GET  /health            - Health check"\n\
-echo "  GET  /api/v1/volumes    - List SPDK volumes (from Kubernetes)"\n\
-echo "  GET  /api/v1/nodes      - List SPDK nodes (from Kubernetes)"\n\
-echo "  GET  /api/v1/stats      - Get I/O statistics (real SPDK data)"\n\
-echo "  GET  /api/v1/stats?bdev=<name> - Get stats for specific device"\n\
-echo "  GET  /api/v1/devices    - List all SPDK block devices"\n\
-echo "  GET  /api/v1/discovery  - Discover storage nodes"\n\
-echo ""\n\
-echo "Features:"\n\
-echo "  ✅ Real SPDK C API integration"\n\
-echo "  ✅ Full Kubernetes custom resource support"\n\
-echo "  ✅ Live I/O statistics and device info"\n\
-echo "  ✅ Node discovery and management"\n\
-echo ""\n\
-exec "$@"\n\
-' > /usr/local/bin/dashboard-start.sh && chmod +x /usr/local/bin/dashboard-start.sh
-
 # Dashboard specific environment
 ENV CSI_MODE=dashboard-backend
 ENV DASHBOARD_PORT=8080
 ENV LOG_LEVEL=info
-ENV RUST_LOG=info
 
 # Expose dashboard port
 EXPOSE 8080
@@ -97,5 +74,5 @@ LABEL service.type="dashboard-backend"
 LABEL service.port="8080"
 LABEL service.protocol="http"
 
-ENTRYPOINT ["/usr/local/bin/dashboard-start.sh", "/usr/local/bin/spdk_flint"]
-CMD ["--mode", "dashboard-backend", "--log-level", "info"] 
+# Run spdk_flint directly as PID 1 (no wrapper script needed)
+CMD ["/usr/local/bin/spdk_flint", "--mode", "dashboard-backend", "--log-level", "info"] 
