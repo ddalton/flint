@@ -17,7 +17,7 @@ public:
         : spdk_(spdk), kube_client_(kube), config_(config) {}
     
     void start() {
-        LOG_CSI_INFO("Service", "Starting CSI gRPC services on {}", config_.csi_endpoint);
+        logger()->info("[CSI] Starting CSI gRPC services on {}", config_.csi_endpoint);
         running_ = true;
         // TODO: Implement gRPC server setup
         LOG_CSI_INFO("Service", "CSI services started successfully");
@@ -47,7 +47,7 @@ public:
         : spdk_(spdk), kube_client_(kube), config_(config) {}
     
     void start() {
-        LOG_DASHBOARD_INFO("Starting dashboard backend on port {}", config_.dashboard_port);
+        logger()->info("[DASHBOARD] Starting dashboard backend on port {}", config_.dashboard_port);
         
         // Set up Crow routes
         app_.route_dynamic("/health")
@@ -277,7 +277,7 @@ public:
         : spdk_(spdk), kube_client_(kube), config_(config) {}
     
     void start() {
-        LOG_NODE_AGENT_INFO("Starting node agent on port {}", config_.node_agent_port);
+        logger()->info("[NODE_AGENT] Starting node agent on port {}", config_.node_agent_port);
         
         // Set up HTTP API for disk operations
         app_.route_dynamic("/health")
@@ -424,7 +424,7 @@ public:
         : spdk_(spdk), kube_client_(kube), config_(config) {}
     
     void start() {
-        LOG_CONTROLLER_INFO("Starting controller operator");
+        logger()->info("[CONTROLLER] Starting controller operator");
         running_ = true;
         
         // Start operator loop
@@ -510,7 +510,7 @@ private:
 // Application implementation
 Application::Application(const AppConfig& config) 
     : config_(config) {
-    LOG_INFO("Initializing SPDK Flint application in {} mode", 
+    logger()->info("Initializing SPDK Flint application in {} mode", 
              config.mode == AppMode::ALL ? "all" : 
              config.mode == AppMode::CSI_DRIVER ? "csi-driver" :
              config.mode == AppMode::CONTROLLER ? "controller" :
@@ -525,22 +525,22 @@ Application::~Application() {
 int Application::run() {
     try {
         if (!initialize()) {
-            LOG_ERROR("Failed to initialize application");
+            logger()->error("Failed to initialize application");
             return 1;
         }
         
-        LOG_INFO("All services started successfully");
+        logger()->info("All services started successfully");
         
         // Instead of running our own event loop, let SPDK handle the main loop
         // SPDK's event loop will run until spdk_app_stop() is called
-        LOG_INFO("Application running - SPDK managing event loop");
+        logger()->info("Application running - SPDK managing event loop");
         
         // This will block until SPDK shuts down
         // The actual event processing happens in SPDK's internal event loop
         return 0;
         
     } catch (const std::exception& e) {
-        LOG_ERROR("Application failed: {}", e.what());
+        logger()->error("Application failed: {}", e.what());
         return 1;
     }
 }
@@ -578,7 +578,7 @@ bool Application::initialize() {
         return true;
         
     } catch (const std::exception& e) {
-        LOG_ERROR("Application initialization failed: {}", e.what());
+        logger()->error("Application initialization failed: {}", e.what());
         return false;
     }
 }
@@ -588,7 +588,7 @@ void Application::shutdown() {
         return; // Already shutting down
     }
     
-    LOG_INFO("Shutting down application");
+    logger()->info("Shutting down application");
     
     // Stop services in reverse order
     if (node_agent_) {
@@ -609,7 +609,7 @@ void Application::shutdown() {
         spdk_wrapper_->shutdown();
     }
     
-    LOG_INFO("Application shutdown complete");
+    logger()->info("Application shutdown complete");
 }
 
 void Application::setupLogging() {
@@ -617,7 +617,7 @@ void Application::setupLogging() {
 }
 
 void Application::initializeComponents() {
-    LOG_INFO("Initializing components");
+    logger()->info("Initializing components");
     
     // Wait for SPDK to be ready
     waitForSpdkReady();
@@ -644,32 +644,32 @@ void Application::initializeComponents() {
     node_agent_ = std::make_unique<NodeAgent>(spdk_wrapper_, kube_client, config_);
     controller_operator_ = std::make_unique<ControllerOperator>(spdk_wrapper_, kube_client, config_);
     
-    LOG_INFO("Components initialized successfully");
+    logger()->info("Components initialized successfully");
 }
 
 void Application::startCSIMode() {
-    LOG_INFO("Starting CSI services");
+    logger()->info("Starting CSI services");
     csi_service_->start();
     controller_operator_->start();
 }
 
 void Application::startControllerMode() {
-    LOG_INFO("Starting controller services");
+    logger()->info("Starting controller services");
     controller_operator_->start();
 }
 
 void Application::startDashboardMode() {
-    LOG_INFO("Starting dashboard services");
+    logger()->info("Starting dashboard services");
     dashboard_service_->start();
 }
 
 void Application::startNodeAgentMode() {
-    LOG_INFO("Starting node agent services");
+    logger()->info("Starting node agent services");
     node_agent_->start();
 }
 
 void Application::startHealthServer() {
-    LOG_INFO("Starting health server on port {}", config_.health_port);
+    logger()->info("Starting health server on port {}", config_.health_port);
     
     // Simple health check server using Crow
     static crow::SimpleApp health_app;
@@ -701,12 +701,12 @@ void Application::startHealthServer() {
 }
 
 void Application::waitForSpdkReady() {
-    LOG_INFO("Waiting for SPDK to be ready at {}", config_.spdk_rpc_url);
+    logger()->info("Waiting for SPDK to be ready at {}", config_.spdk_rpc_url);
     
     // For now, just wait a bit - in production we'd check the RPC socket
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
-    LOG_INFO("SPDK is ready");
+    logger()->info("SPDK is ready");
 }
 
 } // namespace spdk_flint 
