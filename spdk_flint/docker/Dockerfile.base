@@ -20,13 +20,18 @@ RUN apt-get update && apt-get install -y \
     liburing-dev \
     libfuse3-dev \
     uuid-dev \
+    # SPDK specific tools
+    patchelf \
+    python3 \
+    python3-pip \
+    python3-pyelftools \
+    python3-setuptools \
+    python3-dev \
     # C++ dependencies (we'll build gRPC from source)
     libprotobuf-dev \
     protobuf-compiler \
     libcurl4-openssl-dev \
     # Additional tools
-    python3 \
-    python3-pyelftools \
     nasm \
     autoconf \
     automake \
@@ -35,8 +40,12 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up working directory
+# Set up working directory and environment
 WORKDIR /workspace
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+# Ensure Python and pip are properly set up
+RUN python3 -m pip install --upgrade pip setuptools wheel
 
 # Build and install spdlog
 RUN git clone https://github.com/gabime/spdlog.git && \
@@ -66,9 +75,12 @@ RUN git clone https://github.com/spdk/spdk.git && \
     cd spdk && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
-    ./configure --with-ublk --disable-tests --disable-unit-tests && \
+    ./configure --with-ublk --disable-tests --disable-unit-tests --without-shared && \
     make -j$(nproc) && \
-    make install
+    echo "Installing SPDK libraries and headers..." && \
+    make -C lib install && \
+    make -C include install && \
+    echo "SPDK core libraries installed successfully"
 
 # Install Crow web framework
 RUN git clone https://github.com/CrowCpp/Crow.git && \
@@ -111,12 +123,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy SPDK binaries and libraries
-COPY --from=builder /usr/local/bin/spdk_* /usr/local/bin/
+# Create directories first
+RUN mkdir -p /usr/local/bin /usr/local/lib/pkgconfig /usr/local/scripts
+
+# Copy SPDK libraries and headers (essential for compilation)
 COPY --from=builder /usr/local/lib/libspdk* /usr/local/lib/
-COPY --from=builder /usr/local/lib/pkgconfig/spdk* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
-COPY --from=builder /usr/local/scripts/ /usr/local/scripts/
+
+# For now, skip copying optional SPDK binaries - we mainly need libraries for compilation
+
+# Create a simple script to check SPDK installation
+RUN echo '#!/bin/bash\necho "SPDK libraries installed"\nls -la /usr/local/lib/libspdk* | head -5\necho "SPDK headers installed"\nls -la /usr/local/include/spdk/ | head -5' > /usr/local/bin/check-spdk && chmod +x /usr/local/bin/check-spdk
 
 # Copy built libraries (spdlog, gRPC, Crow)
 COPY --from=builder /usr/local/lib/libspdlog* /usr/local/lib/
@@ -154,5 +171,4 @@ RUN useradd -m -u 1001 spdk-flint
 
 # Set default environment variables
 ENV LOG_LEVEL=info
-ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock
-ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" 
+ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock 
