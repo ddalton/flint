@@ -49,9 +49,6 @@ RUN apt-get update && apt-get install -y \
     autotools-dev \
     libtool-bin \
     make \
-    # ISA-L crypto autogen dependencies
-    pkg-config \
-    m4 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory and environment
@@ -106,8 +103,24 @@ RUN echo "Setting up UBLK support for Ubuntu 24.04..." && \
 RUN git clone https://github.com/spdk/spdk.git && \
     cd spdk && \
     git checkout v25.05.x && \
+    echo "=== DEBUGGING SUBMODULE INITIALIZATION ===" && \
+    echo "Checking initial submodule status..." && \
+    git submodule status && \
+    echo "=== INITIALIZING SUBMODULES ===" && \
     git submodule update --init --recursive && \
-    echo "Configuring SPDK with UBLK support - debugging ISA-L-crypto configure issue..." && \
+    echo "=== VERIFYING SUBMODULE CLONING ===" && \
+    echo "Post-init submodule status:" && \
+    git submodule status && \
+    echo "Checking if ISA-L-crypto was cloned properly..." && \
+    if [ -d "isa-l-crypto" ]; then \
+        echo "✅ isa-l-crypto directory exists" && \
+        ls -la isa-l-crypto/ | head -10; \
+    else \
+        echo "❌ isa-l-crypto directory missing!"; \
+    fi && \
+    echo "Checking for broken symlinks in SPDK directory..." && \
+    find . -type l -exec test ! -e {} \; -print 2>/dev/null | head -10 || echo "No broken symlinks found" && \
+    echo "Configuring SPDK with UBLK support - using SPDK's integrated ISA-L build..." && \
     echo "=== DEBUGGING NASM DETECTION ===" && \
     which nasm && \
     nasm --version && \
@@ -115,40 +128,23 @@ RUN git clone https://github.com/spdk/spdk.git && \
     ls -la /usr/bin/nasm && \
     echo "PATH: $PATH" && \
     echo "Current working directory: $(pwd)" && \
-    echo "=== INVESTIGATING ISA-L-CRYPTO CONFIGURE SCRIPT ===" && \
-    cd isa-l-crypto && \
-    echo "ISA-L-crypto directory contents:" && \
-    ls -la && \
-    echo "Looking at configure script for nasm detection..." && \
-    grep -A 5 -B 5 "checking for.*nasm" configure 2>/dev/null || echo "configure script not yet generated" && \
-    echo "=== RUNNING ISA-L-CRYPTO AUTOGEN ===" && \
-    ./autogen.sh && \
-    echo "=== EXAMINING GENERATED CONFIGURE SCRIPT ===" && \
-    grep -A 10 -B 5 "checking for.*nasm" configure && \
-    echo "=== TESTING NASM DETECTION MANUALLY ===" && \
-    echo "Simulating configure nasm check..." && \
-    export NASM=/usr/bin/nasm && \
-    export AS=/usr/bin/nasm && \
-    if command -v /usr/bin/nasm >/dev/null 2>&1; then \
-        echo "✅ command -v /usr/bin/nasm works"; \
-    else \
-        echo "❌ command -v /usr/bin/nasm fails"; \
-    fi && \
-    if test -x /usr/bin/nasm; then \
-        echo "✅ test -x /usr/bin/nasm works"; \
-    else \
-        echo "❌ test -x /usr/bin/nasm fails"; \
-    fi && \
-    echo "=== RUNNING ISA-L-CRYPTO CONFIGURE WITH VERBOSE OUTPUT ===" && \
-    NASM=/usr/bin/nasm AS=/usr/bin/nasm ./configure --prefix=/tmp/isal-crypto --enable-debug && \
-    cd .. && \
-    echo "=== ISA-L-CRYPTO CONFIGURE COMPLETED ===" && \
+    echo "=== UNDERSTANDING SPDK'S ISA-L-CRYPTO INTEGRATION ===" && \
+    echo "Checking SPDK's expected ISA-L-crypto build structure..." && \
+    echo "ISA-L-crypto submodule status:" && \
+    ls -la isa-l-crypto/ && \
+    echo "Looking for SPDK's ISA-L build integration..." && \
+    find . -name "*isal*" -type d 2>/dev/null || echo "No isal directories found yet" && \
+    find . -name "*isal*" -type l 2>/dev/null || echo "No isal symlinks found yet" && \
+    echo "Checking if SPDK has ISA-L build scripts..." && \
+    find . -name "*isal*" -name "*.sh" 2>/dev/null || echo "No isal build scripts found" && \
+    echo "=== LETTING SPDK HANDLE ISA-L-CRYPTO BUILD NATIVELY ===" && \
     echo "Setting up environment for SPDK configure..." && \
     export NASM=/usr/bin/nasm && \
     export AS=/usr/bin/nasm && \
-    echo "Starting SPDK configure..." && \
+    echo "Starting SPDK configure with integrated ISA-L support..." && \
     AS=nasm NASM=/usr/bin/nasm ./configure \
         --with-ublk \
+        --with-isal \
         --disable-tests \
         --disable-unit-tests \
         --without-shared \
