@@ -121,8 +121,7 @@ RUN git clone https://github.com/spdk/spdk.git && \
         --without-shared \
         --without-nvme-cuse \
         --without-fuse \
-        --with-uring \
-        --without-isal 2>&1 | tee configure.log && \
+        --with-uring 2>&1 | tee configure.log && \
     echo "Verifying SPDK configure success..." && \
     if [ ! -f mk/config.mk ]; then \
         echo "ERROR: SPDK configure failed - config.mk not generated!" && \
