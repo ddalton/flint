@@ -139,12 +139,12 @@ RUN git clone https://github.com/spdk/spdk.git && \
     find . -name "*isal*" -name "*.sh" 2>/dev/null || echo "No isal build scripts found" && \
     echo "=== LETTING SPDK HANDLE ISA-L-CRYPTO BUILD NATIVELY ===" && \
     echo "Setting up environment for SPDK configure..." && \
-    export NASM=/usr/bin/nasm && \
-    export AS=/usr/bin/nasm && \
-    echo "Starting SPDK configure with integrated ISA-L support..." && \
-    AS=nasm NASM=/usr/bin/nasm ./configure \
+    echo "Ensuring nasm is in PATH for auto-detection..." && \
+    export PATH="/usr/bin:$PATH" && \
+    which nasm && nasm --version && \
+    echo "Starting SPDK configure (letting it auto-detect nasm)..." && \
+    ./configure \
         --with-ublk \
-        --with-isal \
         --disable-tests \
         --disable-unit-tests \
         --without-shared \
