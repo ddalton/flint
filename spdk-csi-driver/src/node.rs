@@ -115,12 +115,15 @@ impl NodeService {
         }
 
         // Create RAID1 bdev
+        // Convert base_bdevs array to space-separated string as required by SPDK
+        let base_bdevs_str = base_bdevs.join(" ");
+        
         call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
             "method": "bdev_raid_create",
             "params": {
                 "name": raid_name,
                 "raid_level": "1",  // Fixed: RAID level must be string
-                "base_bdevs": base_bdevs,
+                "base_bdevs": base_bdevs_str,  // Fixed: Use space-separated string instead of array
                 "strip_size_kb": 64,
                 "superblock": true
             }

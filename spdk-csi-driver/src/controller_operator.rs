@@ -339,15 +339,24 @@ async fn replace_raid_member_with_spdk(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let http_client = HttpClient::new();
 
-    // Remove failed member - Note: "name" should be the base bdev name, not raid bdev name
-    // TODO: Fix to pass actual base bdev name instead of volume_id
+    // Get current raid status to find the failed base bdev name
+    let raid_status = get_raid_status(ctx, volume_id).await?
+        .ok_or("RAID status not found")?;
+    
+    // Find the failed base bdev name by slot
+    let failed_base_bdev_name = raid_status.base_bdevs_list
+        .iter()
+        .find(|member| member.slot == failed_member_slot as u32)
+        .map(|member| &member.name)
+        .ok_or(format!("Failed member at slot {} not found", failed_member_slot))?;
+
+    // Remove failed member with correct base bdev name
     http_client
         .post(&ctx.spdk_rpc_url)
         .json(&json!({
             "method": "bdev_raid_remove_base_bdev",
             "params": {
-                "name": volume_id  // FIXME: Should be base bdev name, not raid bdev name
-                // Removed "slot" - not in SPDK documentation
+                "name": failed_base_bdev_name  // Fixed: Use actual base bdev name
             }
         }))
         .send()

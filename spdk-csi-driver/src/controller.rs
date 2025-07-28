@@ -320,12 +320,15 @@ impl ControllerService {
         
         let lvol_name = format!("vol_{}", volume_id);
 
+        // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+        let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
+
         let create_params = json!({
             "method": "bdev_lvol_create",
             "params": {
                 "lvs_name": lvs_name,
                 "lvol_name": lvol_name,
-                "size": size_bytes,
+                "size_in_mib": size_in_mib,
                 "thin_provision": false,
                 "clear_method": "write_zeroes"
             }
@@ -801,13 +804,16 @@ impl Controller for ControllerService {
                 };
                 let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
+                // Convert bytes to MiB as required by SPDK bdev_lvol_resize RPC
+                let size_in_mib = (new_capacity + 1048575) / 1048576; // Round up to nearest MiB
+
                 let response = http_client
                     .post(&rpc_url)
                     .json(&json!({
                         "method": "bdev_lvol_resize",
                         "params": {
                             "name": lvol_name,
-                            "size": new_capacity
+                            "size_in_mib": size_in_mib
                         }
                     }))
                     .send()

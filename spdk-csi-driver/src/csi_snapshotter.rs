@@ -21,61 +21,8 @@ fn datetime_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
     system_time.into()
 }
 
-/// RAII guard to ensure the RAID device is resumed even on error
-struct RaidPauseGuard<'a> {
-    client: &'a HttpClient,
-    url: &'a str,
-    raid_name: String,
-    paused: bool,
-}
-
-impl<'a> RaidPauseGuard<'a> {
-    async fn new(client: &'a HttpClient, url: &'a str, raid_name: String) -> Result<Self, Status> {
-        println!("Pausing I/O for RAID device: {}", raid_name);
-        
-        let response = client
-            .post(url)
-            .json(&json!({
-                "method": "bdev_raid_pause",
-                "params": { "name": &raid_name }
-            }))
-            .send()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to pause RAID device I/O: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(Status::internal("Failed to pause RAID device"));
-        }
-
-        Ok(Self {
-            client,
-            url,
-            raid_name,
-            paused: true,
-        })
-    }
-}
-
-impl<'a> Drop for RaidPauseGuard<'a> {
-    fn drop(&mut self) {
-        if self.paused {
-            let client = self.client.clone();
-            let url = self.url.to_string();
-            let name = self.raid_name.clone();
-            
-            // Fire-and-forget resume operation
-            tokio::spawn(async move {
-                println!("Resuming I/O for RAID device: {}", name);
-                if let Err(e) = client.post(&url).json(&json!({
-                    "method": "bdev_raid_resume",
-                    "params": { "name": &name }
-                })).send().await {
-                    eprintln!("Error resuming RAID device {}: {}", name, e);
-                }
-            });
-        }
-    }
-}
+// Remove the unnecessary ensure_data_consistency_for_snapshot function entirely
+// since SPDK's bdev_lvol_snapshot is atomic and handles consistency internally
 
 async fn create_replica_snapshot(
     driver: &SpdkCsiDriver,
@@ -190,13 +137,6 @@ pub async fn create_snapshot_impl(
 
     let http_client = HttpClient::new();
     
-    // For multi-replica volumes, pause RAID I/O for consistency
-    let _pause_guard = if source_volume.spec.num_replicas > 1 {
-        Some(RaidPauseGuard::new(&http_client, &driver.spdk_rpc_url, source_volume.spec.volume_id.clone()).await?)
-    } else {
-        None
-    };
-
     // Create snapshots on healthy replicas
     let mut replica_snapshots = Vec::new();
     let mut errors = Vec::new();
