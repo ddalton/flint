@@ -97,8 +97,20 @@ endforeach()
 set(SPDK_INCLUDE_DIRS /usr/local/include)
 
 # Find Crow (header-only, will be downloaded if not found)
-find_path(CROW_INCLUDE_DIR crow.h PATHS /usr/include /usr/local/include)
-if(NOT CROW_INCLUDE_DIR)
+find_path(CROW_INCLUDE_DIR 
+    NAMES crow.h crow/crow.h 
+    PATHS /usr/include /usr/local/include /usr/local/include/crow
+    PATH_SUFFIXES crow
+)
+
+if(CROW_INCLUDE_DIR)
+    message(STATUS "Found Crow headers at: ${CROW_INCLUDE_DIR}")
+    # Also find Crow library if it exists
+    find_library(CROW_LIBRARY NAMES crow PATHS /usr/local/lib)
+    if(CROW_LIBRARY)
+        message(STATUS "Found Crow library at: ${CROW_LIBRARY}")
+    endif()
+else()
     message(STATUS "Crow not found, will use FetchContent")
     include(FetchContent)
     FetchContent_Declare(
@@ -214,6 +226,11 @@ target_include_directories(spdk_flint PRIVATE
     ${CURL_INCLUDE_DIRS}
 )
 
+# Add Crow include directories (if found)
+if(CROW_INCLUDE_DIR)
+    target_include_directories(spdk_flint PRIVATE ${CROW_INCLUDE_DIR})
+endif()
+
 # Link libraries
 target_link_libraries(spdk_flint
     ${SPDK_LIBRARIES}
@@ -230,9 +247,11 @@ target_link_libraries(spdk_flint
     numa
 )
 
-# If using FetchContent Crow
+# Link Crow (FetchContent or manually found)
 if(TARGET Crow::Crow)
     target_link_libraries(spdk_flint Crow::Crow)
+elseif(CROW_LIBRARY)
+    target_link_libraries(spdk_flint ${CROW_LIBRARY})
 endif()
 
 # Link nlohmann_json
