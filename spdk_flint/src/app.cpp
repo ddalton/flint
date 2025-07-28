@@ -510,8 +510,6 @@ private:
     }
 };
 
-} // namespace spdk_flint
-
 // Application implementation
 Application::Application(const AppConfig& config) 
     : config_(config) {
@@ -711,4 +709,6 @@ void Application::waitForSpdkReady() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     
     LOG_INFO("SPDK is ready");
-} 
+}
+
+} // namespace spdk_flint 
