@@ -28,10 +28,11 @@ static void spdk_app_started(void* arg) {
     // Signal that initialization is complete
 }
 
-static void spdk_app_stopped(void* arg, int rc) {
-    LOG_INFO("SPDK application stopped with code: {}", rc);
-    g_spdk_initialized = false;
-}
+// Note: spdk_app_stopped is currently unused but may be needed for proper SPDK lifecycle
+// static void spdk_app_stopped(void* arg, int rc) {
+//     LOG_INFO("SPDK application stopped with code: {}", rc);
+//     g_spdk_initialized = false;
+// }
 
 // Error conversion utilities
 SpdkError SpdkWrapper::convertErrno(int err) {
@@ -530,7 +531,7 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
             struct spdk_bdev* bdev = spdk_bdev_get_by_name(bdev_name.c_str());
             if (bdev) {
                 struct spdk_bdev_io_stat io_stat;
-                spdk_bdev_get_io_stat(bdev, nullptr, &io_stat, SPDK_BDEV_RESET_STAT_MODE_NEVER);
+                spdk_bdev_get_io_stat(bdev, nullptr, &io_stat, SPDK_BDEV_RESET_STAT_NONE);
                 
                 stats["read_ops"] = io_stat.num_read_ops;
                 stats["write_ops"] = io_stat.num_write_ops;
@@ -556,7 +557,7 @@ std::map<std::string, uint64_t> SpdkWrapper::getBdevIoStats(const std::string& b
             struct spdk_bdev* bdev;
             for (bdev = spdk_bdev_first(); bdev != nullptr; bdev = spdk_bdev_next(bdev)) {
                 struct spdk_bdev_io_stat io_stat;
-                spdk_bdev_get_io_stat(bdev, nullptr, &io_stat, SPDK_BDEV_RESET_STAT_MODE_NEVER);
+                spdk_bdev_get_io_stat(bdev, nullptr, &io_stat, SPDK_BDEV_RESET_STAT_NONE);
                 
                 total_read_ops += io_stat.num_read_ops;
                 total_write_ops += io_stat.num_write_ops;

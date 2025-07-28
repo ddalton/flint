@@ -153,9 +153,7 @@ public:
     void startPeriodicCacheUpdate(std::chrono::milliseconds interval = std::chrono::milliseconds(5000));
     void stopPeriodicCacheUpdate();
     
-    // Synchronous methods (use only from SPDK reactor thread)
-    std::vector<BdevInfo> getBdevs(const std::string& name = "") const;
-    std::map<std::string, uint64_t> getBdevIoStats(const std::string& bdev_name = "") const;
+    // Note: Synchronous methods are declared above in the main public section
 
 private:
     std::string config_file_;

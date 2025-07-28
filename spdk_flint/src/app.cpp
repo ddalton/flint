@@ -628,7 +628,7 @@ void Application::initializeComponents() {
     waitForSpdkReady();
     
     // Initialize SPDK wrapper
-    spdk_wrapper_ = std::make_shared<spdk::SpdkWrapper>();
+    spdk_wrapper_ = std::make_shared<spdk_flint::spdk::SpdkWrapper>();
     if (!spdk_wrapper_->initialize()) {
         throw std::runtime_error("Failed to initialize SPDK");
     }

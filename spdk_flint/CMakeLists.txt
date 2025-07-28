@@ -194,8 +194,9 @@ set(SOURCES
     src/spdk/spdk_wrapper.cpp
     src/utils/config.cpp
     src/utils/kube_client.cpp
-    ${CSI_PB_CPP_FILE}
-    ${CSI_GRPC_CPP_FILE}
+    # Temporarily commented out due to Abseil compatibility issues
+    # ${CSI_PB_CPP_FILE}
+    # ${CSI_GRPC_CPP_FILE}
     # TODO: Add these files as they are implemented:
     # src/csi/identity_service.cpp
     # src/csi/controller_service.cpp

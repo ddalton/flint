@@ -20,6 +20,7 @@ enum class AppMode {
 struct AppConfig {
     AppMode mode = AppMode::ALL;
     std::string node_id;
+    std::string config_file;  // Added missing config_file member
     std::string csi_endpoint = "unix:///csi/csi.sock";
     std::string spdk_rpc_url = "unix:///var/tmp/spdk.sock";
     std::string target_namespace;
@@ -40,7 +41,10 @@ class CSIService;
 class DashboardService;
 class NodeAgent;
 class ControllerOperator;
-class SpdkWrapper;
+
+namespace spdk {
+    class SpdkWrapper;
+}
 
 class Application {
 public:
@@ -60,14 +64,14 @@ public:
     const AppConfig& config() const { return config_; }
 
     // Get SPDK wrapper
-    std::shared_ptr<SpdkWrapper> spdk() const { return spdk_wrapper_; }
+    std::shared_ptr<spdk::SpdkWrapper> spdk() const { return spdk_wrapper_; }
 
 private:
     AppConfig config_;
     std::atomic<bool> running_{true};
     
     // Core components
-    std::shared_ptr<SpdkWrapper> spdk_wrapper_;
+    std::shared_ptr<spdk::SpdkWrapper> spdk_wrapper_;
     std::unique_ptr<CSIService> csi_service_;
     std::unique_ptr<DashboardService> dashboard_service_;
     std::unique_ptr<NodeAgent> node_agent_;
@@ -92,6 +96,7 @@ private:
 
 // Utility functions
 AppConfig loadConfigFromEnvironment();
+AppMode parseAppMode(const std::string& mode_str);
 void printVersion();
 void printUsage();
 
