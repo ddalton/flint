@@ -6,8 +6,6 @@
 #include <chrono>
 #include <crow.h>
 
-using namespace spdk_flint;
-
 namespace spdk_flint {
 
 // CSI Service implementation (stub)
@@ -55,6 +53,7 @@ public:
         app_.route_dynamic("/health")
             .methods("GET"_method)
             ([this](const crow::request& req) {
+                (void)req; // Suppress unused parameter warning
                 return crow::response(200, "OK");
             });
         
@@ -117,6 +116,7 @@ private:
     std::thread server_thread_;
     
     crow::response handle_get_volumes(const crow::request& req) {
+        (void)req; // Suppress unused parameter warning
         try {
             // Get volumes from Kubernetes
             auto volumes_future = kube_client_->list_spdk_volumes(config_.target_namespace);
@@ -137,6 +137,7 @@ private:
     }
     
     crow::response handle_get_nodes(const crow::request& req) {
+        (void)req; // Suppress unused parameter warning
         try {
             auto nodes_future = kube_client_->list_spdk_nodes(config_.target_namespace);
             auto nodes = nodes_future.get();
@@ -200,6 +201,7 @@ private:
     }
 
     crow::response handle_get_devices(const crow::request& req) {
+        (void)req; // Suppress unused parameter warning
         try {
             // Get device list using thread-safe async call
             auto bdevs_future = spdk_->getBdevsAsync();
@@ -230,6 +232,7 @@ private:
     }
     
     crow::response handle_discovery(const crow::request& req) {
+        (void)req; // Suppress unused parameter warning
         try {
             nlohmann::json response;
             
@@ -280,6 +283,7 @@ public:
         app_.route_dynamic("/health")
             .methods("GET"_method)
             ([this](const crow::request& req) {
+                (void)req; // Suppress unused parameter warning
                 return crow::response(200, "OK");
             });
         
@@ -362,6 +366,7 @@ private:
     }
     
     crow::response handle_get_disks(const crow::request& req) {
+        (void)req; // Suppress unused parameter warning
         try {
             auto bdevs = spdk_->getBdevs();
             nlohmann::json response = nlohmann::json::array();
