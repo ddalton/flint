@@ -34,6 +34,10 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     protobuf-compiler \
     libcurl4-openssl-dev \
+    # Boost libraries for Crow framework
+    libboost-dev \
+    libboost-system-dev \
+    libboost-date-time-dev \
     # FIPS-compliant crypto dependencies
     libssl-dev \
     openssl \
