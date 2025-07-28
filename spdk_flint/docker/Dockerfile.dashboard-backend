@@ -15,7 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Development libraries
     libcurl4-openssl-dev \
     libssl-dev \
-    # Boost libraries for Crow framework (FetchContent build)
+    # C++ libraries (avoid FetchContent/git dependencies)
+    nlohmann-json3-dev \
+    # Boost libraries still needed for Crow FetchContent build
     libboost-dev \
     libboost-system-dev \
     libboost-date-time-dev \

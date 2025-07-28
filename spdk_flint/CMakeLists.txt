@@ -133,17 +133,13 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-# Find kubernetes-client-cpp for Kubernetes API
+# Find kubernetes-client-cpp for Kubernetes API (optional - fallback to libcurl)
 find_path(KUBERNETES_CLIENT_INCLUDE_DIR kubernetes/client-cpp.h PATHS /usr/include /usr/local/include)
 if(NOT KUBERNETES_CLIENT_INCLUDE_DIR)
-    message(STATUS "kubernetes-client-cpp not found, will use FetchContent")
-    include(FetchContent)
-    FetchContent_Declare(
-        kubernetes-client-cpp
-        GIT_REPOSITORY https://github.com/kubernetes-client/cpp.git
-        GIT_TAG master
-    )
-    FetchContent_MakeAvailable(kubernetes-client-cpp)
+    message(STATUS "kubernetes-client-cpp not found, using libcurl for Kubernetes API instead")
+    # Skip FetchContent for kubernetes-client-cpp in Docker builds due to Git auth issues
+    # We'll use direct HTTP calls with libcurl for Kubernetes API integration
+    message(STATUS "Kubernetes integration will use libcurl HTTP client")
 endif()
 
 # Find Catch2 for testing
