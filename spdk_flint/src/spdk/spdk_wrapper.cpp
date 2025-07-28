@@ -23,6 +23,7 @@ static bool g_shutdown_requested = false;
 // SPDK application callbacks
 static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
+    (void)wrapper; // Suppress unused variable warning
     LOG_INFO("SPDK application started successfully");
     g_spdk_initialized = true;
     // Signal that initialization is complete
@@ -322,6 +323,7 @@ std::vector<std::string> SpdkWrapper::getNvmeControllers() const {
 // Logical Volume Store operations
 std::string SpdkWrapper::createLvstore(const std::string& bdev_name, const std::string& lvs_name, 
                                        uint32_t cluster_size, const std::string& clear_method) {
+    (void)clear_method; // Suppress unused parameter warning
     try {
         LOG_RPC_CALL("bdev_lvol_create_lvstore", "bdev_name={}, lvs_name={}, cluster_size={}", 
                      bdev_name, lvs_name, cluster_size);
@@ -367,6 +369,8 @@ void SpdkWrapper::stopEventLoop() {
 // Logical Volume operations - stubs for now
 std::string SpdkWrapper::createLvol(const std::string& lvs_name, const std::string& lvol_name,
                                    uint64_t size_mib, bool thin_provision, const std::string& clear_method) {
+    (void)thin_provision; // Suppress unused parameter warning
+    (void)clear_method; // Suppress unused parameter warning
     LOG_RPC_CALL("bdev_lvol_create", "lvs_name={}, lvol_name={}, size_mib={}", lvs_name, lvol_name, size_mib);
     // TODO: Implement using spdk_lvol_create
     LOG_RPC_SUCCESS("bdev_lvol_create", "stub implementation");
@@ -412,6 +416,7 @@ std::vector<std::string> SpdkWrapper::getLvstores() const {
 // RAID operations - stubs
 std::string SpdkWrapper::createRaid(const std::string& name, const std::string& raid_level,
                                    const std::vector<std::string>& base_bdevs, uint32_t strip_size_kb) {
+    (void)strip_size_kb; // Suppress unused parameter warning
     LOG_RPC_CALL("bdev_raid_create", "name={}, raid_level={}, base_bdevs={}", name, raid_level, base_bdevs.size());
     // TODO: Implement RAID creation
     LOG_RPC_SUCCESS("bdev_raid_create", "stub implementation");
@@ -501,6 +506,8 @@ bool SpdkWrapper::destroyUblkTarget() {
 
 int SpdkWrapper::startUblkDisk(const std::string& bdev_name, uint32_t ublk_id,
                               uint32_t queue_depth, uint32_t num_queues) {
+    (void)queue_depth; // Suppress unused parameter warning
+    (void)num_queues; // Suppress unused parameter warning
     LOG_RPC_CALL("ublk_start_disk", "bdev_name={}, ublk_id={}", bdev_name, ublk_id);
     // TODO: Implement UBLK disk start
     LOG_RPC_SUCCESS("ublk_start_disk", "stub implementation");

@@ -367,6 +367,7 @@ std::shared_ptr<KubeClient> KubeClient::create_incluster() {
 }
 
 std::shared_ptr<KubeClient> KubeClient::create_from_kubeconfig(const std::string& path) {
+    (void)path; // Suppress unused parameter warning
     // TODO: Implement kubeconfig parsing
     LOG_WARN("kubeconfig client not implemented yet");
     return nullptr;

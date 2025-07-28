@@ -13,7 +13,7 @@ namespace spdk_flint {
 // CSI Service implementation (stub)
 class CSIService {
 public:
-    explicit CSIService(std::shared_ptr<SpdkWrapper> spdk, 
+    explicit CSIService(std::shared_ptr<spdk::SpdkWrapper> spdk, 
                        std::shared_ptr<kube::KubeClient> kube,
                        const AppConfig& config)
         : spdk_(spdk), kube_client_(kube), config_(config) {}
@@ -34,7 +34,7 @@ public:
     bool is_running() const { return running_; }
 
 private:
-    std::shared_ptr<SpdkWrapper> spdk_;
+    std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
     AppConfig config_;
     std::atomic<bool> running_{false};
@@ -43,7 +43,7 @@ private:
 // Dashboard Service implementation with Crow
 class DashboardService {
 public:
-    explicit DashboardService(std::shared_ptr<SpdkWrapper> spdk,
+    explicit DashboardService(std::shared_ptr<spdk::SpdkWrapper> spdk,
                              std::shared_ptr<kube::KubeClient> kube,
                              const AppConfig& config)
         : spdk_(spdk), kube_client_(kube), config_(config) {}
@@ -109,7 +109,7 @@ public:
     bool is_running() const { return running_; }
 
 private:
-    std::shared_ptr<SpdkWrapper> spdk_;
+    std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
     AppConfig config_;
     std::atomic<bool> running_{false};
@@ -268,7 +268,7 @@ private:
 // Node Agent implementation
 class NodeAgent {
 public:
-    explicit NodeAgent(std::shared_ptr<SpdkWrapper> spdk,
+    explicit NodeAgent(std::shared_ptr<spdk::SpdkWrapper> spdk,
                       std::shared_ptr<kube::KubeClient> kube,
                       const AppConfig& config)
         : spdk_(spdk), kube_client_(kube), config_(config) {}
@@ -325,7 +325,7 @@ public:
     bool is_running() const { return running_; }
 
 private:
-    std::shared_ptr<SpdkWrapper> spdk_;
+    std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
     AppConfig config_;
     std::atomic<bool> running_{false};
@@ -413,7 +413,7 @@ private:
 // Controller Operator implementation
 class ControllerOperator {
 public:
-    explicit ControllerOperator(std::shared_ptr<SpdkWrapper> spdk,
+    explicit ControllerOperator(std::shared_ptr<spdk::SpdkWrapper> spdk,
                                std::shared_ptr<kube::KubeClient> kube,
                                const AppConfig& config)
         : spdk_(spdk), kube_client_(kube), config_(config) {}
@@ -442,7 +442,7 @@ public:
     bool is_running() const { return running_; }
 
 private:
-    std::shared_ptr<SpdkWrapper> spdk_;
+    std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
     AppConfig config_;
     std::atomic<bool> running_{false};
