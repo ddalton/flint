@@ -677,6 +677,7 @@ void Application::startHealthServer() {
     health_app.route_dynamic("/healthz")
         .methods("GET"_method)
         ([this](const crow::request& req) {
+            (void)req; // Suppress unused parameter warning
             // Check if core services are running
             bool healthy = true;
             
@@ -694,7 +695,7 @@ void Application::startHealthServer() {
         });
     
     // Start health server in background
-    std::thread([this, &health_app]() {
+    std::thread([this]() {
         health_app.port(config_.health_port).multithreaded().run();
     }).detach();
 }
