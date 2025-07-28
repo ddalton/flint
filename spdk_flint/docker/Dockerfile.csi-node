@@ -1,6 +1,6 @@
 # CSI Node Plugin (DaemonSet)
 # Requires privileged access and host filesystem tools
-ARG BASE_IMAGE=spdk-flint:base
+ARG BASE_IMAGE=flint-base:latest
 FROM ${BASE_IMAGE}
 
 # Install additional tools needed for CSI node operations

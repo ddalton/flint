@@ -7,7 +7,7 @@ This directory contains specialized Docker images for different deployment patte
 We use a **layered approach** with one base image and four specialized images:
 
 ```
-spdk-flint:base                     (Base runtime + unified binary)
+flint-base:latest                   (Base runtime + unified binary)
 ├── spdk-flint:csi-node            (DaemonSet - privileged)
 ├── spdk-flint:csi-controller      (Deployment - lightweight)
 ├── spdk-flint:dashboard-backend   (Service - web API)
@@ -16,7 +16,7 @@ spdk-flint:base                     (Base runtime + unified binary)
 
 ## 📦 Image Descriptions
 
-### 1. **Base Image** (`spdk-flint:base`)
+### 1. **Base Image** (`flint-base:latest`)
 - Contains the unified C++ binary
 - Common SPDK libraries and dependencies
 - Used as foundation for all specialized images
@@ -67,11 +67,11 @@ REGISTRY=my-registry.com/spdk-flint ./docker/build-images.sh
 ### Individual Image Build
 ```bash
 # Build base image first
-docker build -f docker/Dockerfile.base -t spdk-flint:base .
+docker build -f docker/Dockerfile.base -t flint-base:latest .
 
 # Build specialized images
 docker build -f docker/Dockerfile.csi-controller \
-  --build-arg BASE_IMAGE=spdk-flint:base \
+  --build-arg BASE_IMAGE=flint-base:latest \
   -t spdk-flint:csi-controller .
 ```
 

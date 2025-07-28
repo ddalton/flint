@@ -1,6 +1,6 @@
 # CSI Controller Plugin (Deployment)
 # Lightweight controller that doesn't need host access
-ARG BASE_IMAGE=spdk-flint:base
+ARG BASE_IMAGE=flint-base:latest
 FROM ${BASE_IMAGE}
 
 # CSI Controller needs minimal additional dependencies

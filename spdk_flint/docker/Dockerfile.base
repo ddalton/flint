@@ -20,12 +20,9 @@ RUN apt-get update && apt-get install -y \
     liburing-dev \
     libfuse3-dev \
     uuid-dev \
-    # C++ dependencies
-    libspdlog-dev \
+    # C++ dependencies (we'll build gRPC from source)
     libprotobuf-dev \
     protobuf-compiler \
-    libgrpc++-dev \
-    grpc-tools \
     libcurl4-openssl-dev \
     # Additional tools
     python3 \
@@ -35,10 +32,34 @@ RUN apt-get update && apt-get install -y \
     automake \
     libtool \
     meson \
+    ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory
 WORKDIR /workspace
+
+# Build and install spdlog
+RUN git clone https://github.com/gabime/spdlog.git && \
+    cd spdlog && \
+    git checkout v1.12.0 && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DSPDLOG_BUILD_SHARED=ON && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Build and install gRPC
+RUN git clone --recurse-submodules -b v1.60.0 --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
+    cd grpc && \
+    mkdir -p cmake/build && \
+    cd cmake/build && \
+    cmake -DgRPC_INSTALL=ON \
+          -DgRPC_BUILD_TESTS=OFF \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          ../.. && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
 
 # Clone and build SPDK v25.05.x
 RUN git clone https://github.com/spdk/spdk.git && \
@@ -56,7 +77,8 @@ RUN git clone https://github.com/CrowCpp/Crow.git && \
     mkdir build && cd build && \
     cmake .. -DCROW_BUILD_EXAMPLES=OFF && \
     make -j$(nproc) && \
-    make install
+    make install && \
+    ldconfig
 
 # Copy source code
 COPY . /workspace/spdk_flint/
@@ -90,10 +112,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-3 \
     libuuid1 \
     # C++ runtime dependencies
-    libspdlog1.12 \
     libprotobuf32t64 \
-    libgrpc++1.51 \
     libcurl4 \
+    libstdc++6 \
+    zlib1g \
     # Basic utilities
     curl \
     ca-certificates \
@@ -106,18 +128,42 @@ COPY --from=builder /usr/local/lib/pkgconfig/spdk* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
 COPY --from=builder /usr/local/scripts/ /usr/local/scripts/
 
+# Copy built libraries (spdlog, gRPC, Crow)
+COPY --from=builder /usr/local/lib/libspdlog* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libgrpc* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libprotobuf* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libabsl* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libaddress_sorting* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libcares* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libre2* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libupb* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libgpr* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libCrow* /usr/local/lib/
+COPY --from=builder /usr/local/include/spdlog/ /usr/local/include/spdlog/
+COPY --from=builder /usr/local/include/grpc* /usr/local/include/
+COPY --from=builder /usr/local/include/google/ /usr/local/include/google/
+COPY --from=builder /usr/local/include/crow/ /usr/local/include/crow/
+COPY --from=builder /usr/local/bin/grpc_* /usr/local/bin/
+COPY --from=builder /usr/local/bin/protoc* /usr/local/bin/
+
+# Copy pkg-config files for built libraries
+COPY --from=builder /usr/local/lib/pkgconfig/grpc* /usr/local/lib/pkgconfig/
+COPY --from=builder /usr/local/lib/pkgconfig/protobuf* /usr/local/lib/pkgconfig/
+COPY --from=builder /usr/local/lib/pkgconfig/absl* /usr/local/lib/pkgconfig/
+
 # Copy our unified binary
 COPY --from=builder /usr/local/bin/spdk_flint /usr/local/bin/
 
 # Create necessary directories
 RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
 
-# Set up library paths
-RUN ldconfig
+# Set up library paths and update cache
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # Create runtime user (will be overridden in specialized images if needed)
 RUN useradd -m -u 1001 spdk-flint
 
 # Set default environment variables
 ENV LOG_LEVEL=info
-ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock 
+ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" 

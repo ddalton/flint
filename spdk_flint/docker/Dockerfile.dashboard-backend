@@ -1,6 +1,6 @@
 # Dashboard Backend (Service)
 # Web API service for monitoring dashboard
-ARG BASE_IMAGE=spdk-flint:base
+ARG BASE_IMAGE=flint-base:latest
 FROM ${BASE_IMAGE}
 
 # Dashboard backend specific dependencies

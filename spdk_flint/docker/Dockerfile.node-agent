@@ -1,6 +1,6 @@
 # Node Agent (DaemonSet)
 # Manages local storage devices and SPDK setup on each node
-ARG BASE_IMAGE=spdk-flint:base
+ARG BASE_IMAGE=flint-base:latest
 FROM ${BASE_IMAGE}
 
 # Install tools needed for disk management and SPDK setup

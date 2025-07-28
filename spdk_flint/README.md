@@ -249,7 +249,7 @@ cd spdk_flint
 ./docker/build-images.sh
 
 # Images created:
-# - spdk-flint:base              (Common base)
+# - flint-base:latest            (Common base)
 # - spdk-flint:csi-controller    (Deployment - lightweight)
 # - spdk-flint:csi-node         (DaemonSet - privileged)
 # - spdk-flint:dashboard-backend (Service - web API)

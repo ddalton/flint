@@ -82,23 +82,23 @@ main() {
     
     # Build base image first
     log "=== Building Base Image ==="
-    build_image "docker/Dockerfile.base" "base" "Base runtime image"
+    build_image "docker/Dockerfile.base" "flint-base" "Base runtime image"
     
     # Build specialized images
     log ""
     log "=== Building Specialized Images ==="
     
     # CSI Node (DaemonSet)
-    BASE_IMAGE="$REGISTRY/base:$TAG" build_image "docker/Dockerfile.csi-node" "csi-node" "CSI Node Plugin (DaemonSet)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-node" "csi-node" "CSI Node Plugin (DaemonSet)"
     
     # CSI Controller (Deployment)  
-    BASE_IMAGE="$REGISTRY/base:$TAG" build_image "docker/Dockerfile.csi-controller" "csi-controller" "CSI Controller Plugin (Deployment)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-controller" "csi-controller" "CSI Controller Plugin (Deployment)"
     
     # Dashboard Backend (Service)
-    BASE_IMAGE="$REGISTRY/base:$TAG" build_image "docker/Dockerfile.dashboard-backend" "dashboard-backend" "Dashboard Backend API (Service)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.dashboard-backend" "dashboard-backend" "Dashboard Backend API (Service)"
     
     # Node Agent (DaemonSet)
-    BASE_IMAGE="$REGISTRY/base:$TAG" build_image "docker/Dockerfile.node-agent" "node-agent" "Node Agent (DaemonSet)"
+    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.node-agent" "node-agent" "Node Agent (DaemonSet)"
     
     log ""
     log "=== Running Basic Tests ==="
@@ -149,7 +149,7 @@ main() {
 push_images() {
     log "Pushing images to registry..."
     
-    for image in base csi-controller csi-node dashboard-backend node-agent; do
+    for image in flint-base csi-controller csi-node dashboard-backend node-agent; do
         log "Pushing $REGISTRY/$image:$TAG"
         docker push "$REGISTRY/$image:$TAG"
     done
