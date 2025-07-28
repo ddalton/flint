@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
     libtool \
     meson \
     ninja-build \
-    # Additional build tools for ISA-L/ISA-L-crypto
+    # Additional build tools  
     autotools-dev \
     libtool-bin \
     make \
@@ -97,7 +97,9 @@ RUN git clone https://github.com/spdk/spdk.git && \
     echo "Configuring SPDK with UBLK support..." && \
     echo "Checking configure dependencies..." && \
     which nasm && nasm --version && \
-    echo "Starting SPDK configure..." && \
+    echo "Checking if nasm version is adequate..." && \
+    nasm --version | grep -E "version 2\.(1[4-9]|[2-9][0-9])" && \
+    echo "Starting SPDK configure (disabling crypto to avoid build issues)..." && \
     AS=nasm ./configure \
         --with-ublk \
         --disable-tests \
@@ -105,13 +107,21 @@ RUN git clone https://github.com/spdk/spdk.git && \
         --without-shared \
         --without-nvme-cuse \
         --without-fuse \
-        --with-uring 2>&1 | tee configure.log && \
-    echo "SPDK configure completed successfully" || \
-    (echo "Configure failed! Checking logs..." && \
-     cat configure.log && \
-     [ -f .spdk-isal-crypto.log ] && echo "ISA-L-crypto log:" && cat .spdk-isal-crypto.log && \
-     [ -f .spdk-isal.log ] && echo "ISA-L log:" && cat .spdk-isal.log && \
-     exit 1) && \
+        --with-uring \
+        --without-isal-crypto \
+        --without-crypto 2>&1 | tee configure.log && \
+    echo "Verifying SPDK configure success..." && \
+    if [ ! -f mk/config.mk ]; then \
+        echo "ERROR: SPDK configure failed - config.mk not generated!" && \
+        echo "=== CONFIGURE LOG ===" && \
+        tail -50 configure.log && \
+        echo "=== ISA-L-CRYPTO LOG ===" && \
+        [ -f .spdk-isal-crypto.log ] && cat .spdk-isal-crypto.log && \
+        echo "=== ISA-L LOG ===" && \
+        [ -f .spdk-isal.log ] && cat .spdk-isal.log && \
+        exit 1; \
+    fi && \
+    echo "SPDK configure completed successfully" && \
     make -j$(nproc) && \
     echo "Installing SPDK libraries and headers..." && \
     make -C lib install && \
