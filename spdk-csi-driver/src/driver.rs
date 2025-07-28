@@ -97,7 +97,7 @@ impl SpdkCsiDriver {
         let response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
-                "method": "ublk_start_disk",
+                "method": "bdev_ublk_create",
                 "params": {
                     "bdev_name": bdev_name,
                     "ublk_id": ublk_id
@@ -129,7 +129,7 @@ impl SpdkCsiDriver {
         let response = http_client
             .post(&self.spdk_rpc_url)
             .json(&json!({
-                "method": "ublk_stop_disk",
+                "method": "bdev_ublk_delete",
                 "params": {
                     "ublk_id": ublk_id
                 }

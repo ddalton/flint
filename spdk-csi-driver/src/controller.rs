@@ -320,24 +320,21 @@ impl ControllerService {
         
         let lvol_name = format!("vol_{}", volume_id);
 
-        // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
-        let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
-        
         let create_params = json!({
             "method": "bdev_lvol_create",
             "params": {
                 "lvs_name": lvs_name,
                 "lvol_name": lvol_name,
-                "size_in_mib": size_in_mib,
+                "size": size_bytes,
                 "thin_provision": false,
-                "clear_method": "unmap"
+                "clear_method": "write_zeroes"
             }
         });
 
         println!("🔧 [CREATE_LVOL] Creating logical volume with parameters:");
         println!("   LVS name: '{}'", lvs_name);
         println!("   LVOL name: '{}'", lvol_name);
-        println!("   Size: {} bytes ({} MiB)", size_bytes, size_in_mib);
+        println!("   Size: {} bytes", size_bytes);
         println!("   RPC URL: {}", rpc_url);
         println!("   Full JSON payload: {}", serde_json::to_string_pretty(&create_params).unwrap_or_else(|_| "Failed to serialize".to_string()));
 
@@ -804,16 +801,13 @@ impl Controller for ControllerService {
                 };
                 let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
 
-                // Convert bytes to MiB as required by SPDK bdev_lvol_resize RPC
-                let size_in_mib = (new_capacity + 1048575) / 1048576; // Round up to nearest MiB
-                
                 let response = http_client
                     .post(&rpc_url)
                     .json(&json!({
                         "method": "bdev_lvol_resize",
                         "params": {
                             "name": lvol_name,
-                            "size_in_mib": size_in_mib
+                            "size": new_capacity
                         }
                     }))
                     .send()
