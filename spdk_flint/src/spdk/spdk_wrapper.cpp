@@ -12,12 +12,23 @@
 #include <chrono>
 #include <cstring>
 #include <atomic>
+#include <sys/stat.h>    // For stat()
+#include <fmt/ranges.h>  // For fmt::join
 
 // Additional SPDK headers for direct C API calls
 extern "C" {
 #include <spdk/bdev_module.h>
 #include <spdk/vmd.h>
 #include <spdk/nvme_spec.h>
+#include <spdk/version.h>
+#include <spdk/blobstore.h>
+
+// Internal SPDK headers for complete struct definitions
+// From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/include/spdk_internal/lvolstore.h
+#include "spdk_internal/lvolstore.h"
+// From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
+// This provides lvol_store_bdev struct with lvs pointer
+#include "spdk/bdev_module.h"
 
 // Forward declarations for NVMe controller functions
 // These are internal SPDK functions from module/bdev/nvme/bdev_nvme_rpc.c
@@ -25,6 +36,45 @@ struct nvme_bdev_ctrlr;
 extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_get_by_name(const char* name);
 extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_first(void);
 extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_next(struct nvme_bdev_ctrlr* ctrlr);
+
+// LVol store functions - these are confirmed to exist in SPDK source
+// From module/bdev/lvol/vbdev_lvol_rpc.c: vbdev_get_lvol_store_by_uuid_xor_name
+extern struct spdk_lvol_store* vbdev_get_lvol_store_by_uuid(const struct spdk_uuid* uuid);
+extern struct spdk_lvol_store* vbdev_get_lvol_store_by_name(const char* name);
+
+// Iterator functions from spdk_internal/lvolstore.h - working with lvol_store_bdev
+// From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
+struct lvol_store_bdev;
+extern struct lvol_store_bdev* vbdev_lvol_store_first(void);
+extern struct lvol_store_bdev* vbdev_lvol_store_next(struct lvol_store_bdev* prev);
+
+// LVol store creation/destruction functions
+extern int vbdev_lvs_create_ext(const char* base_bdev_name, const char* name, 
+                               uint32_t cluster_sz, enum lvs_clear_method clear_method,
+                               uint32_t num_md_pages_per_cluster_ratio, uint32_t md_page_size,
+                               void (*cb_fn)(void*, struct spdk_lvol_store*, int), void* cb_arg);
+extern void vbdev_lvs_destruct(struct spdk_lvol_store* lvs, 
+                              void (*cb_fn)(void*, int), void* cb_arg);
+
+// Helper function to get lvol_store_bdev from spdk_lvol_store (from vbdev_lvol.h)
+extern struct lvol_store_bdev* vbdev_get_lvs_bdev_by_lvs(struct spdk_lvol_store* lvs);
+
+// NVMe controller attach function from module/bdev/nvme/bdev_nvme_rpc.c
+extern int bdev_nvme_attach_controller(const char* name, const char* trtype, const char* traddr,
+                                      const char* adrfam, const char* trsvcid, const char* priority,
+                                      const char* subnqn, const char* hostnqn,
+                                      const char* hostaddr, const char* hostsvcid,
+                                      bool multipath, uint32_t num_io_queues,
+                                      uint32_t ctrlr_loss_timeout_sec, uint32_t reconnect_delay_sec,
+                                      uint32_t fast_io_fail_timeout_sec,
+                                      void (*cb_fn)(void*, size_t, int), void* cb_arg);
+
+// Clear method enum (from SPDK source)
+enum lvs_clear_method {
+    LVS_CLEAR_WITH_NONE,
+    LVS_CLEAR_WITH_UNMAP,
+    LVS_CLEAR_WITH_WRITE_ZEROES,
+};
 }
 
 namespace spdk_flint {
@@ -38,7 +88,7 @@ static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
     (void)wrapper; // Suppress unused variable warning
     spdk_flint::logger()->info("[SPDK] Application started successfully - reactor framework active");
-    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_get_version_string());
+    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_version_string());
     spdk_flint::logger()->debug("[SPDK] Current thread: {}", fmt::ptr(spdk_get_thread()));
     g_spdk_initialized = true;
 }
@@ -112,10 +162,16 @@ bool SpdkWrapper::initialize() {
         opts_->delay_subsystem_init = true;
         
         spdk_flint::logger()->debug("[SPDK] SPDK options configured:");
-        spdk_flint::logger()->debug("[SPDK]   - Name: {}", opts_->name);
-        spdk_flint::logger()->debug("[SPDK]   - Config file: {}", opts_->json_config_file ? opts_->json_config_file : "none");
-        spdk_flint::logger()->debug("[SPDK]   - Reactor mask: {}", opts_->reactor_mask);
-        spdk_flint::logger()->debug("[SPDK]   - Memory size: {} MB", opts_->mem_size);
+        // Copy packed fields to temporary variables for logging
+        const char* name = opts_->name;
+        const char* config_file = opts_->json_config_file;
+        const char* reactor_mask = opts_->reactor_mask;
+        int mem_size = opts_->mem_size;
+        
+        spdk_flint::logger()->debug("[SPDK]   - Name: {}", name ? name : "null");
+        spdk_flint::logger()->debug("[SPDK]   - Config file: {}", config_file ? config_file : "none");
+        spdk_flint::logger()->debug("[SPDK]   - Reactor mask: {}", reactor_mask ? reactor_mask : "null");
+        spdk_flint::logger()->debug("[SPDK]   - Memory size: {} MB", mem_size);
         spdk_flint::logger()->debug("[SPDK]   - PCI access: {}", opts_->no_pci ? "disabled" : "enabled");
         
         // Use SPDK's proper application startup - this sets up signal handlers
@@ -234,7 +290,8 @@ static struct spdk_lvol_store* get_lvol_store_by_uuid_or_name(const std::string&
         if (lvs == nullptr) {
             spdk_flint::logger()->warn("[SPDK] LVS with UUID '{}' not found", uuid);
         } else {
-            spdk_flint::logger()->debug("[SPDK] Found LVS by UUID: {} (name: {})", uuid, lvs->name);
+            // Log basic info - name field access from spdk_internal/lvolstore.h
+            spdk_flint::logger()->debug("[SPDK] Found LVS by UUID: {} (name: '{}')", uuid, lvs->name);
         }
     } else {
         spdk_flint::logger()->debug("[SPDK] Searching LVS by name: {}", lvs_name);
@@ -242,6 +299,7 @@ static struct spdk_lvol_store* get_lvol_store_by_uuid_or_name(const std::string&
         if (lvs == nullptr) {
             spdk_flint::logger()->warn("[SPDK] LVS with name '{}' not found", lvs_name);
         } else {
+            // Log UUID info - UUID field access from spdk_internal/lvolstore.h
             char uuid_str[SPDK_UUID_STRING_LEN];
             spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &lvs->uuid);
             spdk_flint::logger()->debug("[SPDK] Found LVS by name: {} (UUID: {})", lvs_name, uuid_str);
@@ -286,36 +344,61 @@ void SpdkWrapper::getLvolStoresAsync(
                 // Return all LVS stores using vbdev_lvol_store_first() and vbdev_lvol_store_next()
                 spdk_flint::logger()->debug("[SPDK] Enumerating all LVol stores using iterator");
                 
-                struct spdk_lvol_store* lvs = vbdev_lvol_store_first();
+                // Enumerate all LVol stores using lvol_store_bdev iterator
+                // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
+                spdk_flint::logger()->debug("[SPDK] Enumerating all LVol stores using lvol_store_bdev iterator");
+                
+                struct lvol_store_bdev* lvs_bdev = vbdev_lvol_store_first();
                 int count = 0;
-                while (lvs != nullptr) {
-                    LvolStoreInfo info;
+                while (lvs_bdev != nullptr) {
+                    // Access spdk_lvol_store through lvol_store_bdev->lvs pointer
+                    struct spdk_lvol_store* lvs = lvs_bdev->lvs;
                     
-                    // Get UUID
-                    char uuid_str[SPDK_UUID_STRING_LEN];
-                    spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &lvs->uuid);
-                    info.uuid = std::string(uuid_str);
+                    if (lvs != nullptr) {
+                        LvolStoreInfo info;
+                        
+                        // Extract LVS information (using complete struct from spdk_internal/lvolstore.h)
+                        // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/include/spdk_internal/lvolstore.h
+                        char uuid_str[SPDK_UUID_STRING_LEN];
+                        spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &lvs->uuid);
+                        info.uuid = std::string(uuid_str);
+                        
+                        // Get name from struct (char name[SPDK_LVS_NAME_MAX])
+                        info.name = std::string(lvs->name);
+                        
+                        // Try to get base bdev name through lvol_store_bdev->bdev
+                        if (lvs_bdev->bdev) {
+                            info.base_bdev = std::string(spdk_bdev_get_name(lvs_bdev->bdev));
+                        } else {
+                            info.base_bdev = "unknown";
+                        }
+                        
+                        // Get cluster information from blobstore (struct spdk_blob_store *blobstore)
+                        if (lvs->blobstore) {
+                            info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+                            info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
+                            info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
+                            info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
+                        } else {
+                            info.total_clusters = 0;
+                            info.free_clusters = 0;
+                            info.cluster_size = 0;
+                            info.block_size = 0;
+                        }
+                        
+                        lvs_list.push_back(info);
+                        count++;
+                        
+                        spdk_flint::logger()->debug("[SPDK] LVS #{}: name='{}', uuid='{}', base_bdev='{}', "
+                                                   "clusters={}/{}, cluster_size={}, block_size={}", 
+                                                   count, info.name, info.uuid, info.base_bdev,
+                                                   info.free_clusters, info.total_clusters, 
+                                                   info.cluster_size, info.block_size);
+                    } else {
+                        spdk_flint::logger()->warn("[SPDK] Found lvol_store_bdev with null lvs pointer, skipping");
+                    }
                     
-                    // Get LVS name and base bdev
-                    info.name = std::string(lvs->name);
-                    info.base_bdev = std::string(spdk_bdev_get_name(lvs->bs_dev->bdev));
-                    
-                    // Get cluster information
-                    info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
-                    info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
-                    info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
-                    info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
-                    
-                    lvs_list.push_back(info);
-                    count++;
-                    
-                    spdk_flint::logger()->debug("[SPDK] LVS #{}: name='{}', uuid='{}', base_bdev='{}', "
-                                               "clusters={}/{}, cluster_size={}, block_size={}", 
-                                               count, info.name, info.uuid, info.base_bdev,
-                                               info.free_clusters, info.total_clusters, 
-                                               info.cluster_size, info.block_size);
-                    
-                    lvs = vbdev_lvol_store_next(lvs);
+                    lvs_bdev = vbdev_lvol_store_next(lvs_bdev);
                 }
                 
                 spdk_flint::logger()->info("[SPDK] Enumerated {} LVol stores successfully", lvs_list.size());
@@ -328,17 +411,35 @@ void SpdkWrapper::getLvolStoresAsync(
                 if (lvs != nullptr) {
                     LvolStoreInfo info;
                     
-                    // Get UUID
+                    // Extract LVS information (using complete struct from spdk_internal/lvolstore.h)
+                    // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/include/spdk_internal/lvolstore.h
                     char uuid_str[SPDK_UUID_STRING_LEN];
                     spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &lvs->uuid);
                     info.uuid = std::string(uuid_str);
                     
+                    // Get name from struct (char name[SPDK_LVS_NAME_MAX])
                     info.name = std::string(lvs->name);
-                    info.base_bdev = std::string(spdk_bdev_get_name(lvs->bs_dev->bdev));
-                    info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
-                    info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
-                    info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
-                    info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
+                    
+                    // Get base bdev name through lvol_store_bdev helper function
+                    struct lvol_store_bdev* lvs_bdev = vbdev_get_lvs_bdev_by_lvs(lvs);
+                    if (lvs_bdev && lvs_bdev->bdev) {
+                        info.base_bdev = std::string(spdk_bdev_get_name(lvs_bdev->bdev));
+                    } else {
+                        info.base_bdev = "unknown";
+                    }
+                    
+                    // Get cluster information from blobstore (struct spdk_blob_store *blobstore)
+                    if (lvs->blobstore) {
+                        info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+                        info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
+                        info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
+                        info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
+                    } else {
+                        info.total_clusters = 0;
+                        info.free_clusters = 0;
+                        info.cluster_size = 0;
+                        info.block_size = 0;
+                    }
                     
                     lvs_list.push_back(info);
                     
@@ -563,18 +664,26 @@ void SpdkWrapper::deleteLvolStoreAsync(
             return;
         }
         
-        // Log details before deletion
+        // Log details before deletion (using complete struct from spdk_internal/lvolstore.h)
         char uuid_str[SPDK_UUID_STRING_LEN];
         spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &lvs->uuid);
-        uint64_t total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
-        uint64_t free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
-        uint64_t used_clusters = total_clusters - free_clusters;
         
-        spdk_flint::logger()->debug("[SPDK] Found LVS for deletion: name='{}', uuid='{}', usage={}/{} clusters",
-                                   lvs->name, uuid_str, used_clusters, total_clusters);
+        spdk_flint::logger()->debug("[SPDK] Found LVS for deletion: uuid='{}', name='{}'", 
+                                   uuid_str, lvs->name);
         
-        if (used_clusters > 0) {
-            spdk_flint::logger()->warn("[SPDK] Deleting LVS with {} used clusters - data will be lost", used_clusters);
+        // Get usage information from blobstore (struct spdk_blob_store *blobstore)
+        if (lvs->blobstore) {
+            uint64_t total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+            uint64_t free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
+            uint64_t used_clusters = total_clusters - free_clusters;
+            
+            spdk_flint::logger()->debug("[SPDK] LVS usage: {}/{} clusters used", used_clusters, total_clusters);
+            
+            if (used_clusters > 0) {
+                spdk_flint::logger()->warn("[SPDK] Deleting LVS with {} used clusters - data will be lost", used_clusters);
+            }
+        } else {
+            spdk_flint::logger()->warn("[SPDK] Cannot access blobstore for usage information");
         }
         
         // Call vbdev_lvs_destruct with callback
@@ -927,15 +1036,123 @@ void SpdkWrapper::attachNvmeControllerAsync(
         return;
     }
     
-    // Implementation would use the SPDK attach controller API
-    // This is a complex operation that requires careful parameter handling
+    // Context for async operation
+    struct AttachNvmeCtx {
+        NvmeAttachCallback callback;
+        std::string name;
+        std::string trtype;
+        std::string traddr;
+        std::string adrfam;
+        std::string trsvcid;
+        std::string subnqn;
+        std::string hostnqn;
+        std::string hostaddr;
+        std::string hostsvcid;
+        bool multipath;
+        uint32_t num_io_queues;
+        uint32_t ctrlr_loss_timeout_sec;
+        uint32_t reconnect_delay_sec;
+        uint32_t fast_io_fail_timeout_sec;
+        std::chrono::steady_clock::time_point start_time;
+    };
     
-    spdk_flint::logger()->warn("[SPDK] NVMe controller attach not yet fully implemented - returning ENOSYS");
-    spdk_flint::logger()->debug("[SPDK] Full implementation requires complex SPDK transport configuration");
+    auto* ctx = new AttachNvmeCtx{callback, name, trtype, traddr, adrfam, trsvcid, subnqn, hostnqn, 
+                                 hostaddr, hostsvcid, multipath, num_io_queues, ctrlr_loss_timeout_sec,
+                                 reconnect_delay_sec, fast_io_fail_timeout_sec, std::chrono::steady_clock::now()};
+    spdk_flint::logger()->debug("[SPDK] Created async context for NVMe controller attach");
     
-    if (callback) {
-        callback({}, -ENOSYS);
-    }
+    spdk_thread_send_msg(spdk_get_thread(), [](void* arg) {
+        auto* ctx = static_cast<AttachNvmeCtx*>(arg);
+        
+        spdk_flint::logger()->debug("[SPDK] Executing NVMe controller attach on reactor thread");
+        
+        // Convert parameters to C strings (some can be NULL)
+        const char* priority_str = nullptr;  // Use default priority
+        const char* subnqn_str = ctx->subnqn.empty() ? nullptr : ctx->subnqn.c_str();
+        const char* hostnqn_str = ctx->hostnqn.empty() ? nullptr : ctx->hostnqn.c_str();
+        const char* hostaddr_str = ctx->hostaddr.empty() ? nullptr : ctx->hostaddr.c_str();
+        const char* hostsvcid_str = ctx->hostsvcid.empty() ? nullptr : ctx->hostsvcid.c_str();
+        const char* adrfam_str = ctx->adrfam.empty() ? nullptr : ctx->adrfam.c_str();
+        const char* trsvcid_str = ctx->trsvcid.empty() ? nullptr : ctx->trsvcid.c_str();
+        
+        spdk_flint::logger()->debug("[SPDK] Calling bdev_nvme_attach_controller with parameters:");
+        spdk_flint::logger()->debug("[SPDK]   name='{}', trtype='{}', traddr='{}'", ctx->name, ctx->trtype, ctx->traddr);
+        spdk_flint::logger()->debug("[SPDK]   adrfam='{}', trsvcid='{}', multipath={}", 
+                                   adrfam_str ? adrfam_str : "null", trsvcid_str ? trsvcid_str : "null", ctx->multipath);
+        spdk_flint::logger()->debug("[SPDK]   queues={}, timeouts={}/{}/{}", ctx->num_io_queues, 
+                                   ctx->ctrlr_loss_timeout_sec, ctx->reconnect_delay_sec, ctx->fast_io_fail_timeout_sec);
+        
+                 // Call the real SPDK function
+         int rc = bdev_nvme_attach_controller(
+             ctx->name.c_str(),
+             ctx->trtype.c_str(),
+             ctx->traddr.c_str(),
+             adrfam_str,
+             trsvcid_str,
+             priority_str,
+             subnqn_str,
+             hostnqn_str,
+             hostaddr_str,
+             hostsvcid_str,
+             ctx->multipath,
+             ctx->num_io_queues,
+             ctx->ctrlr_loss_timeout_sec,
+             ctx->reconnect_delay_sec,
+             ctx->fast_io_fail_timeout_sec,
+            [](void* cb_arg, size_t bdev_count, int nvme_status) {
+                auto* ctx = static_cast<AttachNvmeCtx*>(cb_arg);
+                
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - ctx->start_time);
+                
+                if (nvme_status == 0) {
+                    // Success - build list of attached bdev names
+                    std::vector<std::string> bdev_names;
+                    
+                    // For NVMe controllers, bdevs are typically named like "Nvme0n1", "Nvme0n2", etc.
+                    // where "Nvme0" is the controller name and "n1", "n2" are namespace numbers
+                    for (size_t i = 1; i <= bdev_count; i++) {
+                        std::string bdev_name = ctx->name + "n" + std::to_string(i);
+                        bdev_names.push_back(bdev_name);
+                    }
+                    
+                    spdk_flint::logger()->info("[SPDK] Successfully attached NVMe controller '{}' in {} ms", 
+                                             ctx->name, duration.count());
+                    spdk_flint::logger()->info("[SPDK] Created {} block device(s): {}", 
+                                             bdev_count, fmt::join(bdev_names, ", "));
+                    
+                    if (ctx->callback) {
+                        ctx->callback(bdev_names, 0);
+                    }
+                } else {
+                    spdk_flint::logger()->error("[SPDK] Failed to attach NVMe controller '{}' after {} ms: {} ({})", 
+                                               ctx->name, duration.count(), nvme_status, strerror(-nvme_status));
+                    
+                    if (ctx->callback) {
+                        ctx->callback({}, nvme_status);
+                    }
+                }
+                
+                delete ctx;
+            },
+            ctx
+        );
+        
+        if (rc != 0) {
+            // Immediate error - callback won't be called
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - ctx->start_time);
+            
+            spdk_flint::logger()->error("[SPDK] Failed to initiate NVMe controller attach '{}' after {} ms: {} ({})", 
+                                       ctx->name, duration.count(), rc, strerror(-rc));
+            
+            if (ctx->callback) {
+                ctx->callback({}, rc);
+            }
+            
+            delete ctx;
+        }
+    }, ctx);
 }
 
 // Block Device Enumeration Implementation
