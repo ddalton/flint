@@ -690,7 +690,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     };
     
     // Update existing CRDs based on current physical devices
-    for existing_disk in existing_disks {
+    for existing_disk in &existing_disks {
         let disk_name = existing_disk.metadata.name.as_ref().unwrap();
         
         // Find matching physical device for this CRD
@@ -1317,8 +1317,8 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     }
     
     // Check if device path or nvme_controller_id need updating due to device name changes
-    let current_device_path = format!("/dev/{}", device.name);
-    let current_controller_id = device.name.clone();
+    let current_device_path = format!("/dev/{}", device.controller_id);
+    let current_controller_id = device.controller_id.clone();
     
     if disk.spec.device_path != current_device_path || 
        disk.spec.nvme_controller_id.as_ref() != Some(&current_controller_id) {
