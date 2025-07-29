@@ -61,38 +61,7 @@ find_package(OpenSSL REQUIRED)
 
 # Manual SPDK detection (pkg-config files not available)
 # Based on debugging output, these libraries exist in /usr/local/lib/
-set(SPDK_LIBRARY_NAMES
-    spdk_env_dpdk
-    spdk_util
-    spdk_nvme
-    spdk_bdev
-    spdk_blob
-    spdk_lvol
-    spdk_nvmf
-    spdk_rpc
-    spdk_thread
-    spdk_log
-    spdk_sock
-    spdk_json
-    spdk_jsonrpc
-    spdk_trace
-    spdk_notify
-    spdk_init
-    spdk_event
-    spdk_accel
-    spdk_ublk
-    spdk_conf
-)
-
-set(SPDK_LIBRARIES "")
-foreach(lib_name ${SPDK_LIBRARY_NAMES})
-    find_library(SPDK_${lib_name}_LIBRARY 
-        NAMES ${lib_name} 
-        PATHS /usr/local/lib 
-        REQUIRED
-    )
-    list(APPEND SPDK_LIBRARIES ${SPDK_${lib_name}_LIBRARY})
-endforeach()
+# SPDK library discovery is done individually below for better control
 
 set(SPDK_INCLUDE_DIRS /usr/local/include)
 
@@ -247,6 +216,9 @@ if(PKG_CONFIG_FOUND)
     endif()
 endif()
 
+# Also find system DPDK library (provides all rte_* functions)
+find_library(DPDK_MAIN NAMES dpdk rte libdpdk PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+
 # Add library search directories for SPDK
 link_directories(/usr/local/lib)
 
@@ -259,11 +231,15 @@ find_library(SPDK_TRACE NAMES spdk_trace PATHS /usr/local/lib)
 find_library(SPDK_NOTIFY NAMES spdk_notify PATHS /usr/local/lib)
 find_library(SPDK_JSON NAMES spdk_json PATHS /usr/local/lib)
 find_library(SPDK_JSONRPC NAMES spdk_jsonrpc PATHS /usr/local/lib)
+find_library(SPDK_JSONRPC_CLIENT NAMES spdk_jsonrpc_client PATHS /usr/local/lib)
 find_library(SPDK_MEMORY NAMES spdk_memory spdk_memory_domain spdk_dma PATHS /usr/local/lib)
 find_library(SPDK_SOCK NAMES spdk_sock PATHS /usr/local/lib)
 find_library(SPDK_BDEV NAMES spdk_bdev PATHS /usr/local/lib)
 find_library(SPDK_ACCEL NAMES spdk_accel PATHS /usr/local/lib)
 find_library(SPDK_INIT NAMES spdk_init PATHS /usr/local/lib)
+find_library(SPDK_RPC NAMES spdk_rpc PATHS /usr/local/lib)
+find_library(SPDK_EVENT NAMES spdk_event PATHS /usr/local/lib)
+find_library(SPDK_NVME NAMES spdk_nvme PATHS /usr/local/lib)
 
 # Find ISA-L libraries (Intel Storage Acceleration Library)
 # SPDK builds ISA-L internally, so check multiple naming patterns and locations
@@ -284,21 +260,29 @@ message(STATUS "SPDK libraries found:")
 message(STATUS "  ENV_DPDK: ${SPDK_ENV_DPDK}")
 message(STATUS "  UTIL: ${SPDK_UTIL}")
 message(STATUS "  LOG: ${SPDK_LOG}")
+message(STATUS "  JSON: ${SPDK_JSON}")
 message(STATUS "  JSONRPC: ${SPDK_JSONRPC}")
+message(STATUS "  JSONRPC_CLIENT: ${SPDK_JSONRPC_CLIENT}")
 message(STATUS "  MEMORY: ${SPDK_MEMORY}")
 message(STATUS "  SOCK: ${SPDK_SOCK}")
+message(STATUS "  BDEV: ${SPDK_BDEV}")
+message(STATUS "  ACCEL: ${SPDK_ACCEL}")
+message(STATUS "  INIT: ${SPDK_INIT}")
+message(STATUS "  RPC: ${SPDK_RPC}")
+message(STATUS "  EVENT: ${SPDK_EVENT}")
+message(STATUS "  NVME: ${SPDK_NVME}")
+message(STATUS "DPDK libraries found:")
+message(STATUS "  DPDK_FOUND: ${DPDK_FOUND}")
+message(STATUS "  DPDK_LIBRARIES: ${DPDK_LIBRARIES}")
+message(STATUS "  DPDK_MAIN: ${DPDK_MAIN}")
 message(STATUS "ISA-L libraries found:")
 message(STATUS "  ISAL: ${ISAL}")
 message(STATUS "  ISAL_CRYPTO: ${ISAL_CRYPTO}")
 
 # Link libraries for the main library with proper SPDK dependency order
 target_link_libraries(spdk_flint_lib
-    # Link SPDK libraries with whole-archive to ensure all symbols are available
-    -Wl,--whole-archive
-    ${SPDK_LIBRARIES}
-    -Wl,--no-whole-archive
-    # Add DPDK if found
-    ${DPDK_LIBRARIES}
+    # SPDK libraries are linked conditionally below with whole-archive
+    # Add DPDK if found (removed from here, handled conditionally below)
     ${Protobuf_LIBRARIES}
     ${gRPC_LIBRARIES}
     ${spdlog_LIBRARIES}
@@ -347,6 +331,9 @@ endif()
 if(SPDK_JSONRPC)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSONRPC} -Wl,--no-whole-archive)
 endif()
+if(SPDK_JSONRPC_CLIENT)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSONRPC_CLIENT} -Wl,--no-whole-archive)
+endif()
 if(SPDK_BDEV)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_BDEV} -Wl,--no-whole-archive)
 endif()
@@ -356,6 +343,15 @@ endif()
 if(SPDK_INIT)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_INIT} -Wl,--no-whole-archive)
 endif()
+if(SPDK_RPC)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_RPC} -Wl,--no-whole-archive)
+endif()
+if(SPDK_EVENT)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_EVENT} -Wl,--no-whole-archive)
+endif()
+if(SPDK_NVME)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_NVME} -Wl,--no-whole-archive)
+endif()
 
 # Add ISA-L libraries conditionally (only if found)
 if(ISAL)
@@ -363,6 +359,14 @@ if(ISAL)
 endif()
 if(ISAL_CRYPTO)
     target_link_libraries(spdk_flint_lib ${ISAL_CRYPTO})
+endif()
+
+# Add DPDK libraries conditionally (only if found)
+if(DPDK_FOUND)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${DPDK_LIBRARIES} -Wl,--no-whole-archive)
+endif()
+if(DPDK_MAIN)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${DPDK_MAIN} -Wl,--no-whole-archive)
 endif()
 
 # Add linker flags to resolve DSO issues
