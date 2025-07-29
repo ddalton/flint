@@ -995,7 +995,7 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     "method": "bdev_nvme_attach_controller",
                     "params": {
                         "name": controller_id,
-                        "trtype": "pcie",  // Fixed: SPDK expects lowercase per documentation
+                        "trtype": "PCIe",
                         "traddr": disk.spec.pcie_addr
                     }
                 })).await;
@@ -4076,122 +4076,166 @@ impl NodeAgent {
         let mut needs_update = false;
         let mut updated_status = disk_crd.status.clone().unwrap_or_default();
         
-        // Query actual SPDK state
-        println!("🔍 [RECONCILE] Querying SPDK for actual LVS state...");
+        // Enhanced reconciliation: Check for both AIO bdev and LVS state
+        println!("🔍 [RECONCILE] Checking complete SPDK state (AIO bdev + LVS)...");
+        
+        // Step 1: Check if AIO bdev exists for kernel-bound devices
+        let device_name = if let Some(controller_id) = &disk_crd.spec.nvme_controller_id {
+            controller_id.clone()
+        } else {
+            // Fallback: extract device name from device_path
+            disk_crd.spec.device_path.trim_start_matches("/dev/").to_string()
+        };
+        
+        let kernel_bdev_name = format!("kernel_{}", device_name);
+        let mut aio_bdev_exists = false;
+        
+        println!("🔍 [RECONCILE] Checking for AIO bdev: {}", kernel_bdev_name);
         match call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_lvol_get_lvstores"
+            "method": "bdev_get_bdevs",
+            "params": { "name": kernel_bdev_name }
         })).await {
-            Ok(lvstores_result) => {
-                let mut spdk_lvs_exists = false;
-                let mut spdk_lvs_info = None;
-                
-                if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                    for lvstore in lvstore_list {
-                        if let Some(name) = lvstore["name"].as_str() {
-                            if name == lvs_name {
-                                spdk_lvs_exists = true;
-                                spdk_lvs_info = Some(lvstore.clone());
-                                println!("✅ [RECONCILE] Found LVS in SPDK: {}", lvs_name);
-                                break;
-                            }
-                        }
+            Ok(bdev_result) => {
+                if let Some(bdev_list) = bdev_result["result"].as_array() {
+                    aio_bdev_exists = !bdev_list.is_empty();
+                    if aio_bdev_exists {
+                        println!("✅ [RECONCILE] AIO bdev {} exists", kernel_bdev_name);
+                    } else {
+                        println!("❌ [RECONCILE] AIO bdev {} not found", kernel_bdev_name);
                     }
                 }
-                
-                let crd_thinks_initialized = updated_status.blobstore_initialized;
-                
-                // Reconcile the state differences
-                if spdk_lvs_exists && !crd_thinks_initialized {
-                    println!("🔧 [RECONCILE] SPDK has LVS but CRD thinks uninitialized - updating CRD to match reality");
-                    updated_status.blobstore_initialized = true;
-                    updated_status.lvs_name = Some(lvs_name.clone());
-                    updated_status.healthy = true;
-                    
-                    // Extract capacity information
-                    if let Some(lvstore_info) = &spdk_lvs_info {
-                        if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
-                            lvstore_info["total_data_clusters"].as_u64(),
-                            lvstore_info["free_clusters"].as_u64(),
-                            lvstore_info["cluster_size"].as_u64()
-                        ) {
-                            let total_capacity = (total_clusters * cluster_size) as i64;
-                            let free_space = (free_clusters * cluster_size) as i64;
-                            let used_space = total_capacity - free_space;
-                            
-                            updated_status.total_capacity = total_capacity;
-                            updated_status.free_space = free_space;
-                            updated_status.used_space = used_space;
-                            
-                            println!("📊 [RECONCILE] Updated capacity info - Total: {}, Free: {}, Used: {}", 
-                                     total_capacity, free_space, used_space);
-                        }
-                    }
-                } else if !spdk_lvs_exists && crd_thinks_initialized {
-                    println!("🔧 [RECONCILE] CRD thinks initialized but no LVS in SPDK - updating CRD to match reality");
-                    updated_status.blobstore_initialized = false;
-                    updated_status.lvs_name = None;
-                    updated_status.healthy = false;
-                    updated_status.total_capacity = 0;
-                    updated_status.free_space = 0;
-                    updated_status.used_space = 0;
-                } else if spdk_lvs_exists && crd_thinks_initialized {
-                    // Both agree it's initialized - just refresh the capacity info
-                    if let Some(lvstore_info) = &spdk_lvs_info {
-                        if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
-                            lvstore_info["total_data_clusters"].as_u64(),
-                            lvstore_info["free_clusters"].as_u64(),
-                            lvstore_info["cluster_size"].as_u64()
-                        ) {
-                            let total_capacity = (total_clusters * cluster_size) as i64;
-                            let free_space = (free_clusters * cluster_size) as i64;
-                            let used_space = total_capacity - free_space;
-                            
-                            if updated_status.total_capacity != total_capacity || 
-                               updated_status.free_space != free_space {
-                                updated_status.total_capacity = total_capacity;
-                                updated_status.free_space = free_space;
-                                updated_status.used_space = used_space;
-                                println!("📊 [RECONCILE] Refreshed capacity info");
-                            }
-                        }
-                    }
-                } else {
-                    println!("✅ [RECONCILE] SPDK and CRD states are consistent");
-                }
-                
-                // Since we successfully communicated with SPDK, ensure healthy status is true
-                if !updated_status.healthy {
-                    println!("🔄 [RECONCILE] SPDK is reachable again - restoring healthy status");
-                    updated_status.healthy = true;
-                    needs_update = true;
-                }
-                
-                // Ensure blobstore_initialized reflects actual SPDK state
-                if spdk_lvs_exists && !updated_status.blobstore_initialized {
-                    println!("🔄 [RECONCILE] SPDK has LVS - ensuring blobstore_initialized is true");
-                    updated_status.blobstore_initialized = true;
-                    updated_status.lvs_name = Some(lvs_name.clone());
-                    needs_update = true;
-                }
-                
-                // Always update the last_checked timestamp
-                updated_status.last_checked = Utc::now().to_rfc3339();
-                needs_update = true; // Always need to update for timestamp
-                
             }
             Err(e) => {
-                println!("⚠️ [RECONCILE] Could not query SPDK LVS stores: {}", e);
-                // Don't immediately mark as unhealthy on communication errors
-                // SPDK might be temporarily unavailable due to restart, initialization, etc.
-                // Instead, only update the last_checked timestamp and preserve existing state
-                println!("🔄 [RECONCILE] Preserving current state while SPDK is unreachable");
-                updated_status.last_checked = Utc::now().to_rfc3339();
-                needs_update = true; // Update timestamp only
-                
-                // TODO: Consider implementing retry logic with exponential backoff
-                // or mark as unhealthy only after consecutive failures over a threshold period
+                println!("⚠️ [RECONCILE] Failed to query AIO bdev {}: {}", kernel_bdev_name, e);
             }
         }
+        
+        // Step 2: Query LVS state only if AIO bdev exists
+        let mut spdk_lvs_exists = false;
+        let mut spdk_lvs_info = None;
+        
+        if aio_bdev_exists {
+            println!("🔍 [RECONCILE] AIO bdev exists, checking for LVS stores...");
+            match call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_lvol_get_lvstores"
+            })).await {
+                Ok(lvstores_result) => {
+                    if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                        for lvstore in lvstore_list {
+                            if let Some(name) = lvstore["name"].as_str() {
+                                if name == lvs_name {
+                                    spdk_lvs_exists = true;
+                                    spdk_lvs_info = Some(lvstore.clone());
+                                    println!("✅ [RECONCILE] Found LVS in SPDK: {}", lvs_name);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ [RECONCILE] Could not query SPDK LVS stores: {}", e);
+                }
+            }
+        } else {
+            println!("❌ [RECONCILE] AIO bdev missing, cannot have LVS - will attempt to create AIO bdev if auto-init enabled");
+        }
+        
+        // Step 3: Enhanced state reconciliation logic
+        let crd_thinks_initialized = updated_status.blobstore_initialized;
+        
+        if aio_bdev_exists && spdk_lvs_exists && !crd_thinks_initialized {
+            // SPDK has both AIO bdev and LVS, but CRD thinks uninitialized - update CRD
+            println!("🔧 [RECONCILE] SPDK has complete setup (AIO+LVS) but CRD thinks uninitialized - updating CRD");
+            updated_status.blobstore_initialized = true;
+            updated_status.lvs_name = Some(lvs_name.clone());
+            updated_status.healthy = true;
+            needs_update = true;
+            
+            // Extract capacity information
+            if let Some(lvstore_info) = &spdk_lvs_info {
+                if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
+                    lvstore_info["total_data_clusters"].as_u64(),
+                    lvstore_info["free_clusters"].as_u64(),
+                    lvstore_info["cluster_size"].as_u64()
+                ) {
+                    let total_capacity = (total_clusters * cluster_size) as i64;
+                    let free_space = (free_clusters * cluster_size) as i64;
+                    let used_space = total_capacity - free_space;
+                    
+                    updated_status.total_capacity = total_capacity;
+                    updated_status.free_space = free_space;
+                    updated_status.used_space = used_space;
+                    
+                    println!("📊 [RECONCILE] Updated capacity info - Total: {}, Free: {}, Used: {}", 
+                             total_capacity, free_space, used_space);
+                }
+            }
+        } else if !aio_bdev_exists && crd_thinks_initialized {
+            // CRD thinks initialized but SPDK has no AIO bdev - need to create infrastructure
+            println!("🔧 [RECONCILE] CRD thinks initialized but SPDK missing AIO bdev - will create if auto-init enabled");
+            if self.auto_initialize_blobstore {
+                println!("🔄 [RECONCILE] Auto-initialization enabled, will create missing SPDK infrastructure");
+                // Create AIO bdev first, then LVS will be created by subsequent logic
+                if let Err(e) = self.ensure_aio_bdev_exists(&disk_crd).await {
+                    println!("⚠️ [RECONCILE] Failed to create AIO bdev: {}", e);
+                    updated_status.blobstore_initialized = false;
+                    updated_status.healthy = false;
+                    needs_update = true;
+                }
+            } else {
+                println!("⚠️ [RECONCILE] Auto-initialization disabled, marking as uninitialized");
+                updated_status.blobstore_initialized = false;
+                updated_status.lvs_name = None;
+                updated_status.healthy = false;
+                needs_update = true;
+            }
+        } else if aio_bdev_exists && !spdk_lvs_exists && crd_thinks_initialized {
+            // AIO bdev exists but no LVS, yet CRD thinks initialized - create LVS if auto-init enabled
+            println!("🔧 [RECONCILE] AIO bdev exists but no LVS, CRD thinks initialized - will create LVS");
+            if self.auto_initialize_blobstore {
+                if let Err(e) = self.ensure_lvs_exists(&disk_crd, &kernel_bdev_name).await {
+                    println!("⚠️ [RECONCILE] Failed to create LVS: {}", e);
+                    updated_status.blobstore_initialized = false;
+                    updated_status.healthy = false;
+                    needs_update = true;
+                }
+            } else {
+                updated_status.blobstore_initialized = false;
+                updated_status.lvs_name = None;
+                updated_status.healthy = false;
+                needs_update = true;
+            }
+        } else if aio_bdev_exists && spdk_lvs_exists && crd_thinks_initialized {
+            // Both SPDK and CRD agree - just refresh capacity info
+            if let Some(lvstore_info) = &spdk_lvs_info {
+                if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
+                    lvstore_info["total_data_clusters"].as_u64(),
+                    lvstore_info["free_clusters"].as_u64(),
+                    lvstore_info["cluster_size"].as_u64()
+                ) {
+                    let total_capacity = (total_clusters * cluster_size) as i64;
+                    let free_space = (free_clusters * cluster_size) as i64;
+                    let used_space = total_capacity - free_space;
+                    
+                    if updated_status.total_capacity != total_capacity || 
+                       updated_status.free_space != free_space {
+                        updated_status.total_capacity = total_capacity;
+                        updated_status.free_space = free_space;
+                        updated_status.used_space = used_space;
+                        needs_update = true;
+                        println!("📊 [RECONCILE] Refreshed capacity info");
+                    }
+                }
+            }
+            println!("✅ [RECONCILE] SPDK and CRD states are consistent and complete");
+        } else {
+            println!("✅ [RECONCILE] States are consistent (both uninitialized or both initialized)");
+        }
+        
+        // Always update the last_checked timestamp
+        updated_status.last_checked = Utc::now().to_rfc3339();
+        needs_update = true; // Always need to update for timestamp
         
         // Apply updates if needed
         if needs_update {
@@ -4207,6 +4251,72 @@ impl NodeAgent {
         
         println!("🎉 [RECONCILE] State reconciliation completed for: {}", disk_name);
         Ok(())
+    }
+
+    /// Ensure AIO bdev exists for kernel-bound device
+    async fn ensure_aio_bdev_exists(&self, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let device_name = if let Some(controller_id) = &disk.spec.nvme_controller_id {
+            controller_id.clone()
+        } else {
+            disk.spec.device_path.trim_start_matches("/dev/").to_string()
+        };
+        
+        let kernel_bdev_name = format!("kernel_{}", device_name);
+        
+        println!("🔧 [AIO_BDEV] Creating AIO bdev: {} for device: {}", kernel_bdev_name, disk.spec.device_path);
+        
+        match call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_aio_create",
+            "params": {
+                "name": kernel_bdev_name,
+                "filename": disk.spec.device_path
+            }
+        })).await {
+            Ok(_) => {
+                println!("✅ [AIO_BDEV] Successfully created AIO bdev: {}", kernel_bdev_name);
+                Ok(())
+            }
+            Err(e) => {
+                if e.to_string().contains("already exists") {
+                    println!("✅ [AIO_BDEV] AIO bdev {} already exists", kernel_bdev_name);
+                    Ok(())
+                } else {
+                    println!("❌ [AIO_BDEV] Failed to create AIO bdev {}: {}", kernel_bdev_name, e);
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Ensure LVS exists on the specified bdev
+    async fn ensure_lvs_exists(&self, disk: &SpdkDisk, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let disk_name = disk.metadata.name.as_ref().unwrap();
+        let lvs_name = format!("lvs_{}", disk_name);
+        
+        println!("🔧 [LVS_CREATE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
+        
+        match call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_lvol_create_lvstore",
+            "params": {
+                "bdev_name": bdev_name,
+                "lvs_name": lvs_name,
+                "cluster_sz": 4194304
+            }
+        })).await {
+            Ok(_) => {
+                println!("✅ [LVS_CREATE] Successfully created LVS: {}", lvs_name);
+                Ok(())
+            }
+            Err(e) => {
+                if e.to_string().contains("already exists") || e.to_string().contains("Logical volume store already exists") {
+                    println!("✅ [LVS_CREATE] LVS {} already exists", lvs_name);
+                    Ok(())
+                } else {
+                    println!("❌ [LVS_CREATE] Failed to create LVS {}: {}", lvs_name, e);
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Idempotent wrapper for disk operations - ensures state consistency regardless of operation outcome
