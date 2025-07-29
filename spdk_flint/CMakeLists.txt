@@ -293,8 +293,10 @@ message(STATUS "  ISAL_CRYPTO: ${ISAL_CRYPTO}")
 
 # Link libraries for the main library with proper SPDK dependency order
 target_link_libraries(spdk_flint_lib
-    # Link individual SPDK libraries in dependency order (core first, then higher-level)
+    # Link SPDK libraries with whole-archive to ensure all symbols are available
+    -Wl,--whole-archive
     ${SPDK_LIBRARIES}
+    -Wl,--no-whole-archive
     # Add DPDK if found
     ${DPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
@@ -310,49 +312,49 @@ target_link_libraries(spdk_flint_lib
     pthread
     m
     # OpenSSL libraries (at the end for proper dependency resolution)
-    OpenSSL::SSL
-    OpenSSL::Crypto
+    -lssl
+    -lcrypto
 )
 
-# Add SPDK libraries conditionally (only if found)
+# Add SPDK libraries conditionally (only if found) with whole-archive
 if(SPDK_ENV_DPDK)
-    target_link_libraries(spdk_flint_lib ${SPDK_ENV_DPDK})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_ENV_DPDK} -Wl,--no-whole-archive)
 endif()
 if(SPDK_UTIL)
-    target_link_libraries(spdk_flint_lib ${SPDK_UTIL})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_UTIL} -Wl,--no-whole-archive)
 endif()
 if(SPDK_LOG)
-    target_link_libraries(spdk_flint_lib ${SPDK_LOG})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_LOG} -Wl,--no-whole-archive)
 endif()
 if(SPDK_MEMORY)
-    target_link_libraries(spdk_flint_lib ${SPDK_MEMORY})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_MEMORY} -Wl,--no-whole-archive)
 endif()
 if(SPDK_SOCK)
-    target_link_libraries(spdk_flint_lib ${SPDK_SOCK})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_SOCK} -Wl,--no-whole-archive)
 endif()
 if(SPDK_THREAD)
-    target_link_libraries(spdk_flint_lib ${SPDK_THREAD})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_THREAD} -Wl,--no-whole-archive)
 endif()
 if(SPDK_TRACE)
-    target_link_libraries(spdk_flint_lib ${SPDK_TRACE})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_TRACE} -Wl,--no-whole-archive)
 endif()
 if(SPDK_NOTIFY)
-    target_link_libraries(spdk_flint_lib ${SPDK_NOTIFY})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_NOTIFY} -Wl,--no-whole-archive)
 endif()
 if(SPDK_JSON)
-    target_link_libraries(spdk_flint_lib ${SPDK_JSON})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSON} -Wl,--no-whole-archive)
 endif()
 if(SPDK_JSONRPC)
-    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSONRPC} -Wl,--no-whole-archive)
 endif()
 if(SPDK_BDEV)
-    target_link_libraries(spdk_flint_lib ${SPDK_BDEV})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_BDEV} -Wl,--no-whole-archive)
 endif()
 if(SPDK_ACCEL)
-    target_link_libraries(spdk_flint_lib ${SPDK_ACCEL})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_ACCEL} -Wl,--no-whole-archive)
 endif()
 if(SPDK_INIT)
-    target_link_libraries(spdk_flint_lib ${SPDK_INIT})
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_INIT} -Wl,--no-whole-archive)
 endif()
 
 # Add ISA-L libraries conditionally (only if found)
@@ -363,12 +365,18 @@ if(ISAL_CRYPTO)
     target_link_libraries(spdk_flint_lib ${ISAL_CRYPTO})
 endif()
 
+# Add linker flags to resolve DSO issues
+set_target_properties(spdk_flint PROPERTIES
+    LINK_FLAGS "-Wl,--no-as-needed"
+)
+
 # Link libraries for the main executable
 target_link_libraries(spdk_flint
     spdk_flint_lib
-    # Ensure OpenSSL is available at executable level
-    OpenSSL::SSL
-    OpenSSL::Crypto
+    # Force OpenSSL linking with raw library names and full paths
+    -lssl
+    -lcrypto
+    ${CMAKE_DL_LIBS}
 )
 
 # Link Crow (FetchContent or manually found)

@@ -14,12 +14,18 @@ set(TEST_SOURCES
 # Create test executable
 add_executable(spdk_flint_tests ${TEST_SOURCES})
 
+# Add linker flags to resolve DSO issues  
+set_target_properties(spdk_flint_tests PROPERTIES
+    LINK_FLAGS "-Wl,--no-as-needed"
+)
+
 # Link against main application library and Catch2
 target_link_libraries(spdk_flint_tests
     spdk_flint_lib
-    # Ensure OpenSSL is available at test executable level
-    OpenSSL::SSL
-    OpenSSL::Crypto
+    # Force OpenSSL linking with raw library names
+    -lssl
+    -lcrypto
+    ${CMAKE_DL_LIBS}
 )
 
 # Link Catch2
