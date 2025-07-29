@@ -304,7 +304,7 @@ else()
 endif()
 message(STATUS "Found DPDK libraries: ${ALL_DPDK_LIBS}")
 
-# Find ISA-L libraries (Intel Storage Acceleration Library) with comprehensive search
+# Find ISA-L libraries - SPDK builds these internally, so check SPDK build dirs too
 file(GLOB ALL_ISAL_LIBS 
     "/usr/local/lib/libisal*.a" 
     "/usr/lib/x86_64-linux-gnu/libisal*.a"
@@ -314,6 +314,11 @@ file(GLOB ALL_ISAL_LIBS
     "/usr/local/lib/libisal_crypto*.a"
     "/usr/lib/x86_64-linux-gnu/libisal_crypto*.a"
     "/usr/lib/libisal_crypto*.a"
+    # SPDK might have built ISA-L internally - check SPDK directories
+    "/workspace/spdk/isa-l/.libs/libisal.a"
+    "/workspace/spdk/isa-l-crypto/.libs/libisal_crypto.a"
+    "/workspace/spdk/build/lib/libisal*.a"
+    "/workspace/spdk/lib/libisal*.a"
     # Alternative naming patterns
     "/usr/local/lib/libisa-l*.a"
     "/usr/lib/x86_64-linux-gnu/libisa-l*.a"
@@ -332,14 +337,26 @@ if(NOT ALL_ISAL_LIBS)
     endif()
 endif()
 
+# ISA-L might be embedded in SPDK libraries, so let's also check for that
+if(NOT ALL_ISAL_LIBS)
+    message(STATUS "No separate ISA-L libraries found - ISA-L symbols may be embedded in SPDK libraries")
+endif()
+
 # Link everything statically with whole-archive to include all symbols
+# Use aggressive linking to resolve embedded symbols
 target_link_libraries(spdk_flint_lib
-    # Use --whole-archive for all SPDK/DPDK/ISA-L libraries to ensure all symbols are included
+    # First pass: Link all libraries with --whole-archive
+    -Wl,--start-group
     -Wl,--whole-archive
     ${ALL_SPDK_LIBS}
     ${ALL_DPDK_LIBS}
     ${ALL_ISAL_LIBS}
     -Wl,--no-whole-archive
+    # Second pass: Link again to resolve any circular dependencies or embedded symbols
+    ${ALL_SPDK_LIBS}
+    ${ALL_DPDK_LIBS}
+    ${ALL_ISAL_LIBS}
+    -Wl,--end-group
 )
 
 # Link system libraries
@@ -357,9 +374,26 @@ endif()
 if(NOT ALL_ISAL_LIBS)
     message(WARNING "No ISA-L static libraries found, trying shared libraries")
     find_library(ISAL_SHARED NAMES isal libisal PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    find_library(ISAL_CRYPTO_SHARED NAMES isal_crypto libisal_crypto libisal2 PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
     if(ISAL_SHARED)
         target_link_libraries(spdk_flint_lib ${ISAL_SHARED})
         message(STATUS "Linked shared ISA-L library: ${ISAL_SHARED}")
+    endif()
+    if(ISAL_CRYPTO_SHARED)
+        target_link_libraries(spdk_flint_lib ${ISAL_CRYPTO_SHARED})
+        message(STATUS "Linked shared ISA-L-crypto library: ${ISAL_CRYPTO_SHARED}")
+    endif()
+else()
+    # Even if we found ISA-L static libs, also try to add system ISA-L in case SPDK's internal version is incomplete
+    find_library(SYSTEM_ISAL NAMES isal libisal PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    find_library(SYSTEM_ISAL_CRYPTO NAMES isal_crypto libisal_crypto libisal2 PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    if(SYSTEM_ISAL)
+        target_link_libraries(spdk_flint_lib ${SYSTEM_ISAL})
+        message(STATUS "Added system ISA-L library: ${SYSTEM_ISAL}")
+    endif()
+    if(SYSTEM_ISAL_CRYPTO)
+        target_link_libraries(spdk_flint_lib ${SYSTEM_ISAL_CRYPTO})
+        message(STATUS "Added system ISA-L-crypto library: ${SYSTEM_ISAL_CRYPTO}")
     endif()
 endif()
 
@@ -375,7 +409,7 @@ endif()
 
 # Set linker flags for static linking
 set_target_properties(spdk_flint_lib PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--start-group -Wl,--end-group"
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--copy-dt-needed-entries"
 )
 
 # Link libraries for the main executable
