@@ -1416,31 +1416,24 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
         needs_update = true;
     }
     
-    // Verify actual SPDK state matches custom resource state
-    // Get all LVS stores from SPDK and find ours by base_bdev analysis
-    let (actual_lvs_exists, actual_lvs_name) = find_lvs_for_disk_by_spdk_query(agent, disk).await.unwrap_or((false, None));
+    // Use enhanced reconciliation logic that handles both AIO bdev and LVS properly
+    println!("🔄 [STATE_SYNC] Running enhanced state reconciliation...");
+    if let Err(e) = agent.reconcile_disk_state_with_spdk(disk_name).await {
+        println!("⚠️ [STATE_SYNC] Reconciliation failed: {}", e);
+    }
     
-    if updated_status.blobstore_initialized && !actual_lvs_exists {
-        // Custom resource thinks LVS exists but SPDK doesn't have it - correct the state
-        println!("🔄 [STATE_SYNC] Custom resource shows blobstore_initialized=true but no LVS found in SPDK for disk {}, correcting state", disk.spec.pcie_addr);
-        updated_status.blobstore_initialized = false;
-        updated_status.lvs_name = None;
-        needs_update = true;
-    } else if !updated_status.blobstore_initialized && actual_lvs_exists {
-        // SPDK has LVS but custom resource doesn't know - update the state
-        let found_lvs_name = actual_lvs_name.as_ref().unwrap();
-        println!("🔄 [STATE_SYNC] Found existing LVS '{}' in SPDK but custom resource shows blobstore_initialized=false, correcting state", found_lvs_name);
-        updated_status.blobstore_initialized = true;
-        updated_status.lvs_name = Some(found_lvs_name.clone());
-        needs_update = true;
-    } else if !updated_status.blobstore_initialized && agent.auto_initialize_blobstore {
-        // Neither SPDK nor custom resource have LVS, and auto-init is enabled - create it
-        let expected_lvs_name = format!("lvs_{}", disk_name);
-        println!("🔄 [STATE_SYNC] No LVS found and auto-initialization enabled, creating LVS: {}", expected_lvs_name);
-        initialize_blobstore_on_device(agent, disk).await?;
-        updated_status.blobstore_initialized = true;
-        updated_status.lvs_name = Some(expected_lvs_name);
-        needs_update = true;
+    // Fetch the updated status after reconciliation
+    match spdk_disks.get(disk_name).await {
+        Ok(reconciled_disk) => {
+            if let Some(reconciled_status) = reconciled_disk.status {
+                println!("✅ [STATE_SYNC] Using reconciled status from enhanced logic");
+                updated_status = reconciled_status;
+                needs_update = true; // Always update since reconciliation handles timestamp
+            }
+        }
+        Err(e) => {
+            println!("⚠️ [STATE_SYNC] Failed to fetch reconciled status: {}", e);
+        }
     }
     
     if needs_update {
