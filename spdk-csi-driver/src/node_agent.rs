@@ -4065,7 +4065,14 @@ impl NodeAgent {
             }
         };
         
-        let lvs_name = format!("lvs_{}", disk_name);
+        // Generate LVS name using the same format as the rest of the system: lvs_{node}_{device}
+        let device_name = if let Some(controller_id) = &disk_crd.spec.nvme_controller_id {
+            controller_id.clone()
+        } else {
+            disk_crd.spec.device_path.trim_start_matches("/dev/").to_string()
+        };
+        let lvs_name = format!("lvs_{}-{}", disk_crd.spec.node_id, device_name);
+        
         let mut needs_update = false;
         let mut updated_status = disk_crd.status.clone().unwrap_or_default();
         
@@ -4283,8 +4290,13 @@ impl NodeAgent {
 
     /// Ensure LVS exists on the specified bdev
     async fn ensure_lvs_exists(&self, disk: &SpdkDisk, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let disk_name = disk.metadata.name.as_ref().unwrap();
-        let lvs_name = format!("lvs_{}", disk_name);
+        // Generate LVS name using the same format: lvs_{node}_{device}
+        let device_name = if let Some(controller_id) = &disk.spec.nvme_controller_id {
+            controller_id.clone()
+        } else {
+            disk.spec.device_path.trim_start_matches("/dev/").to_string()
+        };
+        let lvs_name = format!("lvs_{}-{}", disk.spec.node_id, device_name);
         
         println!("🔧 [LVS_CREATE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
         
