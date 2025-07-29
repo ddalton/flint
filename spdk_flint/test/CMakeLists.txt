@@ -19,10 +19,10 @@ set_target_properties(spdk_flint_tests PROPERTIES
     LINK_FLAGS "-Wl,--no-as-needed"
 )
 
-# Link against main application library and Catch2
+# Link against main application library (all dependencies propagated via PUBLIC linking)
 target_link_libraries(spdk_flint_tests
     spdk_flint_lib
-    # Force OpenSSL linking with raw library names
+    # Additional libraries for tests only
     -lssl
     -lcrypto
     ${CMAKE_DL_LIBS}
