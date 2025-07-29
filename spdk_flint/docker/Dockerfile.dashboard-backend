@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # System libraries needed for SPDK
     uuid-dev \
     libnuma-dev \
+    libaio-dev \
+    liburing-dev \
     # DPDK development libraries
     libdpdk-dev \
     # Intel Storage Acceleration Library (ISA-L) for CRC functions

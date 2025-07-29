@@ -219,8 +219,6 @@ set(SYSTEM_LIBS
     pthread
     ssl
     crypto
-    aio
-    uring
 )
 
 # Essential SPDK libraries in dependency order
@@ -265,6 +263,26 @@ if(NOT DPDK_FOUND)
     endif()
 endif()
 
+# Find AIO library (different names possible)
+find_library(AIO_LIBRARY NAMES aio libaio 
+    PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
+    DOC "AIO library")
+if(AIO_LIBRARY)
+    message(STATUS "Found AIO library: ${AIO_LIBRARY}")
+else()
+    message(WARNING "AIO library not found - may cause linking issues")
+endif()
+
+# Find uring library (different names possible)  
+find_library(URING_LIBRARY NAMES uring liburing
+    PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
+    DOC "uring library")
+if(URING_LIBRARY)
+    message(STATUS "Found uring library: ${URING_LIBRARY}")
+else()
+    message(WARNING "uring library not found - may cause linking issues")
+endif()
+
 # Link libraries for spdk_flint_lib
 target_link_libraries(spdk_flint_lib
     # External dependencies
@@ -299,6 +317,14 @@ endforeach()
 
 # Link system libraries
 target_link_libraries(spdk_flint_lib ${SYSTEM_LIBS})
+
+# Link AIO and uring libraries if found
+if(AIO_LIBRARY)
+    target_link_libraries(spdk_flint_lib ${AIO_LIBRARY})
+endif()
+if(URING_LIBRARY)
+    target_link_libraries(spdk_flint_lib ${URING_LIBRARY})
+endif()
 
 # Set linker flags to handle potential issues
 set_target_properties(spdk_flint_lib PROPERTIES
