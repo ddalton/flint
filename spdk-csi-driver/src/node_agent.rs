@@ -4065,13 +4065,8 @@ impl NodeAgent {
             }
         };
         
-        // Generate LVS name using the same format as the rest of the system: lvs_{node}_{device}
-        let device_name = if let Some(controller_id) = &disk_crd.spec.nvme_controller_id {
-            controller_id.clone()
-        } else {
-            disk_crd.spec.device_path.trim_start_matches("/dev/").to_string()
-        };
-        let lvs_name = format!("lvs_{}-{}", disk_crd.spec.node_id, device_name);
+        // Generate LVS name using current device name (not potentially stale CRD spec)
+        let lvs_name = format!("lvs_{}-{}", disk_crd.spec.node_id, current_device_name);
         
         let mut needs_update = false;
         let mut updated_status = disk_crd.status.clone().unwrap_or_default();
@@ -4079,15 +4074,24 @@ impl NodeAgent {
         // Enhanced reconciliation: Check for both AIO bdev and LVS state
         println!("🔍 [RECONCILE] Checking complete SPDK state (AIO bdev + LVS)...");
         
-        // Step 1: Check if AIO bdev exists for kernel-bound devices
-        let device_name = if let Some(controller_id) = &disk_crd.spec.nvme_controller_id {
-            controller_id.clone()
-        } else {
-            // Fallback: extract device name from device_path
-            disk_crd.spec.device_path.trim_start_matches("/dev/").to_string()
+        // Step 1: Get CURRENT device name from discovery (not potentially stale CRD spec)
+        // The CRD spec may be outdated if device name changed (nvme1n1 -> nvme1n2)
+        let current_device_name = match self.find_nvme_device_name(&disk_crd.spec.pcie_addr).await {
+            Ok(name) => {
+                println!("🔍 [RECONCILE] Found current device name: {} for PCI: {}", name, disk_crd.spec.pcie_addr);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [RECONCILE] Could not find current device name, using CRD spec as fallback");
+                if let Some(controller_id) = &disk_crd.spec.nvme_controller_id {
+                    controller_id.clone()
+                } else {
+                    disk_crd.spec.device_path.trim_start_matches("/dev/").to_string()
+                }
+            }
         };
         
-        let kernel_bdev_name = format!("kernel_{}", device_name);
+        let kernel_bdev_name = format!("kernel_{}", current_device_name);
         let mut aio_bdev_exists = false;
         
         println!("🔍 [RECONCILE] Checking for AIO bdev: {}", kernel_bdev_name);
@@ -4255,21 +4259,32 @@ impl NodeAgent {
 
     /// Ensure AIO bdev exists for kernel-bound device
     async fn ensure_aio_bdev_exists(&self, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let device_name = if let Some(controller_id) = &disk.spec.nvme_controller_id {
-            controller_id.clone()
-        } else {
-            disk.spec.device_path.trim_start_matches("/dev/").to_string()
+        // Get current device name from discovery (not potentially stale CRD spec)
+        let device_name = match self.find_nvme_device_name(&disk.spec.pcie_addr).await {
+            Ok(name) => {
+                println!("🔍 [AIO_BDEV] Found current device name: {} for PCI: {}", name, disk.spec.pcie_addr);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [AIO_BDEV] Could not find current device name, using CRD spec as fallback");
+                if let Some(controller_id) = &disk.spec.nvme_controller_id {
+                    controller_id.clone()
+                } else {
+                    disk.spec.device_path.trim_start_matches("/dev/").to_string()
+                }
+            }
         };
         
         let kernel_bdev_name = format!("kernel_{}", device_name);
+        let current_device_path = format!("/dev/{}", device_name);
         
-        println!("🔧 [AIO_BDEV] Creating AIO bdev: {} for device: {}", kernel_bdev_name, disk.spec.device_path);
+        println!("🔧 [AIO_BDEV] Creating AIO bdev: {} for device: {}", kernel_bdev_name, current_device_path);
         
         match call_spdk_rpc(&self.spdk_rpc_url, &json!({
             "method": "bdev_aio_create",
             "params": {
                 "name": kernel_bdev_name,
-                "filename": disk.spec.device_path
+                "filename": current_device_path
             }
         })).await {
             Ok(_) => {
@@ -4290,11 +4305,20 @@ impl NodeAgent {
 
     /// Ensure LVS exists on the specified bdev
     async fn ensure_lvs_exists(&self, disk: &SpdkDisk, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Generate LVS name using the same format: lvs_{node}_{device}
-        let device_name = if let Some(controller_id) = &disk.spec.nvme_controller_id {
-            controller_id.clone()
-        } else {
-            disk.spec.device_path.trim_start_matches("/dev/").to_string()
+        // Get current device name from discovery (not potentially stale CRD spec)
+        let device_name = match self.find_nvme_device_name(&disk.spec.pcie_addr).await {
+            Ok(name) => {
+                println!("🔍 [LVS_CREATE] Found current device name: {} for PCI: {}", name, disk.spec.pcie_addr);
+                name
+            }
+            Err(_) => {
+                println!("⚠️ [LVS_CREATE] Could not find current device name, using CRD spec as fallback");
+                if let Some(controller_id) = &disk.spec.nvme_controller_id {
+                    controller_id.clone()
+                } else {
+                    disk.spec.device_path.trim_start_matches("/dev/").to_string()
+                }
+            }
         };
         let lvs_name = format!("lvs_{}-{}", disk.spec.node_id, device_name);
         
