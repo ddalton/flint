@@ -6,38 +6,56 @@
 
 using namespace spdk_flint;
 
-// Basic application configuration tests
-TEST_CASE("Application Configuration", "[config]") {
+// Basic application configuration tests for node agent only
+TEST_CASE("Node Agent Configuration", "[config]") {
     SECTION("Default configuration values") {
         AppConfig config;
-        REQUIRE(config.mode == AppMode::ALL);
-        REQUIRE(config.csi_endpoint == "unix:///csi/csi.sock");
-        REQUIRE(config.spdk_rpc_url == "unix:///var/tmp/spdk.sock");
-        REQUIRE(config.nvmeof_transport == "tcp");
-        REQUIRE(config.nvmeof_target_port == 4420);
-        REQUIRE(config.dashboard_port == 8080);
+        REQUIRE(config.mode == AppMode::NODE_AGENT);
         REQUIRE(config.health_port == 9809);
+        REQUIRE(config.node_agent_port == 8090);
         REQUIRE(config.log_level == "info");
         REQUIRE(config.auto_initialize_blobstore == true);
         REQUIRE(config.discovery_interval == 300);
+        REQUIRE(config.target_namespace == "flint-system");
+        REQUIRE(config.backup_path == "/var/lib/spdk-csi/backups");
     }
     
     SECTION("Load configuration from environment") {
         // Set some environment variables
-        setenv("CSI_MODE", "controller", 1);
+        setenv("CSI_MODE", "node-agent", 1);
         setenv("LOG_LEVEL", "debug", 1);
-        setenv("NVMEOF_TARGET_PORT", "5420", 1);
+        setenv("NODE_AGENT_PORT", "8091", 1);
+        setenv("HEALTH_PORT", "9810", 1);
+        setenv("NODE_ID", "test-node", 1);
+        setenv("TARGET_NAMESPACE", "test-namespace", 1);
+        setenv("DISK_DISCOVERY_INTERVAL", "120", 1);
         
         AppConfig config = loadConfigFromEnvironment();
         
-        REQUIRE(config.mode == AppMode::CONTROLLER);
+        REQUIRE(config.mode == AppMode::NODE_AGENT);
         REQUIRE(config.log_level == "debug");
-        REQUIRE(config.nvmeof_target_port == 5420);
+        REQUIRE(config.node_agent_port == 8091);
+        REQUIRE(config.health_port == 9810);
+        REQUIRE(config.node_id == "test-node");
+        REQUIRE(config.target_namespace == "test-namespace");
+        REQUIRE(config.discovery_interval == 120);
         
         // Clean up
         unsetenv("CSI_MODE");
         unsetenv("LOG_LEVEL");
-        unsetenv("NVMEOF_TARGET_PORT");
+        unsetenv("NODE_AGENT_PORT");
+        unsetenv("HEALTH_PORT");
+        unsetenv("NODE_ID");
+        unsetenv("TARGET_NAMESPACE");
+        unsetenv("DISK_DISCOVERY_INTERVAL");
+    }
+    
+    SECTION("Invalid mode rejection") {
+        setenv("CSI_MODE", "controller", 1);
+        
+        REQUIRE_THROWS_AS(loadConfigFromEnvironment(), std::invalid_argument);
+        
+        unsetenv("CSI_MODE");
     }
 }
 
@@ -45,74 +63,69 @@ TEST_CASE("Application Configuration", "[config]") {
 TEST_CASE("Logging System", "[logging]") {
     SECTION("Logger initialization") {
         // Initialize with debug level
-        REQUIRE_NOTHROW(Logger::initialize("test_logger", "debug"));
+        REQUIRE_NOTHROW(Logger::initialize("spdk_flint_node_agent", "debug"));
         
         auto logger = Logger::get();
         REQUIRE(logger != nullptr);
         
-        // Test different log levels
-        REQUIRE_NOTHROW(spdk_flint::logger()->debug("Debug message: {}", 42));
-        REQUIRE_NOTHROW(spdk_flint::logger()->info("Info message: {}", "test"));
-        REQUIRE_NOTHROW(spdk_flint::logger()->warn("Warning message"));
-        REQUIRE_NOTHROW(spdk_flint::logger()->error("Error message"));
-        
-        // Test context-aware logging
-        REQUIRE_NOTHROW(spdk_flint::logger()->info("[CSI] Creating volume {}", "test-vol"));
-        REQUIRE_NOTHROW(spdk_flint::logger()->info("[SPDK] Initializing SPDK"));
-        REQUIRE_NOTHROW(spdk_flint::logger()->info("[DASHBOARD] Starting dashboard on port {}", 8080));
+        // Test basic logging calls
+        REQUIRE_NOTHROW(logger->info("Test info message"));
+        REQUIRE_NOTHROW(logger->debug("Test debug message"));
+        REQUIRE_NOTHROW(logger->warn("Test warning message"));
+        REQUIRE_NOTHROW(logger->error("Test error message"));
         
         Logger::shutdown();
     }
     
-    SECTION("Log level setting") {
-        Logger::initialize("test_logger", "info");
+    SECTION("Multiple initialization") {
+        // Should be able to initialize multiple times safely
+        REQUIRE_NOTHROW(Logger::initialize("spdk_flint_node_agent", "info"));
+        REQUIRE_NOTHROW(Logger::initialize("spdk_flint_node_agent", "debug"));
         
-        // This should work
-        REQUIRE_NOTHROW(Logger::setLevel("debug"));
-        REQUIRE_NOTHROW(Logger::setLevel("error"));
-        REQUIRE_NOTHROW(Logger::setLevel("info"));
+        auto logger = Logger::get();
+        REQUIRE(logger != nullptr);
         
         Logger::shutdown();
     }
 }
 
-// Mode parsing tests
-TEST_CASE("Application Mode Parsing", "[app][mode]") {
-    Application app(AppConfig{});
+// Application mode parsing tests
+TEST_CASE("Application Mode Parsing", "[mode]") {
+    SECTION("Valid node-agent mode") {
+        REQUIRE(parseAppMode("node-agent") == AppMode::NODE_AGENT);
+        REQUIRE(parseAppMode("") == AppMode::NODE_AGENT);  // Default
+    }
     
-    SECTION("Valid mode strings") {
-        // These would normally be private, but we can test the public interface
-        // by setting environment variables and checking the config loading
-        
-        setenv("CSI_MODE", "csi-driver", 1);
-        auto config1 = loadConfigFromEnvironment();
-        REQUIRE(config1.mode == AppMode::CSI_DRIVER);
-        
-        setenv("CSI_MODE", "controller", 1);
-        auto config2 = loadConfigFromEnvironment();
-        REQUIRE(config2.mode == AppMode::CONTROLLER);
-        
-        setenv("CSI_MODE", "dashboard-backend", 1);
-        auto config3 = loadConfigFromEnvironment();
-        REQUIRE(config3.mode == AppMode::DASHBOARD_BACKEND);
-        
-        setenv("CSI_MODE", "node-agent", 1);
-        auto config4 = loadConfigFromEnvironment();
-        REQUIRE(config4.mode == AppMode::NODE_AGENT);
-        
-        setenv("CSI_MODE", "all", 1);
-        auto config5 = loadConfigFromEnvironment();
-        REQUIRE(config5.mode == AppMode::ALL);
-        
-        unsetenv("CSI_MODE");
+    SECTION("Invalid modes rejected") {
+        REQUIRE_THROWS_AS(parseAppMode("controller"), std::invalid_argument);
+        REQUIRE_THROWS_AS(parseAppMode("dashboard-backend"), std::invalid_argument);
+        REQUIRE_THROWS_AS(parseAppMode("csi-driver"), std::invalid_argument);
+        REQUIRE_THROWS_AS(parseAppMode("all"), std::invalid_argument);
+        REQUIRE_THROWS_AS(parseAppMode("invalid"), std::invalid_argument);
     }
 }
 
-// Utility function tests
-TEST_CASE("Utility Functions", "[utils]") {
-    SECTION("Version and usage printing") {
-        // These functions print to stdout, so we just ensure they don't crash
-        REQUIRE_NOTHROW(printVersion());
-        REQUIRE_NOTHROW(printUsage());
+// Basic application lifecycle tests
+TEST_CASE("Node Agent Application", "[app]") {
+    SECTION("Application creation") {
+        AppConfig config;
+        config.mode = AppMode::NODE_AGENT;
+        config.log_level = "debug";
+        
+        REQUIRE_NOTHROW(Application app(config));
     }
+    
+    // NOTE: Cannot test full initialization without SPDK setup
+    // These would require a proper SPDK test environment
+}
+
+int main(int argc, char* argv[]) {
+    // Initialize logging for tests
+    spdk_flint::Logger::initialize("spdk_flint_test", "debug");
+    
+    int result = Catch::Session().run(argc, argv);
+    
+    spdk_flint::Logger::shutdown();
+    
+    return result;
 } 

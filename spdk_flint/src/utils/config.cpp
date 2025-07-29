@@ -1,203 +1,227 @@
+#include "utils/config.hpp"
 #include "app.hpp"
 #include "logging.hpp"
-#include <cstdlib>
-#include <fstream>
-#include <sstream>
 #include <iostream>
+#include <cstdlib>
+#include <stdexcept>
+#include <fstream> // Added for file existence check
+#include <algorithm> // Added for std::transform
+#include <chrono> // Added for timing
 
 namespace spdk_flint {
 
-namespace {
-    std::string getEnvVar(const char* name, const std::string& defaultValue = "") {
-        const char* value = std::getenv(name);
-        return value ? std::string(value) : defaultValue;
-    }
-    
-    int getEnvInt(const char* name, int defaultValue) {
-        const char* value = std::getenv(name);
-        if (!value) return defaultValue;
-        
-        try {
-            return std::stoi(value);
-        } catch (const std::exception&) {
-            return defaultValue;
-        }
-    }
-    
-    bool getEnvBool(const char* name, bool defaultValue) {
-        const char* value = std::getenv(name);
-        if (!value) return defaultValue;
-        
-        std::string str = value;
-        std::transform(str.begin(), str.end(), str.begin(), ::tolower);
-        
-        if (str == "true" || str == "1" || str == "yes" || str == "on") {
-            return true;
-        } else if (str == "false" || str == "0" || str == "no" || str == "off") {
-            return false;
-        }
-        
-        return defaultValue;
-    }
-    
-
-    
-    std::map<std::string, std::string> parseNodeUrls(const std::string& node_urls_str) {
-        std::map<std::string, std::string> result;
-        
-        if (node_urls_str.empty()) {
-            return result;
-        }
-        
-        std::istringstream stream(node_urls_str);
-        std::string pair;
-        
-        while (std::getline(stream, pair, ',')) {
-            auto equals_pos = pair.find('=');
-            if (equals_pos != std::string::npos) {
-                std::string node = pair.substr(0, equals_pos);
-                std::string url = pair.substr(equals_pos + 1);
-                
-                // Trim whitespace
-                node.erase(0, node.find_first_not_of(" \t"));
-                node.erase(node.find_last_not_of(" \t") + 1);
-                url.erase(0, url.find_first_not_of(" \t"));
-                url.erase(url.find_last_not_of(" \t") + 1);
-                
-                result[node] = url;
-            }
-        }
-        
-        return result;
-    }
-    
-    std::string getCurrentNamespace() {
-        // Try to read from service account token first (Kubernetes)
-        std::ifstream namespace_file("/var/run/secrets/kubernetes.io/serviceaccount/namespace");
-        if (namespace_file.is_open()) {
-            std::string namespace_str;
-            std::getline(namespace_file, namespace_str);
-            if (!namespace_str.empty()) {
-                return namespace_str;
-            }
-        }
-        
-        // Fall back to environment variable
-        return getEnvVar("TARGET_NAMESPACE", "default");
-    }
-    
-    std::string getNodeId() {
-        std::string node_id = getEnvVar("NODE_ID");
-        if (node_id.empty()) {
-            node_id = getEnvVar("HOSTNAME");
-        }
-        if (node_id.empty()) {
-            node_id = "unknown-node";
-        }
-        return node_id;
-    }
-}
-
 AppMode parseAppMode(const std::string& mode_str) {
-    if (mode_str == "csi-driver") return AppMode::CSI_DRIVER;
-    if (mode_str == "controller") return AppMode::CONTROLLER;
-    if (mode_str == "dashboard-backend") return AppMode::DASHBOARD_BACKEND;
-    if (mode_str == "node-agent") return AppMode::NODE_AGENT;
-    if (mode_str == "all") return AppMode::ALL;
+    logger()->debug("[CONFIG] Parsing application mode: '{}'", mode_str);
     
-    // Default to ALL if unknown
-    return AppMode::ALL;
+    if (mode_str.empty() || mode_str == "node-agent") {
+        logger()->debug("[CONFIG] Mode parsed successfully: node-agent");
+        return AppMode::NODE_AGENT;
+    }
+    
+    // spdk_flint only supports node-agent mode
+    logger()->error("[CONFIG] Invalid mode '{}' - spdk_flint only supports 'node-agent' mode", mode_str);
+    logger()->error("[CONFIG] Other services (controller, dashboard) use Rust RPC clients in spdk-csi-driver");
+    
+    throw std::invalid_argument("Only 'node-agent' mode is supported by spdk_flint");
 }
 
 AppConfig loadConfigFromEnvironment() {
+    logger()->info("[CONFIG] Loading configuration from environment variables");
+    auto start_time = std::chrono::steady_clock::now();
+    
     AppConfig config;
     
-    // Basic application settings
-    config.mode = parseAppMode(getEnvVar("CSI_MODE", "all"));
-    config.node_id = getNodeId();
-    config.log_level = getEnvVar("LOG_LEVEL", "info");
+    // Parse mode - only node-agent supported
+    const char* mode_env = std::getenv("CSI_MODE");
+    logger()->debug("[CONFIG] Environment variable CSI_MODE: '{}'", mode_env ? mode_env : "unset");
     
-    // Network endpoints
-    config.csi_endpoint = getEnvVar("CSI_ENDPOINT", "unix:///csi/csi.sock");
-    config.spdk_rpc_url = getEnvVar("SPDK_RPC_URL", "unix:///var/tmp/spdk.sock");
+    if (mode_env) {
+        try {
+            config.mode = parseAppMode(std::string(mode_env));
+            logger()->info("[CONFIG] Application mode set to: node-agent (from CSI_MODE)");
+        } catch (const std::exception& e) {
+            logger()->error("[CONFIG] Invalid CSI_MODE environment variable '{}': {}", mode_env, e.what());
+            throw;
+        }
+    } else {
+        // Default to node-agent mode
+        config.mode = AppMode::NODE_AGENT;
+        logger()->info("[CONFIG] Application mode defaulted to: node-agent (CSI_MODE not set)");
+    }
+    
+    // Node identification
+    const char* node_id = std::getenv("NODE_ID");
+    const char* hostname = std::getenv("HOSTNAME");
+    logger()->debug("[CONFIG] Environment variables - NODE_ID: '{}', HOSTNAME: '{}'", 
+                   node_id ? node_id : "unset", hostname ? hostname : "unset");
+    
+    if (node_id) {
+        config.node_id = std::string(node_id);
+        logger()->info("[CONFIG] Node ID set to: '{}' (from NODE_ID)", config.node_id);
+    } else {
+        // Try HOSTNAME as fallback
+        if (hostname) {
+            config.node_id = std::string(hostname);
+            logger()->info("[CONFIG] Node ID set to: '{}' (from HOSTNAME fallback)", config.node_id);
+        } else {
+            config.node_id = "unknown-node";
+            logger()->warn("[CONFIG] Node ID defaulted to: '{}' (neither NODE_ID nor HOSTNAME set)", config.node_id);
+        }
+    }
+    
+    // Logging configuration
+    const char* log_level = std::getenv("LOG_LEVEL");
+    logger()->debug("[CONFIG] Environment variable LOG_LEVEL: '{}'", log_level ? log_level : "unset");
+    
+    if (log_level) {
+        config.log_level = std::string(log_level);
+        logger()->info("[CONFIG] Log level set to: '{}' (from LOG_LEVEL)", config.log_level);
+    } else {
+        logger()->debug("[CONFIG] Log level remains default: '{}'", config.log_level);
+    }
+    
+    // Network ports
+    const char* health_port = std::getenv("HEALTH_PORT");
+    const char* node_agent_port = std::getenv("NODE_AGENT_PORT");
+    logger()->debug("[CONFIG] Port environment variables - HEALTH_PORT: '{}', NODE_AGENT_PORT: '{}'",
+                   health_port ? health_port : "unset", node_agent_port ? node_agent_port : "unset");
+    
+    if (health_port) {
+        try {
+            config.health_port = static_cast<uint16_t>(std::stoi(health_port));
+            logger()->info("[CONFIG] Health port set to: {} (from HEALTH_PORT)", config.health_port);
+        } catch (const std::exception& e) {
+            logger()->error("[CONFIG] Invalid HEALTH_PORT value '{}': {}", health_port, e.what());
+            logger()->warn("[CONFIG] Using default health port: {}", config.health_port);
+        }
+    } else {
+        logger()->debug("[CONFIG] Health port remains default: {}", config.health_port);
+    }
+    
+    if (node_agent_port) {
+        try {
+            config.node_agent_port = static_cast<uint16_t>(std::stoi(node_agent_port));
+            logger()->info("[CONFIG] Node agent port set to: {} (from NODE_AGENT_PORT)", config.node_agent_port);
+        } catch (const std::exception& e) {
+            logger()->error("[CONFIG] Invalid NODE_AGENT_PORT value '{}': {}", node_agent_port, e.what());
+            logger()->warn("[CONFIG] Using default node agent port: {}", config.node_agent_port);
+        }
+    } else {
+        logger()->debug("[CONFIG] Node agent port remains default: {}", config.node_agent_port);
+    }
     
     // Kubernetes namespace
-    config.target_namespace = getCurrentNamespace();
+    const char* target_namespace = std::getenv("TARGET_NAMESPACE");
+    logger()->debug("[CONFIG] Environment variable TARGET_NAMESPACE: '{}'", target_namespace ? target_namespace : "unset");
     
-    // NVMe-oF settings
-    config.nvmeof_transport = getEnvVar("NVMEOF_TRANSPORT", "tcp");
-    config.nvmeof_target_port = getEnvInt("NVMEOF_TARGET_PORT", 4420);
+    if (target_namespace) {
+        config.target_namespace = std::string(target_namespace);
+        logger()->info("[CONFIG] Target namespace set to: '{}' (from TARGET_NAMESPACE)", config.target_namespace);
+    } else {
+        logger()->debug("[CONFIG] Target namespace remains default: '{}'", config.target_namespace);
+    }
     
-    // Port configurations
-    config.dashboard_port = getEnvInt("DASHBOARD_PORT", 8080);
-    config.health_port = getEnvInt("HEALTH_PORT", 9809);
-    config.node_agent_port = getEnvInt("NODE_AGENT_PORT", 8090);
+    // SPDK configuration
+    const char* discovery_interval = std::getenv("DISK_DISCOVERY_INTERVAL");
+    const char* auto_init = std::getenv("AUTO_INITIALIZE_BLOBSTORE");
+    const char* backup_path = std::getenv("DISK_BACKUP_PATH");
+    const char* config_file = std::getenv("SPDK_CONFIG_FILE");
     
-    // Node agent specific settings
-    config.auto_initialize_blobstore = getEnvBool("AUTO_INITIALIZE_BLOBSTORE", true);
-    config.discovery_interval = getEnvInt("DISCOVERY_INTERVAL", 300);
-    config.backup_path = getEnvVar("BACKUP_PATH", "/var/lib/spdk-csi/backups");
+    logger()->debug("[CONFIG] SPDK environment variables - DISK_DISCOVERY_INTERVAL: '{}', AUTO_INITIALIZE_BLOBSTORE: '{}', "
+                   "DISK_BACKUP_PATH: '{}', SPDK_CONFIG_FILE: '{}'",
+                   discovery_interval ? discovery_interval : "unset",
+                   auto_init ? auto_init : "unset",
+                   backup_path ? backup_path : "unset",
+                   config_file ? config_file : "unset");
     
-    // SPDK node URLs for dashboard
-    config.spdk_node_urls = parseNodeUrls(getEnvVar("SPDK_NODE_URLS"));
+    if (discovery_interval) {
+        try {
+            config.discovery_interval = static_cast<uint32_t>(std::stoi(discovery_interval));
+            logger()->info("[CONFIG] Discovery interval set to: {} seconds (from DISK_DISCOVERY_INTERVAL)", config.discovery_interval);
+        } catch (const std::exception& e) {
+            logger()->error("[CONFIG] Invalid DISK_DISCOVERY_INTERVAL value '{}': {}", discovery_interval, e.what());
+            logger()->warn("[CONFIG] Using default discovery interval: {} seconds", config.discovery_interval);
+        }
+    } else {
+        logger()->debug("[CONFIG] Discovery interval remains default: {} seconds", config.discovery_interval);
+    }
     
-    // Validate transport
-    if (config.nvmeof_transport != "tcp" && 
-        config.nvmeof_transport != "rdma" && 
-        config.nvmeof_transport != "fc") {
-        spdk_flint::logger()->warn("Unknown NVMe-oF transport '{}', using 'tcp'", config.nvmeof_transport);
-        config.nvmeof_transport = "tcp";
+    if (auto_init) {
+        std::string auto_init_str = std::string(auto_init);
+        // Convert to lowercase for comparison
+        std::transform(auto_init_str.begin(), auto_init_str.end(), auto_init_str.begin(), ::tolower);
+        
+        if (auto_init_str == "true" || auto_init_str == "1" || auto_init_str == "yes" || auto_init_str == "on") {
+            config.auto_initialize_blobstore = true;
+        } else if (auto_init_str == "false" || auto_init_str == "0" || auto_init_str == "no" || auto_init_str == "off") {
+            config.auto_initialize_blobstore = false;
+        } else {
+            logger()->warn("[CONFIG] Invalid AUTO_INITIALIZE_BLOBSTORE value '{}', using default: {}", 
+                          auto_init, config.auto_initialize_blobstore);
+        }
+        logger()->info("[CONFIG] Auto initialize blobstore set to: {} (from AUTO_INITIALIZE_BLOBSTORE)", 
+                      config.auto_initialize_blobstore);
+    } else {
+        logger()->debug("[CONFIG] Auto initialize blobstore remains default: {}", config.auto_initialize_blobstore);
+    }
+    
+    if (backup_path) {
+        config.backup_path = std::string(backup_path);
+        logger()->info("[CONFIG] Backup path set to: '{}' (from DISK_BACKUP_PATH)", config.backup_path);
+    } else {
+        logger()->debug("[CONFIG] Backup path remains default: '{}'", config.backup_path);
+    }
+    
+    // SPDK configuration file (optional)
+    if (config_file) {
+        config.config_file = std::string(config_file);
+        logger()->info("[CONFIG] SPDK config file set to: '{}' (from SPDK_CONFIG_FILE)", config.config_file);
+        
+        // Check if the file exists and is readable
+        std::ifstream file(config.config_file);
+        if (file.good()) {
+            logger()->debug("[CONFIG] SPDK config file verified: exists and readable");
+        } else {
+            logger()->warn("[CONFIG] SPDK config file '{}' may not exist or is not readable", config.config_file);
+        }
+    } else {
+        logger()->debug("[CONFIG] No SPDK config file specified (SPDK_CONFIG_FILE not set)");
+    }
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    
+    // Log the loaded configuration summary
+    logger()->info("[CONFIG] Configuration loaded successfully in {} ms", duration.count());
+    logger()->info("[CONFIG] ===== Configuration Summary =====");
+    logger()->info("[CONFIG]   Mode: node-agent (embedded SPDK)");
+    logger()->info("[CONFIG]   Node ID: '{}'", config.node_id);
+    logger()->info("[CONFIG]   Log Level: '{}'", config.log_level);
+    logger()->info("[CONFIG]   Health Port: {}", config.health_port);
+    logger()->info("[CONFIG]   Node Agent Port: {}", config.node_agent_port);
+    logger()->info("[CONFIG]   Target Namespace: '{}'", config.target_namespace);
+    logger()->info("[CONFIG]   Discovery Interval: {} seconds", config.discovery_interval);
+    logger()->info("[CONFIG]   Auto Initialize Blobstore: {}", config.auto_initialize_blobstore);
+    logger()->info("[CONFIG]   Backup Path: '{}'", config.backup_path);
+    if (!config.config_file.empty()) {
+        logger()->info("[CONFIG]   SPDK Config File: '{}'", config.config_file);
+    }
+    logger()->info("[CONFIG] ================================");
+    
+    // Log configuration validation
+    if (config.health_port == config.node_agent_port) {
+        logger()->warn("[CONFIG] Health port and node agent port are the same ({}), this may cause conflicts", config.health_port);
+    }
+    
+    if (config.discovery_interval < 30) {
+        logger()->warn("[CONFIG] Discovery interval ({} seconds) is very low, this may impact performance", config.discovery_interval);
+    }
+    
+    if (config.node_id == "unknown-node") {
+        logger()->warn("[CONFIG] Node ID is 'unknown-node' - consider setting NODE_ID environment variable");
     }
     
     return config;
-}
-
-void printVersion() {
-    std::cout << "SPDK Flint CSI Driver v1.0.0\n";
-    std::cout << "Built with C++20 and direct SPDK integration\n";
-    std::cout << "Supports modes: csi-driver, controller, dashboard-backend, node-agent\n";
-    std::cout << "Copyright (c) 2024\n";
-}
-
-void printUsage() {
-    std::cout << "Usage: spdk_flint [options]\n\n";
-    std::cout << "A unified SPDK-based CSI driver supporting multiple operational modes.\n\n";
-    
-    std::cout << "Options:\n";
-    std::cout << "  --help, -h              Show this help message\n";
-    std::cout << "  --version, -v           Show version information\n";
-    std::cout << "  --mode <mode>           Operating mode (csi-driver|controller|dashboard-backend|node-agent|all)\n";
-    std::cout << "  --log-level <level>     Log level (trace|debug|info|warn|error|critical)\n";
-    std::cout << "  --config <file>         Configuration file path\n\n";
-    
-    std::cout << "Operational Modes:\n";
-    std::cout << "  csi-driver              Run as CSI driver (both controller and node)\n";
-    std::cout << "  controller              Run only CSI controller service\n";
-    std::cout << "  dashboard-backend       Run dashboard backend API server\n";
-    std::cout << "  node-agent              Run node agent for disk management\n";
-    std::cout << "  all                     Run all services (default)\n\n";
-    
-    std::cout << "Environment Variables:\n";
-    std::cout << "  CSI_MODE                Operating mode (default: all)\n";
-    std::cout << "  CSI_ENDPOINT            CSI socket endpoint (default: unix:///csi/csi.sock)\n";
-    std::cout << "  NODE_ID                 Node identifier (default: $HOSTNAME)\n";
-    std::cout << "  SPDK_RPC_URL            SPDK RPC endpoint (default: unix:///var/tmp/spdk.sock)\n";
-    std::cout << "  TARGET_NAMESPACE        Kubernetes namespace for custom resources\n";
-    std::cout << "  NVMEOF_TRANSPORT        NVMe-oF transport (tcp|rdma|fc, default: tcp)\n";
-    std::cout << "  NVMEOF_TARGET_PORT      NVMe-oF target port (default: 4420)\n";
-    std::cout << "  DASHBOARD_PORT          Dashboard HTTP port (default: 8080)\n";
-    std::cout << "  HEALTH_PORT             Health check port (default: 9809)\n";
-    std::cout << "  NODE_AGENT_PORT         Node agent HTTP port (default: 8090)\n";
-    std::cout << "  LOG_LEVEL               Log level (default: info)\n";
-    std::cout << "  AUTO_INITIALIZE_BLOBSTORE  Auto-initialize blobstore (default: true)\n";
-    std::cout << "  DISCOVERY_INTERVAL      Disk discovery interval in seconds (default: 300)\n";
-    std::cout << "  BACKUP_PATH             Disk backup path (default: /var/lib/spdk-csi/backups)\n";
-    std::cout << "  SPDK_NODE_URLS          Comma-separated node=url pairs for dashboard\n\n";
-    
-    std::cout << "Examples:\n";
-    std::cout << "  spdk_flint --mode controller --log-level debug\n";
-    std::cout << "  CSI_MODE=dashboard-backend DASHBOARD_PORT=9090 spdk_flint\n";
-    std::cout << "  spdk_flint --mode node-agent\n\n";
 }
 
 } // namespace spdk_flint 

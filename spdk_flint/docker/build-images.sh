@@ -1,13 +1,14 @@
 #!/bin/bash
-# Build script for all SPDK Flint Docker images
-# This script builds specialized images for different deployment patterns
+set -e
 
-set -e  # Exit on any error
+# SPDK Flint Single Image Build Script
+# This script builds the consolidated image that can run in multiple modes
 
 # Configuration
-REGISTRY=${REGISTRY:-"spdk-flint"}
-TAG=${TAG:-"latest"}
-BUILD_ARGS=${BUILD_ARGS:-""}
+REGISTRY=${REGISTRY:-"docker-sandbox.infra.cloudera.com/ddalton"}
+IMAGE_NAME="flint-base"
+VERSION=${VERSION:-"latest"}
+BUILD_TYPE=${CMAKE_BUILD_TYPE:-"Release"}
 
 # Colors for output
 RED='\033[0;31m'
@@ -16,184 +17,70 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-log() {
-    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
-}
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}   SPDK Flint Single Image Builder     ${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
 
-success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
-}
+# Print configuration
+echo -e "${YELLOW}Configuration:${NC}"
+echo -e "  Registry: ${REGISTRY}"
+echo -e "  Image: ${IMAGE_NAME}"
+echo -e "  Version: ${VERSION}"
+echo -e "  Build Type: ${BUILD_TYPE}"
+echo -e "  Full Image: ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+echo ""
 
-warn() {
-    echo -e "${YELLOW}[WARNING] $1${NC}"
-}
+# Build the consolidated image
+echo -e "${BLUE}Building consolidated SPDK Flint image...${NC}"
+echo -e "${YELLOW}This single image can run as:${NC}"
+echo -e "  • Controller (CSI_MODE=controller)"
+echo -e "  • Node Agent (CSI_MODE=node-agent)" 
+echo -e "  • Dashboard Backend (CSI_MODE=dashboard-backend)"
+echo -e "  • SPDK Driver (CSI_MODE=spdk-driver)"
+echo ""
 
-error() {
-    echo -e "${RED}[ERROR] $1${NC}"
-}
+# Change to project root
+cd "$(dirname "$0")/.."
 
-# Function to build an image
-build_image() {
-    local dockerfile=$1
-    local image_name=$2
-    local description=$3
-    
-    log "Building $description..."
-    log "Dockerfile: $dockerfile"
-    log "Image: $REGISTRY/$image_name:$TAG"
-    
-    if docker build -f "$dockerfile" -t "$REGISTRY/$image_name:$TAG" $BUILD_ARGS .; then
-        success "Built $REGISTRY/$image_name:$TAG"
-        
-        # Get image size
-        local size=$(docker images "$REGISTRY/$image_name:$TAG" --format "{{.Size}}")
-        log "Image size: $size"
-    else
-        error "Failed to build $description"
-        return 1
-    fi
-}
+# Build the image
+echo -e "${GREEN}Building image: ${REGISTRY}/${IMAGE_NAME}:${VERSION}${NC}"
+docker build \
+    --build-arg CMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -f docker/Dockerfile.base \
+    -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+    .
 
-# Function to run tests on an image
-test_image() {
-    local image_name=$1
-    local test_cmd=$2
-    
-    log "Testing $image_name..."
-    if docker run --rm "$REGISTRY/$image_name:$TAG" $test_cmd; then
-        success "Tests passed for $image_name"
-    else
-        warn "Tests failed for $image_name (this may be expected without SPDK)"
-    fi
-}
+echo ""
+echo -e "${GREEN}✅ Build completed successfully!${NC}"
+echo ""
 
-# Main build process
-main() {
-    log "Starting SPDK Flint Docker image build process"
-    log "Registry: $REGISTRY"
-    log "Tag: $TAG"
-    log "Build context: $(pwd)"
-    
-    # Check if we're in the right directory
-    if [ ! -f "CMakeLists.txt" ] || [ ! -d "docker" ]; then
-        error "Please run this script from the spdk_flint root directory"
-        exit 1
-    fi
-    
-    # Build base image first (infrastructure only - no business logic)
-    log "=== Building Base Image ==="
-    build_image "docker/Dockerfile.base" "flint-base" "Base infrastructure image (SPDK + dependencies)"
-    
-    # Build specialized images (each builds business logic from source)
-    log ""
-    log "=== Building Specialized Images ==="
-    
-    # CSI Node (DaemonSet)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-node" "csi-node" "CSI Node Plugin (DaemonSet + business logic)"
-    
-    # CSI Controller (Deployment)  
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.csi-controller" "csi-controller" "CSI Controller Plugin (Deployment + business logic)"
-    
-    # Dashboard Backend (Service)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.dashboard-backend" "dashboard-backend" "Dashboard Backend API (Service + business logic)"
-    
-    # Node Agent (DaemonSet)
-    BASE_IMAGE="$REGISTRY/flint-base:$TAG" build_image "docker/Dockerfile.node-agent" "node-agent" "Node Agent (DaemonSet + business logic)"
-    
-    log ""
-    log "=== Running Basic Tests ==="
-    
-    # Test that images can start (will fail without SPDK but should show help)
-    test_image "csi-controller" "--help"
-    test_image "dashboard-backend" "--help"
-    test_image "node-agent" "--help"
-    test_image "csi-node" "--help"
-    
-    log ""
-    log "=== Build Summary ==="
-    
-    # Show all built images
-    log "Built images:"
-    docker images "$REGISTRY/*:$TAG" --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
-    
-    success "All images built successfully!"
-    
-    log ""
-    log "=== Usage Examples ==="
-    echo ""
-    echo "To run the CSI Controller:"
-    echo "  docker run -p 9809:9809 $REGISTRY/csi-controller:$TAG"
-    echo ""
-    echo "To run the Dashboard Backend:"
-    echo "  docker run -p 8080:8080 $REGISTRY/dashboard-backend:$TAG"
-    echo ""
-    echo "Dashboard API endpoints (when running):"
-    echo "  http://localhost:8080/health"
-    echo "  http://localhost:8080/api/v1/volumes"
-    echo "  http://localhost:8080/api/v1/nodes"
-    echo "  http://localhost:8080/api/v1/stats"
-    echo "  http://localhost:8080/api/v1/devices"
-    echo "  http://localhost:8080/api/v1/discovery"
-    echo ""
-    echo "To run the Node Agent (requires privileged):"
-    echo "  docker run --privileged -p 8090:8090 -v /dev:/dev $REGISTRY/node-agent:$TAG"
-    echo ""
-    echo "To push images to registry:"
-    echo "  docker push $REGISTRY/csi-controller:$TAG"
-    echo "  docker push $REGISTRY/csi-node:$TAG"
-    echo "  docker push $REGISTRY/dashboard-backend:$TAG"
-    echo "  docker push $REGISTRY/node-agent:$TAG"
-}
+# Show usage examples
+echo -e "${BLUE}Usage Examples:${NC}"
+echo ""
+echo -e "${YELLOW}1. Controller Mode:${NC}"
+echo "  docker run -e CSI_MODE=controller ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+echo ""
+echo -e "${YELLOW}2. Node Agent Mode:${NC}"
+echo "  docker run --privileged -e CSI_MODE=node-agent \\"
+echo "    -v /dev:/dev -v /sys:/sys \\"
+echo "    ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+echo ""
+echo -e "${YELLOW}3. Dashboard Backend Mode:${NC}"
+echo "  docker run -e CSI_MODE=dashboard-backend -p 8080:8080 \\"
+echo "    ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+echo ""
+echo -e "${YELLOW}4. Push to Registry:${NC}"
+echo "  docker push ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+echo ""
 
-# Function to push all images
-push_images() {
-    log "Pushing images to registry..."
-    
-    for image in flint-base csi-controller csi-node dashboard-backend node-agent; do
-        log "Pushing $REGISTRY/$image:$TAG"
-        docker push "$REGISTRY/$image:$TAG"
-    done
-    
-    success "All images pushed successfully!"
-}
+# Optionally push if requested
+if [[ "$1" == "--push" ]]; then
+    echo -e "${BLUE}Pushing image to registry...${NC}"
+    docker push "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+    echo -e "${GREEN}✅ Image pushed successfully!${NC}"
+fi
 
-# Function to clean up images
-clean_images() {
-    log "Cleaning up SPDK Flint images..."
-    
-    docker images "$REGISTRY/*" -q | xargs -r docker rmi -f
-    
-    success "Images cleaned up!"
-}
-
-# Parse command line arguments
-case "${1:-build}" in
-    "build")
-        main
-        ;;
-    "push")
-        push_images
-        ;;
-    "clean")
-        clean_images
-        ;;
-    "all")
-        main
-        push_images
-        ;;
-    *)
-        echo "Usage: $0 [build|push|clean|all]"
-        echo ""
-        echo "Commands:"
-        echo "  build (default) - Build all images"
-        echo "  push           - Push all images to registry"
-        echo "  clean          - Remove all built images"
-        echo "  all            - Build and push all images"
-        echo ""
-        echo "Environment variables:"
-        echo "  REGISTRY       - Docker registry/namespace (default: spdk-flint)"
-        echo "  TAG            - Image tag (default: latest)"
-        echo "  BUILD_ARGS     - Additional docker build arguments"
-        exit 1
-        ;;
-esac 
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}   Build Complete!                     ${NC}"
+echo -e "${GREEN}========================================${NC}" 

@@ -8,705 +8,909 @@
 
 namespace spdk_flint {
 
-// CSI Service implementation (stub)
-class CSIService {
-public:
-    explicit CSIService(std::shared_ptr<spdk::SpdkWrapper> spdk, 
-                       std::shared_ptr<kube::KubeClient> kube,
-                       const AppConfig& config)
-        : spdk_(spdk), kube_client_(kube), config_(config) {}
-    
-    void start() {
-        logger()->info("[CSI] Starting CSI gRPC services on {}", config_.csi_endpoint);
-        running_ = true;
-        // TODO: Implement gRPC server setup
-        logger()->info("[CSI] CSI services started successfully");
-    }
-    
-    void stop() {
-        logger()->info("[CSI] Stopping CSI services");
-        running_ = false;
-        // TODO: Implement graceful shutdown
-    }
-    
-    bool is_running() const { return running_; }
+// ===== NODE AGENT SERVICE IMPLEMENTATION =====
 
-private:
-    std::shared_ptr<spdk::SpdkWrapper> spdk_;
-    std::shared_ptr<kube::KubeClient> kube_client_;
-    AppConfig config_;
-    std::atomic<bool> running_{false};
-};
-
-// Dashboard Service implementation with Crow
-class DashboardService {
+class NodeAgentService {
 public:
-    explicit DashboardService(std::shared_ptr<spdk::SpdkWrapper> spdk,
+    explicit NodeAgentService(std::shared_ptr<spdk::SpdkWrapper> spdk, 
                              std::shared_ptr<kube::KubeClient> kube,
                              const AppConfig& config)
-        : spdk_(spdk), kube_client_(kube), config_(config) {}
+        : spdk_(spdk), kube_client_(kube), config_(config) {
+        logger()->info("[NODE_AGENT] Creating Node Agent service");
+        logger()->debug("[NODE_AGENT] Configuration: port={}, namespace='{}'", 
+                       config_.node_agent_port, config_.target_namespace);
+    }
     
     void start() {
-        logger()->info("[DASHBOARD] Starting dashboard backend on port {}", config_.dashboard_port);
-        
-        // Set up Crow routes
-        app_.route_dynamic("/health")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                (void)req; // Suppress unused parameter warning
-                return crow::response(200, "OK");
-            });
-        
-        app_.route_dynamic("/api/v1/volumes")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_get_volumes(req);
-            });
-        
-        app_.route_dynamic("/api/v1/nodes")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_get_nodes(req);
-            });
-        
-        app_.route_dynamic("/api/v1/stats")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_get_stats(req);
-            });
-        
-        app_.route_dynamic("/api/v1/devices")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_get_devices(req);
-            });
-        
-        app_.route_dynamic("/api/v1/discovery")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_discovery(req);
-            });
-        
-        // Start server in background thread
-        server_thread_ = std::thread([this]() {
-            app_.port(config_.dashboard_port).multithreaded().run();
-        });
-        
+        auto start_time = std::chrono::steady_clock::now();
+        logger()->info("[NODE_AGENT] Starting SPDK Node Agent service on port {}", config_.node_agent_port);
+        logger()->debug("[NODE_AGENT] Thread ID: {}", std::this_thread::get_id());
         running_ = true;
-        logger()->info("[DASHBOARD] Dashboard backend started on port {}", config_.dashboard_port);
+        
+        // Start HTTP API server for node agent operations
+        startHttpServer();
+        
+        // Start disk discovery and monitoring loop
+        startDiskMonitoring();
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time);
+        logger()->info("[NODE_AGENT] Node Agent service started successfully in {} ms", duration.count());
+        logger()->debug("[NODE_AGENT] Services active: HTTP API server, disk monitoring");
     }
     
     void stop() {
-        logger()->info("[DASHBOARD] Stopping dashboard backend");
+        auto start_time = std::chrono::steady_clock::now();
+        logger()->info("[NODE_AGENT] Stopping Node Agent service");
         running_ = false;
-        app_.stop();
-        if (server_thread_.joinable()) {
-            server_thread_.join();
+        
+        if (http_server_thread_.joinable()) {
+            logger()->debug("[NODE_AGENT] Stopping HTTP server thread");
+            http_server_thread_.join();
         }
+        
+        if (disk_monitor_thread_.joinable()) {
+            logger()->debug("[NODE_AGENT] Stopping disk monitoring thread");
+            disk_monitor_thread_.join();
+        }
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time);
+        logger()->info("[NODE_AGENT] Node Agent service stopped in {} ms", duration.count());
     }
     
-    bool is_running() const { return running_; }
+    bool is_running() const { 
+        bool running = running_;
+        logger()->debug("[NODE_AGENT] Service status check: {}", running ? "running" : "stopped");
+        return running;
+    }
 
 private:
     std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
     AppConfig config_;
     std::atomic<bool> running_{false};
-    crow::SimpleApp app_;
-    std::thread server_thread_;
+    std::thread http_server_thread_;
+    std::thread disk_monitor_thread_;
     
-    crow::response handle_get_volumes(const crow::request& req) {
-        (void)req; // Suppress unused parameter warning
-        try {
-            // Get volumes from Kubernetes
-            auto volumes_future = kube_client_->list_spdk_volumes(config_.target_namespace);
-            auto volumes = volumes_future.get();
-            
-            nlohmann::json response = nlohmann::json::array();
-            for (const auto& vol : volumes) {
-                nlohmann::json vol_json;
-                vol.to_json(vol_json);
-                response.push_back(vol_json);
+    void startHttpServer() {
+        logger()->info("[NODE_AGENT] Starting HTTP API server on port {}", config_.node_agent_port);
+        
+        http_server_thread_ = std::thread([this]() {
+            try {
+                logger()->debug("[NODE_AGENT] HTTP server thread started: {}", std::this_thread::get_id());
+                crow::SimpleApp app;
+                
+                // Enable CORS for dashboard access
+                auto& cors = app.get_middleware<crow::CORSHandler>();
+                cors.global().origin("*").methods("GET"_method, "POST"_method, "PUT"_method, "DELETE"_method);
+                
+                // Disk discovery endpoint
+                CROW_ROUTE(app, "/api/disks/uninitialized").methods("GET"_method)
+                ([this](const crow::request& req) {
+                    auto start_time = std::chrono::steady_clock::now();
+                    logger()->info("[NODE_AGENT] HTTP GET /api/disks/uninitialized from {}", req.remote_ip_address);
+                    auto response = handleGetUninitializedDisks();
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    logger()->debug("[NODE_AGENT] GET /api/disks/uninitialized completed in {} ms (status: {})", 
+                                   duration.count(), response.code);
+                    return response;
+                });
+                
+                // Disk setup endpoint
+                CROW_ROUTE(app, "/api/disks/setup").methods("POST"_method)
+                ([this](const crow::request& req) {
+                    auto start_time = std::chrono::steady_clock::now();
+                    logger()->info("[NODE_AGENT] HTTP POST /api/disks/setup from {} (body_size: {})", 
+                                  req.remote_ip_address, req.body.size());
+                    logger()->debug("[NODE_AGENT] Request body: {}", req.body.substr(0, 200) + (req.body.size() > 200 ? "..." : ""));
+                    auto response = handleSetupDisks(req);
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    logger()->debug("[NODE_AGENT] POST /api/disks/setup completed in {} ms (status: {})", 
+                                   duration.count(), response.code);
+                    return response;
+                });
+                
+                // LVS operations
+                CROW_ROUTE(app, "/api/lvs").methods("GET"_method)
+                ([this](const crow::request& req) {
+                    auto start_time = std::chrono::steady_clock::now();
+                    logger()->info("[NODE_AGENT] HTTP GET /api/lvs from {}", req.remote_ip_address);
+                    auto response = handleGetLvolStores();
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    logger()->debug("[NODE_AGENT] GET /api/lvs completed in {} ms (status: {})", 
+                                   duration.count(), response.code);
+                    return response;
+                });
+                
+                CROW_ROUTE(app, "/api/lvs").methods("POST"_method)
+                ([this](const crow::request& req) {
+                    auto start_time = std::chrono::steady_clock::now();
+                    logger()->info("[NODE_AGENT] HTTP POST /api/lvs from {} (body_size: {})", 
+                                  req.remote_ip_address, req.body.size());
+                    logger()->debug("[NODE_AGENT] Request body: {}", req.body.substr(0, 200) + (req.body.size() > 200 ? "..." : ""));
+                    auto response = handleCreateLvolStore(req);
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    logger()->debug("[NODE_AGENT] POST /api/lvs completed in {} ms (status: {})", 
+                                   duration.count(), response.code);
+                    return response;
+                });
+                
+                // Bdev operations
+                CROW_ROUTE(app, "/api/bdevs").methods("GET"_method)
+                ([this](const crow::request& req) {
+                    auto start_time = std::chrono::steady_clock::now();
+                    std::string filter = req.url_params.get("name") ? req.url_params.get("name") : "";
+                    logger()->info("[NODE_AGENT] HTTP GET /api/bdevs from {} (filter: '{}')", 
+                                  req.remote_ip_address, filter);
+                    auto response = handleGetBdevs(filter);
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start_time);
+                    logger()->debug("[NODE_AGENT] GET /api/bdevs completed in {} ms (status: {})", 
+                                   duration.count(), response.code);
+                    return response;
+                });
+                
+                // Health check
+                CROW_ROUTE(app, "/health").methods("GET"_method)
+                ([this](const crow::request& req) {
+                    logger()->debug("[NODE_AGENT] HTTP GET /health from {}", req.remote_ip_address);
+                    bool healthy = spdk_ && spdk_->isInitialized() && running_;
+                    if (healthy) {
+                        logger()->debug("[NODE_AGENT] Health check: OK");
+                        return crow::response(200, "OK");
+                    } else {
+                        logger()->warn("[NODE_AGENT] Health check: FAIL (spdk_initialized={}, running={})", 
+                                      spdk_ ? spdk_->isInitialized() : false, running_.load());
+                        return crow::response(503, "Service Unavailable");
+                    }
+                });
+                
+                // Status endpoint with detailed information
+                CROW_ROUTE(app, "/api/status").methods("GET"_method)
+                ([this](const crow::request& req) {
+                    logger()->debug("[NODE_AGENT] HTTP GET /api/status from {}", req.remote_ip_address);
+                    return handleGetStatus();
+                });
+                
+                logger()->info("[NODE_AGENT] HTTP server listening on port {}", config_.node_agent_port);
+                app.port(config_.node_agent_port).multithreaded().run();
+                
+            } catch (const std::exception& e) {
+                logger()->error("[NODE_AGENT] HTTP server thread exception: {}", e.what());
             }
-            
-            return crow::response(200, response.dump());
-        } catch (const std::exception& e) {
-            logger()->error("[DASHBOARD] Failed to get volumes: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to get volumes"})");
-        }
+            logger()->debug("[NODE_AGENT] HTTP server thread exiting");
+        });
     }
     
-    crow::response handle_get_nodes(const crow::request& req) {
-        (void)req; // Suppress unused parameter warning
-        try {
-            auto nodes_future = kube_client_->list_spdk_nodes(config_.target_namespace);
-            auto nodes = nodes_future.get();
-            
-            nlohmann::json response = nlohmann::json::array();
-            for (const auto& node : nodes) {
-                nlohmann::json node_json;
-                node.to_json(node_json);
-                response.push_back(node_json);
-            }
-            
-            return crow::response(200, response.dump());
-        } catch (const std::exception& e) {
-            logger()->error("[DASHBOARD] Failed to get nodes: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to get nodes"})");
-        }
-    }
-    
-    crow::response handle_get_stats(const crow::request& req) {
-        try {
-            auto bdev_name = req.url_params.get("bdev");
-            
-            if (bdev_name) {
-                // Get stats for specific bdev using thread-safe async call
-                auto stats_future = spdk_->getBdevIoStatsAsync(std::string(bdev_name));
-                auto stats = stats_future.get(); // Wait for result from SPDK thread
+    void startDiskMonitoring() {
+        logger()->info("[NODE_AGENT] Starting disk monitoring (interval: {} seconds)", config_.discovery_interval);
+        
+        disk_monitor_thread_ = std::thread([this]() {
+            try {
+                logger()->debug("[NODE_AGENT] Disk monitoring thread started: {}", std::this_thread::get_id());
+                int cycle_count = 0;
                 
-                nlohmann::json response = stats;
-                return crow::response(200, response.dump());
-            } else {
-                // Get overall stats using thread-safe async call
-                auto stats_future = spdk_->getBdevIoStatsAsync();
-                auto stats = stats_future.get(); // Wait for result from SPDK thread
-                
-                // Also get bdev list to include device info
-                auto bdevs_future = spdk_->getBdevsAsync();
-                auto bdevs = bdevs_future.get(); // Wait for result from SPDK thread
-                
-                nlohmann::json response;
-                response["io_stats"] = stats;
-                response["total_devices"] = bdevs.size();
-                
-                // Add per-device stats
-                nlohmann::json device_stats = nlohmann::json::array();
-                for (const auto& bdev : bdevs) {
-                    nlohmann::json bdev_info;
-                    bdev_info["name"] = bdev.name;
-                    bdev_info["size"] = bdev.num_blocks * bdev.block_size;
-                    bdev_info["block_size"] = bdev.block_size;
-                    bdev_info["stats"] = spdk_->getBdevIoStatsAsync(bdev.name).get();
-                    device_stats.push_back(bdev_info);
+                while (running_) {
+                    try {
+                        auto start_time = std::chrono::steady_clock::now();
+                        cycle_count++;
+                        
+                        logger()->debug("[NODE_AGENT] Starting monitoring cycle #{}", cycle_count);
+                        
+                        // Periodic disk discovery and health monitoring
+                        performDiskDiscovery();
+                        updateDiskHealth();
+                        
+                        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start_time);
+                        logger()->debug("[NODE_AGENT] Monitoring cycle #{} completed in {} ms", cycle_count, duration.count());
+                        
+                        // Sleep for monitoring interval
+                        for (uint32_t i = 0; i < config_.discovery_interval && running_; ++i) {
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                        }
+                        
+                    } catch (const std::exception& e) {
+                        logger()->error("[NODE_AGENT] Disk monitoring cycle #{} error: {}", cycle_count, e.what());
+                        // Continue monitoring despite errors
+                        std::this_thread::sleep_for(std::chrono::seconds(10));
+                    }
                 }
-                response["devices"] = device_stats;
-                
-                return crow::response(200, response.dump());
+            } catch (const std::exception& e) {
+                logger()->error("[NODE_AGENT] Disk monitoring thread exception: {}", e.what());
             }
+            logger()->debug("[NODE_AGENT] Disk monitoring thread exiting");
+        });
+    }
+    
+    crow::response handleGetUninitializedDisks() {
+        logger()->debug("[NODE_AGENT] Processing uninitialized disks request");
+        
+        try {
+            // Get all bdevs using direct SPDK calls
+            auto bdevs = spdk_->getBdevs();
+            logger()->debug("[NODE_AGENT] Retrieved {} total block devices", bdevs.size());
+            
+            crow::json::wvalue result;
+            result["disks"] = crow::json::load("[]");
+            
+            int uninitialized_count = 0;
+            
+            // Filter for uninitialized disks (not claimed by LVS)
+            for (const auto& bdev : bdevs) {
+                // Consider a disk uninitialized if it's not claimed and not an LVS
+                if (!bdev.claimed && bdev.name.find("lvs_") == std::string::npos) {
+                    crow::json::wvalue disk;
+                    disk["name"] = bdev.name;
+                    disk["size_bytes"] = bdev.num_blocks * bdev.block_size;
+                    disk["size_mb"] = (bdev.num_blocks * bdev.block_size) / (1024 * 1024);
+                    disk["product_name"] = bdev.product_name;
+                    disk["claimed"] = bdev.claimed;
+                    disk["uuid"] = bdev.uuid;
+                    disk["block_size"] = bdev.block_size;
+                    disk["num_blocks"] = bdev.num_blocks;
+                    result["disks"][result["disks"].size()] = std::move(disk);
+                    uninitialized_count++;
+                    
+                    logger()->debug("[NODE_AGENT] Uninitialized disk: {} ({} MB)", 
+                                   bdev.name, (bdev.num_blocks * bdev.block_size) / (1024 * 1024));
+                }
+            }
+            
+            result["count"] = uninitialized_count;
+            result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            
+            logger()->info("[NODE_AGENT] Found {} uninitialized disks out of {} total", uninitialized_count, bdevs.size());
+            return crow::response(200, result);
+            
         } catch (const std::exception& e) {
-            logger()->error("[DASHBOARD] Failed to get stats: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to get stats"})");
+            logger()->error("[NODE_AGENT] Error getting uninitialized disks: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
         }
     }
-
-    crow::response handle_get_devices(const crow::request& req) {
-        (void)req; // Suppress unused parameter warning
+    
+    crow::response handleSetupDisks(const crow::request& req) {
+        logger()->debug("[NODE_AGENT] Processing disk setup request");
+        
         try {
-            // Get device list using thread-safe async call
-            auto bdevs_future = spdk_->getBdevsAsync();
-            auto bdevs = bdevs_future.get(); // Wait for result from SPDK thread
+            auto body = crow::json::load(req.body);
+            if (!body) {
+                logger()->error("[NODE_AGENT] Disk setup failed: invalid JSON in request body");
+                return crow::response(400, "Invalid JSON");
+            }
             
-            nlohmann::json response = nlohmann::json::array();
+            std::vector<std::string> pci_addresses;
+            if (body.has("pci_addresses")) {
+                for (const auto& addr : body["pci_addresses"]) {
+                    pci_addresses.push_back(addr.s());
+                }
+            }
+            
+            logger()->info("[NODE_AGENT] Setting up {} PCI devices", pci_addresses.size());
+            for (const auto& addr : pci_addresses) {
+                logger()->debug("[NODE_AGENT] PCI address to setup: {}", addr);
+            }
+            
+            // TODO: Implement disk setup logic using SPDK direct calls
+            // This would involve:
+            // 1. Validate PCI addresses
+            // 2. Attach NVMe controllers if needed
+            // 3. Create appropriate bdevs
+            // 4. Update Kubernetes custom resources
+            
+            crow::json::wvalue result;
+            result["success"] = true;
+            result["setup_disks"] = crow::json::load("[]");
+            result["message"] = "Disk setup not yet implemented";
+            result["pci_addresses_requested"] = pci_addresses.size();
+            result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            
+            logger()->warn("[NODE_AGENT] Disk setup not yet fully implemented - returning placeholder");
+            return crow::response(200, result);
+            
+        } catch (const std::exception& e) {
+            logger()->error("[NODE_AGENT] Error setting up disks: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
+        }
+    }
+    
+    crow::response handleGetLvolStores() {
+        logger()->debug("[NODE_AGENT] Processing LVol stores request");
+        
+        try {
+            auto lvs_stores = spdk_->getLvolStores();
+            logger()->debug("[NODE_AGENT] Retrieved {} LVol stores", lvs_stores.size());
+            
+            crow::json::wvalue result;
+            result["lvol_stores"] = crow::json::load("[]");
+            
+            uint64_t total_capacity = 0;
+            uint64_t total_used = 0;
+            
+            for (const auto& lvs : lvs_stores) {
+                crow::json::wvalue store;
+                store["uuid"] = lvs.uuid;
+                store["name"] = lvs.name;
+                store["base_bdev"] = lvs.base_bdev;
+                store["total_clusters"] = lvs.total_clusters;
+                store["free_clusters"] = lvs.free_clusters;
+                store["used_clusters"] = lvs.total_clusters - lvs.free_clusters;
+                store["cluster_size"] = lvs.cluster_size;
+                store["block_size"] = lvs.block_size;
+                
+                uint64_t total_size = lvs.total_clusters * lvs.cluster_size;
+                uint64_t used_size = (lvs.total_clusters - lvs.free_clusters) * lvs.cluster_size;
+                double usage_percent = lvs.total_clusters > 0 ? 
+                    100.0 * (lvs.total_clusters - lvs.free_clusters) / lvs.total_clusters : 0.0;
+                
+                store["total_size_bytes"] = total_size;
+                store["used_size_bytes"] = used_size;
+                store["total_size_mb"] = total_size / (1024 * 1024);
+                store["used_size_mb"] = used_size / (1024 * 1024);
+                store["usage_percent"] = usage_percent;
+                
+                total_capacity += total_size;
+                total_used += used_size;
+                
+                result["lvol_stores"][result["lvol_stores"].size()] = std::move(store);
+                
+                logger()->debug("[NODE_AGENT] LVS: {} ({:.1f}% used, {} MB total)", 
+                               lvs.name, usage_percent, total_size / (1024 * 1024));
+            }
+            
+            result["count"] = lvs_stores.size();
+            result["total_capacity_mb"] = total_capacity / (1024 * 1024);
+            result["total_used_mb"] = total_used / (1024 * 1024);
+            result["overall_usage_percent"] = total_capacity > 0 ? 100.0 * total_used / total_capacity : 0.0;
+            result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            
+            logger()->info("[NODE_AGENT] Returned {} LVol stores (total: {} MB, used: {:.1f}%)", 
+                          lvs_stores.size(), total_capacity / (1024 * 1024), 
+                          total_capacity > 0 ? 100.0 * total_used / total_capacity : 0.0);
+            return crow::response(200, result);
+            
+        } catch (const std::exception& e) {
+            logger()->error("[NODE_AGENT] Error getting LVol stores: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
+        }
+    }
+    
+    crow::response handleCreateLvolStore(const crow::request& req) {
+        logger()->debug("[NODE_AGENT] Processing LVol store creation request");
+        
+        try {
+            auto body = crow::json::load(req.body);
+            if (!body) {
+                logger()->error("[NODE_AGENT] LVS creation failed: invalid JSON in request body");
+                return crow::response(400, "Invalid JSON");
+            }
+            
+            std::string bdev_name = body.has("bdev_name") ? body["bdev_name"].s() : "";
+            std::string lvs_name = body.has("lvs_name") ? body["lvs_name"].s() : "";
+            std::string clear_method = body.has("clear_method") ? body["clear_method"].s() : "unmap";
+            uint32_t cluster_sz = body.has("cluster_sz") ? body["cluster_sz"].u() : 0;
+            
+            logger()->info("[NODE_AGENT] Creating LVS: name='{}', bdev='{}', clear='{}', cluster={}",
+                          lvs_name, bdev_name, clear_method, cluster_sz);
+            
+            // Validate required parameters
+            if (bdev_name.empty()) {
+                logger()->error("[NODE_AGENT] LVS creation failed: missing bdev_name");
+                return crow::response(400, "Missing required parameter: bdev_name");
+            }
+            if (lvs_name.empty()) {
+                logger()->error("[NODE_AGENT] LVS creation failed: missing lvs_name");
+                return crow::response(400, "Missing required parameter: lvs_name");
+            }
+            
+            // Use async SPDK call with promise/future for synchronous HTTP response
+            std::promise<std::pair<std::string, int>> promise;
+            auto future = promise.get_future();
+            
+            auto request_start = std::chrono::steady_clock::now();
+            
+            spdk_->createLvolStoreAsync(bdev_name, lvs_name, clear_method, cluster_sz,
+                [&promise, request_start](const std::string& uuid, int error) {
+                    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - request_start);
+                    spdk_flint::logger()->debug("[NODE_AGENT] LVS creation callback received after {} ms", duration.count());
+                    promise.set_value({uuid, error});
+                });
+            
+            logger()->debug("[NODE_AGENT] Waiting for LVS creation to complete...");
+            auto result_pair = future.get();
+            
+            auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - request_start);
+            
+            if (result_pair.second == 0) {
+                crow::json::wvalue result;
+                result["uuid"] = result_pair.first;
+                result["success"] = true;
+                result["lvs_name"] = lvs_name;
+                result["bdev_name"] = bdev_name;
+                result["clear_method"] = clear_method;
+                result["cluster_size"] = cluster_sz;
+                result["creation_time_ms"] = total_duration.count();
+                result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                
+                logger()->info("[NODE_AGENT] Successfully created LVS '{}' with UUID '{}' in {} ms", 
+                              lvs_name, result_pair.first, total_duration.count());
+                return crow::response(200, result);
+            } else {
+                crow::json::wvalue error;
+                error["error"] = "Failed to create LVol store";
+                error["errno"] = result_pair.second;
+                error["error_message"] = strerror(-result_pair.second);
+                error["lvs_name"] = lvs_name;
+                error["bdev_name"] = bdev_name;
+                error["creation_time_ms"] = total_duration.count();
+                error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                
+                logger()->error("[NODE_AGENT] Failed to create LVS '{}' after {} ms: {} ({})", 
+                               lvs_name, total_duration.count(), result_pair.second, strerror(-result_pair.second));
+                return crow::response(500, error);
+            }
+        } catch (const std::exception& e) {
+            logger()->error("[NODE_AGENT] Error creating LVol store: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
+        }
+    }
+    
+    crow::response handleGetBdevs(const std::string& filter = "") {
+        logger()->debug("[NODE_AGENT] Processing bdevs request (filter: '{}')", filter);
+        
+        try {
+            auto bdevs = spdk_->getBdevs(filter);
+            logger()->debug("[NODE_AGENT] Retrieved {} block devices", bdevs.size());
+            
+            crow::json::wvalue result;
+            result["bdevs"] = crow::json::load("[]");
+            
+            uint64_t total_storage = 0;
+            int claimed_count = 0;
+            
             for (const auto& bdev : bdevs) {
-                nlohmann::json device;
+                crow::json::wvalue device;
                 device["name"] = bdev.name;
-                device["size"] = bdev.num_blocks * bdev.block_size;
-                device["block_size"] = bdev.block_size;
                 device["uuid"] = bdev.uuid;
                 device["product_name"] = bdev.product_name;
+                device["block_size"] = bdev.block_size;
+                device["num_blocks"] = bdev.num_blocks;
                 device["claimed"] = bdev.claimed;
                 
-                // Get stats for this device using thread-safe async call
-                auto stats_future = spdk_->getBdevIoStatsAsync(bdev.name);
-                device["stats"] = stats_future.get(); // Wait for result from SPDK thread
+                uint64_t size_bytes = bdev.num_blocks * bdev.block_size;
+                device["size_bytes"] = size_bytes;
+                device["size_mb"] = size_bytes / (1024 * 1024);
+                device["size_gb"] = size_bytes / (1024 * 1024 * 1024);
                 
-                response.push_back(device);
+                total_storage += size_bytes;
+                if (bdev.claimed) claimed_count++;
+                
+                result["bdevs"][result["bdevs"].size()] = std::move(device);
+                
+                logger()->debug("[NODE_AGENT] bdev: {} ({} MB, claimed: {})", 
+                               bdev.name, size_bytes / (1024 * 1024), bdev.claimed);
             }
             
-            return crow::response(200, response.dump());
+            result["count"] = bdevs.size();
+            result["claimed_count"] = claimed_count;
+            result["unclaimed_count"] = bdevs.size() - claimed_count;
+            result["total_storage_mb"] = total_storage / (1024 * 1024);
+            result["total_storage_gb"] = total_storage / (1024 * 1024 * 1024);
+            result["filter"] = filter;
+            result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            
+            logger()->info("[NODE_AGENT] Returned {} block devices (total: {} GB, claimed: {}, unclaimed: {})", 
+                          bdevs.size(), total_storage / (1024 * 1024 * 1024), claimed_count, bdevs.size() - claimed_count);
+            return crow::response(200, result);
+            
         } catch (const std::exception& e) {
-            logger()->error("[DASHBOARD] Failed to get devices: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to get devices"})");
+            logger()->error("[NODE_AGENT] Error getting bdevs: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["filter"] = filter;
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
         }
     }
     
-    crow::response handle_discovery(const crow::request& req) {
-        (void)req; // Suppress unused parameter warning
+    crow::response handleGetStatus() {
+        logger()->debug("[NODE_AGENT] Processing status request");
+        
         try {
-            nlohmann::json response;
+            crow::json::wvalue status;
             
-            // Discover Kubernetes nodes
-            auto nodes_future = kube_client_->discover_spdk_nodes();
-            auto discovered_nodes = nodes_future.get();
+            // Service status
+            status["service"]["running"] = running_.load();
+            status["service"]["name"] = "spdk-flint-node-agent";
+            status["service"]["version"] = "1.0.0";
+            status["service"]["node_id"] = config_.node_id;
+            status["service"]["namespace"] = config_.target_namespace;
+            status["service"]["port"] = config_.node_agent_port;
             
-            nlohmann::json nodes = nlohmann::json::array();
-            for (const auto& [node_name, node_address] : discovered_nodes) {
-                nlohmann::json node;
-                node["name"] = node_name;
-                node["address"] = node_address;
-                node["type"] = "kubernetes_node";
-                nodes.push_back(node);
+            // SPDK status
+            bool spdk_initialized = spdk_ && spdk_->isInitialized();
+            status["spdk"]["initialized"] = spdk_initialized;
+            status["spdk"]["version"] = spdk_ ? spdk_->getVersion() : "unknown";
+            
+            // Resource counts
+            if (spdk_initialized) {
+                try {
+                    auto bdevs = spdk_->getBdevs();
+                    auto lvs_stores = spdk_->getLvolStores();
+                    
+                    status["resources"]["bdevs"]["total"] = bdevs.size();
+                    status["resources"]["bdevs"]["claimed"] = std::count_if(bdevs.begin(), bdevs.end(), 
+                        [](const auto& bdev) { return bdev.claimed; });
+                    status["resources"]["lvol_stores"]["total"] = lvs_stores.size();
+                    
+                    uint64_t total_storage = 0;
+                    for (const auto& bdev : bdevs) {
+                        total_storage += bdev.num_blocks * bdev.block_size;
+                    }
+                    status["resources"]["total_storage_gb"] = total_storage / (1024 * 1024 * 1024);
+                    
+                } catch (const std::exception& e) {
+                    logger()->warn("[NODE_AGENT] Could not get resource counts: {}", e.what());
+                    status["resources"]["error"] = e.what();
+                }
             }
             
-            response["discovered_nodes"] = nodes;
-            response["node_count"] = nodes.size();
+            // Uptime
+            static auto start_time = std::chrono::steady_clock::now();
+            auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start_time);
+            status["uptime_seconds"] = uptime.count();
             
-            // Also include SPDK devices summary
-            auto bdevs = spdk_->getBdevs();
-            response["device_count"] = bdevs.size();
+            status["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
             
-            auto now = std::chrono::system_clock::now();
-            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            response["timestamp"] = timestamp;
+            logger()->debug("[NODE_AGENT] Status: running={}, spdk_initialized={}, uptime={}s", 
+                           running_.load(), spdk_initialized, uptime.count());
             
-            return crow::response(200, response.dump());
+            return crow::response(200, status);
+            
         } catch (const std::exception& e) {
-            logger()->error("[DASHBOARD] Failed to perform discovery: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to perform discovery"})");
-        }
-    }
-};
-
-// Node Agent implementation
-class NodeAgent {
-public:
-    explicit NodeAgent(std::shared_ptr<spdk::SpdkWrapper> spdk,
-                      std::shared_ptr<kube::KubeClient> kube,
-                      const AppConfig& config)
-        : spdk_(spdk), kube_client_(kube), config_(config) {}
-    
-    void start() {
-        logger()->info("[NODE_AGENT] Starting node agent on port {}", config_.node_agent_port);
-        
-        // Set up HTTP API for disk operations
-        app_.route_dynamic("/health")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                (void)req; // Suppress unused parameter warning
-                return crow::response(200, "OK");
-            });
-        
-        app_.route_dynamic("/api/v1/disks")
-            .methods("GET"_method)
-            ([this](const crow::request& req) {
-                return handle_get_disks(req);
-            });
-        
-        app_.route_dynamic("/api/v1/setup")
-            .methods("POST"_method)
-            ([this](const crow::request& req) {
-                return handle_setup_disk(req);
-            });
-        
-        // Start server
-        server_thread_ = std::thread([this]() {
-            app_.port(config_.node_agent_port).multithreaded().run();
-        });
-        
-        // Start discovery loop
-        discovery_thread_ = std::thread([this]() {
-            discovery_loop();
-        });
-        
-        running_ = true;
-        logger()->info("[NODE_AGENT] Node agent started successfully");
-    }
-    
-    void stop() {
-        logger()->info("[NODE_AGENT] Stopping node agent");
-        running_ = false;
-        app_.stop();
-        
-        if (server_thread_.joinable()) {
-            server_thread_.join();
-        }
-        if (discovery_thread_.joinable()) {
-            discovery_thread_.join();
+            logger()->error("[NODE_AGENT] Error getting status: {}", e.what());
+            crow::json::wvalue error;
+            error["error"] = e.what();
+            error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return crow::response(500, error);
         }
     }
     
-    bool is_running() const { return running_; }
-
-private:
-    std::shared_ptr<spdk::SpdkWrapper> spdk_;
-    std::shared_ptr<kube::KubeClient> kube_client_;
-    AppConfig config_;
-    std::atomic<bool> running_{false};
-    crow::SimpleApp app_;
-    std::thread server_thread_;
-    std::thread discovery_thread_;
-    
-    void discovery_loop() {
-        while (running_) {
-            try {
-                logger()->debug("[NODE_AGENT] Running disk discovery");
-                discover_and_setup_disks();
-            } catch (const std::exception& e) {
-                logger()->error("[NODE_AGENT] Discovery failed: {}", e.what());
-            }
-            
-            // Sleep for discovery interval
-            for (int i = 0; i < config_.discovery_interval && running_; ++i) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        }
-    }
-    
-    void discover_and_setup_disks() {
-        // Get available block devices from SPDK
-        auto bdevs = spdk_->getBdevs();
+    void performDiskDiscovery() {
+        logger()->debug("[NODE_AGENT] Starting disk discovery cycle");
         
-        for (const auto& bdev : bdevs) {
-            if (!bdev.claimed) {
-                logger()->info("[NODE_AGENT] Found unclaimed device: {}", bdev.name);
-                // TODO: Implement automatic setup logic
-            }
-        }
-    }
-    
-    crow::response handle_get_disks(const crow::request& req) {
-        (void)req; // Suppress unused parameter warning
-        try {
-            auto bdevs = spdk_->getBdevs();
-            nlohmann::json response = nlohmann::json::array();
-            
-            for (const auto& bdev : bdevs) {
-                nlohmann::json bdev_json = {
-                    {"name", bdev.name},
-                    {"product_name", bdev.product_name},
-                    {"num_blocks", bdev.num_blocks},
-                    {"block_size", bdev.block_size},
-                    {"uuid", bdev.uuid},
-                    {"claimed", bdev.claimed}
-                };
-                response.push_back(bdev_json);
-            }
-            
-            return crow::response(200, response.dump());
-        } catch (const std::exception& e) {
-            logger()->error("[NODE_AGENT] Failed to get disks: {}", e.what());
-            return crow::response(500, R"({"error": "Failed to get disks"})");
-        }
-    }
-    
-    crow::response handle_setup_disk(const crow::request& req) {
-        try {
-            auto request_json = nlohmann::json::parse(req.body);
-            std::string disk_name = request_json["disk_name"];
-            std::string setup_type = request_json["type"]; // "aio", "uring", "nvme"
-            
-            bool success = false;
-            if (setup_type == "aio") {
-                success = spdk_->createAioBdev(disk_name + "_aio", disk_name);
-            } else if (setup_type == "uring") {
-                success = spdk_->createUringBdev(disk_name + "_uring", disk_name);
-            }
-            
-            if (success) {
-                return crow::response(200, R"({"status": "success"})");
+        // Use async SPDK calls to discover new devices
+        spdk_->getBdevsAsync("", 0, [this](const std::vector<spdk::BdevInfo>& bdevs, int error) {
+            if (error == 0) {
+                logger()->debug("[NODE_AGENT] Discovered {} block devices", bdevs.size());
+                
+                // Count device types for monitoring
+                int nvme_count = 0, aio_count = 0, uring_count = 0, other_count = 0;
+                uint64_t total_capacity = 0;
+                
+                for (const auto& bdev : bdevs) {
+                    uint64_t size = bdev.num_blocks * bdev.block_size;
+                    total_capacity += size;
+                    
+                    if (bdev.name.find("nvme") != std::string::npos) nvme_count++;
+                    else if (bdev.name.find("aio") != std::string::npos) aio_count++;
+                    else if (bdev.name.find("uring") != std::string::npos) uring_count++;
+                    else other_count++;
+                }
+                
+                logger()->info("[NODE_AGENT] Discovery summary: {} devices ({} GB total), "
+                              "NVMe: {}, AIO: {}, uring: {}, other: {}",
+                              bdevs.size(), total_capacity / (1024 * 1024 * 1024),
+                              nvme_count, aio_count, uring_count, other_count);
+                
+                // TODO: Update Kubernetes custom resources with discovered devices
+                
             } else {
-                return crow::response(500, R"({"error": "Setup failed"})");
+                logger()->error("[NODE_AGENT] Error during disk discovery: {} ({})", error, strerror(-error));
             }
-        } catch (const std::exception& e) {
-            logger()->error("[NODE_AGENT] Failed to setup disk: {}", e.what());
-            return crow::response(400, R"({"error": "Invalid request"})");
-        }
-    }
-};
-
-// Controller Operator implementation
-class ControllerOperator {
-public:
-    explicit ControllerOperator(std::shared_ptr<spdk::SpdkWrapper> spdk,
-                               std::shared_ptr<kube::KubeClient> kube,
-                               const AppConfig& config)
-        : spdk_(spdk), kube_client_(kube), config_(config) {}
-    
-    void start() {
-        logger()->info("[CONTROLLER] Starting controller operator");
-        running_ = true;
-        
-        // Start operator loop
-        operator_thread_ = std::thread([this]() {
-            operator_loop();
         });
+    }
+    
+    void updateDiskHealth() {
+        logger()->debug("[NODE_AGENT] Updating disk health status");
         
-        logger()->info("[CONTROLLER] Controller operator started");
-    }
-    
-    void stop() {
-        logger()->info("[CONTROLLER] Stopping controller operator");
-        running_ = false;
+        // TODO: Implement health monitoring using SPDK callbacks
+        // This would include:
+        // - Check I/O error rates
+        // - Monitor temperature if available
+        // - Verify connectivity to NVMe devices
+        // - Update health status in Kubernetes resources
         
-        if (operator_thread_.joinable()) {
-            operator_thread_.join();
-        }
-    }
-    
-    bool is_running() const { return running_; }
-
-private:
-    std::shared_ptr<spdk::SpdkWrapper> spdk_;
-    std::shared_ptr<kube::KubeClient> kube_client_;
-    AppConfig config_;
-    std::atomic<bool> running_{false};
-    std::thread operator_thread_;
-    
-    void operator_loop() {
-        while (running_) {
-            try {
-                reconcile_volumes();
-            } catch (const std::exception& e) {
-                logger()->error("[CONTROLLER] Reconciliation failed: {}", e.what());
-            }
-            
-            // Sleep before next reconciliation
-            for (int i = 0; i < 30 && running_; ++i) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        }
-    }
-    
-    void reconcile_volumes() {
-        // Get all SPDK volumes
-        auto volumes_future = kube_client_->list_spdk_volumes(config_.target_namespace);
-        auto volumes = volumes_future.get();
+        static int health_check_count = 0;
+        health_check_count++;
         
-        for (const auto& volume : volumes) {
-            try {
-                reconcile_single_volume(volume);
-            } catch (const std::exception& e) {
-                logger()->error("[CONTROLLER] Failed to reconcile volume {}: {}",
-                               volume.name(), e.what());
-            }
+        if (health_check_count % 10 == 0) {  // Log every 10th health check
+            logger()->info("[NODE_AGENT] Health monitoring active (check #{})", health_check_count);
         }
-    }
-    
-    void reconcile_single_volume(const kube::SpdkVolume& volume) {
-        logger()->debug("[CONTROLLER] Reconciling volume {}", volume.name());
-        
-        // Check if volume needs creation
-        if (volume.spec.state == "Creating") {
-            create_volume_replicas(volume);
-        }
-        // Check for failed replicas
-        else if (volume.spec.state == "Degraded") {
-            repair_volume_replicas(volume);
-        }
-    }
-    
-    void create_volume_replicas(const kube::SpdkVolume& volume) {
-        logger()->info("[CONTROLLER] Creating replicas for volume {}", volume.name());
-        // TODO: Implement replica creation logic
-    }
-    
-    void repair_volume_replicas(const kube::SpdkVolume& volume) {
-        logger()->info("[CONTROLLER] Repairing replicas for volume {}", volume.name());
-        // TODO: Implement replica repair logic
     }
 };
 
-// Application implementation
+// ===== APPLICATION IMPLEMENTATION =====
+
 Application::Application(const AppConfig& config) 
-    : config_(config) {
-    logger()->info("Initializing SPDK Flint application in {} mode", 
-             config.mode == AppMode::ALL ? "all" : 
-             config.mode == AppMode::CSI_DRIVER ? "csi-driver" :
-             config.mode == AppMode::CONTROLLER ? "controller" :
-             config.mode == AppMode::DASHBOARD_BACKEND ? "dashboard-backend" :
-             config.mode == AppMode::NODE_AGENT ? "node-agent" : "unknown");
+    : config_(config), running_(false) {
+    logger()->info("[APP] Creating SPDK Flint Application in Node Agent mode");
+    logger()->info("[APP] Configuration summary - Mode: node-agent, Log Level: {}, Node ID: '{}'", 
+                  config.log_level, config.node_id);
+    logger()->debug("[APP] Detailed config - Health port: {}, Node agent port: {}, Target namespace: '{}'",
+                   config.health_port, config.node_agent_port, config.target_namespace);
+    logger()->debug("[APP] SPDK config - Discovery interval: {}s, Auto init blobstore: {}, Backup path: '{}'",
+                   config.discovery_interval, config.auto_initialize_blobstore, config.backup_path);
 }
 
 Application::~Application() {
+    logger()->debug("[APP] Destroying application");
     shutdown();
 }
 
 int Application::run() {
+    auto app_start_time = std::chrono::steady_clock::now();
+    
     try {
+        logger()->info("[APP] Starting SPDK Flint Node Agent application");
+        
         if (!initialize()) {
-            logger()->error("Failed to initialize application");
+            logger()->error("[APP] Failed to initialize application");
             return 1;
         }
         
-        logger()->info("All services started successfully");
-        
-        // Instead of running our own event loop, let SPDK handle the main loop
-        // SPDK's event loop will run until spdk_app_stop() is called
-        logger()->info("Application running - SPDK managing event loop");
+        auto init_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - app_start_time);
+        logger()->info("[APP] SPDK Flint Node Agent started successfully in {} ms", init_duration.count());
+        logger()->info("[APP] Application running - SPDK managing event loop");
+        logger()->debug("[APP] Services active: Node Agent HTTP API, Health server, Disk monitoring");
         
         // This will block until SPDK shuts down
         // The actual event processing happens in SPDK's internal event loop
         return 0;
         
     } catch (const std::exception& e) {
-        logger()->error("Application failed: {}", e.what());
+        logger()->error("[APP] Application failed: {}", e.what());
         return 1;
     }
 }
 
 bool Application::initialize() {
+    auto start_time = std::chrono::steady_clock::now();
+    
     try {
+        logger()->info("[APP] Initializing SPDK Flint Node Agent components");
+        
         setupLogging();
         initializeComponents();
         
-        // Start services based on mode
-        switch (config_.mode) {
-            case AppMode::CSI_DRIVER:
-                startCSIMode();
-                break;
-            case AppMode::CONTROLLER:
-                startControllerMode();
-                break;
-            case AppMode::DASHBOARD_BACKEND:
-                startDashboardMode();
-                break;
-            case AppMode::NODE_AGENT:
-                startNodeAgentMode();
-                break;
-            case AppMode::ALL:
-                startCSIMode();
-                startDashboardMode();
-                startNodeAgentMode();
-                break;
+        // Only start node agent mode since spdk_flint is node-agent only
+        if (config_.mode == AppMode::NODE_AGENT) {
+            startNodeAgentMode();
+        } else {
+            logger()->error("[APP] spdk_flint only supports node-agent mode. Other services should use Rust RPC clients.");
+            return false;
         }
         
-        // Always start health server
+        // Start health server
         startHealthServer();
         
         running_ = true;
+        
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time);
+        logger()->info("[APP] Application initialized successfully in {} ms", duration.count());
         return true;
         
     } catch (const std::exception& e) {
-        logger()->error("Application initialization failed: {}", e.what());
+        logger()->error("[APP] Application initialization failed: {}", e.what());
         return false;
     }
 }
 
 void Application::shutdown() {
     if (!running_.exchange(false)) {
+        logger()->debug("[APP] Shutdown called but application not running - skipping");
         return; // Already shutting down
     }
     
-    logger()->info("Shutting down application");
+    auto start_time = std::chrono::steady_clock::now();
+    logger()->info("[APP] Shutting down SPDK Flint Node Agent");
     
-    // Stop services in reverse order
+    // Stop node agent service
     if (node_agent_) {
+        logger()->debug("[APP] Stopping node agent service");
         node_agent_->stop();
     }
-    if (dashboard_service_) {
-        dashboard_service_->stop();
-    }
-    if (csi_service_) {
-        csi_service_->stop();
-    }
-    if (controller_operator_) {
-        controller_operator_->stop();
+    
+    // Stop health server
+    if (health_thread_.joinable()) {
+        logger()->debug("[APP] Stopping health server thread");
+        health_thread_.join();
     }
     
     // Shutdown SPDK - this will properly flush and cleanup
     if (spdk_wrapper_) {
+        logger()->debug("[APP] Shutting down embedded SPDK");
         spdk_wrapper_->shutdown();
     }
     
-    logger()->info("Application shutdown complete");
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    logger()->info("[APP] SPDK Flint Node Agent shutdown complete in {} ms", duration.count());
 }
 
 void Application::setupLogging() {
     // Logging is already initialized in main.cpp
+    logger()->debug("[APP] Logging system already configured");
 }
 
 void Application::initializeComponents() {
-    logger()->info("Initializing components");
+    auto start_time = std::chrono::steady_clock::now();
+    logger()->info("[APP] Initializing SPDK Flint Node Agent components");
     
-    // Wait for SPDK to be ready
-    waitForSpdkReady();
-    
-    // Initialize SPDK wrapper
-    spdk_wrapper_ = std::make_shared<spdk_flint::spdk::SpdkWrapper>();
+    // Initialize SPDK wrapper with embedded SPDK
+    logger()->debug("[APP] Creating embedded SPDK wrapper");
+    spdk_wrapper_ = std::make_shared<spdk_flint::spdk::SpdkWrapper>(config_.config_file);
     if (!spdk_wrapper_->initialize()) {
-        throw std::runtime_error("Failed to initialize SPDK");
+        throw std::runtime_error("Failed to initialize embedded SPDK");
     }
+    logger()->info("[APP] Embedded SPDK initialized successfully");
     
     // Initialize Kubernetes client
+    logger()->debug("[APP] Initializing Kubernetes client");
     auto kube_client = kube::KubeClient::create_incluster();
     if (!kube_client) {
-        logger()->warn("Failed to create in-cluster client, trying kubeconfig");
+        logger()->warn("[APP] Failed to create in-cluster client, trying kubeconfig");
         kube_client = kube::KubeClient::create_from_kubeconfig();
     }
     if (!kube_client) {
         throw std::runtime_error("Failed to initialize Kubernetes client");
     }
+    logger()->info("[APP] Kubernetes client initialized successfully");
     
-    // Create service instances
-    csi_service_ = std::make_unique<CSIService>(spdk_wrapper_, kube_client, config_);
-    dashboard_service_ = std::make_unique<DashboardService>(spdk_wrapper_, kube_client, config_);
-    node_agent_ = std::make_unique<NodeAgent>(spdk_wrapper_, kube_client, config_);
-    controller_operator_ = std::make_unique<ControllerOperator>(spdk_wrapper_, kube_client, config_);
+    // Create node agent service instance
+    logger()->debug("[APP] Creating node agent service");
+    node_agent_ = std::make_unique<NodeAgentService>(spdk_wrapper_, kube_client, config_);
     
-    logger()->info("Components initialized successfully");
-}
-
-void Application::startCSIMode() {
-    logger()->info("Starting CSI services");
-    csi_service_->start();
-    controller_operator_->start();
-}
-
-void Application::startControllerMode() {
-    logger()->info("Starting controller services");
-    controller_operator_->start();
-}
-
-void Application::startDashboardMode() {
-    logger()->info("Starting dashboard services");
-    dashboard_service_->start();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    logger()->info("[APP] SPDK Flint Node Agent components initialized successfully in {} ms", duration.count());
 }
 
 void Application::startNodeAgentMode() {
-    logger()->info("Starting node agent services");
+    logger()->info("[APP] Starting SPDK Flint Node Agent mode");
+    logger()->debug("[APP] Node agent configuration: port={}, discovery_interval={}s", 
+                   config_.node_agent_port, config_.discovery_interval);
     node_agent_->start();
+    logger()->info("[APP] Node Agent service started");
 }
 
 void Application::startHealthServer() {
-    logger()->info("Starting health server on port {}", config_.health_port);
+    logger()->info("[APP] Starting health server on port {}", config_.health_port);
     
-    // Simple health check server using Crow
-    static crow::SimpleApp health_app;
-    
-    health_app.route_dynamic("/healthz")
-        .methods("GET"_method)
-        ([this](const crow::request& req) {
-            (void)req; // Suppress unused parameter warning
-            // Check if core services are running
-            bool healthy = true;
+    // Start a simple health server
+    health_thread_ = std::thread([this]() {
+        try {
+            logger()->debug("[APP] Health server thread started: {}", std::this_thread::get_id());
+            crow::SimpleApp app;
             
-            if (config_.mode == AppMode::CSI_DRIVER || config_.mode == AppMode::ALL) {
-                healthy = healthy && csi_service_ && csi_service_->is_running();
-            }
-            if (config_.mode == AppMode::DASHBOARD_BACKEND || config_.mode == AppMode::ALL) {
-                healthy = healthy && dashboard_service_ && dashboard_service_->is_running();
-            }
-            if (config_.mode == AppMode::NODE_AGENT || config_.mode == AppMode::ALL) {
-                healthy = healthy && node_agent_ && node_agent_->is_running();
-            }
+            // Enable simple CORS
+            auto& cors = app.get_middleware<crow::CORSHandler>();
+            cors.global().origin("*").methods("GET"_method);
             
-            return crow::response(healthy ? 200 : 503, healthy ? "OK" : "Not Ready");
-        });
+            CROW_ROUTE(app, "/health").methods("GET"_method)
+            ([this](const crow::request& req) {
+                logger()->debug("[APP] Health check from {}", req.remote_ip_address);
+                if (node_agent_ && node_agent_->is_running() && spdk_wrapper_ && spdk_wrapper_->isInitialized()) {
+                    logger()->debug("[APP] Health check: OK");
+                    return crow::response(200, "OK");
+                } else {
+                    logger()->warn("[APP] Health check: FAIL (agent_running={}, spdk_initialized={})", 
+                                  node_agent_ ? node_agent_->is_running() : false,
+                                  spdk_wrapper_ ? spdk_wrapper_->isInitialized() : false);
+                    return crow::response(503, "Service Unavailable");
+                }
+            });
+            
+            CROW_ROUTE(app, "/ready").methods("GET"_method)
+            ([this](const crow::request& req) {
+                logger()->debug("[APP] Readiness check from {}", req.remote_ip_address);
+                if (running_ && spdk_wrapper_ && spdk_wrapper_->isInitialized()) {
+                    logger()->debug("[APP] Readiness check: Ready");
+                    return crow::response(200, "Ready");
+                } else {
+                    logger()->warn("[APP] Readiness check: Not Ready (running={}, spdk_initialized={})", 
+                                  running_.load(), spdk_wrapper_ ? spdk_wrapper_->isInitialized() : false);
+                    return crow::response(503, "Not Ready");
+                }
+            });
+            
+            CROW_ROUTE(app, "/version").methods("GET"_method)
+            ([this](const crow::request& req) {
+                logger()->debug("[APP] Version request from {}", req.remote_ip_address);
+                crow::json::wvalue version;
+                version["application"] = "spdk-flint-node-agent";
+                version["version"] = "1.0.0";
+                version["spdk_version"] = spdk_wrapper_ ? spdk_wrapper_->getVersion() : "unknown";
+                version["build_date"] = __DATE__;
+                version["build_time"] = __TIME__;
+                return crow::response(200, version);
+            });
+            
+            logger()->info("[APP] Health server listening on port {}", config_.health_port);
+            app.port(config_.health_port).multithreaded().run();
+            
+        } catch (const std::exception& e) {
+            logger()->error("[APP] Health server thread exception: {}", e.what());
+        }
+        logger()->debug("[APP] Health server thread exiting");
+    });
     
-    // Start health server in background
-    std::thread([this]() {
-        health_app.port(config_.health_port).multithreaded().run();
-    }).detach();
+    logger()->info("[APP] Health server started successfully");
 }
 
 void Application::waitForSpdkReady() {
-    logger()->info("Waiting for SPDK to be ready at {}", config_.spdk_rpc_url);
+    logger()->debug("[APP] Waiting for SPDK to be ready");
     
-    // For now, just wait a bit - in production we'd check the RPC socket
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    auto start_time = std::chrono::steady_clock::now();
+    int attempts = 0;
     
-    logger()->info("SPDK is ready");
+    // Wait for SPDK to be ready
+    while (!spdk_wrapper_ || !spdk_wrapper_->isInitialized()) {
+        attempts++;
+        
+        if (attempts % 10 == 0) {  // Log every second
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_time);
+            logger()->debug("[APP] Waiting for SPDK (attempt {}, {}ms elapsed)", attempts, duration.count());
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // Timeout after 30 seconds
+        if (attempts > 300) {
+            logger()->error("[APP] Timeout waiting for SPDK to initialize");
+            throw std::runtime_error("SPDK initialization timeout");
+        }
+    }
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    logger()->info("[APP] SPDK ready after {} attempts ({} ms)", attempts, duration.count());
 }
 
 } // namespace spdk_flint 

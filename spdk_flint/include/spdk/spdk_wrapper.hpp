@@ -6,11 +6,11 @@
 #include <functional>
 #include <optional>
 #include <map>
-#include <future> // Added for std::future
-#include <mutex> // Added for std::mutex
-#include <thread> // Added for std::thread
-#include <atomic> // Added for std::atomic
-#include <chrono> // Added for std::chrono
+#include <future>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 // SPDK headers
 extern "C" {
@@ -26,6 +26,7 @@ extern "C" {
 #include <spdk/rpc.h>
 #include <spdk/thread.h>
 #include <spdk/log.h>
+#include <spdk/uuid.h>
 }
 
 namespace spdk_flint {
@@ -36,6 +37,8 @@ struct VolumeInfo;
 struct RaidInfo;
 struct BdevInfo;
 struct NvmfSubsystemInfo;
+struct LvolStoreInfo;
+struct NvmeControllerInfo;
 
 // Error handling
 enum class SpdkError {
@@ -63,7 +66,43 @@ private:
     std::string message_;
 };
 
-// SPDK wrapper class - replaces HTTP RPC calls with direct C function calls
+// Callback types for async operations
+using LvolStoreCreateCallback = std::function<void(const std::string& uuid, int error)>;
+using LvolStoreDeleteCallback = std::function<void(int error)>;
+using BdevCreateCallback = std::function<void(const std::string& bdev_name, int error)>;
+using NvmeAttachCallback = std::function<void(const std::vector<std::string>& bdev_names, int error)>;
+
+// Data structures for return values
+struct LvolStoreInfo {
+    std::string uuid;
+    std::string name;
+    std::string base_bdev;
+    uint64_t total_clusters;
+    uint64_t free_clusters;
+    uint64_t cluster_size;
+    uint64_t block_size;
+};
+
+struct BdevInfo {
+    std::string name;
+    std::string uuid;
+    std::string product_name;
+    uint64_t block_size;
+    uint64_t num_blocks;
+    std::vector<std::string> aliases;
+    bool claimed;
+    std::string driver_specific;
+};
+
+struct NvmeControllerInfo {
+    std::string name;
+    std::string trtype;
+    std::string traddr;
+    std::string state;
+    std::vector<std::string> bdevs;
+};
+
+// SPDK wrapper class - Node Agent functionality only
 class SpdkWrapper {
 public:
     explicit SpdkWrapper(const std::string& config_file = "");
@@ -74,145 +113,119 @@ public:
     void shutdown();
     bool isInitialized() const;
 
-    // Version information (replaces spdk_get_version RPC)
+    // Version information
     std::string getVersion() const;
 
-    // Block device operations (replaces bdev_* RPCs)
-    std::vector<BdevInfo> getBdevs(const std::string& name = "") const;
-    bool createAioBdev(const std::string& name, const std::string& filename, 
-                       uint32_t block_size = 512);
-    bool createUringBdev(const std::string& name, const std::string& filename,
-                         uint32_t block_size = 512);
-    bool deleteBdev(const std::string& name);
+    // ===== NODE AGENT DIRECT SPDK C API METHODS =====
     
-    // NVMe operations (replaces bdev_nvme_* RPCs)
-    bool attachNvmeController(const std::string& name, const std::string& traddr,
-                             const std::string& trtype = "PCIe");
-    bool detachNvmeController(const std::string& name);
-    std::vector<std::string> getNvmeControllers() const;
-
-    // Logical Volume Store operations (replaces bdev_lvol_*_lvstore RPCs)
-    std::string createLvstore(const std::string& bdev_name, const std::string& lvs_name,
-                             uint32_t cluster_size = 4194304,  // 4MB default
-                             const std::string& clear_method = "write_zeroes");
-    bool deleteLvstore(const std::string& lvs_name);
-    std::vector<std::string> getLvstores() const;
-
-    // Logical Volume operations (replaces bdev_lvol_* RPCs)
-    std::string createLvol(const std::string& lvs_name, const std::string& lvol_name,
-                          uint64_t size_mib, bool thin_provision = false,
-                          const std::string& clear_method = "write_zeroes");
-    bool deleteLvol(const std::string& lvol_name);
-    bool resizeLvol(const std::string& lvol_name, uint64_t new_size_mib);
+    // LVol Store Operations (replaces bdev_lvol_* RPCs)
+    void getLvolStoresAsync(
+        const std::string& uuid = "",
+        const std::string& lvs_name = "",
+        std::function<void(const std::vector<LvolStoreInfo>&, int)> callback = nullptr
+    );
     
-    // Snapshot operations (replaces bdev_lvol_snapshot RPC)
-    std::string createSnapshot(const std::string& lvol_name, const std::string& snapshot_name);
+    void createLvolStoreAsync(
+        const std::string& bdev_name,
+        const std::string& lvs_name, 
+        const std::string& clear_method = "unmap",
+        uint32_t cluster_sz = 0,
+        LvolStoreCreateCallback callback = nullptr
+    );
     
-    // RAID operations (replaces bdev_raid_* RPCs)
-    std::string createRaid(const std::string& name, const std::string& raid_level,
-                          const std::vector<std::string>& base_bdevs,
-                          uint32_t strip_size_kb = 64);
-    bool deleteRaid(const std::string& name);
-    std::vector<RaidInfo> getRaidBdevs(const std::string& category = "all") const;
-    bool addRaidBaseBdev(const std::string& raid_bdev, const std::string& base_bdev);
-    bool removeRaidBaseBdev(const std::string& base_bdev_name);
+    void deleteLvolStoreAsync(
+        const std::string& uuid = "",
+        const std::string& lvs_name = "",
+        LvolStoreDeleteCallback callback = nullptr
+    );
 
-    // NVMe-oF Target operations (replaces nvmf_* RPCs)
-    bool createNvmfSubsystem(const std::string& nqn, bool allow_any_host = true);
-    bool deleteNvmfSubsystem(const std::string& nqn);
-    bool addNvmfNamespace(const std::string& nqn, const std::string& bdev_name,
-                         uint32_t nsid = 0);
-    bool addNvmfListener(const std::string& nqn, const std::string& trtype,
-                        const std::string& traddr, const std::string& trsvcid);
-    std::vector<NvmfSubsystemInfo> getNvmfSubsystems() const;
+    // Block Device Creation (replaces bdev_aio_create, bdev_uring_create RPCs)
+    void createAioBdevAsync(
+        const std::string& name,
+        const std::string& filename,
+        uint32_t block_size = 512,
+        bool readonly = false,
+        bool fallocate = false,
+        const std::string& uuid = "",
+        BdevCreateCallback callback = nullptr
+    );
+    
+    void createUringBdevAsync(
+        const std::string& name,
+        const std::string& filename,
+        uint32_t block_size = 512,
+        const std::string& uuid = "",
+        BdevCreateCallback callback = nullptr
+    );
 
-    // UBLK operations (replaces ublk_* RPCs)  
-    bool createUblkTarget(const std::string& cpumask = "");
-    bool destroyUblkTarget();
-    int startUblkDisk(const std::string& bdev_name, uint32_t ublk_id,
-                      uint32_t queue_depth = 128, uint32_t num_queues = 1);
-    bool stopUblkDisk(uint32_t ublk_id);
+    // NVMe Operations (replaces bdev_nvme_* RPCs)
+    void getNvmeControllersAsync(
+        const std::string& name = "",
+        std::function<void(const std::vector<NvmeControllerInfo>&, int)> callback = nullptr
+    );
+    
+    void attachNvmeControllerAsync(
+        const std::string& name,
+        const std::string& trtype,
+        const std::string& traddr,
+        const std::string& adrfam = "",
+        const std::string& trsvcid = "",
+        uint32_t priority = 0,
+        const std::string& subnqn = "",
+        const std::string& hostnqn = "",
+        const std::string& hostaddr = "",
+        const std::string& hostsvcid = "",
+        bool multipath = false,
+        uint32_t num_io_queues = 0,
+        uint32_t ctrlr_loss_timeout_sec = 0,
+        uint32_t reconnect_delay_sec = 0,
+        uint32_t fast_io_fail_timeout_sec = 0,
+        NvmeAttachCallback callback = nullptr
+    );
 
-    // Statistics and monitoring
-    std::map<std::string, uint64_t> getBdevIoStats(const std::string& bdev_name = "") const;
+    // Block Device Enumeration (replaces bdev_get_bdevs RPC)
+    void getBdevsAsync(
+        const std::string& name = "",
+        uint32_t timeout = 0,
+        std::function<void(const std::vector<BdevInfo>&, int)> callback = nullptr
+    );
+
+    // Process control
+    void stopApplicationAsync(std::function<void(int)> callback = nullptr);
 
     // Event handling and threading
     void processEvents();
     void runEventLoop();
     void stopEventLoop();
 
-    // Thread-safe methods for cross-thread access (e.g., from dashboard)
-    std::future<std::vector<BdevInfo>> getBdevsAsync(const std::string& name = "") const;
-    std::future<std::map<std::string, uint64_t>> getBdevIoStatsAsync(const std::string& bdev_name = "") const;
-    std::future<std::string> getVersionAsync() const;
-    
-    // Alternative: Simple caching approach (recommended for monitoring dashboards)
-    // These are thread-safe and don't block, but data may be slightly stale
-    std::vector<BdevInfo> getCachedBdevs(const std::string& name = "") const;
-    std::map<std::string, uint64_t> getCachedBdevIoStats(const std::string& bdev_name = "") const;
-    void startPeriodicCacheUpdate(std::chrono::milliseconds interval = std::chrono::milliseconds(5000));
-    void stopPeriodicCacheUpdate();
-    
-    // Note: Synchronous methods are declared above in the main public section
+    // Synchronous convenience methods (for backwards compatibility)
+    std::vector<BdevInfo> getBdevs(const std::string& name = "") const;
+    std::vector<LvolStoreInfo> getLvolStores(const std::string& uuid = "", const std::string& lvs_name = "") const;
+    std::string getVersionSync() const;
 
 private:
-    std::string config_file_;
-    
-    // SPDK application context
-    struct spdk_app_opts* opts_ = nullptr;
-    
-    // Caching for thread-safe dashboard access
-    mutable std::mutex cache_mutex_;
-    std::vector<BdevInfo> cached_bdevs_;
-    std::map<std::string, std::map<std::string, uint64_t>> cached_stats_; // bdev_name -> stats
-    std::chrono::steady_clock::time_point last_cache_update_;
-    std::thread cache_update_thread_;
-    std::atomic<bool> cache_update_running_{false};
-    
     // Internal helper methods
-    static void appStarted(void* arg);
-    static void appStopped(void* arg, int rc);
-    static int parseArgs(int argc, char** argv);
-    
-    // Thread-safe execution helpers
-    template<typename Func>
-    auto executeOnSpdkThread(Func&& func) -> decltype(func());
-    
-    // Error conversion helpers
     static SpdkError convertErrno(int err);
     static void throwOnError(int rc, const std::string& operation);
-};
-
-// Data structures for information retrieval
-struct BdevInfo {
-    std::string name;
-    std::string product_name;
-    uint64_t num_blocks;
-    uint32_t block_size;
-    std::string uuid;
-    bool claimed;
-    std::vector<std::string> aliases;
-};
-
-struct RaidInfo {
-    std::string name;
-    std::string uuid;
-    std::string state;
-    std::string raid_level;
-    uint32_t strip_size_kb;
-    uint32_t num_base_bdevs;
-    uint32_t num_base_bdevs_discovered;
-    uint32_t num_base_bdevs_operational;
-    std::vector<std::string> base_bdevs_list;
-};
-
-struct NvmfSubsystemInfo {
-    std::string nqn;
-    std::string subtype;
-    bool allow_any_host;
-    std::vector<std::string> hosts;
-    std::vector<std::map<std::string, std::string>> namespaces;
-    std::vector<std::map<std::string, std::string>> listeners;
+    
+    // Internal data members
+    std::string config_file_;
+    struct spdk_app_opts* opts_;
+    std::atomic<bool> event_loop_running_{false};
+    std::atomic<bool> shutdown_requested_{false};
+    
+    // Callback management for async operations
+    struct CallbackContext {
+        uint64_t id;
+        std::function<void()> cleanup;
+    };
+    
+    std::mutex callback_mutex_;
+    std::map<uint64_t, CallbackContext> pending_callbacks_;
+    std::atomic<uint64_t> next_callback_id_{1};
+    
+    uint64_t registerCallback(std::function<void()> cleanup);
+    void unregisterCallback(uint64_t callback_id);
 };
 
 } // namespace spdk
