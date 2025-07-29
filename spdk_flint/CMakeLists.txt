@@ -280,24 +280,57 @@ target_link_libraries(spdk_flint_lib
 )
 
 # Static linking approach - link ALL SPDK and DPDK libraries at once
-# Find all SPDK static libraries
+# Find all SPDK static libraries (exclude unit test libraries)
 file(GLOB ALL_SPDK_LIBS "/usr/local/lib/libspdk*.a")
+# Remove unit test and mock libraries
+list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*ut_mock.*")
+list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*unit.*")
+list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*test.*")
 message(STATUS "Found SPDK libraries: ${ALL_SPDK_LIBS}")
 
-# Find DPDK libraries  
+# Find DPDK libraries with more comprehensive search
 if(DPDK_FOUND)
     set(ALL_DPDK_LIBS ${DPDK_LIBRARIES})
-elseif(DPDK_LIBRARY)
-    set(ALL_DPDK_LIBS ${DPDK_LIBRARY})
 else()
-    # Find all DPDK libraries if pkg-config didn't work
-    file(GLOB ALL_DPDK_LIBS "/usr/lib/x86_64-linux-gnu/libdpdk*.a" "/usr/local/lib/libdpdk*.a" "/usr/local/lib/librte*.a")
+    # Find all DPDK libraries including specific PCI libraries
+    file(GLOB ALL_DPDK_LIBS 
+        "/usr/lib/x86_64-linux-gnu/libdpdk*.a" 
+        "/usr/local/lib/libdpdk*.a" 
+        "/usr/local/lib/librte*.a"
+        "/usr/lib/x86_64-linux-gnu/librte*.a"
+        "/usr/lib/librte*.a"
+        "/lib/x86_64-linux-gnu/libdpdk*.a"
+    )
 endif()
 message(STATUS "Found DPDK libraries: ${ALL_DPDK_LIBS}")
 
-# Find ISA-L libraries (Intel Storage Acceleration Library)
-file(GLOB ALL_ISAL_LIBS "/usr/local/lib/libisal*.a" "/usr/lib/x86_64-linux-gnu/libisal*.a")
+# Find ISA-L libraries (Intel Storage Acceleration Library) with comprehensive search
+file(GLOB ALL_ISAL_LIBS 
+    "/usr/local/lib/libisal*.a" 
+    "/usr/lib/x86_64-linux-gnu/libisal*.a"
+    "/usr/lib/libisal*.a"
+    "/lib/x86_64-linux-gnu/libisal*.a"
+    # Also look for ISA-L-crypto
+    "/usr/local/lib/libisal_crypto*.a"
+    "/usr/lib/x86_64-linux-gnu/libisal_crypto*.a"
+    "/usr/lib/libisal_crypto*.a"
+    # Alternative naming patterns
+    "/usr/local/lib/libisa-l*.a"
+    "/usr/lib/x86_64-linux-gnu/libisa-l*.a"
+)
 message(STATUS "Found ISA-L libraries: ${ALL_ISAL_LIBS}")
+
+# If no ISA-L libraries found, try to find them via pkg-config
+if(NOT ALL_ISAL_LIBS)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(ISAL QUIET libisal)
+        if(ISAL_FOUND)
+            list(APPEND ALL_ISAL_LIBS ${ISAL_LIBRARIES})
+            message(STATUS "Found ISA-L via pkg-config: ${ISAL_LIBRARIES}")
+        endif()
+    endif()
+endif()
 
 # Link everything statically with whole-archive to include all symbols
 target_link_libraries(spdk_flint_lib
@@ -318,6 +351,26 @@ if(AIO_LIBRARY)
 endif()
 if(URING_LIBRARY)
     target_link_libraries(spdk_flint_lib ${URING_LIBRARY})
+endif()
+
+# Add fallback linking for ISA-L if static libraries weren't found
+if(NOT ALL_ISAL_LIBS)
+    message(WARNING "No ISA-L static libraries found, trying shared libraries")
+    find_library(ISAL_SHARED NAMES isal libisal PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    if(ISAL_SHARED)
+        target_link_libraries(spdk_flint_lib ${ISAL_SHARED})
+        message(STATUS "Linked shared ISA-L library: ${ISAL_SHARED}")
+    endif()
+endif()
+
+# Add fallback linking for DPDK if needed
+if(NOT ALL_DPDK_LIBS)
+    message(WARNING "No DPDK static libraries found, trying shared libraries")
+    find_library(DPDK_SHARED NAMES dpdk libdpdk PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    if(DPDK_SHARED)
+        target_link_libraries(spdk_flint_lib ${DPDK_SHARED})
+        message(STATUS "Linked shared DPDK library: ${DPDK_SHARED}")
+    endif()
 endif()
 
 # Set linker flags for static linking
