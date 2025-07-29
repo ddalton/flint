@@ -21,7 +21,7 @@ extern "C" {
 #include <spdk/vmd.h>
 #include <spdk/nvme_spec.h>
 #include <spdk/version.h>
-#include <spdk/blobstore.h>
+// Note: spdk/blobstore.h is in lib/blob/ directory, using bdev operations instead
 
 // Internal SPDK headers for complete struct definitions
 // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/include/spdk_internal/lvolstore.h

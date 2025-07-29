@@ -162,6 +162,7 @@ set(LIB_SOURCES
     src/spdk/spdk_wrapper.cpp
     src/utils/config.cpp
     src/utils/kube_client.cpp
+    src/utils/disk_manager.cpp
     # Temporarily commented out due to Abseil compatibility issues
     # ${CSI_PB_CPP_FILE}
     # ${CSI_GRPC_CPP_FILE}

@@ -1,9 +1,11 @@
 #include "app.hpp"
 #include "spdk/spdk_wrapper.hpp"
 #include "utils/kube_client.hpp"
+#include "utils/disk_manager.hpp"
 #include <csignal>
 #include <thread>
 #include <chrono>
+#include <future>
 #include <crow.h>
 
 namespace spdk_flint {
@@ -19,6 +21,10 @@ public:
         logger()->info("[NODE_AGENT] Creating Node Agent service");
         logger()->debug("[NODE_AGENT] Configuration: port={}, namespace='{}'", 
                        config_.node_agent_port, config_.target_namespace);
+        
+        // Initialize disk manager
+        disk_manager_ = std::make_unique<DiskManager>(spdk_, config_.node_id, config_.target_namespace);
+        logger()->debug("[NODE_AGENT] DiskManager initialized");
     }
     
     void start() {
@@ -68,6 +74,7 @@ public:
 private:
     std::shared_ptr<spdk::SpdkWrapper> spdk_;
     std::shared_ptr<kube::KubeClient> kube_client_;
+    std::unique_ptr<DiskManager> disk_manager_;
     AppConfig config_;
     std::atomic<bool> running_{false};
     std::thread http_server_thread_;
@@ -227,49 +234,91 @@ private:
     }
     
     crow::response handleGetUninitializedDisks() {
-        logger()->debug("[NODE_AGENT] Processing uninitialized disks request");
+        logger()->debug("[NODE_AGENT] Processing uninitialized disks request using DiskManager");
         
         try {
-            // Get all bdevs using direct SPDK calls
-            auto bdevs = spdk_->getBdevs();
-            logger()->debug("[NODE_AGENT] Retrieved {} total block devices", bdevs.size());
+            // Use a future to make async call synchronous for HTTP response
+            std::promise<crow::response> response_promise;
+            auto response_future = response_promise.get_future();
             
-            crow::json::wvalue result;
-            result["disks"] = crow::json::load("[]");
-            
-            int uninitialized_count = 0;
-            
-            // Filter for uninitialized disks (not claimed by LVS)
-            for (const auto& bdev : bdevs) {
-                // Consider a disk uninitialized if it's not claimed and not an LVS
-                if (!bdev.claimed && bdev.name.find("lvs_") == std::string::npos) {
-                    crow::json::wvalue disk;
-                    disk["name"] = bdev.name;
-                    disk["size_bytes"] = bdev.num_blocks * bdev.block_size;
-                    disk["size_mb"] = (bdev.num_blocks * bdev.block_size) / (1024 * 1024);
-                    disk["product_name"] = bdev.product_name;
-                    disk["claimed"] = bdev.claimed;
-                    disk["uuid"] = bdev.uuid;
-                    disk["block_size"] = bdev.block_size;
-                    disk["num_blocks"] = bdev.num_blocks;
-                    result["disks"][result["disks"].size()] = std::move(disk);
-                    uninitialized_count++;
-                    
-                    logger()->debug("[NODE_AGENT] Uninitialized disk: {} ({} MB)", 
-                                   bdev.name, (bdev.num_blocks * bdev.block_size) / (1024 * 1024));
+            // Call DiskManager to discover all disks
+            disk_manager_->discoverAllDisksAsync([this, &response_promise](const std::vector<DiskInfo>& disks, int error) {
+                crow::json::wvalue result;
+                
+                if (error != 0) {
+                    logger()->error("[NODE_AGENT] DiskManager discovery failed: {}", strerror(-error));
+                    result["success"] = false;
+                    result["error"] = strerror(-error);
+                    result["count"] = 0;
+                    result["disks"] = crow::json::load("[]");
+                    result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    response_promise.set_value(crow::response(500, result));
+                    return;
                 }
+                
+                logger()->info("[NODE_AGENT] DiskManager discovered {} disks", disks.size());
+                
+                result["success"] = true;
+                result["disks"] = crow::json::load("[]");
+                result["node"] = config_.node_id;
+                
+                // Convert discovered disks to JSON
+                for (size_t i = 0; i < disks.size(); i++) {
+                    const auto& disk = disks[i];
+                    crow::json::wvalue disk_json;
+                    
+                    disk_json["pci_address"] = disk.pci_address;
+                    disk_json["device_name"] = disk.device_name;
+                    disk_json["driver"] = disk.driver;
+                    disk_json["size_bytes"] = disk.size_bytes;
+                    disk_json["size_mb"] = disk.size_bytes / (1024 * 1024);
+                    disk_json["size_gb"] = disk.size_bytes / (1024 * 1024 * 1024);
+                    disk_json["model"] = disk.model;
+                    disk_json["vendor_id"] = disk.vendor_id;
+                    disk_json["device_id"] = disk.device_id;
+                    disk_json["is_system_disk"] = disk.is_system_disk;
+                    disk_json["spdk_ready"] = disk.spdk_ready;
+                    
+                    // Add mounted partitions array
+                    disk_json["mounted_partitions"] = crow::json::load("[]");
+                    for (size_t j = 0; j < disk.mounted_partitions.size(); j++) {
+                        disk_json["mounted_partitions"][j] = disk.mounted_partitions[j];
+                    }
+                    
+                    result["disks"][i] = std::move(disk_json);
+                    
+                    logger()->debug("[NODE_AGENT] Disk {}: PCI={}, Name={}, Driver={}, System={}, SPDK Ready={}, Size={}GB", 
+                                   i+1, disk.pci_address, disk.device_name, disk.driver, 
+                                   disk.is_system_disk, disk.spdk_ready, disk.size_bytes / (1024*1024*1024));
+                }
+                
+                result["count"] = disks.size();
+                result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                
+                logger()->info("[NODE_AGENT] Returning {} discovered disks", disks.size());
+                response_promise.set_value(crow::response(200, result));
+            });
+            
+            // Wait for the async operation to complete (with timeout)
+            auto status = response_future.wait_for(std::chrono::seconds(30));
+            if (status == std::future_status::timeout) {
+                logger()->error("[NODE_AGENT] Disk discovery timed out after 30 seconds");
+                crow::json::wvalue error;
+                error["success"] = false;
+                error["error"] = "Disk discovery timed out";
+                error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                return crow::response(504, error);
             }
             
-            result["count"] = uninitialized_count;
-            result["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            
-            logger()->info("[NODE_AGENT] Found {} uninitialized disks out of {} total", uninitialized_count, bdevs.size());
-            return crow::response(200, result);
+            return response_future.get();
             
         } catch (const std::exception& e) {
-            logger()->error("[NODE_AGENT] Error getting uninitialized disks: {}", e.what());
+            logger()->error("[NODE_AGENT] Exception in handleGetUninitializedDisks: {}", e.what());
             crow::json::wvalue error;
+            error["success"] = false;
             error["error"] = e.what();
             error["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
