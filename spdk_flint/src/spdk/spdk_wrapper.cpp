@@ -29,10 +29,12 @@ extern "C" {
 // Module header with lvol_store_bdev complete definition
 // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
 #include "module/bdev/lvol/vbdev_lvol.h"
+// NVMe module header for controller functions
+#include "module/bdev/nvme/bdev_nvme.h"
+// Try including the RPC header which might have the controller functions
+#include "module/bdev/nvme/bdev_nvme_rpc.h"
 
-// Some forward declarations for functions not exposed in public headers
-extern struct spdk_lvol_store* vbdev_get_lvol_store_by_uuid(const struct spdk_uuid* uuid);
-extern struct spdk_lvol_store* vbdev_get_lvol_store_by_name(const char* name);
+// Function signatures are now provided by the module headers
 }
 
 namespace spdk_flint {
@@ -46,7 +48,7 @@ static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
     (void)wrapper; // Suppress unused variable warning
     spdk_flint::logger()->info("[SPDK] Application started successfully - reactor framework active");
-    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_version_get());
+    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_get_version());
     spdk_flint::logger()->debug("[SPDK] Current thread: {}", fmt::ptr(spdk_get_thread()));
     g_spdk_initialized = true;
 }
@@ -244,7 +246,7 @@ static struct spdk_lvol_store* get_lvol_store_by_uuid_or_name(const std::string&
             return nullptr;
         }
         spdk_flint::logger()->debug("[SPDK] Searching LVS by UUID: {}", uuid);
-        lvs = vbdev_get_lvol_store_by_uuid(&spdk_uuid);
+        lvs = vbdev_get_lvol_store_by_uuid(uuid.c_str());
         if (lvs == nullptr) {
             spdk_flint::logger()->warn("[SPDK] LVS with UUID '{}' not found", uuid);
         } else {
@@ -1161,7 +1163,8 @@ void SpdkWrapper::getBdevsAsync(
                     info.product_name = std::string(spdk_bdev_get_product_name(bdev));
                     info.block_size = spdk_bdev_get_block_size(bdev);
                     info.num_blocks = spdk_bdev_get_num_blocks(bdev);
-                    info.claimed = spdk_bdev_is_claimed(bdev);
+                    // Check if bdev is claimed by examining internal claim_type
+                    info.claimed = (bdev->internal.claim_type != SPDK_BDEV_CLAIM_NONE);
                     
                     // Get UUID if available
                     const struct spdk_uuid* uuid = spdk_bdev_get_uuid(bdev);
@@ -1197,7 +1200,8 @@ void SpdkWrapper::getBdevsAsync(
                     info.product_name = std::string(spdk_bdev_get_product_name(bdev));
                     info.block_size = spdk_bdev_get_block_size(bdev);
                     info.num_blocks = spdk_bdev_get_num_blocks(bdev);
-                    info.claimed = spdk_bdev_is_claimed(bdev);
+                    // Check if bdev is claimed by examining internal claim_type
+                    info.claimed = (bdev->internal.claim_type != SPDK_BDEV_CLAIM_NONE);
                     
                     // Get UUID if available
                     const struct spdk_uuid* uuid = spdk_bdev_get_uuid(bdev);
