@@ -53,7 +53,8 @@ static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
     (void)wrapper; // Suppress unused variable warning
     spdk_flint::logger()->info("[SPDK] Application started successfully - reactor framework active");
-    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_get_version());
+    spdk_flint::logger()->debug("[SPDK] SPDK version: {}.{}.{}", 
+                                 SPDK_VERSION_MAJOR, SPDK_VERSION_MINOR, SPDK_VERSION_PATCH);
     spdk_flint::logger()->debug("[SPDK] Current thread: {}", fmt::ptr(spdk_get_thread()));
     g_spdk_initialized = true;
 }
@@ -926,25 +927,13 @@ void SpdkWrapper::getNvmeControllersAsync(
                 }
             } else {
                 // Get all controllers
-                spdk_flint::logger()->debug("[SPDK] Enumerating all NVMe controllers");
-                struct nvme_bdev_ctrlr* ctrlr = nvme_bdev_ctrlr_first();
-                int count = 0;
-                while (ctrlr != nullptr) {
-                    NvmeControllerInfo info;
-                    // TODO: Extract controller information from ctrlr structure
-                    info.name = fmt::format("nvme_controller_{}", count);
-                    info.trtype = "unknown";
-                    info.traddr = "unknown";
-                    info.state = "connected";
-                    controllers.push_back(info);
-                    count++;
-                    
-                    spdk_flint::logger()->debug("[SPDK] Controller #{}: name={}, type={}, addr={}, state={}",
-                                               count, info.name, info.trtype, info.traddr, info.state);
-                    
-                    ctrlr = nvme_bdev_ctrlr_next(ctrlr);
-                }
-                spdk_flint::logger()->info("[SPDK] Enumerated {} NVMe controllers", controllers.size());
+                // TODO: Implement NVMe controller enumeration using available SPDK APIs
+                // The nvme_bdev_ctrlr_first/next functions are internal and not exposed in headers
+                spdk_flint::logger()->debug("[SPDK] NVMe controller enumeration not yet implemented");
+                spdk_flint::logger()->warn("[SPDK] Controller enumeration requires internal SPDK APIs not exposed in headers");
+                
+                // For now, return empty list - implement using alternative approach later
+                spdk_flint::logger()->info("[SPDK] Enumerated {} NVMe controllers (stub implementation)", controllers.size());
             }
         } catch (const std::exception& e) {
             spdk_flint::logger()->error("[SPDK] Exception in getNvmeControllersAsync: {}", e.what());
@@ -1048,6 +1037,17 @@ void SpdkWrapper::attachNvmeControllerAsync(
                                    ctx->ctrlr_loss_timeout_sec, ctx->reconnect_delay_sec, ctx->fast_io_fail_timeout_sec);
         
                  // Call the real SPDK function
+         // TODO: Implement using available SPDK APIs - bdev_nvme_attach_controller is internal
+         spdk_flint::logger()->warn("[SPDK] Controller attachment not yet implemented");
+         int rc = -ENOSYS; // Not implemented
+         
+         // Simulate callback for now
+         if (ctx->callback) {
+             ctx->callback({}, rc);
+         }
+         delete ctx;
+         
+         /* Original call would be:
          int rc = bdev_nvme_attach_controller(
              ctx->name.c_str(),
              ctx->trtype.c_str(),
@@ -1064,52 +1064,9 @@ void SpdkWrapper::attachNvmeControllerAsync(
              ctx->ctrlr_loss_timeout_sec,
              ctx->reconnect_delay_sec,
              ctx->fast_io_fail_timeout_sec,
-            [](void* cb_arg, size_t bdev_count, int nvme_status) {
-                auto* ctx = static_cast<AttachNvmeCtx*>(cb_arg);
-                
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - ctx->start_time);
-                
-                if (nvme_status == 0) {
-                    // Success - build list of attached bdev names
-                    std::vector<std::string> bdev_names;
-                    
-                    // For NVMe controllers, bdevs are typically named like "Nvme0n1", "Nvme0n2", etc.
-                    // where "Nvme0" is the controller name and "n1", "n2" are namespace numbers
-                    for (size_t i = 1; i <= bdev_count; i++) {
-                        std::string bdev_name = ctx->name + "n" + std::to_string(i);
-                        bdev_names.push_back(bdev_name);
-                    }
-                    
-                    spdk_flint::logger()->info("[SPDK] Successfully attached NVMe controller '{}' in {} ms", 
-                                             ctx->name, duration.count());
-                    
-                    // Create comma-separated list of bdev names
-                    std::string bdev_list;
-                    for (size_t i = 0; i < bdev_names.size(); i++) {
-                        if (i > 0) bdev_list += ", ";
-                        bdev_list += bdev_names[i];
-                    }
-                    
-                    spdk_flint::logger()->info("[SPDK] Created {} block device(s): {}", 
-                                             bdev_count, bdev_list);
-                    
-                    if (ctx->callback) {
-                        ctx->callback(bdev_names, 0);
-                    }
-                } else {
-                    spdk_flint::logger()->error("[SPDK] Failed to attach NVMe controller '{}' after {} ms: {} ({})", 
-                                               ctx->name, duration.count(), nvme_status, strerror(-nvme_status));
-                    
-                    if (ctx->callback) {
-                        ctx->callback({}, nvme_status);
-                    }
-                }
-                
-                delete ctx;
-            },
-            ctx
+             callback, ctx
         );
+        */
         
         if (rc != 0) {
             // Immediate error - callback won't be called
