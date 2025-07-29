@@ -17,6 +17,9 @@ add_executable(spdk_flint_tests ${TEST_SOURCES})
 # Link against main application library and Catch2
 target_link_libraries(spdk_flint_tests
     spdk_flint_lib
+    # Ensure OpenSSL is available at test executable level
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Link Catch2

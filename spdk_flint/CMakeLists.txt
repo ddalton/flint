@@ -302,15 +302,16 @@ target_link_libraries(spdk_flint_lib
     ${spdlog_LIBRARIES}
     Threads::Threads
     ${CURL_LIBRARIES}
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    # System libraries
+    # System libraries (before OpenSSL)
     dl
     rt
     uuid
     numa
     pthread
     m
+    # OpenSSL libraries (at the end for proper dependency resolution)
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Add SPDK libraries conditionally (only if found)
@@ -365,6 +366,9 @@ endif()
 # Link libraries for the main executable
 target_link_libraries(spdk_flint
     spdk_flint_lib
+    # Ensure OpenSSL is available at executable level
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Link Crow (FetchContent or manually found)
