@@ -300,9 +300,23 @@ else()
         "/usr/lib/x86_64-linux-gnu/librte*.a"
         "/usr/lib/librte*.a"
         "/lib/x86_64-linux-gnu/libdpdk*.a"
+        # Look for specific PCI libraries
+        "/usr/lib/x86_64-linux-gnu/librte_pci*.a"
+        "/usr/lib/x86_64-linux-gnu/librte_bus_pci*.a"
+        "/usr/local/lib/librte_pci*.a"
+        "/usr/local/lib/librte_bus_pci*.a"
     )
 endif()
 message(STATUS "Found DPDK libraries: ${ALL_DPDK_LIBS}")
+
+# Also try to find the main DPDK shared library as fallback for PCI functions
+find_library(DPDK_MAIN_LIB NAMES dpdk libdpdk 
+    PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
+    DOC "Main DPDK library")
+if(DPDK_MAIN_LIB)
+    list(APPEND ALL_DPDK_LIBS ${DPDK_MAIN_LIB})
+    message(STATUS "Added main DPDK library: ${DPDK_MAIN_LIB}")
+endif()
 
 # Find ISA-L libraries - SPDK builds these internally, so check SPDK build dirs too
 file(GLOB ALL_ISAL_LIBS 
@@ -404,6 +418,13 @@ if(NOT ALL_DPDK_LIBS)
     if(DPDK_SHARED)
         target_link_libraries(spdk_flint_lib ${DPDK_SHARED})
         message(STATUS "Linked shared DPDK library: ${DPDK_SHARED}")
+    endif()
+else()
+    # Even with DPDK static libs, also try to add the shared library for PCI functions
+    find_library(DPDK_SHARED_FALLBACK NAMES dpdk libdpdk PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+    if(DPDK_SHARED_FALLBACK)
+        target_link_libraries(spdk_flint_lib ${DPDK_SHARED_FALLBACK})
+        message(STATUS "Added shared DPDK library for PCI functions: ${DPDK_SHARED_FALLBACK}")
     endif()
 endif()
 
