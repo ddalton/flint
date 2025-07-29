@@ -4065,17 +4065,9 @@ impl NodeAgent {
             }
         };
         
-        // Generate LVS name using current device name (not potentially stale CRD spec)
-        let lvs_name = format!("lvs_{}-{}", disk_crd.spec.node_id, current_device_name);
-        
-        let mut needs_update = false;
-        let mut updated_status = disk_crd.status.clone().unwrap_or_default();
-        
-        // Enhanced reconciliation: Check for both AIO bdev and LVS state
-        println!("🔍 [RECONCILE] Checking complete SPDK state (AIO bdev + LVS)...");
-        
         // Step 1: Get CURRENT device name from discovery (not potentially stale CRD spec)
         // The CRD spec may be outdated if device name changed (nvme1n1 -> nvme1n2)
+        println!("🔍 [RECONCILE] Checking complete SPDK state (AIO bdev + LVS)...");
         let current_device_name = match self.find_nvme_device_name(&disk_crd.spec.pcie_addr).await {
             Ok(name) => {
                 println!("🔍 [RECONCILE] Found current device name: {} for PCI: {}", name, disk_crd.spec.pcie_addr);
@@ -4090,6 +4082,12 @@ impl NodeAgent {
                 }
             }
         };
+        
+        // Generate LVS name using current device name (not potentially stale CRD spec)
+        let lvs_name = format!("lvs_{}-{}", disk_crd.spec.node_id, current_device_name);
+        
+        let mut needs_update = false;
+        let mut updated_status = disk_crd.status.clone().unwrap_or_default();
         
         let kernel_bdev_name = format!("kernel_{}", current_device_name);
         let mut aio_bdev_exists = false;
