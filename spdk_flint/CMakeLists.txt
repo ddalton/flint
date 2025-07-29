@@ -259,15 +259,25 @@ find_library(SPDK_TRACE NAMES spdk_trace PATHS /usr/local/lib)
 find_library(SPDK_NOTIFY NAMES spdk_notify PATHS /usr/local/lib)
 find_library(SPDK_JSON NAMES spdk_json PATHS /usr/local/lib)
 find_library(SPDK_JSONRPC NAMES spdk_jsonrpc PATHS /usr/local/lib)
-find_library(SPDK_MEMORY NAMES spdk_memory PATHS /usr/local/lib)
+find_library(SPDK_MEMORY NAMES spdk_memory spdk_memory_domain spdk_dma PATHS /usr/local/lib)
 find_library(SPDK_SOCK NAMES spdk_sock PATHS /usr/local/lib)
 find_library(SPDK_BDEV NAMES spdk_bdev PATHS /usr/local/lib)
 find_library(SPDK_ACCEL NAMES spdk_accel PATHS /usr/local/lib)
 find_library(SPDK_INIT NAMES spdk_init PATHS /usr/local/lib)
 
 # Find ISA-L libraries (Intel Storage Acceleration Library)
-find_library(ISAL NAMES isal PATHS /usr/local/lib /usr/lib)
-find_library(ISAL_CRYPTO NAMES isal_crypto PATHS /usr/local/lib /usr/lib)
+# SPDK builds ISA-L internally, so check multiple naming patterns and locations
+find_library(ISAL NAMES isal libisal spdk_isal PATHS /usr/local/lib /usr/local/lib/spdk /usr/lib)
+find_library(ISAL_CRYPTO NAMES isal_crypto libisal_crypto spdk_isal_crypto PATHS /usr/local/lib /usr/local/lib/spdk /usr/lib)
+
+# Also check if ISA-L symbols might be embedded in SPDK libraries
+# In some SPDK builds, ISA-L is statically linked into SPDK libraries
+if(NOT ISAL)
+    message(STATUS "ISA-L not found as separate library - may be embedded in SPDK")
+endif()
+if(NOT ISAL_CRYPTO)
+    message(STATUS "ISA-L-crypto not found as separate library - may be embedded in SPDK")
+endif()
 
 # Log what we found
 message(STATUS "SPDK libraries found:")
@@ -285,25 +295,6 @@ message(STATUS "  ISAL_CRYPTO: ${ISAL_CRYPTO}")
 target_link_libraries(spdk_flint_lib
     # Link individual SPDK libraries in dependency order (core first, then higher-level)
     ${SPDK_LIBRARIES}
-    # Core SPDK libraries
-    ${SPDK_ENV_DPDK}
-    ${SPDK_UTIL}
-    ${SPDK_LOG}
-    ${SPDK_MEMORY}
-    ${SPDK_SOCK}
-    # Mid-level SPDK libraries
-    ${SPDK_THREAD}
-    ${SPDK_TRACE}
-    ${SPDK_NOTIFY}
-    ${SPDK_JSON}
-    ${SPDK_JSONRPC}
-    # High-level SPDK libraries
-    ${SPDK_BDEV}
-    ${SPDK_ACCEL}
-    ${SPDK_INIT}
-    # ISA-L libraries for CRC functions
-    ${ISAL}
-    ${ISAL_CRYPTO}
     # Add DPDK if found
     ${DPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}
@@ -321,6 +312,55 @@ target_link_libraries(spdk_flint_lib
     pthread
     m
 )
+
+# Add SPDK libraries conditionally (only if found)
+if(SPDK_ENV_DPDK)
+    target_link_libraries(spdk_flint_lib ${SPDK_ENV_DPDK})
+endif()
+if(SPDK_UTIL)
+    target_link_libraries(spdk_flint_lib ${SPDK_UTIL})
+endif()
+if(SPDK_LOG)
+    target_link_libraries(spdk_flint_lib ${SPDK_LOG})
+endif()
+if(SPDK_MEMORY)
+    target_link_libraries(spdk_flint_lib ${SPDK_MEMORY})
+endif()
+if(SPDK_SOCK)
+    target_link_libraries(spdk_flint_lib ${SPDK_SOCK})
+endif()
+if(SPDK_THREAD)
+    target_link_libraries(spdk_flint_lib ${SPDK_THREAD})
+endif()
+if(SPDK_TRACE)
+    target_link_libraries(spdk_flint_lib ${SPDK_TRACE})
+endif()
+if(SPDK_NOTIFY)
+    target_link_libraries(spdk_flint_lib ${SPDK_NOTIFY})
+endif()
+if(SPDK_JSON)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON})
+endif()
+if(SPDK_JSONRPC)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC})
+endif()
+if(SPDK_BDEV)
+    target_link_libraries(spdk_flint_lib ${SPDK_BDEV})
+endif()
+if(SPDK_ACCEL)
+    target_link_libraries(spdk_flint_lib ${SPDK_ACCEL})
+endif()
+if(SPDK_INIT)
+    target_link_libraries(spdk_flint_lib ${SPDK_INIT})
+endif()
+
+# Add ISA-L libraries conditionally (only if found)
+if(ISAL)
+    target_link_libraries(spdk_flint_lib ${ISAL})
+endif()
+if(ISAL_CRYPTO)
+    target_link_libraries(spdk_flint_lib ${ISAL_CRYPTO})
+endif()
 
 # Link libraries for the main executable
 target_link_libraries(spdk_flint
