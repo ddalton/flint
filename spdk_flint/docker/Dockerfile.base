@@ -195,12 +195,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdpdk-dev \
     # Try additional DPDK packages that might have PCI functions
     dpdk-dev \
-    libdpdk-dev \
-    dpdk \
     # ISA-L libraries for crypto and compression functions
     libisal-dev \
-    # Try to find ISA-L crypto package
-    libisal2-dev \
     # JSON processing  
     nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
