@@ -777,11 +777,12 @@ if(DPDK_PCI)
 endif()
 
 # Add more system libraries that might contain missing symbols
-target_link_libraries(spdk_flint_lib
-    # Additional system libraries for networking and I/O
-    resolv
-    nsl
-)
+# Note: nsl and resolv are not available in modern systems
+# target_link_libraries(spdk_flint_lib
+#     # Additional system libraries for networking and I/O
+#     resolv
+#     nsl
+# )
 
 # DPDK libraries are now linked above before SPDK libraries
 
