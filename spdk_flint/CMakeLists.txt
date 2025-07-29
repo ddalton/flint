@@ -216,11 +216,20 @@ if(PKG_CONFIG_FOUND)
     endif()
 endif()
 
+# Try to find shared SPDK libraries first (might have complete symbol sets)
+find_library(SPDK_JSON_SHARED NAMES spdk_json PATHS /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib NO_DEFAULT_PATH)
+find_library(SPDK_JSONRPC_SHARED NAMES spdk_jsonrpc PATHS /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib NO_DEFAULT_PATH)
+find_library(SPDK_UTIL_SHARED NAMES spdk_util PATHS /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib NO_DEFAULT_PATH)
+
 # Also find system DPDK library (provides all rte_* functions)
 find_library(DPDK_MAIN NAMES dpdk rte libdpdk PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
 # Also try to find specific DPDK libraries
 find_library(DPDK_PCI NAMES dpdk_pci rte_pci PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
 find_library(DPDK_RAW NAMES dpdk PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
+
+# Try alternative DPDK paths and naming patterns
+find_library(DPDK_ALL NAMES librte_all rte_all PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+find_library(DPDK_STATIC NAMES dpdk_static libdpdk_static PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
 
 # Try to find a combined SPDK library that might have all functions
 find_library(SPDK_COMBINED NAMES spdk libspdk spdk_all PATHS /usr/local/lib /usr/lib)
@@ -233,6 +242,40 @@ find_library(SPDK_JSON_PARSER NAMES spdk_json_parser json_parser PATHS /usr/loca
 find_library(SPDK_JSON_DECODE NAMES spdk_json_decode json_decode PATHS /usr/local/lib)
 # Search for fd/socket utilities
 find_library(SPDK_FD_UTIL NAMES spdk_fd_util fd_util PATHS /usr/local/lib)
+
+# Search for external JSON libraries as fallback
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(JANSSON QUIET jansson)
+    pkg_check_modules(JSON_C QUIET json-c)
+endif()
+find_library(JANSSON_LIB NAMES jansson PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+find_library(JSON_C_LIB NAMES json-c PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+
+# Try to find more comprehensive SPDK library collections
+find_library(SPDK_ALL_STATIC NAMES spdk_all libspdk_all PATHS /usr/local/lib /usr/lib)
+find_library(SPDK_CORE NAMES spdk_core libspdk_core PATHS /usr/local/lib /usr/lib)
+
+# Search for platform-specific implementations
+find_library(SPDK_PLATFORM NAMES spdk_platform libspdk_platform PATHS /usr/local/lib /usr/lib)
+find_library(SPDK_APP NAMES spdk_app libspdk_app PATHS /usr/local/lib /usr/lib)
+
+# Try to find SPDK libraries in alternative directories that might be more complete
+file(GLOB SPDK_LIB_SEARCH_PATHS
+    "/usr/local/lib/spdk/*"
+    "/usr/lib/x86_64-linux-gnu/spdk/*" 
+    "/opt/spdk/lib/*"
+    "/usr/share/spdk/lib/*"
+)
+foreach(search_path ${SPDK_LIB_SEARCH_PATHS})
+    if(IS_DIRECTORY ${search_path})
+        list(APPEND CMAKE_LIBRARY_PATH ${search_path})
+    endif()
+endforeach()
+
+# Try one more comprehensive search for the missing JSON functions
+find_library(SPDK_JSON_IMPL NAMES spdk_json_impl json_impl PATHS ${SPDK_LIB_SEARCH_PATHS} /usr/local/lib)
+find_library(SPDK_JSONRPC_IMPL NAMES spdk_jsonrpc_impl jsonrpc_impl PATHS ${SPDK_LIB_SEARCH_PATHS} /usr/local/lib)
 
 # Add library search directories for SPDK
 link_directories(/usr/local/lib)
@@ -330,6 +373,12 @@ message(STATUS "  DPDK_LIBRARIES: ${DPDK_LIBRARIES}")
 message(STATUS "  DPDK_MAIN: ${DPDK_MAIN}")
 message(STATUS "  DPDK_PCI: ${DPDK_PCI}")
 message(STATUS "  DPDK_RAW: ${DPDK_RAW}")
+message(STATUS "  DPDK_ALL: ${DPDK_ALL}")
+message(STATUS "  DPDK_STATIC: ${DPDK_STATIC}")
+message(STATUS "Shared SPDK libraries:")
+message(STATUS "  SPDK_JSON_SHARED: ${SPDK_JSON_SHARED}")
+message(STATUS "  SPDK_JSONRPC_SHARED: ${SPDK_JSONRPC_SHARED}")
+message(STATUS "  SPDK_UTIL_SHARED: ${SPDK_UTIL_SHARED}")
 message(STATUS "Special SPDK libraries:")
 message(STATUS "  SPDK_COMBINED: ${SPDK_COMBINED}")
 message(STATUS "  SPDK_JSON_ALL: ${SPDK_JSON_ALL}")
@@ -337,6 +386,18 @@ message(STATUS "  SPDK_JSON_PARSER: ${SPDK_JSON_PARSER}")
 message(STATUS "  SPDK_JSON_DECODE: ${SPDK_JSON_DECODE}")
 message(STATUS "  SPDK_SOCK_UTIL: ${SPDK_SOCK_UTIL}")
 message(STATUS "  SPDK_FD_UTIL: ${SPDK_FD_UTIL}")
+message(STATUS "  SPDK_ALL_STATIC: ${SPDK_ALL_STATIC}")
+message(STATUS "  SPDK_CORE: ${SPDK_CORE}")
+message(STATUS "Fallback JSON libraries:")
+message(STATUS "  JANSSON: ${JANSSON_FOUND}")
+message(STATUS "  JANSSON_LIB: ${JANSSON_LIB}")
+message(STATUS "  JSON_C: ${JSON_C_FOUND}")
+message(STATUS "  JSON_C_LIB: ${JSON_C_LIB}")
+message(STATUS "Extended SPDK libraries:")
+message(STATUS "  SPDK_PLATFORM: ${SPDK_PLATFORM}")
+message(STATUS "  SPDK_APP: ${SPDK_APP}")
+message(STATUS "  SPDK_JSON_IMPL: ${SPDK_JSON_IMPL}")
+message(STATUS "  SPDK_JSONRPC_IMPL: ${SPDK_JSONRPC_IMPL}")
 message(STATUS "ISA-L libraries found:")
 message(STATUS "  ISAL: ${ISAL}")
 message(STATUS "  ISAL_CRYPTO: ${ISAL_CRYPTO}")
@@ -376,6 +437,23 @@ if(DPDK_PCI)
 endif()
 if(DPDK_RAW)
     target_link_libraries(spdk_flint_lib ${DPDK_RAW})
+endif()
+if(DPDK_ALL)
+    target_link_libraries(spdk_flint_lib ${DPDK_ALL})
+endif()
+if(DPDK_STATIC)
+    target_link_libraries(spdk_flint_lib ${DPDK_STATIC})
+endif()
+
+# Try shared SPDK libraries first (might have complete symbols)
+if(SPDK_JSON_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON_SHARED})
+endif()
+if(SPDK_JSONRPC_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC_SHARED})
+endif()
+if(SPDK_UTIL_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_UTIL_SHARED})
 endif()
 
 # Link all SPDK libraries multiple times to resolve circular dependencies
@@ -586,34 +664,135 @@ endif()
 if(SPDK_FD_UTIL)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_FD_UTIL} -Wl,--no-whole-archive)
 endif()
+if(SPDK_ALL_STATIC)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_ALL_STATIC} -Wl,--no-whole-archive)
+endif()
+if(SPDK_CORE)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_CORE} -Wl,--no-whole-archive)
+endif()
 
-# Use group linking to resolve circular dependencies with whole-archive
+# Add fallback JSON libraries if available
+if(JANSSON_FOUND)
+    target_link_libraries(spdk_flint_lib ${JANSSON_LIBRARIES})
+endif()
+if(JANSSON_LIB)
+    target_link_libraries(spdk_flint_lib ${JANSSON_LIB})
+endif()
+if(JSON_C_FOUND)
+    target_link_libraries(spdk_flint_lib ${JSON_C_LIBRARIES})
+endif()
+if(JSON_C_LIB)
+    target_link_libraries(spdk_flint_lib ${JSON_C_LIB})
+endif()
+
+# Use comprehensive group linking with aggressive symbol resolution
 target_link_libraries(spdk_flint_lib -Wl,--start-group)
+
+# First pass: All JSON and RPC related libraries
 if(SPDK_JSON)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSON} -Wl,--no-whole-archive)
+endif()
+if(SPDK_JSON_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON_SHARED})
 endif()
 if(SPDK_JSONRPC) 
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_JSONRPC} -Wl,--no-whole-archive)
 endif()
+if(SPDK_JSONRPC_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC_SHARED})
+endif()
 if(SPDK_RPC)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_RPC} -Wl,--no-whole-archive)
 endif()
+
+# Core libraries
 if(SPDK_INIT)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_INIT} -Wl,--no-whole-archive)
 endif()
 if(SPDK_UTIL)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_UTIL} -Wl,--no-whole-archive)
 endif()
+if(SPDK_UTIL_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_UTIL_SHARED})
+endif()
 if(SPDK_SOCK)
     target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_SOCK} -Wl,--no-whole-archive)
 endif()
+
+# All comprehensive libraries
+if(SPDK_ALL_STATIC)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_ALL_STATIC} -Wl,--no-whole-archive)
+endif()
+if(SPDK_CORE)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_CORE} -Wl,--no-whole-archive)
+endif()
+if(SPDK_COMBINED)
+    target_link_libraries(spdk_flint_lib -Wl,--whole-archive ${SPDK_COMBINED} -Wl,--no-whole-archive)
+endif()
+
+# All DPDK libraries again
+if(DPDK_FOUND)
+    target_link_libraries(spdk_flint_lib ${DPDK_LIBRARIES})
+endif()
+if(DPDK_ALL)
+    target_link_libraries(spdk_flint_lib ${DPDK_ALL})
+endif()
+
 target_link_libraries(spdk_flint_lib -Wl,--end-group)
+
+# Final desperate attempt: Link all discovered libraries one more time
+# This approach uses the most aggressive linking possible
+if(SPDK_JSON)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON})
+endif()
+if(SPDK_JSON_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON_SHARED})
+endif()
+if(SPDK_JSONRPC)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC})
+endif()
+if(SPDK_JSONRPC_SHARED)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC_SHARED})
+endif()
+if(SPDK_JSON_IMPL)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSON_IMPL})
+endif()
+if(SPDK_JSONRPC_IMPL)
+    target_link_libraries(spdk_flint_lib ${SPDK_JSONRPC_IMPL})
+endif()
+if(SPDK_PLATFORM)
+    target_link_libraries(spdk_flint_lib ${SPDK_PLATFORM})
+endif()
+if(SPDK_APP)
+    target_link_libraries(spdk_flint_lib ${SPDK_APP})
+endif()
+if(DPDK_FOUND)
+    target_link_libraries(spdk_flint_lib ${DPDK_LIBRARIES})
+endif()
+if(DPDK_ALL)
+    target_link_libraries(spdk_flint_lib ${DPDK_ALL})
+endif()
+if(DPDK_PCI)
+    target_link_libraries(spdk_flint_lib ${DPDK_PCI})
+endif()
+
+# Add more system libraries that might contain missing symbols
+target_link_libraries(spdk_flint_lib
+    # Additional system libraries for networking and I/O
+    resolv
+    nsl
+)
 
 # DPDK libraries are now linked above before SPDK libraries
 
-# Add linker flags to resolve DSO issues
+# Add comprehensive linker flags to resolve DSO and symbol issues
 set_target_properties(spdk_flint PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed"
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--undefined-version"
+)
+
+# Also set aggressive flags for the library
+set_target_properties(spdk_flint_lib PROPERTIES
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition"
 )
 
 # Link libraries for the main executable

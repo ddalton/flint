@@ -14,9 +14,9 @@ set(TEST_SOURCES
 # Create test executable
 add_executable(spdk_flint_tests ${TEST_SOURCES})
 
-# Add linker flags to resolve DSO issues  
+# Add comprehensive linker flags to resolve DSO and symbol issues  
 set_target_properties(spdk_flint_tests PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed"
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--undefined-version"
 )
 
 # Link against main application library and all its dependencies
