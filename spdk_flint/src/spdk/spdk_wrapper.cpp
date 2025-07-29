@@ -18,6 +18,13 @@ extern "C" {
 #include <spdk/bdev_module.h>
 #include <spdk/vmd.h>
 #include <spdk/nvme_spec.h>
+
+// Forward declarations for NVMe controller functions
+// These are internal SPDK functions from module/bdev/nvme/bdev_nvme_rpc.c
+struct nvme_bdev_ctrlr;
+extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_get_by_name(const char* name);
+extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_first(void);
+extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_next(struct nvme_bdev_ctrlr* ctrlr);
 }
 
 namespace spdk_flint {
@@ -25,7 +32,6 @@ namespace spdk {
 
 // Global SPDK application context
 static bool g_spdk_initialized = false;
-static bool g_shutdown_requested = false;
 
 // SPDK application callbacks
 static void spdk_app_started(void* arg) {
@@ -824,11 +830,7 @@ void SpdkWrapper::getNvmeControllersAsync(
         spdk_flint::logger()->debug("[SPDK] Executing NVMe controller enumeration on reactor thread");
         
         try {
-            // Use external function nvme_bdev_ctrlr_get_by_name from module/bdev/nvme/bdev_nvme_rpc.c
-            extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_get_by_name(const char* name);
-            extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_first(void);
-            extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_next(struct nvme_bdev_ctrlr* ctrlr);
-            
+            // Use NVMe controller functions (declared at top of file)
             if (!ctx->name.empty()) {
                 // Get specific controller by name
                 spdk_flint::logger()->debug("[SPDK] Searching for specific NVMe controller: '{}'", ctx->name);
