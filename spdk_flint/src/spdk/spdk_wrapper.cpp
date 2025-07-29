@@ -68,7 +68,7 @@ SpdkWrapper::SpdkWrapper(const std::string& config_file)
     : config_file_(config_file) {
     spdk_flint::logger()->info("[SPDK] Creating SPDK wrapper for Node Agent");
     spdk_flint::logger()->debug("[SPDK] Configuration file: '{}'", config_file_.empty() ? "none" : config_file_);
-    spdk_flint::logger()->debug("[SPDK] Thread ID: {}", std::this_thread::get_id());
+    spdk_flint::logger()->debug("[SPDK] Thread ID: {}", spdk_flint::current_thread_id());
 }
 
 SpdkWrapper::~SpdkWrapper() {
@@ -87,7 +87,7 @@ bool SpdkWrapper::initialize() {
 
     try {
         spdk_flint::logger()->info("[SPDK] Initializing embedded SPDK application framework");
-        spdk_flint::logger()->debug("[SPDK] Process ID: {}, Thread ID: {}", getpid(), std::this_thread::get_id());
+        spdk_flint::logger()->debug("[SPDK] Process ID: {}, Thread ID: {}", getpid(), spdk_flint::current_thread_id());
         
         // Allocate and initialize SPDK options
         spdk_flint::logger()->debug("[SPDK] Allocating SPDK application options structure");
@@ -1098,7 +1098,7 @@ void SpdkWrapper::processEvents() {
 void SpdkWrapper::runEventLoop() {
     event_loop_running_ = true;
     spdk_flint::logger()->info("[SPDK] Starting event loop");
-    spdk_flint::logger()->debug("[SPDK] Event loop thread: {}", std::this_thread::get_id());
+    spdk_flint::logger()->debug("[SPDK] Event loop thread: {}", spdk_flint::current_thread_id());
     
     int iterations = 0;
     auto last_log_time = std::chrono::steady_clock::now();

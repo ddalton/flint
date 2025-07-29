@@ -24,7 +24,7 @@ public:
     void start() {
         auto start_time = std::chrono::steady_clock::now();
         logger()->info("[NODE_AGENT] Starting SPDK Node Agent service on port {}", config_.node_agent_port);
-        logger()->debug("[NODE_AGENT] Thread ID: {}", std::this_thread::get_id());
+        logger()->debug("[NODE_AGENT] Thread ID: {}", spdk_flint::current_thread_id());
         running_ = true;
         
         // Start HTTP API server for node agent operations
@@ -78,7 +78,7 @@ private:
         
         http_server_thread_ = std::thread([this]() {
             try {
-                logger()->debug("[NODE_AGENT] HTTP server thread started: {}", std::this_thread::get_id());
+                                 logger()->debug("[NODE_AGENT] HTTP server thread started: {}", spdk_flint::current_thread_id());
                 crow::SimpleApp app;
                 
                 // Enable CORS for dashboard access
@@ -192,7 +192,7 @@ private:
         
         disk_monitor_thread_ = std::thread([this]() {
             try {
-                logger()->debug("[NODE_AGENT] Disk monitoring thread started: {}", std::this_thread::get_id());
+                                 logger()->debug("[NODE_AGENT] Disk monitoring thread started: {}", spdk_flint::current_thread_id());
                 int cycle_count = 0;
                 
                 while (running_) {
@@ -825,7 +825,7 @@ void Application::startHealthServer() {
     // Start a simple health server
     health_thread_ = std::thread([this]() {
         try {
-            logger()->debug("[APP] Health server thread started: {}", std::this_thread::get_id());
+                         logger()->debug("[APP] Health server thread started: {}", spdk_flint::current_thread_id());
             crow::SimpleApp app;
             
             // Enable simple CORS

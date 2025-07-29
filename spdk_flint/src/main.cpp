@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
     spdk_flint::logger()->info("========================================");
     spdk_flint::logger()->info("Starting SPDK Flint Node Agent");
     spdk_flint::logger()->info("Version: 1.0.0 | Build: {} {}", __DATE__, __TIME__);
-    spdk_flint::logger()->info("Process: PID={}, main_thread={}", getpid(), std::this_thread::get_id());
+    spdk_flint::logger()->info("Process: PID={}, main_thread={}", getpid(), spdk_flint::current_thread_id());
     spdk_flint::logger()->info("========================================");
     
     // Log command line arguments

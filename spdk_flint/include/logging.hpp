@@ -6,6 +6,8 @@
 #include <spdlog/fmt/fmt.h>
 #include <memory>
 #include <string>
+#include <thread>
+#include <sstream>
 
 namespace spdk_flint {
 
@@ -23,5 +25,17 @@ private:
 
 // Simple, direct spdlog access - no macros, no complexity
 inline auto logger() { return Logger::get(); }
+
+// Utility function to format thread IDs for logging
+inline std::string thread_id_to_string(std::thread::id id) {
+    std::ostringstream oss;
+    oss << id;
+    return oss.str();
+}
+
+// Convenience function to get current thread ID as string
+inline std::string current_thread_id() {
+    return thread_id_to_string(std::this_thread::get_id());
+}
 
 } // namespace spdk_flint 
