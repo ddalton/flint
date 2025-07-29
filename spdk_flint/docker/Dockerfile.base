@@ -183,10 +183,34 @@ RUN git clone https://github.com/CrowCpp/Crow.git && \
     make install && \
     ldconfig
 
+# Build spdk_flint binary in the builder stage
+COPY . /workspace/spdk_flint/
+WORKDIR /workspace/spdk_flint
+
+# Add development packages needed for spdk_flint build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Development libraries for linking
+    libaio-dev \
+    liburing-dev \
+    libdpdk-dev \
+    # JSON processing  
+    nlohmann-json3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build the spdk_flint binary
+RUN mkdir build && cd build && \
+    export CMAKE_PREFIX_PATH="/usr/local:$CMAKE_PREFIX_PATH" && \
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH="/usr/local" && \
+    make -j$(nproc) && \
+    make install && \
+    echo "spdk_flint binary built successfully"
+
 # Set working directory for future builds
 WORKDIR /workspace
-
-# Base image is complete - no business logic here!
 
 #--------------------------------------------------------------------
 # Base runtime image with common dependencies
@@ -252,7 +276,8 @@ COPY --from=builder /usr/local/lib/pkgconfig/grpc* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/lib/pkgconfig/protobuf* /usr/local/lib/pkgconfig/
 COPY --from=builder /usr/local/lib/pkgconfig/absl* /usr/local/lib/pkgconfig/
 
-# No business logic binary in base image!
+# Copy the spdk_flint binary
+COPY --from=builder /usr/local/bin/spdk_flint /usr/local/bin/
 
 # Create necessary directories
 RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
@@ -260,9 +285,93 @@ RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
 # Set up library paths and update cache
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local.conf && ldconfig
 
-# Create runtime user (will be overridden in specialized images if needed)
+# Create universal health check script that adapts to different modes
+RUN echo '#!/bin/bash\n\
+# Universal health check script\n\
+MODE=${CSI_MODE:-controller}\n\
+\n\
+case "$MODE" in\n\
+    "dashboard-backend")\n\
+        PORT=${DASHBOARD_PORT:-8080}\n\
+        if ! curl -f http://localhost:${PORT}/health >/dev/null 2>&1; then\n\
+            echo "Dashboard API not responding on port ${PORT}"\n\
+            exit 1\n\
+        fi\n\
+        ;;\n\
+    "controller")\n\
+        if [ ! -S "${SPDK_RPC_URL#unix://}" ]; then\n\
+            echo "SPDK RPC socket not found at ${SPDK_RPC_URL}"\n\
+            exit 1\n\
+        fi\n\
+        ;;\n\
+    "node-agent")\n\
+        if ! pgrep -f "spdk_flint.*node-agent" >/dev/null; then\n\
+            echo "Node agent process not running"\n\
+            exit 1\n\
+        fi\n\
+        ;;\n\
+    *)\n\
+        if ! pgrep -f "spdk_flint" >/dev/null; then\n\
+            echo "spdk_flint process not running"\n\
+            exit 1\n\
+        fi\n\
+        ;;\n\
+esac\n\
+\n\
+echo "Health check passed for mode: $MODE"\n\
+exit 0\n\
+' > /usr/local/bin/health-check.sh && chmod +x /usr/local/bin/health-check.sh
+
+# Create startup script to handle different modes
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+# Default values\n\
+MODE=${CSI_MODE:-controller}\n\
+LOG_LEVEL=${LOG_LEVEL:-info}\n\
+\n\
+echo "Starting spdk_flint in mode: $MODE"\n\
+echo "Log level: $LOG_LEVEL"\n\
+\n\
+# Create necessary directories based on mode\n\
+case "$MODE" in\n\
+    "dashboard-backend")\n\
+        echo "Setting up dashboard backend mode"\n\
+        mkdir -p /var/lib/spdk-csi/dashboards\n\
+        ;;\n\
+    "controller")\n\
+        echo "Setting up controller mode"\n\
+        mkdir -p /var/lib/spdk-csi/backups\n\
+        ;;\n\
+    "node-agent")\n\
+        echo "Setting up node agent mode"\n\
+        mkdir -p /csi\n\
+        ;;\n\
+esac\n\
+\n\
+# Execute spdk_flint with the specified mode\n\
+exec /usr/local/bin/spdk_flint --mode "$MODE" --log-level "$LOG_LEVEL" "$@"\n\
+' > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+# Create runtime user
 RUN useradd -m -u 1001 spdk-flint
 
-# Set default environment variables
+# Set default environment variables (can be overridden at runtime)
+ENV CSI_MODE=controller
 ENV LOG_LEVEL=info
-ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock 
+ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock
+ENV DASHBOARD_PORT=8080
+
+# Expose common ports (dashboard port - only used in dashboard mode)
+EXPOSE 8080
+
+# Health check (adapts to different modes)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD /usr/local/bin/health-check.sh
+
+# Use non-root user for security
+USER spdk-flint
+
+# Set flexible entrypoint
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD []
