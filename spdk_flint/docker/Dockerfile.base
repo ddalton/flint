@@ -245,6 +245,8 @@ RUN mkdir -p /usr/local/bin /usr/local/lib/pkgconfig /usr/local/scripts
 # Copy SPDK libraries and headers (essential for compilation)
 COPY --from=builder /usr/local/lib/libspdk* /usr/local/lib/
 COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
+# Copy SPDK internal headers (needed for spdk_internal/lvolstore.h)
+COPY --from=builder /workspace/spdk/include/spdk_internal/ /usr/local/include/spdk_internal/
 
 # For now, skip copying optional SPDK binaries - we mainly need libraries for compilation
 

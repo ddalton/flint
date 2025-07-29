@@ -65,6 +65,21 @@ find_package(OpenSSL REQUIRED)
 
 set(SPDK_INCLUDE_DIRS /usr/local/include)
 
+# Add SPDK source include directory for internal headers (Docker build)
+set(SPDK_INTERNAL_SEARCH_PATHS 
+    "/workspace/spdk/include"
+    "/workspace/spdk" 
+    "/usr/local/include"
+)
+
+foreach(search_path ${SPDK_INTERNAL_SEARCH_PATHS})
+    if(EXISTS "${search_path}/spdk_internal/lvolstore.h")
+        list(APPEND SPDK_INCLUDE_DIRS ${search_path})
+        message(STATUS "Found SPDK internal headers: ${search_path}/spdk_internal/")
+        break()
+    endif()
+endforeach()
+
 # Find Crow (header-only, will be downloaded if not found)
 find_path(CROW_INCLUDE_DIR 
     NAMES crow.h crow/crow.h 
