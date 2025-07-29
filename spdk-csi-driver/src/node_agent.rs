@@ -1,6 +1,6 @@
 use kube::{
     Client, Api, 
-    api::{PatchParams, Patch, PostParams},
+    api::{PatchParams, Patch, PostParams, ListParams},
 };
 use tokio::time::{Duration, interval};
 use serde::{Deserialize, Serialize};
@@ -674,16 +674,54 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
     
-    // Process each discovered device
+    // Get all existing SpdkDisk CRDs for this node
+    let existing_disks = match spdk_disks.list(&ListParams::default()).await {
+        Ok(disk_list) => {
+            let node_disks: Vec<SpdkDisk> = disk_list.items.into_iter()
+                .filter(|disk| disk.spec.node_id == agent.node_name)
+                .collect();
+            println!("🔍 [DISCOVERY] Found {} existing SpdkDisk CRDs for node: {}", node_disks.len(), agent.node_name);
+            node_disks
+        }
+        Err(e) => {
+            println!("⚠️ [DISCOVERY] Failed to list existing SpdkDisk CRDs: {}", e);
+            Vec::new()
+        }
+    };
+    
+    // Update existing CRDs based on current physical devices
+    for existing_disk in existing_disks {
+        let disk_name = existing_disk.metadata.name.as_ref().unwrap();
+        
+        // Find matching physical device for this CRD
+        if let Some(matching_device) = discovered_devices.iter()
+            .find(|dev| dev.pcie_addr == existing_disk.spec.pcie_addr) {
+            
+            println!("🔄 [DISCOVERY] Updating existing CRD: {} with current device: {}", disk_name, matching_device.controller_id);
+            match update_existing_disk_resource(agent, &existing_disk, matching_device).await {
+                Ok(_) => {
+                    println!("✅ [DISCOVERY] Successfully updated existing CRD: {}", disk_name);
+                }
+                Err(e) => {
+                    println!("❌ [DISCOVERY] Failed to update existing CRD {}: {}", disk_name, e);
+                }
+            }
+        } else {
+            println!("⚠️ [DISCOVERY] Physical device not found for existing CRD: {} (PCI: {})", 
+                     disk_name, existing_disk.spec.pcie_addr);
+            // Could mark as unhealthy or offline here
+        }
+    }
+    
+    // Log discovered devices that don't have CRDs (but don't create CRDs for them)
     for device in discovered_devices {
-        let disk_name = agent.disk_crd_name(&device.pcie_addr);  // Use PCI-based naming
-        match get_or_create_disk_resource(agent, &spdk_disks, &disk_name, &device).await {
-            Ok(_) => {
-                println!("✅ [DISCOVERY] Successfully processed disk: {}", disk_name);
-            }
-            Err(e) => {
-                eprintln!("❌ [DISCOVERY] Failed to process disk {}: {}", disk_name, e);
-            }
+        let expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
+        let has_crd = existing_disks.iter()
+            .any(|disk| disk.spec.pcie_addr == device.pcie_addr);
+        
+        if !has_crd {
+            println!("📋 [DISCOVERY] Unmanaged device found: {} ({}) - PCIe: {} (no SpdkDisk CRD exists)", 
+                     device.controller_id, device.model, device.pcie_addr);
         }
     }
     
@@ -691,145 +729,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     Ok(())
 }
 
-async fn get_or_create_disk_resource(
-    agent: &NodeAgent,
-    spdk_disks: &Api<SpdkDisk>,
-    disk_name: &str,
-    device: &NvmeDevice,
-) -> Result<SpdkDisk, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔄 [DISK_RESOURCE] Attempting to get or create resource: {}", disk_name);
-    
-    // Try to get existing resource first
-    match spdk_disks.get(disk_name).await {
-        Ok(existing_disk) => {
-            println!("✅ [DISK_RESOURCE] Found existing resource: {}", disk_name);
-            println!("🔍 [DISK_RESOURCE] CRD details:");
-            println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
-            println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
-            println!("   - Spec: {:?}", existing_disk.spec);
-            println!("   - Status: {:?}", existing_disk.status);
-            println!("🔍 [DISK_RESOURCE] Checking if update needed for: {}", disk_name);
-            
-            // Resource exists - update it if needed
-            update_existing_disk_resource(agent, &existing_disk, device).await?;
-            
-            // Fetch the updated resource
-            println!("📥 [DISK_RESOURCE] Fetching updated resource: {}", disk_name);
-            match spdk_disks.get(disk_name).await {
-                Ok(updated_disk) => {
-                    println!("✅ [DISK_RESOURCE] Successfully fetched updated resource: {}", disk_name);
-                    println!("🔍 [DISK_RESOURCE] Updated CRD details:");
-                    println!("   - API Version: {:?}", updated_disk.metadata.resource_version);
-                    println!("   - Namespace: {:?}", updated_disk.metadata.namespace);
-                    println!("   - Spec: {:?}", updated_disk.spec);
-                    println!("   - Status: {:?}", updated_disk.status);
-                    Ok(updated_disk)
-                }
-                Err(update_err) => {
-                    println!("❌ [DISK_RESOURCE] Detailed error fetching updated resource {}: {:?}", disk_name, update_err);
-                    
-                    match &update_err {
-                        kube::Error::SerdeError(serde_err) => {
-                            println!("❌ [DISK_RESOURCE] Update Fetch Serde Deserialization Error:");
-                            println!("   - Error: {}", serde_err);
-                            println!("   - This suggests the CRD was updated but now has incompatible format");
-                        }
-                        _ => {
-                            println!("❌ [DISK_RESOURCE] Update fetch other error type: {}", update_err);
-                        }
-                    }
-                    
-                    Err(update_err.into())
-                }
-            }
-        }
-        Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
-            println!("❌ [DISK_RESOURCE] Resource not found, creating new: {}", disk_name);
-            
-            // Resource doesn't exist - try to create it
-            match create_new_disk_resource_internal(agent, spdk_disks, disk_name, device).await {
-                Ok(disk) => {
-                    println!("✅ [DISK_RESOURCE] Successfully created new resource: {}", disk_name);
-                    Ok(disk)
-                }
-                Err(e) => {
-                    println!("⚠️ [DISK_RESOURCE] Creation failed ({}), checking for race condition: {}", e, disk_name);
-                    
-                    // If creation failed, it might be due to race condition - retry get
-                    eprintln!("Creation failed ({}), retrying get for {}", e, disk_name);
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    
-                    match spdk_disks.get(disk_name).await {
-                        Ok(disk) => {
-                            println!("🔄 [DISK_RESOURCE] Found existing resource {} after creation conflict (race condition resolved)", disk_name);
-                            println!("🔍 [DISK_RESOURCE] Retry CRD details:");
-                            println!("   - API Version: {:?}", disk.metadata.resource_version);
-                            println!("   - Namespace: {:?}", disk.metadata.namespace);
-                            println!("   - Spec: {:?}", disk.spec);
-                            println!("   - Status: {:?}", disk.status);
-                            Ok(disk)
-                        }
-                        Err(get_err) => {
-                            println!("❌ [DISK_RESOURCE] Detailed retry error getting {}: {:?}", disk_name, get_err);
-                            
-                            match &get_err {
-                                kube::Error::Api(api_err) => {
-                                    println!("❌ [DISK_RESOURCE] Retry Kubernetes API Error:");
-                                    println!("   - Code: {}", api_err.code);
-                                    println!("   - Message: {}", api_err.message);
-                                    println!("   - Reason: {}", api_err.reason);
-                                    println!("   - Status: {}", api_err.status);
-                                }
-                                kube::Error::SerdeError(serde_err) => {
-                                    println!("❌ [DISK_RESOURCE] Retry Serde Deserialization Error:");
-                                    println!("   - Error: {}", serde_err);
-                                    println!("   - This suggests the CRD data format doesn't match the expected SpdkDisk struct");
-                                }
-                                _ => {
-                                    println!("❌ [DISK_RESOURCE] Retry other error type: {}", get_err);
-                                }
-                            }
-                            
-                            let error_msg = format!("Failed to create and retrieve {}: create_err={}, get_err={}", 
-                                                   disk_name, e, get_err);
-                            println!("❌ [DISK_RESOURCE] {}", error_msg);
-                            Err(error_msg.into())
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("❌ [DISK_RESOURCE] Detailed error getting {}: {:?}", disk_name, e);
-            
-            match &e {
-                kube::Error::Api(api_err) => {
-                    println!("❌ [DISK_RESOURCE] Kubernetes API Error:");
-                    println!("   - Code: {}", api_err.code);
-                    println!("   - Message: {}", api_err.message);
-                    println!("   - Reason: {}", api_err.reason);
-                    println!("   - Status: {}", api_err.status);
-                }
-                kube::Error::SerdeError(serde_err) => {
-                    println!("❌ [DISK_RESOURCE] Serde Deserialization Error:");
-                    println!("   - Error: {}", serde_err);
-                    println!("   - This suggests the CRD data format doesn't match the expected SpdkDisk struct");
-                }
-                kube::Error::HttpError(http_err) => {
-                    println!("❌ [DISK_RESOURCE] HTTP Error:");
-                    println!("   - Error: {}", http_err);
-                }
-                _ => {
-                    println!("❌ [DISK_RESOURCE] Other error type: {}", e);
-                }
-            }
-            
-            let error_msg = format!("Unexpected error getting {}: {}", disk_name, e);
-            println!("❌ [DISK_RESOURCE] {}", error_msg);
-            Err(error_msg.into())
-        }
-    }
-}
+
 
 async fn create_new_disk_resource_internal(
     agent: &NodeAgent,
@@ -1414,6 +1314,26 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     if updated_status.healthy != is_healthy {
         updated_status.healthy = is_healthy;
         needs_update = true;
+    }
+    
+    // Check if device path or nvme_controller_id need updating due to device name changes
+    let current_device_path = format!("/dev/{}", device.name);
+    let current_controller_id = device.name.clone();
+    
+    if disk.spec.device_path != current_device_path || 
+       disk.spec.nvme_controller_id.as_ref() != Some(&current_controller_id) {
+        
+        println!("🔄 [SPEC_UPDATE] Device name changed - updating CRD spec from {:?}/{:?} to {}/{}", 
+                 disk.spec.device_path, disk.spec.nvme_controller_id, current_device_path, current_controller_id);
+        
+        let spec_patch = json!({
+            "spec": {
+                "device_path": current_device_path,
+                "nvme_controller_id": current_controller_id
+            }
+        });
+        spdk_disks.patch(disk_name, &PatchParams::default(), &Patch::Merge(spec_patch)).await?;
+        println!("✅ [SPEC_UPDATE] Successfully updated CRD spec with current device information");
     }
     
     // Use enhanced reconciliation logic that handles both AIO bdev and LVS properly
@@ -4231,8 +4151,39 @@ impl NodeAgent {
                 }
             }
             println!("✅ [RECONCILE] SPDK and CRD states are consistent and complete");
+        } else if !aio_bdev_exists && !spdk_lvs_exists && !crd_thinks_initialized {
+            // Both CRD and SPDK are uninitialized - only auto-initialize if this was previously initialized
+            let was_previously_initialized = updated_status.lvs_name.is_some();
+            
+            if self.auto_initialize_blobstore && was_previously_initialized {
+                println!("🔄 [RECONCILE] CRD was previously initialized but now uninitialized - triggering recovery auto-initialization");
+                
+                // Create AIO bdev first
+                if let Err(e) = self.ensure_aio_bdev_exists(&disk_crd).await {
+                    println!("⚠️ [RECONCILE] Failed to create AIO bdev during auto-init: {}", e);
+                    updated_status.blobstore_initialized = false;
+                    updated_status.healthy = false;
+                    needs_update = true;
+                } else {
+                    // Create LVS on the AIO bdev
+                    if let Err(e) = self.ensure_lvs_exists(&disk_crd, &kernel_bdev_name).await {
+                        println!("⚠️ [RECONCILE] Failed to create LVS during auto-init: {}", e);
+                        updated_status.blobstore_initialized = false;
+                        updated_status.healthy = false;
+                        needs_update = true;
+                    } else {
+                        println!("✅ [RECONCILE] Auto-initialization completed successfully");
+                        updated_status.blobstore_initialized = true;
+                        updated_status.lvs_name = Some(lvs_name.clone());
+                        updated_status.healthy = true;
+                        needs_update = true;
+                    }
+                }
+            } else {
+                println!("✅ [RECONCILE] States are consistent (both uninitialized, auto-init disabled)");
+            }
         } else {
-            println!("✅ [RECONCILE] States are consistent (both uninitialized or both initialized)");
+            println!("✅ [RECONCILE] States are consistent (initialized or other state)");
         }
         
         // Always update the last_checked timestamp
