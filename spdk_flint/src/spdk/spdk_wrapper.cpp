@@ -15,6 +15,10 @@
 #include <sys/stat.h>    // For stat()
 #include <sstream>       // For string concatenation
 
+// Suppress pedantic warnings from SPDK headers (they use C99/GNU extensions)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 // Additional SPDK headers for direct C API calls
 extern "C" {
 #include <spdk/bdev_module.h>
@@ -36,6 +40,9 @@ extern "C" {
 
 // Function signatures are now provided by the module headers
 }
+
+// Restore previous diagnostic settings
+#pragma GCC diagnostic pop
 
 namespace spdk_flint {
 namespace spdk {

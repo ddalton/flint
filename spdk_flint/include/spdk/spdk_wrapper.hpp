@@ -12,6 +12,10 @@
 #include <atomic>
 #include <chrono>
 
+// Suppress pedantic warnings from SPDK headers (they use C99/GNU extensions)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 // SPDK headers
 extern "C" {
 #include <spdk/stdinc.h>
@@ -28,6 +32,9 @@ extern "C" {
 #include <spdk/log.h>
 #include <spdk/uuid.h>
 }
+
+// Restore previous diagnostic settings
+#pragma GCC diagnostic pop
 
 namespace spdk_flint {
 namespace spdk {
