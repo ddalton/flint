@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace spdk_flint {
 
 // Forward declarations - actual definitions are in app.hpp

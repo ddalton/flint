@@ -13,7 +13,7 @@
 #include <cstring>
 #include <atomic>
 #include <sys/stat.h>    // For stat()
-#include <fmt/ranges.h>  // For fmt::join
+#include <sstream>       // For string concatenation
 
 // Additional SPDK headers for direct C API calls
 extern "C" {
@@ -1118,8 +1118,16 @@ void SpdkWrapper::attachNvmeControllerAsync(
                     
                     spdk_flint::logger()->info("[SPDK] Successfully attached NVMe controller '{}' in {} ms", 
                                              ctx->name, duration.count());
+                    
+                    // Create comma-separated list of bdev names
+                    std::string bdev_list;
+                    for (size_t i = 0; i < bdev_names.size(); i++) {
+                        if (i > 0) bdev_list += ", ";
+                        bdev_list += bdev_names[i];
+                    }
+                    
                     spdk_flint::logger()->info("[SPDK] Created {} block device(s): {}", 
-                                             bdev_count, fmt::join(bdev_names, ", "));
+                                             bdev_count, bdev_list);
                     
                     if (ctx->callback) {
                         ctx->callback(bdev_names, 0);
