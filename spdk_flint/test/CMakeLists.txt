@@ -19,10 +19,24 @@ set_target_properties(spdk_flint_tests PROPERTIES
     LINK_FLAGS "-Wl,--no-as-needed"
 )
 
-# Link against main application library (all dependencies propagated via PUBLIC linking)
+# Link against main application library and all its dependencies
 target_link_libraries(spdk_flint_tests
     spdk_flint_lib
-    # Additional libraries for tests only
+    
+    # Since we removed PUBLIC linking, we need to explicitly add all dependencies
+    ${Protobuf_LIBRARIES}
+    ${gRPC_LIBRARIES}
+    ${spdlog_LIBRARIES}
+    Threads::Threads
+    ${CURL_LIBRARIES}
+    # System libraries
+    dl
+    rt
+    uuid
+    numa
+    pthread
+    m
+    # OpenSSL libraries
     -lssl
     -lcrypto
     ${CMAKE_DL_LIBS}
