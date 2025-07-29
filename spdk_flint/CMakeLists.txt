@@ -219,27 +219,13 @@ set(SYSTEM_LIBS
     pthread
     ssl
     crypto
+    m
+    c
 )
 
-# Essential SPDK libraries in dependency order
-set(SPDK_LIBS
-    spdk_json
-    spdk_jsonrpc  
-    spdk_rpc
-    spdk_util
-    spdk_log
-    spdk_thread
-    spdk_trace
-    spdk_notify
-    spdk_sock
-    spdk_init
-    spdk_env_dpdk
-    spdk_memory
-    spdk_conf
-    spdk_bdev
-    spdk_nvme
-    spdk_event
-)
+# Static linking configuration
+set(CMAKE_FIND_LIBRARY_SUFFIXES .a .so)  # Prefer static libraries
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
 
 # Try to find DPDK via pkg-config first
 find_package(PkgConfig QUIET)
@@ -293,27 +279,35 @@ target_link_libraries(spdk_flint_lib
     ${CURL_LIBRARIES}
 )
 
-# Link DPDK first (SPDK depends on it)
-if(DPDK_FOUND)
-    target_link_libraries(spdk_flint_lib ${DPDK_LIBRARIES})
-elseif(DPDK_LIBRARY)
-    target_link_libraries(spdk_flint_lib ${DPDK_LIBRARY})
-endif()
+# Static linking approach - link ALL SPDK and DPDK libraries at once
+# Find all SPDK static libraries
+file(GLOB ALL_SPDK_LIBS "/usr/local/lib/libspdk*.a")
+message(STATUS "Found SPDK libraries: ${ALL_SPDK_LIBS}")
 
-# Link SPDK libraries using --whole-archive to ensure all symbols are included
-foreach(spdk_lib ${SPDK_LIBS})
-    find_library(${spdk_lib}_LIBRARY NAMES ${spdk_lib} lib${spdk_lib}
-        PATHS /usr/local/lib
-        DOC "${spdk_lib} library")
-    
-    if(${spdk_lib}_LIBRARY)
-        message(STATUS "Found ${spdk_lib}: ${${spdk_lib}_LIBRARY}")
-        target_link_libraries(spdk_flint_lib 
-            -Wl,--whole-archive ${${spdk_lib}_LIBRARY} -Wl,--no-whole-archive)
-    else()
-        message(WARNING "Could not find ${spdk_lib} library")
-    endif()
-endforeach()
+# Find DPDK libraries  
+if(DPDK_FOUND)
+    set(ALL_DPDK_LIBS ${DPDK_LIBRARIES})
+elseif(DPDK_LIBRARY)
+    set(ALL_DPDK_LIBS ${DPDK_LIBRARY})
+else()
+    # Find all DPDK libraries if pkg-config didn't work
+    file(GLOB ALL_DPDK_LIBS "/usr/lib/x86_64-linux-gnu/libdpdk*.a" "/usr/local/lib/libdpdk*.a" "/usr/local/lib/librte*.a")
+endif()
+message(STATUS "Found DPDK libraries: ${ALL_DPDK_LIBS}")
+
+# Find ISA-L libraries (Intel Storage Acceleration Library)
+file(GLOB ALL_ISAL_LIBS "/usr/local/lib/libisal*.a" "/usr/lib/x86_64-linux-gnu/libisal*.a")
+message(STATUS "Found ISA-L libraries: ${ALL_ISAL_LIBS}")
+
+# Link everything statically with whole-archive to include all symbols
+target_link_libraries(spdk_flint_lib
+    # Use --whole-archive for all SPDK/DPDK/ISA-L libraries to ensure all symbols are included
+    -Wl,--whole-archive
+    ${ALL_SPDK_LIBS}
+    ${ALL_DPDK_LIBS}
+    ${ALL_ISAL_LIBS}
+    -Wl,--no-whole-archive
+)
 
 # Link system libraries
 target_link_libraries(spdk_flint_lib ${SYSTEM_LIBS})
@@ -326,9 +320,9 @@ if(URING_LIBRARY)
     target_link_libraries(spdk_flint_lib ${URING_LIBRARY})
 endif()
 
-# Set linker flags to handle potential issues
+# Set linker flags for static linking
 set_target_properties(spdk_flint_lib PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition"
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--start-group -Wl,--end-group"
 )
 
 # Link libraries for the main executable
@@ -337,9 +331,9 @@ target_link_libraries(spdk_flint
     ${CMAKE_DL_LIBS}
 )
 
-# Set linker flags for main executable
+# Set linker flags for main executable  
 set_target_properties(spdk_flint PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition"
+    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -static-libgcc -static-libstdc++"
 )
 
 # Link Crow (FetchContent or manually found)
