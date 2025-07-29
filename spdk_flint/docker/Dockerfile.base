@@ -146,9 +146,7 @@ RUN git clone https://github.com/spdk/spdk.git && \
     echo "Ensuring nasm is in PATH for auto-detection..." && \
     export PATH="/usr/bin:$PATH" && \
     which nasm && nasm --version && \
-    echo "Starting SPDK configure (letting it auto-detect nasm)..." && \
-    echo "Checking system DPDK version..." && \
-    dpkg-query -W dpdk-dev || echo "DPDK version check failed" && \
+    echo "Starting SPDK configure (letting it use internal DPDK and auto-detect nasm)..." && \
     ./configure \
         --with-ublk \
         --disable-tests \
@@ -156,10 +154,7 @@ RUN git clone https://github.com/spdk/spdk.git && \
         --without-shared \
         --without-nvme-cuse \
         --without-fuse \
-        --with-uring \
-        --with-dpdk=/usr \
-        --without-vhost \
-        --without-virtio 2>&1 | tee configure.log && \
+        --with-uring 2>&1 | tee configure.log && \
     echo "Verifying SPDK configure success..." && \
     if [ ! -f mk/config.mk ]; then \
         echo "ERROR: SPDK configure failed - config.mk not generated!" && \
@@ -197,10 +192,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Development libraries for linking
     libaio-dev \
     liburing-dev \
-    libdpdk-dev \
-    # Try additional DPDK packages that might have PCI functions
-    dpdk-dev \
-    # ISA-L libraries for crypto and compression functions
+    # ISA-L libraries for crypto and compression functions (system fallback)
     libisal-dev \
     # JSON processing  
     nlohmann-json3-dev \
