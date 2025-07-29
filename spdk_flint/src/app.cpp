@@ -78,12 +78,10 @@ private:
         
         http_server_thread_ = std::thread([this]() {
             try {
-                                 logger()->debug("[NODE_AGENT] HTTP server thread started: {}", spdk_flint::current_thread_id());
-                crow::SimpleApp app;
-                
-                // Enable CORS for dashboard access
-                auto& cors = app.get_middleware<crow::CORSHandler>();
-                cors.global().origin("*").methods("GET"_method, "POST"_method, "PUT"_method, "DELETE"_method);
+                                                  logger()->debug("[NODE_AGENT] HTTP server thread started: {}", spdk_flint::current_thread_id());
+                 crow::SimpleApp app;
+                 
+                 // Note: CORS headers will be added manually in responses if needed
                 
                 // Disk discovery endpoint
                 CROW_ROUTE(app, "/api/disks/uninitialized").methods("GET"_method)
@@ -405,9 +403,19 @@ private:
                 return crow::response(400, "Invalid JSON");
             }
             
-            std::string bdev_name = body.has("bdev_name") ? body["bdev_name"].s() : "";
-            std::string lvs_name = body.has("lvs_name") ? body["lvs_name"].s() : "";
-            std::string clear_method = body.has("clear_method") ? body["clear_method"].s() : "unmap";
+            std::string bdev_name;
+            std::string lvs_name;
+            std::string clear_method = "unmap";  // default
+            
+            if (body.has("bdev_name")) {
+                bdev_name = body["bdev_name"].s();
+            }
+            if (body.has("lvs_name")) {
+                lvs_name = body["lvs_name"].s();
+            }
+            if (body.has("clear_method")) {
+                clear_method = body["clear_method"].s();
+            }
             uint32_t cluster_sz = body.has("cluster_sz") ? body["cluster_sz"].u() : 0;
             
             logger()->info("[NODE_AGENT] Creating LVS: name='{}', bdev='{}', clear='{}', cluster={}",
@@ -825,12 +833,10 @@ void Application::startHealthServer() {
     // Start a simple health server
     health_thread_ = std::thread([this]() {
         try {
-                         logger()->debug("[APP] Health server thread started: {}", spdk_flint::current_thread_id());
-            crow::SimpleApp app;
-            
-            // Enable simple CORS
-            auto& cors = app.get_middleware<crow::CORSHandler>();
-            cors.global().origin("*").methods("GET"_method);
+                                      logger()->debug("[APP] Health server thread started: {}", spdk_flint::current_thread_id());
+             crow::SimpleApp app;
+             
+             // Note: Simple HTTP server for health checks
             
             CROW_ROUTE(app, "/health").methods("GET"_method)
             ([this](const crow::request& req) {
