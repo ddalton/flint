@@ -168,14 +168,14 @@ void DiskManager::getDiskInfoAsync(const std::string& pci_addr,
                 // Determine device name and other properties based on driver
                 if (disk_info.driver == "nvme") {
                     // For nvme driver, find the actual nvme device name
-                    findNvmeDeviceNameAsync(pci_addr, [this, disk_info, callback]
+                    findNvmeDeviceNameAsync(pci_addr, [this, pci_addr, disk_info, callback]
                                            (const std::string& device_name, int name_error) mutable {
                         if (name_error == 0) {
                             disk_info.device_name = device_name;
                             disk_info.spdk_ready = false; // Bound to kernel driver
                             
                             // Get size and model from nvme device
-                            getNvmeDeviceDetailsAsync(device_name, [disk_info, callback]
+                            getNvmeDeviceDetailsAsync(device_name, [this, disk_info, callback]
                                                      (uint64_t size_bytes, const std::string& model, int details_error) mutable {
                                 if (details_error == 0) {
                                     disk_info.size_bytes = size_bytes;
@@ -375,7 +375,7 @@ void DiskManager::createBasicDiskInfoFromSysfs(const std::string& pci_addr,
             }
             
             // Get current driver
-            getCurrentDriverAsync(pci_addr, [this, disk_info, callback](const std::string& driver, int error) mutable {
+            getCurrentDriverAsync(pci_addr, [this, pci_addr, disk_info, callback](const std::string& driver, int error) mutable {
                 if (error != 0) {
                     disk_info.driver = "unknown";
                 } else {
@@ -517,6 +517,8 @@ std::string DiskManager::diskCrdName(const std::string& pci_addr) const {
 void DiskManager::setupDisksAsync(const DiskSetupRequest& request, 
                                  std::function<void(const DiskSetupResult&, int)> callback) {
     logger()->info("[DISK_MANAGER] Starting disk setup for {} devices", request.pci_addresses.size());
+    logger()->debug("[DISK_MANAGER] Setup parameters - force_unmount={}, backup_data={}, huge_pages_mb={}", 
+                   request.force_unmount, request.backup_data, request.huge_pages_mb);
     
     // TODO: Implement full setup workflow
     DiskSetupResult result;
@@ -529,6 +531,8 @@ void DiskManager::setupDisksAsync(const DiskSetupRequest& request,
 void DiskManager::setupSingleDiskAsync(const std::string& pci_addr, const DiskSetupRequest& request,
                                        std::function<void(int)> callback) {
     logger()->info("[DISK_MANAGER] Setting up single disk: {}", pci_addr);
+    logger()->debug("[DISK_MANAGER] Setup request - force_unmount={}, backup_data={}, driver_override='{}'", 
+                   request.force_unmount, request.backup_data, request.driver_override);
     
     // TODO: Implement complete single disk setup workflow:
     // 1. Validate disk
