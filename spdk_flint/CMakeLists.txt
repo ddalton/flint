@@ -250,7 +250,7 @@ endif()
 # Add library search directories for SPDK
 link_directories(/usr/local/lib)
 
-# Find common SPDK libraries explicitly
+# Find ALL SPDK libraries that might be needed
 find_library(SPDK_ENV_DPDK NAMES spdk_env_dpdk PATHS /usr/local/lib)
 find_library(SPDK_UTIL NAMES spdk_util PATHS /usr/local/lib)
 find_library(SPDK_LOG NAMES spdk_log PATHS /usr/local/lib)
@@ -258,24 +258,52 @@ find_library(SPDK_THREAD NAMES spdk_thread PATHS /usr/local/lib)
 find_library(SPDK_TRACE NAMES spdk_trace PATHS /usr/local/lib)
 find_library(SPDK_NOTIFY NAMES spdk_notify PATHS /usr/local/lib)
 find_library(SPDK_JSON NAMES spdk_json PATHS /usr/local/lib)
+find_library(SPDK_JSONRPC NAMES spdk_jsonrpc PATHS /usr/local/lib)
+find_library(SPDK_MEMORY NAMES spdk_memory PATHS /usr/local/lib)
+find_library(SPDK_SOCK NAMES spdk_sock PATHS /usr/local/lib)
+find_library(SPDK_BDEV NAMES spdk_bdev PATHS /usr/local/lib)
+find_library(SPDK_ACCEL NAMES spdk_accel PATHS /usr/local/lib)
+find_library(SPDK_INIT NAMES spdk_init PATHS /usr/local/lib)
+
+# Find ISA-L libraries (Intel Storage Acceleration Library)
+find_library(ISAL NAMES isal PATHS /usr/local/lib /usr/lib)
+find_library(ISAL_CRYPTO NAMES isal_crypto PATHS /usr/local/lib /usr/lib)
 
 # Log what we found
-message(STATUS "SPDK ENV DPDK: ${SPDK_ENV_DPDK}")
-message(STATUS "SPDK UTIL: ${SPDK_UTIL}")
-message(STATUS "SPDK LOG: ${SPDK_LOG}")
+message(STATUS "SPDK libraries found:")
+message(STATUS "  ENV_DPDK: ${SPDK_ENV_DPDK}")
+message(STATUS "  UTIL: ${SPDK_UTIL}")
+message(STATUS "  LOG: ${SPDK_LOG}")
+message(STATUS "  JSONRPC: ${SPDK_JSONRPC}")
+message(STATUS "  MEMORY: ${SPDK_MEMORY}")
+message(STATUS "  SOCK: ${SPDK_SOCK}")
+message(STATUS "ISA-L libraries found:")
+message(STATUS "  ISAL: ${ISAL}")
+message(STATUS "  ISAL_CRYPTO: ${ISAL_CRYPTO}")
 
 # Link libraries for the main library with proper SPDK dependency order
 target_link_libraries(spdk_flint_lib
-    # Link individual SPDK libraries in dependency order
+    # Link individual SPDK libraries in dependency order (core first, then higher-level)
     ${SPDK_LIBRARIES}
-    # Core SPDK libraries (link explicitly if found)
+    # Core SPDK libraries
     ${SPDK_ENV_DPDK}
     ${SPDK_UTIL}
     ${SPDK_LOG}
+    ${SPDK_MEMORY}
+    ${SPDK_SOCK}
+    # Mid-level SPDK libraries
     ${SPDK_THREAD}
     ${SPDK_TRACE}
     ${SPDK_NOTIFY}
     ${SPDK_JSON}
+    ${SPDK_JSONRPC}
+    # High-level SPDK libraries
+    ${SPDK_BDEV}
+    ${SPDK_ACCEL}
+    ${SPDK_INIT}
+    # ISA-L libraries for CRC functions
+    ${ISAL}
+    ${ISAL_CRYPTO}
     # Add DPDK if found
     ${DPDK_LIBRARIES}
     ${Protobuf_LIBRARIES}

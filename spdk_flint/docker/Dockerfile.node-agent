@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnuma-dev \
     # DPDK development libraries
     libdpdk-dev \
+    # Intel Storage Acceleration Library (ISA-L) for CRC functions
+    libisal-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source code and build the business logic
