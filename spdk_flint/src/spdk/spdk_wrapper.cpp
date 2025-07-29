@@ -35,8 +35,6 @@ extern "C" {
 #include "module/bdev/lvol/vbdev_lvol.h"
 // NVMe module header for controller functions
 #include "module/bdev/nvme/bdev_nvme.h"
-// Try including the RPC header which might have the controller functions
-#include "module/bdev/nvme/bdev_nvme_rpc.h"
 
 // Function signatures are now provided by the module headers
 }
