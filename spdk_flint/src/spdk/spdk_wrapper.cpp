@@ -21,60 +21,18 @@ extern "C" {
 #include <spdk/vmd.h>
 #include <spdk/nvme_spec.h>
 #include <spdk/version.h>
-// Note: spdk/blobstore.h is in lib/blob/ directory, using bdev operations instead
+#include <spdk/blob.h>
 
 // Internal SPDK headers for complete struct definitions
 // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/include/spdk_internal/lvolstore.h
 #include "spdk_internal/lvolstore.h"
+// Module header with lvol_store_bdev complete definition
 // From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
-// This provides lvol_store_bdev struct with lvs pointer
-#include "spdk/bdev_module.h"
+#include "module/bdev/lvol/vbdev_lvol.h"
 
-// Forward declarations for NVMe controller functions
-// These are internal SPDK functions from module/bdev/nvme/bdev_nvme_rpc.c
-struct nvme_bdev_ctrlr;
-extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_get_by_name(const char* name);
-extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_first(void);
-extern struct nvme_bdev_ctrlr* nvme_bdev_ctrlr_next(struct nvme_bdev_ctrlr* ctrlr);
-
-// LVol store functions - these are confirmed to exist in SPDK source
-// From module/bdev/lvol/vbdev_lvol_rpc.c: vbdev_get_lvol_store_by_uuid_xor_name
+// Some forward declarations for functions not exposed in public headers
 extern struct spdk_lvol_store* vbdev_get_lvol_store_by_uuid(const struct spdk_uuid* uuid);
 extern struct spdk_lvol_store* vbdev_get_lvol_store_by_name(const char* name);
-
-// Iterator functions from spdk_internal/lvolstore.h - working with lvol_store_bdev
-// From https://raw.githubusercontent.com/spdk/spdk/refs/heads/v25.05.x/module/bdev/lvol/vbdev_lvol.h
-struct lvol_store_bdev;
-extern struct lvol_store_bdev* vbdev_lvol_store_first(void);
-extern struct lvol_store_bdev* vbdev_lvol_store_next(struct lvol_store_bdev* prev);
-
-// LVol store creation/destruction functions
-extern int vbdev_lvs_create_ext(const char* base_bdev_name, const char* name, 
-                               uint32_t cluster_sz, enum lvs_clear_method clear_method,
-                               uint32_t num_md_pages_per_cluster_ratio, uint32_t md_page_size,
-                               void (*cb_fn)(void*, struct spdk_lvol_store*, int), void* cb_arg);
-extern void vbdev_lvs_destruct(struct spdk_lvol_store* lvs, 
-                              void (*cb_fn)(void*, int), void* cb_arg);
-
-// Helper function to get lvol_store_bdev from spdk_lvol_store (from vbdev_lvol.h)
-extern struct lvol_store_bdev* vbdev_get_lvs_bdev_by_lvs(struct spdk_lvol_store* lvs);
-
-// NVMe controller attach function from module/bdev/nvme/bdev_nvme_rpc.c
-extern int bdev_nvme_attach_controller(const char* name, const char* trtype, const char* traddr,
-                                      const char* adrfam, const char* trsvcid, const char* priority,
-                                      const char* subnqn, const char* hostnqn,
-                                      const char* hostaddr, const char* hostsvcid,
-                                      bool multipath, uint32_t num_io_queues,
-                                      uint32_t ctrlr_loss_timeout_sec, uint32_t reconnect_delay_sec,
-                                      uint32_t fast_io_fail_timeout_sec,
-                                      void (*cb_fn)(void*, size_t, int), void* cb_arg);
-
-// Clear method enum (from SPDK source)
-enum lvs_clear_method {
-    LVS_CLEAR_WITH_NONE,
-    LVS_CLEAR_WITH_UNMAP,
-    LVS_CLEAR_WITH_WRITE_ZEROES,
-};
 }
 
 namespace spdk_flint {
@@ -88,7 +46,7 @@ static void spdk_app_started(void* arg) {
     auto* wrapper = static_cast<SpdkWrapper*>(arg);
     (void)wrapper; // Suppress unused variable warning
     spdk_flint::logger()->info("[SPDK] Application started successfully - reactor framework active");
-    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_version_string());
+    spdk_flint::logger()->debug("[SPDK] SPDK version: {}", spdk_version_get());
     spdk_flint::logger()->debug("[SPDK] Current thread: {}", fmt::ptr(spdk_get_thread()));
     g_spdk_initialized = true;
 }
@@ -375,7 +333,7 @@ void SpdkWrapper::getLvolStoresAsync(
                         
                         // Get cluster information from blobstore (struct spdk_blob_store *blobstore)
                         if (lvs->blobstore) {
-                            info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+                            info.total_clusters = spdk_bs_total_data_cluster_count(lvs->blobstore);
                             info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
                             info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
                             info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
@@ -430,7 +388,7 @@ void SpdkWrapper::getLvolStoresAsync(
                     
                     // Get cluster information from blobstore (struct spdk_blob_store *blobstore)
                     if (lvs->blobstore) {
-                        info.total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+                        info.total_clusters = spdk_bs_total_data_cluster_count(lvs->blobstore);
                         info.free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
                         info.cluster_size = spdk_bs_get_cluster_size(lvs->blobstore);
                         info.block_size = spdk_bs_get_io_unit_size(lvs->blobstore);
@@ -581,7 +539,7 @@ void SpdkWrapper::createLvolStoreAsync(
                     std::string uuid = std::string(uuid_str);
                     
                     // Log detailed creation results
-                    uint64_t total_clusters = spdk_bs_get_cluster_count(lvol_store->blobstore);
+                    uint64_t total_clusters = spdk_bs_total_data_cluster_count(lvol_store->blobstore);
                     uint64_t cluster_size = spdk_bs_get_cluster_size(lvol_store->blobstore);
                     uint64_t total_size = total_clusters * cluster_size;
                     
@@ -673,7 +631,7 @@ void SpdkWrapper::deleteLvolStoreAsync(
         
         // Get usage information from blobstore (struct spdk_blob_store *blobstore)
         if (lvs->blobstore) {
-            uint64_t total_clusters = spdk_bs_get_cluster_count(lvs->blobstore);
+            uint64_t total_clusters = spdk_bs_total_data_cluster_count(lvs->blobstore);
             uint64_t free_clusters = spdk_bs_free_cluster_count(lvs->blobstore);
             uint64_t used_clusters = total_clusters - free_clusters;
             

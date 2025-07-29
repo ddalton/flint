@@ -247,6 +247,9 @@ COPY --from=builder /usr/local/lib/libspdk* /usr/local/lib/
 COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
 # Copy SPDK internal headers (needed for spdk_internal/lvolstore.h)
 COPY --from=builder /workspace/spdk/include/spdk_internal/ /usr/local/include/spdk_internal/
+# Copy all SPDK module headers for complete struct definitions and internal APIs
+# This includes bdev modules (nvme, lvol, raid, etc.), event modules, and others
+COPY --from=builder /workspace/spdk/module/ /usr/local/include/module/
 
 # For now, skip copying optional SPDK binaries - we mainly need libraries for compilation
 

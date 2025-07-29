@@ -69,6 +69,7 @@ set(SPDK_INCLUDE_DIRS /usr/local/include)
 set(SPDK_INTERNAL_SEARCH_PATHS 
     "/workspace/spdk/include"
     "/workspace/spdk" 
+    "/workspace/spdk/module"
     "/usr/local/include"
 )
 
@@ -76,6 +77,20 @@ foreach(search_path ${SPDK_INTERNAL_SEARCH_PATHS})
     if(EXISTS "${search_path}/spdk_internal/lvolstore.h")
         list(APPEND SPDK_INCLUDE_DIRS ${search_path})
         message(STATUS "Found SPDK internal headers: ${search_path}/spdk_internal/")
+        break()
+    endif()
+endforeach()
+
+# Also search for module headers needed for complete struct definitions
+set(SPDK_MODULE_SEARCH_PATHS 
+    "/workspace/spdk"
+    "/usr/local/include"
+)
+
+foreach(search_path ${SPDK_MODULE_SEARCH_PATHS})
+    if(EXISTS "${search_path}/module")
+        list(APPEND SPDK_INCLUDE_DIRS ${search_path})
+        message(STATUS "Found SPDK module headers: ${search_path}/module/")
         break()
     endif()
 endforeach()
