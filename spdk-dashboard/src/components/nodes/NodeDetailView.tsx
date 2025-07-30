@@ -1,8 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
-import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
-import { useOperations } from '../../contexts/OperationsContext';
 
 interface NodeDetailViewProps {
   node: string;
@@ -15,6 +13,7 @@ interface NodeDetailViewProps {
   volumeFilter?: VolumeFilter;
   filteredVolumes?: Volume[];
   onDiskVolumeFilter?: (diskId: string) => void;
+  onShowMetrics: () => void;
 }
 
 export const NodeDetailView: React.FC<NodeDetailViewProps> = ({ 
@@ -27,16 +26,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   totalFree,
   volumeFilter,
   filteredVolumes,
-  onDiskVolumeFilter
+  onDiskVolumeFilter,
+  onShowMetrics,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
-  const [showNodeMetrics, setShowNodeMetrics] = useState(false);
-  const { setDialogVisible } = useOperations();
 
-  useEffect(() => {
-    setDialogVisible(showNodeMetrics);
-  }, [showNodeMetrics, setDialogVisible]);
-  
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
     if (newExpanded.has(diskId)) {
@@ -100,7 +94,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           
           {/* Node Metrics Button */}
           <button
-            onClick={() => setShowNodeMetrics(true)}
+            onClick={onShowMetrics}
             className="px-3 py-1 text-sm bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-colors flex items-center gap-1"
             title="View detailed node metrics and SPDK status"
           >
@@ -473,14 +467,6 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           </table>
         </div>
       </div>
-
-      {/* Node Metrics Modal */}
-      {showNodeMetrics && (
-        <NodeMetricsAPI
-          nodeName={node}
-          onClose={() => setShowNodeMetrics(false)}
-        />
-      )}
     </div>
   );
 };

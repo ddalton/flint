@@ -1,7 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import { NodeDetailView } from './NodeDetailView';
 import type { DashboardData, VolumeFilter } from '../../hooks/useDashboardData';
+import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
+import { useOperations } from '../../contexts/OperationsContext';
 
 interface FilteredNodesViewProps {
   data: DashboardData;
@@ -14,7 +16,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   data, 
   activeFilter, 
   onClearFilter,
-  onDiskVolumeFilter
+  onDiskVolumeFilter,
 }) => {
   // Search and filter state
   const [searchTerm, setSearchTerm] = useState('');
@@ -25,6 +27,14 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+
+  // State for active metrics modal
+  const [activeMetricsModal, setActiveMetricsModal] = useState<string | null>(null);
+  const { setDialogVisible } = useOperations();
+
+  useEffect(() => {
+    setDialogVisible(activeMetricsModal !== null);
+  }, [activeMetricsModal, setDialogVisible]);
 
   // Filter volumes based on the active filter
   const getFilteredVolumes = () => {
@@ -631,6 +641,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
               volumeFilter={activeFilter}
               filteredVolumes={hasVolumeFilter ? nodeData.nodeFilteredVolumes : undefined}
               onDiskVolumeFilter={onDiskVolumeFilter}
+              onShowMetrics={() => setActiveMetricsModal(nodeData.name)}
             />
           ))}
         </div>
@@ -726,7 +737,14 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Render the modal here */}
+      {activeMetricsModal && (
+        <NodeMetricsAPI 
+          nodeName={activeMetricsModal}
+          onClose={() => setActiveMetricsModal(null)}
+        />
+      )}
     </div>
   );
 };
-            
