@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { Filter } from 'lucide-react';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
@@ -50,7 +50,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
   const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
   const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
-  const [activeMetricsModal, setActiveMetricsModal] = useState<string | null>(null);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -242,9 +241,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
             activeFilter={volumeFilter}
             onClearFilter={handleClearFilter}
             onDiskVolumeFilter={handleDiskClick}
-            activeMetricsModal={activeMetricsModal}
-            onShowMetrics={setActiveMetricsModal}
-            onHideMetrics={() => setActiveMetricsModal(null)}
           />
         );
 
