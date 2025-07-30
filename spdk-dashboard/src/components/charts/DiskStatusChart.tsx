@@ -7,23 +7,29 @@ interface DiskStatusChartProps {
   disks: Disk[];
 }
 
+type DiskStatus = 'Healthy' | 'Uninitialized' | 'Unhealthy';
+
+// Helper function to determine the status of a single disk
+const getDiskStatus = (disk: Disk): DiskStatus => {
+  if (disk.blobstore_initialized) {
+    return disk.healthy ? 'Healthy' : 'Unhealthy';
+  }
+  return 'Uninitialized';
+};
+
 export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
   const nodeData = disks.reduce((acc, disk) => {
     if (!acc[disk.node]) {
-      acc[disk.node] = { total: 0, initialized: 0, healthy: 0 };
+      acc[disk.node] = { Healthy: 0, Uninitialized: 0, Unhealthy: 0 };
     }
-    acc[disk.node].total++;
-    if (disk.blobstore_initialized) acc[disk.node].initialized++;
-    if (disk.healthy) acc[disk.node].healthy++;
+    const status = getDiskStatus(disk);
+    acc[disk.node][status]++;
     return acc;
-  }, {} as Record<string, { total: number; initialized: number; healthy: number }>);
+  }, {} as Record<string, Record<DiskStatus, number>>);
 
   const chartData = Object.entries(nodeData).map(([node, data]) => ({
     node,
-    total: data.total,
-    initialized: data.initialized,
-    uninitialized: data.total - data.initialized,
-    unhealthy: data.total - data.healthy
+    ...data,
   }));
 
   return (
@@ -39,9 +45,9 @@ export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
           <YAxis />
           <RechartsTooltip />
           <Legend />
-          <Bar dataKey="initialized" stackId="a" fill="#10b981" name="LVS Initialized" />
-          <Bar dataKey="uninitialized" stackId="a" fill="#f59e0b" name="Uninitialized" />
-          <Bar dataKey="unhealthy" stackId="b" fill="#ef4444" name="Unhealthy" />
+          <Bar dataKey="Healthy" stackId="a" fill="#10b981" name="Healthy" />
+          <Bar dataKey="Uninitialized" stackId="a" fill="#f59e0b" name="Uninitialized" />
+          <Bar dataKey="Unhealthy" stackId="a" fill="#ef4444" name="Unhealthy" />
         </BarChart>
       </ResponsiveContainer>
     </div>

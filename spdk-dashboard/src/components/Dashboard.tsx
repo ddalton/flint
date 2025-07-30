@@ -12,6 +12,7 @@ import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
 import { DiskSetupTab } from './setup/DiskSetupTab';
 import { EnhancedSnapshotsTab } from './snapshots/EnhancedSnapshotsTab';
+import RemoteStorageTab from './storage/RemoteStorageTab';
 
 interface DashboardProps {
   data: DashboardData;
@@ -229,6 +230,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       case 'disk-setup':
         return <DiskSetupTab />;
+
+      case 'remote-storage':
+        return <RemoteStorageTab />;
 
       case 'nodes':
         return (
