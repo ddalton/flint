@@ -802,27 +802,67 @@ export const DiskSetupTab: React.FC = () => {
           
           {/* Disk State Cards - clear progression from gray to green */}
           <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-4">
-            <div className="bg-gray-50 rounded-lg p-4 text-center border border-gray-200">
+            <div 
+              className={`bg-gray-50 rounded-lg p-4 text-center border border-gray-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'free' ? 'ring-2 ring-gray-500 shadow-md' : ''
+              }`}
+              onClick={() => {
+                setStatusFilter(statusFilter === 'free' ? 'all' : 'free');
+                setCurrentPage(1);
+              }}
+            >
               <CheckCircle className="w-6 h-6 text-gray-600 mx-auto mb-2" />
               <p className="text-xl font-bold text-gray-600">{stats.free}</p>
               <p className="text-sm text-gray-600">Free</p>
             </div>
-            <div className="bg-blue-50 rounded-lg p-4 text-center border border-blue-200">
+            <div 
+              className={`bg-blue-50 rounded-lg p-4 text-center border border-blue-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'driver-bound' ? 'ring-2 ring-blue-500 shadow-md' : ''
+              }`}
+              onClick={() => {
+                setStatusFilter(statusFilter === 'driver-bound' ? 'all' : 'driver-bound');
+                setCurrentPage(1);
+              }}
+            >
               <Settings className="w-6 h-6 text-blue-600 mx-auto mb-2" />
               <p className="text-xl font-bold text-blue-600">{stats.driverBound}</p>
               <p className="text-sm text-gray-600">Driver Bound</p>
             </div>
-            <div className="bg-yellow-50 rounded-lg p-4 text-center border border-yellow-200">
+            <div 
+              className={`bg-yellow-50 rounded-lg p-4 text-center border border-yellow-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'needs-unmount' ? 'ring-2 ring-yellow-500 shadow-md' : ''
+              }`}
+              onClick={() => {
+                setStatusFilter(statusFilter === 'needs-unmount' ? 'all' : 'needs-unmount');
+                setCurrentPage(1);
+              }}
+            >
               <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
               <p className="text-xl font-bold text-yellow-600">{stats.needsUnmount}</p>
               <p className="text-sm text-gray-600">Needs Unmount</p>
             </div>
-            <div className="bg-red-50 rounded-lg p-4 text-center border border-red-200">
+            <div 
+              className={`bg-red-50 rounded-lg p-4 text-center border border-red-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'system' ? 'ring-2 ring-red-500 shadow-md' : ''
+              }`}
+              onClick={() => {
+                setStatusFilter(statusFilter === 'system' ? 'all' : 'system');
+                setCurrentPage(1);
+              }}
+            >
               <Shield className="w-6 h-6 text-red-600 mx-auto mb-2" />
               <p className="text-xl font-bold text-red-600">{stats.system}</p>
               <p className="text-sm text-gray-600">System Disks</p>
             </div>
-            <div className="bg-green-50 rounded-lg p-4 text-center border border-green-200">
+            <div 
+              className={`bg-green-50 rounded-lg p-4 text-center border border-green-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'lvs-ready' ? 'ring-2 ring-green-500 shadow-md' : ''
+              }`}
+              onClick={() => {
+                setStatusFilter(statusFilter === 'lvs-ready' ? 'all' : 'lvs-ready');
+                setCurrentPage(1);
+              }}
+            >
               <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
               <p className="text-xl font-bold text-green-600">{stats.lvsReady}</p>
               <p className="text-sm text-gray-600">LVS Ready</p>
