@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
+import { useOperations } from '../../contexts/OperationsContext';
 
 interface VolumesTableProps {
   volumes: Volume[];
@@ -23,10 +24,15 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onReplicaClick
 }) => {
   const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<Volume | null>(null);
+  const { setDialogVisible } = useOperations();
   
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+
+  useEffect(() => {
+    setDialogVisible(selectedVolumeDetail !== null);
+  }, [selectedVolumeDetail, setDialogVisible]);
 
   const filteredVolumes = useMemo(() => {
     let result = volumes;

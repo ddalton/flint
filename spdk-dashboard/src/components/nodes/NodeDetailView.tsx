@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
 import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+import { useOperations } from '../../contexts/OperationsContext';
 
 interface NodeDetailViewProps {
   node: string;
@@ -30,6 +31,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
   const [showNodeMetrics, setShowNodeMetrics] = useState(false);
+  const { setDialogVisible } = useOperations();
+
+  useEffect(() => {
+    setDialogVisible(showNodeMetrics);
+  }, [showNodeMetrics, setDialogVisible]);
   
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);

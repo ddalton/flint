@@ -9,6 +9,7 @@ import { EnhancedSnapshotsTreeView } from './EnhancedSnapshotsTreeView';
 import { SnapshotStorageView } from './SnapshotStorageView';
 import { SnapshotsTopologyView } from './SnapshotsTopologyView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
+import { useOperations } from '../../contexts/OperationsContext';
 import type { 
   SnapshotDetails, 
   SnapshotTreeNode, 
@@ -28,6 +29,11 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   const [selectedSnapshot, setSelectedSnapshot] = useState<SnapshotDetails | null>(null);
   const [expandedVolumes, setExpandedVolumes] = useState<Set<string>>(new Set());
   const [showFilters, setShowFilters] = useState(false);
+  const { setDialogVisible } = useOperations();
+
+  useEffect(() => {
+    setDialogVisible(selectedSnapshot !== null);
+  }, [selectedSnapshot, setDialogVisible]);
 
   // Get unique volumes for filter dropdown
   const availableVolumes = useMemo(() => {
