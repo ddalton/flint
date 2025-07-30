@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -15,6 +15,7 @@ import {
   Eye,
   EyeOff
 } from 'lucide-react';
+import { useOperations } from '../../contexts/OperationsContext';
 
 // Types for remote storage targets
 interface NVMeOFTarget {
@@ -49,6 +50,7 @@ interface iSCSITarget {
 type StorageTargetType = 'nvmeof' | 'iscsi';
 
 const RemoteStorageTab: React.FC = () => {
+  const { setDialogVisible } = useOperations();
   // State for NVMe-oF targets
   const [nvmeTargets, setNvmeTargets] = useState<NVMeOFTarget[]>([
     {
@@ -107,6 +109,11 @@ const RemoteStorageTab: React.FC = () => {
     port: '4420',
     authMethod: 'none'
   });
+
+  // Inform context about dialog visibility
+  useEffect(() => {
+    setDialogVisible(showAddForm);
+  }, [showAddForm, setDialogVisible]);
 
   // Mock functions - replace with actual API calls
   const connectTarget = async (id: string, type: StorageTargetType) => {

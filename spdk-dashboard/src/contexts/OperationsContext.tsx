@@ -4,9 +4,11 @@ import type { ReactNode } from 'react';
 interface OperationsContextType {
   hasActiveOperations: boolean;
   hasActiveSelections: boolean;
+  isDialogVisible: boolean;
   shouldPauseRefresh: boolean;
   setActiveOperationsCount: (count: number) => void;
   setActiveSelectionsCount: (count: number) => void;
+  setDialogVisible: (visible: boolean) => void;
   incrementOperations: () => void;
   decrementOperations: () => void;
 }
@@ -34,51 +36,58 @@ export const OperationsProvider: React.FC<OperationsProviderProps> = ({
 }) => {
   const [activeOperationsCount, setActiveOperationsCount] = useState(0);
   const [activeSelectionsCount, setActiveSelectionsCount] = useState(0);
+  const [isDialogVisible, setDialogVisible] = useState(false);
   
   // Track whether auto-refresh was disabled manually by user vs automatically by system
-  const [wasAutoDisabledBySelections, setWasAutoDisabledBySelections] = useState(false);
+  const [wasAutoDisabled, setWasAutoDisabled] = useState(false);
   const prevSelectionsCount = useRef(0);
+  const prevDialogVisible = useRef(false);
 
   const hasActiveOperations = activeOperationsCount > 0;
   const hasActiveSelections = activeSelectionsCount > 0;
-  const shouldPauseRefresh = hasActiveOperations || hasActiveSelections;
+  const shouldPauseRefresh = hasActiveOperations || hasActiveSelections || isDialogVisible;
   
-  // Auto-manage refresh based on selections (only if auto-refresh management is enabled)
+  // Auto-manage refresh based on selections or dialog visibility
   useEffect(() => {
     if (!onAutoRefreshChange) return; // Don't auto-manage if no callback provided
     
-    const currentSelectionsCount = activeSelectionsCount;
-    const previousSelectionsCount = prevSelectionsCount.current;
-    
-    // Selections started (0 → >0): Auto-disable refresh
-    if (previousSelectionsCount === 0 && currentSelectionsCount > 0 && autoRefresh) {
-      console.log('🔄 [AUTO_REFRESH_MANAGER] Auto-disabling refresh due to selections');
-      setWasAutoDisabledBySelections(true);
+    const selectionsStarted = prevSelectionsCount.current === 0 && activeSelectionsCount > 0;
+    const dialogOpened = !prevDialogVisible.current && isDialogVisible;
+
+    // Pause on new selection or dialog
+    if ((selectionsStarted || dialogOpened) && autoRefresh) {
+      const reason = selectionsStarted ? 'selections' : 'dialog';
+      console.log(`🔄 [AUTO_REFRESH_MANAGER] Auto-disabling refresh due to ${reason}`);
+      setWasAutoDisabled(true);
       onAutoRefreshChange(false);
     }
     
-    // Selections ended (>0 → 0): Auto-enable refresh only if it was auto-disabled
-    if (previousSelectionsCount > 0 && currentSelectionsCount === 0 && wasAutoDisabledBySelections) {
-      console.log('🔄 [AUTO_REFRESH_MANAGER] Auto-enabling refresh after selections cleared');
-      setWasAutoDisabledBySelections(false);
+    const selectionsEnded = prevSelectionsCount.current > 0 && activeSelectionsCount === 0;
+    const dialogClosed = prevDialogVisible.current && !isDialogVisible;
+
+    // Resume only when all conditions are clear
+    if ((selectionsEnded || dialogClosed) && wasAutoDisabled && activeSelectionsCount === 0 && !isDialogVisible) {
+      console.log('🔄 [AUTO_REFRESH_MANAGER] Auto-enabling refresh');
+      setWasAutoDisabled(false);
       onAutoRefreshChange(true);
     }
     
-    prevSelectionsCount.current = currentSelectionsCount;
-  }, [activeSelectionsCount, autoRefresh, onAutoRefreshChange, wasAutoDisabledBySelections]);
+    prevSelectionsCount.current = activeSelectionsCount;
+    prevDialogVisible.current = isDialogVisible;
+  }, [activeSelectionsCount, isDialogVisible, autoRefresh, onAutoRefreshChange, wasAutoDisabled]);
   
   // Reset auto-disable flag if user manually enables refresh
   useEffect(() => {
-    if (autoRefresh && wasAutoDisabledBySelections && activeSelectionsCount === 0) {
+    if (autoRefresh && wasAutoDisabled && activeSelectionsCount === 0 && !isDialogVisible) {
       console.log('🔄 [AUTO_REFRESH_MANAGER] User manually enabled refresh, clearing auto-disable flag');
-      setWasAutoDisabledBySelections(false);
+      setWasAutoDisabled(false);
     }
-  }, [autoRefresh, wasAutoDisabledBySelections, activeSelectionsCount]);
+  }, [autoRefresh, wasAutoDisabled, activeSelectionsCount, isDialogVisible]);
   
   // Debug when pause state changes
   const prevShouldPause = useRef(shouldPauseRefresh);
   if (prevShouldPause.current !== shouldPauseRefresh) {
-    console.log(`🔄 [CONTEXT_STATE_CHANGE] shouldPauseRefresh changed: ${prevShouldPause.current} → ${shouldPauseRefresh} (ops: ${activeOperationsCount}, selections: ${activeSelectionsCount})`);
+    console.log(`🔄 [CONTEXT_STATE_CHANGE] shouldPauseRefresh changed: ${prevShouldPause.current} → ${shouldPauseRefresh} (ops: ${activeOperationsCount}, selections: ${activeSelectionsCount}, dialog: ${isDialogVisible})`);
     prevShouldPause.current = shouldPauseRefresh;
   }
 
@@ -95,23 +104,27 @@ export const OperationsProvider: React.FC<OperationsProviderProps> = ({
   };
 
   const setActiveSelectionsCountDirect = (count: number) => {
-    console.log(`🔄 [CONTEXT_UPDATE] setActiveSelectionsCount called with: ${count}`);
     const newCount = Math.max(0, count);
-    console.log(`🔄 [CONTEXT_UPDATE] Setting activeSelectionsCount to: ${newCount}`);
     setActiveSelectionsCount(newCount);
+  };
+
+  const setDialogVisibleDirect = (visible: boolean) => {
+    setDialogVisible(visible);
   };
 
   return (
     <OperationsContext.Provider value={{
       hasActiveOperations,
       hasActiveSelections,
+      isDialogVisible,
       shouldPauseRefresh,
       setActiveOperationsCount: setActiveOperationsCountDirect,
       setActiveSelectionsCount: setActiveSelectionsCountDirect,
+      setDialogVisible: setDialogVisibleDirect,
       incrementOperations,
       decrementOperations,
     }}>
       {children}
     </OperationsContext.Provider>
   );
-}; 
+};
