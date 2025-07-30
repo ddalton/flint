@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -11,7 +11,6 @@ import {
   AlertTriangle,
   HardDrive,
   Network,
-  Settings,
   RefreshCw,
   Eye,
   EyeOff
