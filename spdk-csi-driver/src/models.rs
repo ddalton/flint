@@ -31,17 +31,27 @@ pub struct SpdkVolumeSpec {
 pub struct Replica {
     pub node: String,
     pub replica_type: String,
+    
+    // NVMe-oF networking fields
     pub pcie_addr: Option<String>,
     pub nqn: Option<String>,
     pub ip: Option<String>,
     pub port: Option<String>,
+    
+    // Scheduling and pod management
     pub local_pod_scheduled: bool,
     pub pod_name: Option<String>,
+    
+    // SPDK and storage fields
     pub disk_ref: String,
     pub lvol_uuid: Option<String>,
     pub health_status: ReplicaHealth,
+    
+    // Monitoring and consistency fields
     pub last_io_timestamp: Option<String>,
     pub write_sequence: u64,
+    
+    // RAID management
     pub raid_member_index: usize,
     pub raid_member_state: RaidMemberState,
 }

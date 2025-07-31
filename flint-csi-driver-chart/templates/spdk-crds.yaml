@@ -33,6 +33,32 @@ spec:
                 format: int64
               num_replicas:
                 type: integer
+              # SPDK volume management fields
+              primary_lvol_uuid:
+                type: string
+                description: "UUID of the primary logical volume"
+              write_ordering_enabled:
+                type: boolean
+                description: "Whether write ordering is enabled for consistency"
+              raid_auto_rebuild:
+                type: boolean
+                description: "Whether RAID auto-rebuild is enabled"
+              # NVMe-oF configuration
+              nvmeof_transport:
+                type: string
+                description: "NVMe-oF transport protocol (tcp, rdma)"
+              nvmeof_target_port:
+                type: integer
+                description: "Port number for NVMe-oF target"
+              # Scheduling configuration
+              scheduling_policy:
+                type: string
+                description: "Pod scheduling policy for this volume"
+              preferred_nodes:
+                type: array
+                items:
+                  type: string
+                description: "List of preferred nodes for scheduling"
               replicas:
                 type: array
                 items:
@@ -53,9 +79,45 @@ spec:
                       type: string
                     health_status:
                       type: string
-                      enum: ["healthy", "degraded", "failed"]
+                      enum: ["healthy", "degraded", "failed", "rebuilding", "syncing"]
                     raid_member_index:
                       type: integer
+                    # NVMe-oF networking fields
+                    pcie_addr:
+                      type: string
+                      description: "PCIe address of the NVMe device"
+                    nqn:
+                      type: string
+                      description: "NVMe-oF Qualified Name for remote access"
+                    ip:
+                      type: string
+                      description: "IP address for NVMe-oF target"
+                    port:
+                      type: string
+                      description: "Port for NVMe-oF target"
+                    # SPDK and scheduling fields
+                    lvol_uuid:
+                      type: string
+                      description: "UUID of the logical volume in SPDK"
+                    local_pod_scheduled:
+                      type: boolean
+                      description: "Whether pods can be scheduled locally to this replica"
+                    pod_name:
+                      type: string
+                      description: "Name of pod currently using this replica"
+                    # RAID and monitoring fields
+                    raid_member_state:
+                      type: string
+                      enum: ["online", "offline", "degraded", "rebuilding"]
+                      description: "State of this replica in RAID configuration"
+                    last_io_timestamp:
+                      type: string
+                      format: date-time
+                      description: "Timestamp of last I/O activity"
+                    write_sequence:
+                      type: integer
+                      format: int64
+                      description: "Write sequence number for consistency"
           status:
             type: object
             properties:

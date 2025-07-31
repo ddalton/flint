@@ -95,10 +95,45 @@ impl ControllerService {
             }
         }
         
-        // Try to create the CRD with detailed error handling
+        // Try to create the CRD with idempotency handling
         match crd_api.create(&PostParams::default(), &spdk_volume).await {
             Ok(created_volume) => {
                 println!("✅ [CRD_DEBUG] Successfully created SpdkVolume CRD: {}", created_volume.metadata.name.as_deref().unwrap_or("unknown"));
+            },
+            Err(kube::Error::Api(api_error)) if api_error.code == 409 => {
+                // Handle "AlreadyExists" - this is expected for idempotent operations
+                println!("🔍 [CRD_DEBUG] SpdkVolume CRD already exists, checking compatibility...");
+                
+                match crd_api.get(volume_id).await {
+                    Ok(existing_volume) => {
+                        println!("✅ [CRD_DEBUG] Found existing SpdkVolume CRD");
+                        
+                        // Validate that existing volume is compatible
+                        if existing_volume.spec.size_bytes == spdk_volume.spec.size_bytes &&
+                           existing_volume.spec.num_replicas == spdk_volume.spec.num_replicas {
+                            println!("✅ [CRD_DEBUG] Existing SpdkVolume is compatible (size: {}, replicas: {})", 
+                                existing_volume.spec.size_bytes, existing_volume.spec.num_replicas);
+                            
+                            // Update our return value to the existing volume
+                            let compatible_volume = existing_volume;
+                            
+                            // Still update disk statuses for consistency
+                            self.update_disk_statuses(&disks, &selected_disks, capacity, 1).await?;
+                            return Ok(compatible_volume);
+                        } else {
+                            println!("❌ [CRD_DEBUG] Existing SpdkVolume is incompatible:");
+                            println!("   Existing: size={}, replicas={}", existing_volume.spec.size_bytes, existing_volume.spec.num_replicas);
+                            println!("   Requested: size={}, replicas={}", spdk_volume.spec.size_bytes, spdk_volume.spec.num_replicas);
+                            return Err(Status::already_exists(format!(
+                                "Volume {} already exists with incompatible specifications", volume_id
+                            )));
+                        }
+                    },
+                    Err(get_error) => {
+                        println!("❌ [CRD_DEBUG] Failed to get existing SpdkVolume for compatibility check: {}", get_error);
+                        return Err(Status::internal(format!("Failed to validate existing SpdkVolume: {}", get_error)));
+                    }
+                }
             },
             Err(kube::Error::Api(api_error)) => {
                 println!("❌ [CRD_DEBUG] Kubernetes API error creating SpdkVolume:");
