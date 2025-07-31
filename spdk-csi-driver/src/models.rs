@@ -30,7 +30,6 @@ pub struct SpdkVolumeSpec {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
 pub struct Replica {
     pub node: String,
-    #[serde(rename = "type")]
     pub replica_type: String,
     pub pcie_addr: Option<String>,
     pub nqn: Option<String>,
