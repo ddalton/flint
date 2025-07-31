@@ -282,7 +282,7 @@ impl ControllerService {
 
             let replica = Replica {
                 node: disk.spec.node_id.clone(),
-                replica_type: "lvol".to_string(),
+                replica_type: if i == 0 { "primary".to_string() } else { "secondary".to_string() },
                 pcie_addr: Some(disk.spec.pcie_addr.clone()),
                 disk_ref: disk.metadata.name.clone().unwrap_or_default(),
                 lvol_uuid: Some(lvol_uuid),

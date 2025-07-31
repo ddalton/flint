@@ -48,6 +48,7 @@ pub struct Replica {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum RaidMemberState {
     #[default]
     Online,
@@ -59,6 +60,7 @@ pub enum RaidMemberState {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum ReplicaHealth {
     #[default]
     Healthy,
