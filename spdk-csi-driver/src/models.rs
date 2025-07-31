@@ -340,7 +340,43 @@ impl SpdkVolume {
     pub fn new_with_metadata(name: &str, spec: SpdkVolumeSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
         
-        SpdkVolume {
+        // Debug validation of the spec before creating the volume
+        println!("🔍 [VOLUME_DEBUG] Creating SpdkVolume with metadata:");
+        println!("   Name: {}", name);
+        println!("   Namespace: {}", namespace);
+        println!("   Volume ID: {}", spec.volume_id);
+        println!("   Size: {} bytes", spec.size_bytes);
+        println!("   Num replicas: {}", spec.num_replicas);
+        println!("   Replicas count: {}", spec.replicas.len());
+        
+        // Validate each replica
+        for (i, replica) in spec.replicas.iter().enumerate() {
+            println!("   Replica {}: node={}, type={}, health={:?}", 
+                i, replica.node, replica.replica_type, replica.health_status);
+            
+            // Test serialization of individual replica
+            match serde_json::to_string(replica) {
+                Ok(replica_json) => {
+                    println!("   ✅ Replica {} JSON: {}", i, replica_json);
+                },
+                Err(e) => {
+                    println!("   ❌ Replica {} failed to serialize: {}", i, e);
+                }
+            }
+        }
+        
+        // Test serialization of the entire spec
+        match serde_json::to_string(&spec) {
+            Ok(spec_json) => {
+                println!("✅ [VOLUME_DEBUG] SpdkVolumeSpec serializes successfully");
+                println!("   Spec JSON length: {} characters", spec_json.len());
+            },
+            Err(e) => {
+                println!("❌ [VOLUME_DEBUG] SpdkVolumeSpec failed to serialize: {}", e);
+            }
+        }
+        
+        let volume = SpdkVolume {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
@@ -348,7 +384,20 @@ impl SpdkVolume {
             },
             spec,
             status: None,
+        };
+        
+        // Final validation: test full volume serialization
+        match serde_json::to_string(&volume) {
+            Ok(volume_json) => {
+                println!("✅ [VOLUME_DEBUG] Complete SpdkVolume serializes successfully");
+                println!("   Volume JSON length: {} characters", volume_json.len());
+            },
+            Err(e) => {
+                println!("❌ [VOLUME_DEBUG] Complete SpdkVolume failed to serialize: {}", e);
+            }
         }
+        
+        volume
     }
 }
 

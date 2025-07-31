@@ -73,10 +73,53 @@ impl ControllerService {
             &self.driver.target_namespace,
         );
 
-        // Create CRD
+        // Create CRD with enhanced debugging
         let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        crd_api.create(&PostParams::default(), &spdk_volume).await
-            .map_err(|e| Status::internal(format!("Failed to create SpdkVolume CRD: {}", e)))?;
+        
+        // Debug: Log the SpdkVolume object we're trying to create
+        println!("🔍 [CRD_DEBUG] Attempting to create SpdkVolume CRD:");
+        println!("   Volume ID: {}", spdk_volume.spec.volume_id);
+        println!("   Namespace: {}", self.driver.target_namespace);
+        println!("   Size: {} bytes", spdk_volume.spec.size_bytes);
+        println!("   Replicas count: {}", spdk_volume.spec.replicas.len());
+        
+        // Serialize to JSON for debugging
+        match serde_json::to_string_pretty(&spdk_volume) {
+            Ok(json_str) => {
+                println!("🔍 [CRD_DEBUG] SpdkVolume JSON payload:");
+                println!("{}", json_str);
+            },
+            Err(e) => {
+                println!("❌ [CRD_DEBUG] Failed to serialize SpdkVolume to JSON: {}", e);
+                return Err(Status::internal(format!("Failed to serialize SpdkVolume: {}", e)));
+            }
+        }
+        
+        // Try to create the CRD with detailed error handling
+        match crd_api.create(&PostParams::default(), &spdk_volume).await {
+            Ok(created_volume) => {
+                println!("✅ [CRD_DEBUG] Successfully created SpdkVolume CRD: {}", created_volume.metadata.name.as_deref().unwrap_or("unknown"));
+            },
+            Err(kube::Error::Api(api_error)) => {
+                println!("❌ [CRD_DEBUG] Kubernetes API error creating SpdkVolume:");
+                println!("   Status: {}", api_error.status);
+                println!("   Code: {}", api_error.code);
+                println!("   Message: {}", api_error.message);
+                println!("   Reason: {}", api_error.reason);
+                return Err(Status::internal(format!("Failed to create SpdkVolume CRD: Kubernetes API error: {}", api_error.message)));
+            },
+            Err(kube::Error::SerdeError(serde_error)) => {
+                println!("❌ [CRD_DEBUG] Serialization/Deserialization error:");
+                println!("   Error: {}", serde_error);
+                return Err(Status::internal(format!("Failed to create SpdkVolume CRD: Serialization error: {}", serde_error)));
+            },
+            Err(other_error) => {
+                println!("❌ [CRD_DEBUG] Other error creating SpdkVolume:");
+                println!("   Error type: {:?}", std::any::type_name_of_val(&other_error));
+                println!("   Error: {}", other_error);
+                return Err(Status::internal(format!("Failed to create SpdkVolume CRD: {}", other_error)));
+            }
+        }
 
         // Update disk statuses
         self.update_disk_statuses(&disks, &selected_disks, capacity, 1).await?;
