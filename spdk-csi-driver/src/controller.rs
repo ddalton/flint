@@ -356,7 +356,7 @@ impl ControllerService {
             
             // Check if this is a "File exists" error - if so, try to handle it idempotently
             if error_text.contains("File exists") || error_text.contains("Code=-17") {
-                return self.handle_existing_volume(&rpc_url, &lvol_name, size_bytes).await;
+                return self.handle_existing_volume(disk, &rpc_url, &lvol_name, size_bytes).await;
             }
             
             return Err(format!("Failed to create lvol: {}", error_text).into());
@@ -386,7 +386,7 @@ impl ControllerService {
             if let Some(error_code) = error.get("code").and_then(|c| c.as_i64()) {
                 if error_code == -17 {  // SPDK "File exists" error
                     println!("⚠️ [CREATE_LVOL] Volume already exists, checking compatibility...");
-                    return self.handle_existing_volume(&rpc_url, &lvol_name, size_bytes).await;
+                    return self.handle_existing_volume(disk, &rpc_url, &lvol_name, size_bytes).await;
                 }
             }
             
@@ -411,6 +411,7 @@ impl ControllerService {
     /// Handle the case where a logical volume already exists - implement CSI idempotency
     async fn handle_existing_volume(
         &self,
+        disk: &SpdkDisk,
         rpc_url: &str,
         lvol_name: &str,
         requested_size_bytes: i64,
@@ -419,11 +420,17 @@ impl ControllerService {
         
         let http_client = HttpClient::new();
         
-        // Query the existing logical volume
+        // Query the existing logical volume using the full alias path
+        let full_lvol_name = format!("{}/{}", 
+            disk.status.as_ref()
+                .and_then(|s| s.lvs_name.as_ref())
+                .ok_or("Disk does not have LVS initialized")?,
+            lvol_name);
+        
         let query_params = json!({
             "method": "bdev_get_bdevs",
             "params": {
-                "name": lvol_name
+                "name": full_lvol_name
             }
         });
 
