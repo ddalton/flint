@@ -973,9 +973,18 @@ impl NodeService {
                 println!("❌ [ERROR] Failed to patch volume status for {}: {:?}", volume_id, e);
                 println!("❌ [ERROR] Error details: {}", e);
                 
-                // Try to get more specific error info
-                if let Some(api_error) = e.downcast_ref::<kube::Error>() {
-                    println!("❌ [ERROR] Kubernetes API error details: {:?}", api_error);
+                // e is already a kube::Error, so we can examine it directly
+                match &e {
+                    kube::Error::Api(api_err) => {
+                        println!("❌ [ERROR] Kubernetes API error - code: {}, message: {}", api_err.code, api_err.message);
+                        println!("❌ [ERROR] API error reason: {}", api_err.reason);
+                    }
+                    kube::Error::Service(service_err) => {
+                        println!("❌ [ERROR] Kubernetes service error: {:?}", service_err);
+                    }
+                    _ => {
+                        println!("❌ [ERROR] Other kubernetes error type: {:?}", e);
+                    }
                 }
                 
                 Err(Status::internal(format!("Failed to update volume status: {}", e)))
