@@ -810,6 +810,31 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         }
     }
     
+    // Collect raw SPDK volumes for the dashboard
+    let raw_spdk_volumes = match get_raw_spdk_volumes(state).await {
+        Ok(mut raw_volumes) => {
+            // Check which volumes are managed against the managed volume list
+            for raw_vol in &mut raw_volumes {
+                for managed_vol in &volumes_list.items {
+                    if raw_vol.name.contains(&managed_vol.spec.volume_id) ||
+                       managed_vol.spec.volume_id.contains(&raw_vol.uuid) ||
+                       raw_vol.name.contains("vol_") && raw_vol.name.contains(&managed_vol.spec.volume_id.replace("pvc-", "")) {
+                        raw_vol.is_managed = true;
+                        break;
+                    }
+                }
+            }
+            // Return only unmanaged volumes for the dashboard
+            raw_volumes.into_iter().filter(|v| !v.is_managed).collect()
+        }
+        Err(e) => {
+            println!("⚠️ [DASHBOARD_REFRESH] Failed to get raw SPDK volumes: {}", e);
+            Vec::new()
+        }
+    };
+    
+    println!("✅ [DASHBOARD_REFRESH] Found {} unmanaged SPDK volumes", raw_spdk_volumes.len());
+    
     // Include all discovered nodes, not just those with volumes/disks
     let spdk_nodes = state.spdk_nodes.read().await;
     for discovered_node in spdk_nodes.keys() {
@@ -1239,34 +1264,6 @@ async fn enhance_with_spdk_metrics(
         }
     }
     
-    // Collect raw SPDK volumes for the dashboard
-    let raw_spdk_volumes = match get_raw_spdk_volumes(state).await {
-        Ok(mut raw_volumes) => {
-            // Check which volumes are managed against the managed volume list
-            for raw_vol in &mut raw_volumes {
-                for managed_vol in &volumes_list.items {
-                    if raw_vol.name.contains(&managed_vol.spec.volume_id) ||
-                       managed_vol.spec.volume_id.contains(&raw_vol.uuid) ||
-                       raw_vol.name.contains("vol_") && raw_vol.name.contains(&managed_vol.spec.volume_id.replace("pvc-", "")) {
-                        raw_vol.is_managed = true;
-                        break;
-                    }
-                }
-            }
-            // Return only unmanaged volumes for the dashboard
-            raw_volumes.into_iter().filter(|v| !v.is_managed).collect()
-        }
-        Err(e) => {
-            println!("⚠️ [DASHBOARD_REFRESH] Failed to get raw SPDK volumes: {}", e);
-            Vec::new()
-        }
-    };
-    
-    println!("✅ [DASHBOARD_REFRESH] Found {} unmanaged SPDK volumes", raw_spdk_volumes.len());
-    
-    // Validation removed - raw SPDK volumes are now included in dashboard data
-    println!("✅ [DASHBOARD_REFRESH] SPDK metrics enhancement completed successfully");
-    
     Ok(())
 }
 
@@ -1489,16 +1486,19 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
                     println!("⚠️ [DELETE_RAW] Failed to refresh dashboard after deletion: {}", e);
                 }
                 
-                Ok(warp::reply::json(&json!({
-                    "success": true,
-                    "message": format!("Volume '{}' deleted successfully", target_volume.name),
-                    "deleted_volume": {
-                        "name": target_volume.name,
-                        "uuid": target_volume.uuid,
-                        "node": target_volume.node,
-                        "size_gb": target_volume.size_gb
-                    }
-                })))
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({
+                        "success": true,
+                        "message": format!("Volume '{}' deleted successfully", target_volume.name),
+                        "deleted_volume": {
+                            "name": target_volume.name,
+                            "uuid": target_volume.uuid,
+                            "node": target_volume.node,
+                            "size_gb": target_volume.size_gb
+                        }
+                    })),
+                    warp::http::StatusCode::OK
+                ))
             } else {
                 let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
                 println!("❌ [DELETE_RAW] SPDK deletion failed: {}", error_text);
