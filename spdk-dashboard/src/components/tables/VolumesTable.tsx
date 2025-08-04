@@ -207,7 +207,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       });
       
       if (response.ok) {
-        const result = await response.json();
+        await response.json(); // Parse response but don't need the result
         console.log(`Volume "${volumeToDelete.name}" deleted successfully`);
         // Refresh dashboard data
         onRefresh?.();
