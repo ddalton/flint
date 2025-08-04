@@ -715,7 +715,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     
     // Log discovered devices that don't have CRDs (but don't create CRDs for them)
     for device in discovered_devices {
-        let _expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
+        let expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
         let has_crd = existing_disks.iter()
             .any(|disk| disk.spec.pcie_addr == device.pcie_addr);
         
@@ -3566,7 +3566,7 @@ impl NodeAgent {
         println!("🔍 [VOLUME_CHECK] Checking volumes on disk: {}", pci_address);
         
         // Get the disk name from PCI address
-        let _disk_info = self.get_disk_info(pci_address).await?;
+        let disk_info = self.get_disk_info(pci_address).await?;
         let disk_name = self.disk_crd_name(pci_address);
         
         // Query Kubernetes for SpdkVolume CRDs that use this disk
@@ -3733,7 +3733,7 @@ impl NodeAgent {
         println!("🗑️ [LVS_DELETE] Deleting LVS from disk: {}", pci_address);
         
         let disk_info = self.get_disk_info(pci_address).await?;
-        let _disk_name = self.disk_crd_name(pci_address);
+        let disk_name = self.disk_crd_name(pci_address);
         let actual_device_name = match self.find_nvme_device_name(pci_address).await {
             Ok(name) => name,
             Err(_) => disk_info.device_name.clone(),
@@ -4032,31 +4032,48 @@ impl NodeAgent {
             }
         }
         
-        // Step 2: Query LVS state only if AIO bdev exists
+        // Step 2: Auto-discover LVS using proper discovery logic (not exact name matching)
         let mut spdk_lvs_exists = false;
         let mut spdk_lvs_info = None;
+        let mut discovered_lvs_name = lvs_name.clone();
         
         if aio_bdev_exists {
-            println!("🔍 [RECONCILE] AIO bdev exists, checking for LVS stores...");
-            match call_spdk_rpc(&self.spdk_rpc_url, &json!({
-                "method": "bdev_lvol_get_lvstores"
-            })).await {
-                Ok(lvstores_result) => {
-                    if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                        for lvstore in lvstore_list {
-                            if let Some(name) = lvstore["name"].as_str() {
-                                if name == lvs_name {
-                                    spdk_lvs_exists = true;
-                                    spdk_lvs_info = Some(lvstore.clone());
-                                    println!("✅ [RECONCILE] Found LVS in SPDK: {}", lvs_name);
-                                    break;
+            println!("🔍 [RECONCILE] AIO bdev exists, auto-discovering LVS for this disk...");
+            
+            // Use the proper discovery function that matches by base_bdev
+            match find_lvs_for_disk_by_spdk_query(self, &disk_crd).await {
+                Ok((found, actual_lvs_name)) => {
+                    if found {
+                        spdk_lvs_exists = true;
+                        discovered_lvs_name = actual_lvs_name.unwrap_or(lvs_name);
+                        println!("✅ [RECONCILE] Auto-discovered existing LVS: {}", discovered_lvs_name);
+                        
+                        // Get the LVS info for capacity updates
+                        match call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                            "method": "bdev_lvol_get_lvstores"
+                        })).await {
+                            Ok(lvstores_result) => {
+                                if let Some(lvstore_list) = lvstores_result["result"].as_array() {
+                                    for lvstore in lvstore_list {
+                                        if let Some(name) = lvstore["name"].as_str() {
+                                            if name == discovered_lvs_name {
+                                                spdk_lvs_info = Some(lvstore.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                println!("⚠️ [RECONCILE] Failed to get LVS info for {}: {}", discovered_lvs_name, e);
+                            }
                         }
+                    } else {
+                        println!("❌ [RECONCILE] No LVS found for this disk despite AIO bdev existing");
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ [RECONCILE] Could not query SPDK LVS stores: {}", e);
+                    println!("⚠️ [RECONCILE] LVS discovery failed: {}", e);
                 }
             }
         } else {
@@ -4070,7 +4087,7 @@ impl NodeAgent {
             // SPDK has both AIO bdev and LVS, but CRD thinks uninitialized - update CRD
             println!("🔧 [RECONCILE] SPDK has complete setup (AIO+LVS) but CRD thinks uninitialized - updating CRD");
             updated_status.blobstore_initialized = true;
-            updated_status.lvs_name = Some(lvs_name.clone());
+            updated_status.lvs_name = Some(discovered_lvs_name.clone());
             updated_status.healthy = true;
             needs_update = true;
             
@@ -4174,7 +4191,7 @@ impl NodeAgent {
                     } else {
                         println!("✅ [RECONCILE] Auto-initialization completed successfully");
                         updated_status.blobstore_initialized = true;
-                        updated_status.lvs_name = Some(lvs_name.clone());
+                        updated_status.lvs_name = Some(discovered_lvs_name.clone());
                         updated_status.healthy = true;
                         needs_update = true;
                     }
@@ -4305,7 +4322,7 @@ impl NodeAgent {
         println!("🔄 [IDEMPOTENT] Starting {} for disk: {}", operation_name, disk_pci_addr);
         
         // Get disk name for reconciliation
-        let _disk_info = self.get_disk_info(disk_pci_addr).await?;
+        let disk_info = self.get_disk_info(disk_pci_addr).await?;
         let disk_name = self.disk_crd_name(disk_pci_addr);
         
         // Pre-operation reconciliation
