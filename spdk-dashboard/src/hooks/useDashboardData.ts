@@ -219,7 +219,12 @@ const mockData: DashboardData = {
           disk_ref: "nvme0n1",
           replica_size: 21474836480
         }
-      ]
+      ],
+      spdk_validation_status: {
+        has_spdk_backing: true,
+        validation_message: "Volume validated successfully",
+        severity: "Info"
+      }
     },
     {
       id: "pvc-12345678-1234-1234-1234-123456789abc",
@@ -340,7 +345,12 @@ const mockData: DashboardData = {
           disk_ref: "nvme2n1",
           replica_size: 107374182400
         }
-      ]
+      ],
+      spdk_validation_status: {
+        has_spdk_backing: true,
+        validation_message: "Volume validated successfully",
+        severity: "Info"
+      }
     },
     {
       id: "pvc-87654321-4321-4321-4321-cba987654321",
@@ -462,7 +472,12 @@ const mockData: DashboardData = {
           raid_member_slot: 2,
           raid_member_state: "rebuilding"
         }
-      ]
+      ],
+      spdk_validation_status: {
+        has_spdk_backing: false,
+        validation_message: "SPDK backing not found - phantom volume",
+        severity: "Critical"
+      }
     }
   ],
   disks: [
@@ -501,7 +516,8 @@ const mockData: DashboardData = {
           replica_type: "Local NVMe",
           status: "healthy"
         }
-      ]
+      ],
+      orphaned_spdk_volumes: []
     },
     {
       id: "nvme1n1",
@@ -537,6 +553,13 @@ const mockData: DashboardData = {
           provisioned_at: "2025-06-01T08:20:00Z",
           replica_type: "Remote NVMe-oF",
           status: "healthy"
+        }
+      ],
+      orphaned_spdk_volumes: [
+        {
+          spdk_volume_name: "orphaned_vol_123",
+          spdk_volume_uuid: "abc12345-def6-7890-abcd-ef1234567890",
+          size_gb: 25.50
         }
       ]
     },
@@ -575,7 +598,8 @@ const mockData: DashboardData = {
           replica_type: "Remote NVMe-oF",
           status: "rebuilding"
         }
-      ]
+      ],
+      orphaned_spdk_volumes: []
     }
   ],
   nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
