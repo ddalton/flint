@@ -108,7 +108,7 @@ spec:
                     # RAID and monitoring fields
                     raid_member_state:
                       type: string
-                      enum: ["online", "offline", "degraded", "rebuilding"]
+                      enum: ["online", "offline", "degraded", "failed", "rebuilding", "spare", "removing"]
                       description: "State of this replica in RAID configuration"
                     last_io_timestamp:
                       type: string

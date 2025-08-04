@@ -431,31 +431,67 @@ async fn refresh_loop(state: AppState) {
 }
 
 async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
+    println!("🔄 [DASHBOARD_REFRESH] Starting dashboard data refresh...");
+    
     let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-    let volumes_list = volumes_api.list(&ListParams::default()).await?;
+    let volumes_list = match volumes_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            println!("✅ [DASHBOARD_REFRESH] Successfully listed {} volumes", list.items.len());
+            list
+        }
+        Err(e) => {
+            println!("❌ [DASHBOARD_REFRESH] Failed to list volumes: {}", e);
+            return Err(Box::new(e));
+        }
+    };
     
     let disks_api: Api<SpdkDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-    let disks_list = disks_api.list(&ListParams::default()).await?;
+    let disks_list = match disks_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            println!("✅ [DASHBOARD_REFRESH] Successfully listed {} disks", list.items.len());
+            list
+        }
+        Err(e) => {
+            println!("❌ [DASHBOARD_REFRESH] Failed to list disks: {}", e);
+            return Err(Box::new(e));
+        }
+    };
     
     let mut dashboard_volumes = Vec::new();
     let mut dashboard_disks = Vec::new();
     let mut nodes = std::collections::HashSet::new();
     
-    for volume in volumes_list.items {
-        let dashboard_volume = convert_volume_to_dashboard(&volume);
+    println!("🔧 [DASHBOARD_REFRESH] Converting {} volumes to dashboard format...", volumes_list.items.len());
+    for (i, volume) in volumes_list.items.iter().enumerate() {
+        let dashboard_volume = convert_volume_to_dashboard(volume);
+        println!("✅ [DASHBOARD_REFRESH] Volume {}/{}: {} converted successfully", 
+            i + 1, volumes_list.items.len(), volume.spec.volume_id);
         for replica in &dashboard_volume.replica_statuses {
             nodes.insert(replica.node.clone());
         }
         dashboard_volumes.push(dashboard_volume);
     }
     
-    for disk in disks_list.items {
+    println!("🔧 [DASHBOARD_REFRESH] Converting {} disks to dashboard format...", disks_list.items.len());
+    for (i, disk) in disks_list.items.iter().enumerate() {
+        // Track the node for this disk
         nodes.insert(disk.spec.node_id.clone());
-        let dashboard_disk = convert_disk_to_dashboard(&disk, &dashboard_volumes);
+        
+        // Convert disk to dashboard format
+        let dashboard_disk = convert_disk_to_dashboard(disk, &dashboard_volumes);
+        println!("✅ [DASHBOARD_REFRESH] Disk {}/{}: {} converted successfully", 
+            i + 1, disks_list.items.len(), disk.metadata.name.as_ref().unwrap_or(&"unnamed".to_string()));
         dashboard_disks.push(dashboard_disk);
     }
     
-    enhance_with_spdk_metrics(&mut dashboard_volumes, &mut dashboard_disks, state).await?;
+    println!("🚀 [DASHBOARD_REFRESH] Enhancing with SPDK metrics...");
+    match enhance_with_spdk_metrics(&mut dashboard_volumes, &mut dashboard_disks, state).await {
+        Ok(_) => println!("✅ [DASHBOARD_REFRESH] SPDK metrics enhancement completed successfully"),
+        Err(e) => {
+            println!("⚠️ [DASHBOARD_REFRESH] SPDK metrics enhancement failed: {}", e);
+            // Continue without SPDK metrics rather than failing entirely
+        }
+    }
     
     // Include all discovered nodes, not just those with volumes/disks
     let spdk_nodes = state.spdk_nodes.read().await;
@@ -697,9 +733,14 @@ async fn enhance_with_spdk_metrics(
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
     
-    for (_node, rpc_url) in spdk_nodes.iter() {
+    println!("🔍 [SPDK_METRICS] Enhancing {} volumes and {} disks with SPDK metrics from {} nodes", 
+        volumes.len(), disks.len(), spdk_nodes.len());
+    
+    for (node_name, rpc_url) in spdk_nodes.iter() {
+        println!("🌐 [SPDK_METRICS] Querying node '{}' at '{}'", node_name, rpc_url);
+        
         // Get real-time RAID status and update volumes
-        if let Ok(response) = http_client
+        match http_client
             .post(rpc_url)
             .json(&json!({
                 "method": "bdev_raid_get_bdevs",
@@ -708,24 +749,62 @@ async fn enhance_with_spdk_metrics(
             .send()
             .await
         {
-            if let Ok(raid_info) = response.json::<serde_json::Value>().await {
-                if let Some(raid_bdevs) = raid_info["result"].as_array() {
-                    for raid_bdev in raid_bdevs {
-                        if let Some(raid_name) = raid_bdev["name"].as_str() {
-                            for volume in volumes.iter_mut() {
-                                if volume.id == raid_name || raid_name.contains(&volume.id) {
-                                    // Update volume with real-time RAID status from SPDK
-                                    update_volume_with_live_raid_status(volume, raid_bdev);
+            Ok(response) => {
+                let status = response.status();
+                println!("✅ [SPDK_METRICS] RAID query to {} returned status: {}", node_name, status);
+                
+                if status.is_success() {
+                    let response_text = match response.text().await {
+                        Ok(text) => {
+                            println!("📄 [SPDK_METRICS] Raw RAID response from {}: {}", node_name, 
+                                if text.len() > 500 { format!("{}... (truncated, full length: {})", &text[..500], text.len()) } else { text.clone() });
+                            text
+                        }
+                        Err(e) => {
+                            println!("❌ [SPDK_METRICS] Failed to read response text from {}: {}", node_name, e);
+                            continue;
+                        }
+                    };
+                    
+                    match serde_json::from_str::<serde_json::Value>(&response_text) {
+                        Ok(raid_info) => {
+                            println!("✅ [SPDK_METRICS] Successfully parsed RAID JSON from {}", node_name);
+                            if let Some(raid_bdevs) = raid_info["result"].as_array() {
+                                println!("🔍 [SPDK_METRICS] Found {} RAID bdevs from {}", raid_bdevs.len(), node_name);
+                                for (i, raid_bdev) in raid_bdevs.iter().enumerate() {
+                                    if let Some(raid_name) = raid_bdev["name"].as_str() {
+                                        println!("🔍 [SPDK_METRICS] Processing RAID bdev {}/{}: '{}'", i + 1, raid_bdevs.len(), raid_name);
+                                        for volume in volumes.iter_mut() {
+                                            if volume.id == raid_name || raid_name.contains(&volume.id) {
+                                                println!("🔄 [SPDK_METRICS] Updating volume '{}' with live RAID status", volume.id);
+                                                update_volume_with_live_raid_status(volume, raid_bdev);
+                                            }
+                                        }
+                                    } else {
+                                        println!("⚠️ [SPDK_METRICS] RAID bdev {} missing 'name' field", i);
+                                    }
                                 }
+                            } else {
+                                println!("⚠️ [SPDK_METRICS] No 'result' array found in RAID response from {}", node_name);
                             }
                         }
+                        Err(e) => {
+                            println!("❌ [SPDK_METRICS] Failed to parse RAID JSON from {}: {}", node_name, e);
+                            println!("📄 [SPDK_METRICS] Failed JSON content: {}", response_text);
+                        }
                     }
+                } else {
+                    println!("⚠️ [SPDK_METRICS] RAID query to {} failed with status: {}", node_name, status);
                 }
+            }
+            Err(e) => {
+                println!("❌ [SPDK_METRICS] Failed to send RAID query to {}: {}", node_name, e);
             }
         }
         
         // Get NVMe-oF subsystem status instead of vhost controllers
-        if let Ok(response) = http_client
+        println!("🔍 [SPDK_METRICS] Querying NVMe-oF subsystems from {}", node_name);
+        match http_client
             .post(rpc_url)
             .json(&json!({
                 "method": "nvmf_get_subsystems"
@@ -733,33 +812,68 @@ async fn enhance_with_spdk_metrics(
             .send()
             .await
         {
-            if let Ok(nvmf_info) = response.json::<serde_json::Value>().await {
-                if let Some(subsystems) = nvmf_info["result"].as_array() {
-                    for subsystem in subsystems {
-                        if let Some(nqn) = subsystem["nqn"].as_str() {
-                            for volume in volumes.iter_mut() {
-                                // Find volumes that match this NQN
-                                if nqn.contains(&volume.id) || volume.nvmeof_targets.iter().any(|t| t.nqn == nqn) {
-                                    // Update NVMe-oF target status
-                                    let is_active = subsystem["state"].as_str() == Some("active");
-                                    
-                                    for target in &mut volume.nvmeof_targets {
-                                        if target.nqn == nqn {
-                                            target.active = is_active;
+            Ok(response) => {
+                let status = response.status();
+                println!("✅ [SPDK_METRICS] NVMe-oF query to {} returned status: {}", node_name, status);
+                
+                if status.is_success() {
+                    let response_text = match response.text().await {
+                        Ok(text) => {
+                            println!("📄 [SPDK_METRICS] Raw NVMe-oF response from {}: {}", node_name,
+                                if text.len() > 500 { format!("{}... (truncated, full length: {})", &text[..500], text.len()) } else { text.clone() });
+                            text
+                        }
+                        Err(e) => {
+                            println!("❌ [SPDK_METRICS] Failed to read NVMe-oF response text from {}: {}", node_name, e);
+                            continue;
+                        }
+                    };
+                    
+                    if let Ok(nvmf_info) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                        println!("✅ [SPDK_METRICS] Successfully parsed NVMe-oF JSON from {}", node_name);
+                        if let Some(subsystems) = nvmf_info["result"].as_array() {
+                            println!("🔍 [SPDK_METRICS] Found {} NVMe-oF subsystems from {}", subsystems.len(), node_name);
+                            for (i, subsystem) in subsystems.iter().enumerate() {
+                                if let Some(nqn) = subsystem["nqn"].as_str() {
+                                    println!("🔍 [SPDK_METRICS] Processing NVMe-oF subsystem {}/{}: '{}'", i + 1, subsystems.len(), nqn);
+                                    for volume in volumes.iter_mut() {
+                                        // Find volumes that match this NQN
+                                        if nqn.contains(&volume.id) || volume.nvmeof_targets.iter().any(|t| t.nqn == nqn) {
+                                            println!("🔄 [SPDK_METRICS] Updating volume '{}' with NVMe-oF status from subsystem '{}'", volume.id, nqn);
+                                            // Update NVMe-oF target status
+                                            let is_active = subsystem["state"].as_str() == Some("active");
                                             
-                                            // Get connection count if available
-                                            if let Some(hosts) = subsystem["hosts"].as_array() {
-                                                target.connection_count = hosts.len() as u32;
+                                            for target in &mut volume.nvmeof_targets {
+                                                if target.nqn == nqn {
+                                                    target.active = is_active;
+                                                    
+                                                    // Get connection count if available
+                                                    if let Some(hosts) = subsystem["hosts"].as_array() {
+                                                        target.connection_count = hosts.len() as u32;
+                                                    }
+                                                }
                                             }
+                                            
+                                            volume.nvmeof_enabled = volume.nvmeof_targets.iter().any(|t| t.active);
                                         }
                                     }
-                                    
-                                    volume.nvmeof_enabled = volume.nvmeof_targets.iter().any(|t| t.active);
+                                } else {
+                                    println!("⚠️ [SPDK_METRICS] NVMe-oF subsystem {} missing 'nqn' field", i);
                                 }
                             }
+                        } else {
+                            println!("⚠️ [SPDK_METRICS] No 'result' array found in NVMe-oF response from {}", node_name);
                         }
+                    } else {
+                        println!("❌ [SPDK_METRICS] Failed to parse NVMe-oF JSON from {}: parse error", node_name);
+                        println!("📄 [SPDK_METRICS] Failed NVMe-oF JSON content: {}", response_text);
                     }
+                } else {
+                    println!("⚠️ [SPDK_METRICS] NVMe-oF query to {} failed with status: {}", node_name, status);
                 }
+            }
+            Err(e) => {
+                println!("❌ [SPDK_METRICS] Failed to send NVMe-oF query to {}: {}", node_name, e);
             }
         }
         

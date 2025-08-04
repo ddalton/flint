@@ -715,7 +715,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     
     // Log discovered devices that don't have CRDs (but don't create CRDs for them)
     for device in discovered_devices {
-        let expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
+        let _expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
         let has_crd = existing_disks.iter()
             .any(|disk| disk.spec.pcie_addr == device.pcie_addr);
         
@@ -3566,7 +3566,7 @@ impl NodeAgent {
         println!("🔍 [VOLUME_CHECK] Checking volumes on disk: {}", pci_address);
         
         // Get the disk name from PCI address
-        let disk_info = self.get_disk_info(pci_address).await?;
+        let _disk_info = self.get_disk_info(pci_address).await?;
         let disk_name = self.disk_crd_name(pci_address);
         
         // Query Kubernetes for SpdkVolume CRDs that use this disk
@@ -3733,7 +3733,7 @@ impl NodeAgent {
         println!("🗑️ [LVS_DELETE] Deleting LVS from disk: {}", pci_address);
         
         let disk_info = self.get_disk_info(pci_address).await?;
-        let disk_name = self.disk_crd_name(pci_address);
+        let _disk_name = self.disk_crd_name(pci_address);
         let actual_device_name = match self.find_nvme_device_name(pci_address).await {
             Ok(name) => name,
             Err(_) => disk_info.device_name.clone(),
@@ -4305,7 +4305,7 @@ impl NodeAgent {
         println!("🔄 [IDEMPOTENT] Starting {} for disk: {}", operation_name, disk_pci_addr);
         
         // Get disk name for reconciliation
-        let disk_info = self.get_disk_info(disk_pci_addr).await?;
+        let _disk_info = self.get_disk_info(disk_pci_addr).await?;
         let disk_name = self.disk_crd_name(disk_pci_addr);
         
         // Pre-operation reconciliation
