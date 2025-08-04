@@ -8,6 +8,8 @@ use kube::Api;
 use tonic::Status;
 use reqwest::Client as HttpClient;
 use serde_json::json;
+use std::os::unix::net::UnixStream;
+use std::io::{Write, Read};
 
 #[derive(Clone)]
 pub struct SpdkCsiDriver {
@@ -90,25 +92,22 @@ impl SpdkCsiDriver {
         bdev_name: &str,
         ublk_id: u32,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-        
         println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
         
-        let response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "ublk_start_disk",
-                "params": {
-                    "bdev_name": bdev_name,
-                    "ublk_id": ublk_id
-                }
-            }))
-            .send()
-            .await?;
-            
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(format!("Failed to create ublk device: {}", error_text).into());
+        // Use the same SPDK RPC pattern as node_agent.rs
+        let rpc_request = json!({
+            "method": "ublk_start_disk",
+            "params": {
+                "bdev_name": bdev_name,
+                "ublk_id": ublk_id
+            }
+        });
+        
+        let response = self.call_spdk_rpc(&rpc_request).await?;
+        
+        // Check for SPDK RPC errors
+        if let Some(error) = response.get("error") {
+            return Err(format!("SPDK RPC error: {}", error).into());
         }
         
         // ublk devices appear as /dev/ublkb{id}
@@ -122,26 +121,23 @@ impl SpdkCsiDriver {
         &self,
         ublk_id: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let http_client = HttpClient::new();
-        
         println!("Deleting ublk device with ID {}", ublk_id);
         
-        let response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "ublk_stop_disk",
-                "params": {
-                    "ublk_id": ublk_id
-                }
-            }))
-            .send()
-            .await?;
-            
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            // Ignore "does not exist" errors
-            if !error_text.contains("does not exist") {
-                return Err(format!("Failed to delete ublk device: {}", error_text).into());
+        // Use the same SPDK RPC pattern as node_agent.rs
+        let rpc_request = json!({
+            "method": "ublk_stop_disk",
+            "params": {
+                "ublk_id": ublk_id
+            }
+        });
+        
+        let response = self.call_spdk_rpc(&rpc_request).await?;
+        
+        // Check for SPDK RPC errors, but ignore "does not exist" type errors
+        if let Some(error) = response.get("error") {
+            let error_str = error.to_string();
+            if !error_str.contains("does not exist") && !error_str.contains("not found") {
+                return Err(format!("SPDK RPC error: {}", error).into());
             }
         }
         
@@ -239,5 +235,50 @@ impl SpdkCsiDriver {
 
         println!("Successfully created NVMe-oF target: {} on {}:{}", nqn, node_ip, self.nvmeof_target_port);
         Ok(())
+    }
+
+    /// Call SPDK RPC using the same pattern as node_agent.rs
+    async fn call_spdk_rpc(
+        &self,
+        rpc_request: &serde_json::Value,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        if self.spdk_rpc_url.starts_with("unix://") {
+            // Unix socket connection
+            let socket_path = self.spdk_rpc_url.trim_start_matches("unix://");
+            let mut stream = UnixStream::connect(socket_path)?;
+            
+            // Convert to proper JSON-RPC 2.0 format
+            let jsonrpc_request = json!({
+                "jsonrpc": "2.0",
+                "method": rpc_request["method"],
+                "params": rpc_request.get("params").unwrap_or(&json!({})),
+                "id": 1
+            });
+            let message = format!("{}\n", jsonrpc_request.to_string());
+            stream.write_all(message.as_bytes())?;
+            
+            let mut buffer = [0; 8192];
+            let bytes_read = stream.read(&mut buffer)?;
+            let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+            
+            let response: serde_json::Value = serde_json::from_str(&response_str)?;
+            Ok(response)
+        } else {
+            // HTTP connection fallback
+            let http_client = HttpClient::new();
+            let response = http_client
+                .post(&self.spdk_rpc_url)
+                .json(rpc_request)
+                .send()
+                .await?;
+                
+            if !response.status().is_success() {
+                let error_text = response.text().await?;
+                return Err(format!("HTTP RPC failed: {}", error_text).into());
+            }
+            
+            let response_json = response.json().await?;
+            Ok(response_json)
+        }
     }
 }
