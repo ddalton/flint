@@ -481,9 +481,15 @@ impl Node for NodeService {
         println!("Staging volume {} to {}", volume_id, staging_target_path);
 
         // Get volume information from CRD
+        println!("🔍 [DEBUG] NodeStageVolume: Getting volume {} from namespace {}", volume_id, self.driver.target_namespace);
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let volume = volumes_api.get(&volume_id).await
-            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+            .map_err(|e| {
+                println!("❌ [ERROR] NodeStageVolume: Failed to get volume {}: {:?}", volume_id, e);
+                Status::not_found(format!("Volume {} not found: {}", volume_id, e))
+            })?;
+        
+        println!("✅ [SUCCESS] NodeStageVolume: Successfully retrieved volume {}", volume_id);
 
         // Update scheduling status
         self.update_volume_scheduling_status(&volume_id, true).await?;
@@ -497,13 +503,18 @@ impl Node for NodeService {
         let device_path = self.connect_to_target_device(&volume).await?;
 
         // Update volume status with ublk device info
+        println!("🔍 [DEBUG] NodeStageVolume: Updating volume status with ublk device info");
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
-        self.update_volume_ublk_status(&volume_id, Some(UblkDevice {
+        let ublk_device = UblkDevice {
             id: ublk_id,
             device_path: device_path.clone(),
             created_at: Utc::now().to_rfc3339(),
             node: self.driver.node_id.clone(),
-        })).await?;
+        };
+        println!("🔍 [DEBUG] NodeStageVolume: Created ublk_device: {:?}", ublk_device);
+        
+        self.update_volume_ublk_status(&volume_id, Some(ublk_device)).await?;
+        println!("✅ [SUCCESS] NodeStageVolume: Volume status updated successfully");
 
         // For filesystem volumes, format and mount
         if let Some(volume_capability) = req.volume_capability {
@@ -923,27 +934,52 @@ impl NodeService {
         volume_id: &str,
         ublk_device: Option<UblkDevice>,
     ) -> Result<(), Status> {
+        println!("🔍 [DEBUG] Starting update_volume_ublk_status for volume: {}", volume_id);
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         // Get current volume
+        println!("🔍 [DEBUG] Getting volume {} from namespace: {}", volume_id, self.driver.target_namespace);
         let volume = volumes_api.get(volume_id).await
-            .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
+            .map_err(|e| {
+                println!("❌ [ERROR] Failed to get volume {}: {:?}", volume_id, e);
+                Status::not_found(format!("Volume {} not found: {}", volume_id, e))
+            })?;
         
-            // Update status
-    let mut status = volume.status.unwrap_or_else(|| {
-        let mut default_status = SpdkVolumeStatus::default();
-        default_status.state = "creating".to_string(); // Set valid state instead of empty string
-        default_status
-    });
-    status.ublk_device = ublk_device;
+        println!("🔍 [DEBUG] Successfully retrieved volume, current status: {:?}", volume.status);
+        
+        // Update status
+        let mut status = volume.status.unwrap_or_else(|| {
+            println!("🔍 [DEBUG] No existing status, creating default with state='creating'");
+            let mut default_status = SpdkVolumeStatus::default();
+            default_status.state = "creating".to_string(); // Set valid state instead of empty string
+            default_status
+        });
+        
+        println!("🔍 [DEBUG] Current status state before update: '{}'", status.state);
+        status.ublk_device = ublk_device.clone();
+        println!("🔍 [DEBUG] Updated ublk_device: {:?}", ublk_device);
         
         // Patch the status
         let patch = json!({ "status": status });
-        volumes_api
-            .patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch))
-            .await
-            .map_err(|e| Status::internal(format!("Failed to update volume status: {}", e)))?;
+        println!("🔍 [DEBUG] Attempting to patch status with: {}", serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "serialization failed".to_string()));
         
-        Ok(())
+        match volumes_api.patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch)).await {
+            Ok(updated_volume) => {
+                println!("✅ [SUCCESS] Successfully updated volume status for {}", volume_id);
+                println!("🔍 [DEBUG] Updated volume status: {:?}", updated_volume.status);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [ERROR] Failed to patch volume status for {}: {:?}", volume_id, e);
+                println!("❌ [ERROR] Error details: {}", e);
+                
+                // Try to get more specific error info
+                if let Some(api_error) = e.downcast_ref::<kube::Error>() {
+                    println!("❌ [ERROR] Kubernetes API error details: {:?}", api_error);
+                }
+                
+                Err(Status::internal(format!("Failed to update volume status: {}", e)))
+            }
+        }
     }
 }
