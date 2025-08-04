@@ -83,6 +83,7 @@ pub enum ReplicaHealth {
 // models.rs - Add ublk device info to SpdkVolumeStatus
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(default)]
 pub struct SpdkVolumeStatus {
     pub state: String,
     pub degraded: bool,
