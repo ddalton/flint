@@ -223,7 +223,7 @@ const mockData: DashboardData = {
       spdk_validation_status: {
         has_spdk_backing: true,
         validation_message: "Volume validated successfully",
-        severity: "Info"
+        validation_severity: "info"
       }
     },
     {
@@ -349,7 +349,7 @@ const mockData: DashboardData = {
       spdk_validation_status: {
         has_spdk_backing: true,
         validation_message: "Volume validated successfully",
-        severity: "Info"
+        validation_severity: "info"
       }
     },
     {
@@ -476,7 +476,7 @@ const mockData: DashboardData = {
       spdk_validation_status: {
         has_spdk_backing: false,
         validation_message: "SPDK backing not found - phantom volume",
-        severity: "Critical"
+        validation_severity: "error"
       }
     }
   ],
@@ -559,7 +559,9 @@ const mockData: DashboardData = {
         {
           spdk_volume_name: "orphaned_vol_123",
           spdk_volume_uuid: "abc12345-def6-7890-abcd-ef1234567890",
-          size_gb: 25.50
+          size_blocks: 50331648,
+          size_gb: 25.50,
+          orphaned_since: "2025-06-01T10:00:00Z"
         }
       ]
     },
