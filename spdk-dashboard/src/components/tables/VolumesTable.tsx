@@ -661,7 +661,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     <span className="text-blue-800 font-medium">Deletion Process</span>
                   </div>
                   <div className="text-blue-700 text-sm mt-1 space-y-1">
-                    <p>• Volume entry will be removed from the list immediately</p>
+                    <p>• Volume entry will be removed from the list earlier than actual space reclamation</p>
                     <p>• Storage space reclamation happens in the background</p>
                     <p>• Large volumes may take several minutes to fully reclaim space</p>
                     <p>• LVS free space will update once reclamation completes</p>
