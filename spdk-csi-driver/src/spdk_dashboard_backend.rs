@@ -1739,9 +1739,7 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
         .post(rpc_url)
         .json(&json!({
             "method": "bdev_lvol_delete",
-            "params": {
-                "bdev_name": target_volume.uuid  // SPDK bdev name is the UUID
-            },
+            "params": [target_volume.uuid],  // Positional argument: bdev_name (UUID)
             "id": 1
         }))
         .send()
