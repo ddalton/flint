@@ -466,19 +466,19 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-sm text-gray-600">Size (GB)</p>
-              <p className="text-xl font-bold text-blue-600">{spdkData.size_gb.toFixed(2)}</p>
+              <p className="text-xl font-bold text-blue-600">{(spdkData.size_gb || 0).toFixed(2)}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Size (Bytes)</p>
-              <p className="font-mono text-sm">{spdkData.size_bytes.toLocaleString()}</p>
+              <p className="font-mono text-sm">{(spdkData.size_bytes || 0).toLocaleString()}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Allocated Clusters</p>
-              <p className="font-mono text-sm">{spdkData.allocated_clusters.toLocaleString()}</p>
+              <p className="font-mono text-sm">{(spdkData.allocated_clusters || 0).toLocaleString()}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Cluster Size</p>
-              <p className="font-mono text-sm">{(spdkData.cluster_size / 1024).toLocaleString()} KB</p>
+              <p className="font-mono text-sm">{((spdkData.cluster_size || 0) / 1024).toLocaleString()} KB</p>
             </div>
           </div>
 
@@ -529,7 +529,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
             </div>
             <div>
               <p className="text-sm text-gray-600">Block Size</p>
-              <p className="font-mono text-sm">{spdkData.lvs_block_size} bytes</p>
+              <p className="font-mono text-sm">{spdkData.lvs_block_size || 0} bytes</p>
             </div>
           </div>
 
@@ -537,19 +537,19 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-sm text-gray-600">Total Capacity</p>
-              <p className="text-lg font-bold text-indigo-600">{spdkData.lvs_capacity_gb.toFixed(1)} GB</p>
+              <p className="text-lg font-bold text-indigo-600">{(spdkData.lvs_capacity_gb || 0).toFixed(1)} GB</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Used Space</p>
-              <p className="text-lg font-bold text-orange-600">{spdkData.lvs_used_gb.toFixed(1)} GB</p>
+              <p className="text-lg font-bold text-orange-600">{(spdkData.lvs_used_gb || 0).toFixed(1)} GB</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Free Space</p>
-              <p className="text-lg font-bold text-green-600">{(spdkData.lvs_capacity_gb - spdkData.lvs_used_gb).toFixed(1)} GB</p>
+              <p className="text-lg font-bold text-green-600">{((spdkData.lvs_capacity_gb || 0) - (spdkData.lvs_used_gb || 0)).toFixed(1)} GB</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Utilization</p>
-              <p className="text-lg font-bold text-gray-700">{spdkData.lvs_utilization_pct.toFixed(1)}%</p>
+              <p className="text-lg font-bold text-gray-700">{(spdkData.lvs_utilization_pct || 0).toFixed(1)}%</p>
             </div>
           </div>
 
@@ -557,12 +557,12 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <div className="mb-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-gray-700">LVS Space Usage</span>
-              <span className="text-sm text-gray-500">{spdkData.lvs_utilization_pct.toFixed(1)}% used</span>
+              <span className="text-sm text-gray-500">{(spdkData.lvs_utilization_pct || 0).toFixed(1)}% used</span>
             </div>
             <div className="w-full bg-gray-200 rounded-full h-3">
               <div 
                 className="bg-gradient-to-r from-blue-500 to-indigo-600 h-3 rounded-full" 
-                style={{ width: `${Math.min(spdkData.lvs_utilization_pct, 100)}%` }}
+                style={{ width: `${Math.min(spdkData.lvs_utilization_pct || 0, 100)}%` }}
               />
             </div>
           </div>
@@ -571,15 +571,15 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <div className="grid grid-cols-3 gap-4 text-sm">
             <div className="bg-gray-50 p-3 rounded">
               <p className="text-gray-600">Total Clusters</p>
-              <p className="font-mono font-semibold">{spdkData.lvs_total_clusters.toLocaleString()}</p>
+              <p className="font-mono font-semibold">{(spdkData.lvs_total_clusters || 0).toLocaleString()}</p>
             </div>
             <div className="bg-gray-50 p-3 rounded">
               <p className="text-gray-600">Free Clusters</p>
-              <p className="font-mono font-semibold text-green-600">{spdkData.lvs_free_clusters.toLocaleString()}</p>
+              <p className="font-mono font-semibold text-green-600">{(spdkData.lvs_free_clusters || 0).toLocaleString()}</p>
             </div>
             <div className="bg-gray-50 p-3 rounded">
               <p className="text-gray-600">Used Clusters</p>
-              <p className="font-mono font-semibold text-orange-600">{(spdkData.lvs_total_clusters - spdkData.lvs_free_clusters).toLocaleString()}</p>
+              <p className="font-mono font-semibold text-orange-600">{((spdkData.lvs_total_clusters || 0) - (spdkData.lvs_free_clusters || 0)).toLocaleString()}</p>
             </div>
           </div>
         </div>
