@@ -1330,8 +1330,46 @@ async fn get_raw_spdk_volumes(
     let mut raw_volumes = Vec::new();
     
     for (node_name, rpc_url) in spdk_nodes.iter() {
-        println!("🌐 [RAW_SPDK] Querying logical volumes on node '{}'", node_name);
+        println!("🌐 [RAW_SPDK] Querying logical volumes and LVS stores on node '{}'", node_name);
         
+        // First, get LVS stores to get cluster sizes
+        let lvstores_response = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_lvol_get_lvstores",
+                "params": {},
+                "id": 1
+            }))
+            .send()
+            .await?;
+            
+        let mut lvs_cluster_sizes = std::collections::HashMap::new();
+        
+        if lvstores_response.status().is_success() {
+            let lvstores_text = lvstores_response.text().await?;
+            let lvstores_info: serde_json::Value = serde_json::from_str(&lvstores_text)?;
+            
+            let lvstores_list = if let Some(result_array) = lvstores_info["result"].as_array() {
+                result_array
+            } else if let Some(direct_array) = lvstores_info.as_array() {
+                direct_array
+            } else {
+                println!("⚠️ [RAW_SPDK] Unexpected LVS response format from {}", node_name);
+                &Vec::new()
+            };
+            
+            for lvstore in lvstores_list {
+                if let (Some(lvs_name), Some(cluster_size)) = (
+                    lvstore["name"].as_str(),
+                    lvstore["cluster_size"].as_u64()
+                ) {
+                    lvs_cluster_sizes.insert(lvs_name.to_string(), cluster_size);
+                    println!("🏪 [RAW_SPDK] LVS '{}': cluster_size = {} bytes", lvs_name, cluster_size);
+                }
+            }
+        }
+        
+        // Now get logical volumes using the reliable API you specified
         let lvols_response = http_client
             .post(rpc_url)
             .json(&json!({
@@ -1371,23 +1409,31 @@ async fn get_raw_spdk_volumes(
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown");
                     
-                let num_blocks = lvol["num_blocks"].as_u64()
-                    .or_else(|| lvol["size_in_bytes"].as_u64().map(|bytes| bytes / 512))
-                    .unwrap_or(0);
+                // Get cluster information for size calculation
+                let num_allocated_clusters = lvol["num_allocated_clusters"].as_u64().unwrap_or(0);
                 
-                let size_gb = (num_blocks * 512) as f64 / (1024.0 * 1024.0 * 1024.0);
+                let (size_bytes, size_gb) = if let Some(cluster_size) = lvs_cluster_sizes.get(lvs_name) {
+                    let bytes = num_allocated_clusters * cluster_size;
+                    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    (bytes, gb)
+                } else {
+                    println!("⚠️ [RAW_SPDK] Missing cluster size for LVS '{}', skipping volume {}", lvs_name, vol_name);
+                    continue; // Skip this volume if we can't calculate its size
+                };
                 
                 raw_volumes.push(RawSpdkVolume {
                     name: vol_name.to_string(),
                     uuid: vol_uuid.to_string(),
                     node: node_name.clone(),
                     lvs_name: lvs_name.to_string(),
-                    size_blocks: num_blocks,
+                    size_blocks: size_bytes / 512, // Convert to 512-byte blocks for consistency
                     size_gb,
                     is_managed: false, // Will be updated below
                 });
                 
-                println!("📋 [RAW_SPDK] Raw volume: {} ({:.2}GB) on {}", vol_name, size_gb, node_name);
+                let cluster_size = lvs_cluster_sizes.get(lvs_name).unwrap(); // Safe because we checked above
+                println!("📋 [RAW_SPDK] Raw volume: {} ({:.2}GB, {} clusters × {} bytes) on {}", 
+                    vol_name, size_gb, num_allocated_clusters, cluster_size, node_name);
             }
         }
     }
