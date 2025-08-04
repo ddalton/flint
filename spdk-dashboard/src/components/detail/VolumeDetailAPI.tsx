@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Database, Settings, Shield, Network, 
-  RefreshCw, AlertTriangle, X
+  RefreshCw, AlertTriangle, X, HardDrive
 } from 'lucide-react';
-import type { Volume } from '../../hooks/useDashboardData';
+import type { Volume, SpdkVolumeDetails } from '../../hooks/useDashboardData';
 
 interface VolumeDetailAPIProps {
   volumeId: string;
@@ -17,6 +17,7 @@ interface VolumeDetails {
   raidDetails: any;
   nvmeofDetails: any; // Changed from vhostDetails
   metrics: any;
+  spdkDetails?: SpdkVolumeDetails;
 }
 
 export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({ 
@@ -29,6 +30,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshing, setRefreshing] = useState(false);
+  const [spdkLoading, setSpdkLoading] = useState(false);
 
   const fetchVolumeDetails = useCallback(async () => {
     try {
@@ -37,12 +39,32 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
       // Use the real volume data that was passed in
       if (volumeData) {
-        setDetails({
+        const baseDetails = {
           volume: volumeData, // Use the real volume data
           raidDetails: volumeData.raid_status || null,
           nvmeofDetails: volumeData.nvmeof_targets || null,
-          metrics: null
-        });
+          metrics: null,
+          spdkDetails: undefined
+        };
+
+        // Fetch SPDK details separately - pass node info we already have
+        try {
+          setSpdkLoading(true);
+          const targetNode = volumeData.nodes[0]; // Use first node for primary replica
+          const spdkResponse = await fetch(`/api/volumes/${volumeData.id}/spdk?node=${targetNode}`);
+          if (spdkResponse.ok) {
+            const spdkData = await spdkResponse.json();
+            baseDetails.spdkDetails = spdkData;
+          } else {
+            console.warn('Failed to fetch SPDK details:', spdkResponse.status);
+          }
+        } catch (spdkError) {
+          console.warn('Error fetching SPDK details:', spdkError);
+        } finally {
+          setSpdkLoading(false);
+        }
+
+        setDetails(baseDetails);
       } else {
         // Fallback to API or mock data only if no volumeData provided
         throw new Error('No volume data provided');
@@ -107,6 +129,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
   const tabs = [
     { id: 'overview', name: 'Overview', icon: Database },
+    { id: 'spdk', name: 'SPDK Details', icon: HardDrive },
     { id: 'raid', name: 'RAID Status', icon: Shield },
     { id: 'nvmeof', name: 'NVMe-oF', icon: Network }, // Changed from VHost-NVMe
     { id: 'replicas', name: 'Replicas', icon: Network }
@@ -381,6 +404,205 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
     );
   };
 
+  const renderSpdkTab = () => {
+    if (spdkLoading) {
+      return (
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <span className="ml-3 text-gray-600">Loading SPDK details...</span>
+        </div>
+      );
+    }
+
+    const spdkData = details?.spdkDetails;
+    if (!spdkData) {
+      return (
+        <div className="text-center py-12">
+          <HardDrive className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 mb-2">No SPDK Details Available</h3>
+          <p className="text-gray-600 mb-4">Unable to retrieve SPDK logical volume information for this volume.</p>
+          <button
+            onClick={handleRefresh}
+            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Retry
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        {/* SPDK Volume Information */}
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-6 border border-blue-200">
+          <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <HardDrive className="w-5 h-5 text-blue-600" />
+            SPDK Logical Volume
+          </h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <p className="text-sm text-gray-600">Volume Name</p>
+              <p className="font-mono text-sm bg-white px-2 py-1 rounded border">{spdkData.volume_name}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Volume UUID</p>
+              <p className="font-mono text-xs bg-white px-2 py-1 rounded border break-all">{spdkData.volume_uuid}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Node</p>
+              <p className="font-medium">{spdkData.node}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">SPDK Bdev Name</p>
+              <p className="font-mono text-sm bg-white px-2 py-1 rounded border">{spdkData.bdev_name}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Volume Size and Allocation */}
+        <div className="bg-white border rounded-lg p-6">
+          <h4 className="text-lg font-semibold mb-4">Volume Allocation</h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div>
+              <p className="text-sm text-gray-600">Size (GB)</p>
+              <p className="text-xl font-bold text-blue-600">{spdkData.size_gb.toFixed(2)}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Size (Bytes)</p>
+              <p className="font-mono text-sm">{spdkData.size_bytes.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Allocated Clusters</p>
+              <p className="font-mono text-sm">{spdkData.allocated_clusters.toLocaleString()}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Cluster Size</p>
+              <p className="font-mono text-sm">{(spdkData.cluster_size / 1024).toLocaleString()} KB</p>
+            </div>
+          </div>
+
+          {/* Volume Properties */}
+          <div className="grid grid-cols-3 gap-4">
+            <div className="flex items-center gap-2">
+              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                spdkData.is_thin_provisioned ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+              }`}>
+                {spdkData.is_thin_provisioned ? 'Thin Provisioned' : 'Thick Provisioned'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              {spdkData.is_clone && (
+                <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-purple-100 text-purple-800">
+                  Clone
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {spdkData.is_snapshot && (
+                <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-orange-100 text-orange-800">
+                  Snapshot
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* LVS Information */}
+        <div className="bg-white border rounded-lg p-6">
+          <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <Database className="w-5 h-5 text-indigo-600" />
+            Logical Volume Store (LVS)
+          </h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div>
+              <p className="text-sm text-gray-600">LVS Name</p>
+              <p className="font-mono text-sm bg-gray-50 px-2 py-1 rounded border">{spdkData.lvs_name}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">LVS UUID</p>
+              <p className="font-mono text-xs bg-gray-50 px-2 py-1 rounded border break-all">{spdkData.lvs_uuid}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Base Block Device</p>
+              <p className="font-mono text-sm bg-gray-50 px-2 py-1 rounded border">{spdkData.lvs_base_bdev}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Block Size</p>
+              <p className="font-mono text-sm">{spdkData.lvs_block_size} bytes</p>
+            </div>
+          </div>
+
+          {/* LVS Capacity */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div>
+              <p className="text-sm text-gray-600">Total Capacity</p>
+              <p className="text-lg font-bold text-indigo-600">{spdkData.lvs_capacity_gb.toFixed(1)} GB</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Used Space</p>
+              <p className="text-lg font-bold text-orange-600">{spdkData.lvs_used_gb.toFixed(1)} GB</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Free Space</p>
+              <p className="text-lg font-bold text-green-600">{(spdkData.lvs_capacity_gb - spdkData.lvs_used_gb).toFixed(1)} GB</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Utilization</p>
+              <p className="text-lg font-bold text-gray-700">{spdkData.lvs_utilization_pct.toFixed(1)}%</p>
+            </div>
+          </div>
+
+          {/* LVS Usage Bar */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">LVS Space Usage</span>
+              <span className="text-sm text-gray-500">{spdkData.lvs_utilization_pct.toFixed(1)}% used</span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-3">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-3 rounded-full" 
+                style={{ width: `${Math.min(spdkData.lvs_utilization_pct, 100)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Cluster Information */}
+          <div className="grid grid-cols-3 gap-4 text-sm">
+            <div className="bg-gray-50 p-3 rounded">
+              <p className="text-gray-600">Total Clusters</p>
+              <p className="font-mono font-semibold">{spdkData.lvs_total_clusters.toLocaleString()}</p>
+            </div>
+            <div className="bg-gray-50 p-3 rounded">
+              <p className="text-gray-600">Free Clusters</p>
+              <p className="font-mono font-semibold text-green-600">{spdkData.lvs_free_clusters.toLocaleString()}</p>
+            </div>
+            <div className="bg-gray-50 p-3 rounded">
+              <p className="text-gray-600">Used Clusters</p>
+              <p className="font-mono font-semibold text-orange-600">{(spdkData.lvs_total_clusters - spdkData.lvs_free_clusters).toLocaleString()}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Additional Information */}
+        <div className="bg-gray-50 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-600">Last Updated</span>
+            <span className="text-sm font-mono text-gray-800">
+              {new Date(spdkData.last_updated).toLocaleString()}
+            </span>
+          </div>
+          {spdkData.bdev_alias && (
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-sm text-gray-600">SPDK Alias</span>
+              <span className="text-sm font-mono text-gray-800">{spdkData.bdev_alias}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg max-w-6xl w-full max-h-[90vh] mx-4 flex flex-col">
@@ -430,6 +652,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         {/* Content */}
         <div className="flex-1 overflow-auto p-6">
           {activeTab === 'overview' && renderOverviewTab()}
+          {activeTab === 'spdk' && renderSpdkTab()}
           {activeTab === 'raid' && renderRaidTab()}
           {activeTab === 'nvmeof' && renderNvmeofTab()}
           {activeTab === 'replicas' && renderReplicasTab()}

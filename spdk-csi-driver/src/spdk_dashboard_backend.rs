@@ -219,6 +219,11 @@ struct RawSpdkVolume {
     is_managed: bool, // Whether this volume has a corresponding SpdkVolume CRD
 }
 
+#[derive(Deserialize, Debug)]
+struct QueryParameters {
+    node: Option<String>,
+}
+
 #[derive(Serialize, Debug, Clone)]
 struct OrphanedVolumeInfo {
     spdk_volume_name: String,
@@ -695,8 +700,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(delete_orphaned_spdk_volume)
         )
+        .or(
+            // GET /api/volumes/{id}/spdk?node=... - Get detailed SPDK information for a volume
+            warp::path("volumes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("spdk"))
+                .and(warp::get())
+                .and(warp::query::<QueryParameters>())
+                .and(state_filter.clone())
+                .and_then(get_volume_spdk_details)
+        )
     );
-    
+
     let routes = api.with(cors);
     
     println!("SPDK Dashboard API server starting on http://0.0.0.0:8080");
@@ -1440,6 +1455,215 @@ async fn get_raw_spdk_volumes(
     
     println!("📊 [RAW_SPDK] Total raw SPDK volumes found: {}", raw_volumes.len());
     Ok(raw_volumes)
+}
+
+/// Enhanced SPDK volume details structure
+#[derive(Serialize, Debug, Clone)]
+struct SpdkVolumeDetails {
+    volume_name: String,
+    volume_uuid: String,
+    lvs_name: String,
+    lvs_uuid: String,
+    node: String,
+    // Volume-specific information
+    allocated_clusters: u64,
+    cluster_size: u64,
+    size_bytes: u64,
+    size_gb: f64,
+    is_thin_provisioned: bool,
+    is_clone: bool,
+    is_snapshot: bool,
+    // LVS information
+    lvs_total_clusters: u64,
+    lvs_free_clusters: u64,
+    lvs_block_size: u64,
+    lvs_base_bdev: String,
+    lvs_capacity_gb: f64,
+    lvs_used_gb: f64,
+    lvs_utilization_pct: f64,
+    // SPDK bdev information
+    bdev_name: String,
+    bdev_alias: Option<String>,
+    // Additional metadata
+    last_updated: String,
+}
+
+/// Get detailed SPDK information for a specific volume
+async fn get_volume_spdk_details(
+    volume_id: String,
+    query: QueryParameters,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🔍 [VOLUME_SPDK] Getting SPDK details for volume: {}", volume_id);
+    
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let http_client = HttpClient::new();
+    
+    // Get the target node from query parameter or fallback to first available
+    let target_node = query.node.unwrap_or_else(|| {
+        spdk_nodes.keys().next().unwrap_or(&"unknown".to_string()).clone()
+    });
+    
+    println!("🎯 [VOLUME_SPDK] Querying node '{}' for volume '{}'", target_node, volume_id);
+    
+    let rpc_url = spdk_nodes.get(&target_node).ok_or_else(|| {
+        println!("❌ [VOLUME_SPDK] Node '{}' not found in SPDK nodes", target_node);
+        warp::reject::not_found()
+    })?;
+    
+        // Get LVS stores first
+    let lvstores_response = http_client
+        .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_lvol_get_lvstores",
+                "params": {},
+                "id": 1
+            }))
+            .send()
+            .await
+            .map_err(|e| {
+                println!("❌ [VOLUME_SPDK] Failed to query LVS stores on {}: {}", target_node, e);
+                warp::reject::not_found()
+            })?;
+            
+    if !lvstores_response.status().is_success() {
+        println!("❌ [VOLUME_SPDK] LVS query failed on node {}", target_node);
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "error": "LVS query failed",
+                "message": format!("Failed to query LVS stores on node: {}", target_node)
+            })),
+            warp::http::StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+        
+        let lvstores_text = lvstores_response.text().await.map_err(|_| {
+            warp::reject::not_found()
+        })?;
+        let lvstores_info: serde_json::Value = serde_json::from_str(&lvstores_text).map_err(|_| {
+            warp::reject::not_found()
+        })?;
+        
+        let empty_vec = Vec::new();
+        let lvstores_list = lvstores_info["result"].as_array().unwrap_or(&empty_vec);
+        
+    // Get logical volumes
+    let lvols_response = http_client
+        .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_lvol_get_lvols",
+                "params": {},
+                "id": 1
+            }))
+            .send()
+            .await
+            .map_err(|_| warp::reject::not_found())?;
+            
+    if !lvols_response.status().is_success() {
+        println!("❌ [VOLUME_SPDK] Logical volumes query failed on node {}", target_node);
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "error": "Logical volumes query failed", 
+                "message": format!("Failed to query logical volumes on node: {}", target_node)
+            })),
+            warp::http::StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+        
+        let lvols_text = lvols_response.text().await.map_err(|_| {
+            warp::reject::not_found()
+        })?;
+        let lvols_info: serde_json::Value = serde_json::from_str(&lvols_text).map_err(|_| {
+            warp::reject::not_found()
+        })?;
+        
+        let empty_lvols = Vec::new();
+        let lvols_list = lvols_info["result"].as_array().unwrap_or(&empty_lvols);
+        
+    // Find the volume by checking if volume_id is contained in the volume name
+    for lvol in lvols_list {
+        if let Some(vol_name) = lvol["name"].as_str() {
+            if vol_name.contains(&volume_id) {
+                // Found the volume! Extract details
+                let vol_uuid = lvol["uuid"].as_str().unwrap_or("unknown");
+                let lvs_info = lvol["lvs"].as_object().unwrap();
+                let lvs_name = lvs_info.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                let lvs_uuid = lvs_info.get("uuid").and_then(|n| n.as_str()).unwrap_or("unknown");
+                
+                // Find the corresponding LVS details
+                let mut lvs_details = None;
+                for lvstore in lvstores_list {
+                    if let Some(store_name) = lvstore["name"].as_str() {
+                        if store_name == lvs_name {
+                            lvs_details = Some(lvstore);
+                            break;
+                        }
+                    }
+                }
+                
+                if let Some(lvs) = lvs_details {
+                    let allocated_clusters = lvol["num_allocated_clusters"].as_u64().unwrap_or(0);
+                    let cluster_size = lvs["cluster_size"].as_u64().unwrap_or(1048576);
+                    let size_bytes = allocated_clusters * cluster_size;
+                    let size_gb = size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    
+                    let total_clusters = lvs["total_data_clusters"].as_u64().unwrap_or(0);
+                    let free_clusters = lvs["free_clusters"].as_u64().unwrap_or(0);
+                    let lvs_capacity_bytes = total_clusters * cluster_size;
+                    let lvs_used_bytes = (total_clusters - free_clusters) * cluster_size;
+                    let lvs_capacity_gb = lvs_capacity_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let lvs_used_gb = lvs_used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let lvs_utilization_pct = if total_clusters > 0 {
+                        ((total_clusters - free_clusters) as f64 / total_clusters as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    
+                    let spdk_details = SpdkVolumeDetails {
+                        volume_name: vol_name.to_string(),
+                        volume_uuid: vol_uuid.to_string(),
+                        lvs_name: lvs_name.to_string(),
+                        lvs_uuid: lvs_uuid.to_string(),
+                        node: target_node.clone(),
+                        allocated_clusters,
+                        cluster_size,
+                        size_bytes,
+                        size_gb,
+                        is_thin_provisioned: lvol["is_thin_provisioned"].as_bool().unwrap_or(false),
+                        is_clone: lvol["is_clone"].as_bool().unwrap_or(false),
+                        is_snapshot: lvol["is_snapshot"].as_bool().unwrap_or(false),
+                        lvs_total_clusters: total_clusters,
+                        lvs_free_clusters: free_clusters,
+                        lvs_block_size: lvs["block_size"].as_u64().unwrap_or(512),
+                        lvs_base_bdev: lvs["base_bdev"].as_str().unwrap_or("unknown").to_string(),
+                        lvs_capacity_gb,
+                        lvs_used_gb,
+                        lvs_utilization_pct,
+                        bdev_name: vol_uuid.to_string(), // SPDK bdev name is the UUID
+                        bdev_alias: lvol.get("alias").and_then(|a| a.as_str()).map(|s| s.to_string()),
+                        last_updated: chrono::Utc::now().to_rfc3339(),
+                    };
+                    
+                    println!("✅ [VOLUME_SPDK] Found SPDK details for volume {} on node {}", volume_id, target_node);
+                    
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&spdk_details),
+                        warp::http::StatusCode::OK
+                    ));
+                }
+            }
+        }
+    }
+    
+    // Volume not found
+    println!("❌ [VOLUME_SPDK] Volume {} not found on node {}", volume_id, target_node);
+    Ok(warp::reply::with_status(
+        warp::reply::json(&json!({
+            "error": "Volume not found",
+            "message": format!("No SPDK logical volume found for volume ID '{}' on node '{}'", volume_id, target_node)
+        })),
+        warp::http::StatusCode::NOT_FOUND
+    ))
 }
 
 /// Delete a raw SPDK logical volume by UUID
