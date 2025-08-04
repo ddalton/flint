@@ -454,7 +454,7 @@ async fn update_replica_after_replacement(
     let mut new_spec = spdk_volume.spec.clone();
     new_spec.replicas[failed_replica_index] = Replica {
         node: replacement_disk.spec.node_id.clone(),
-        replica_type: if failed_replica_index == 0 { "primary".to_string() } else { "secondary".to_string() },
+        replica_type: "lvol".to_string(),
         pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
         disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
         lvol_uuid: Some(lvol_uuid),
