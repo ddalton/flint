@@ -2,6 +2,7 @@
 use kube::CustomResource;
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use chrono;
 use chrono::{DateTime, Utc};
 
 // ============================================================================
@@ -81,7 +82,7 @@ pub enum ReplicaHealth {
 
 // models.rs - Add ublk device info to SpdkVolumeStatus
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct SpdkVolumeStatus {
     pub state: String,
     pub degraded: bool,
@@ -104,6 +105,30 @@ pub struct SpdkVolumeStatus {
     pub read_optimized: bool,
     pub read_policy: Option<String>,
     pub local_replica_performance: Option<LocalReplicaMetrics>,
+}
+
+impl Default for SpdkVolumeStatus {
+    fn default() -> Self {
+        SpdkVolumeStatus {
+            state: "creating".to_string(), // Use valid CRD state instead of empty string
+            degraded: false,
+            last_checked: chrono::Utc::now().to_rfc3339(),
+            active_replicas: Vec::new(),
+            failed_replicas: Vec::new(),
+            write_sequence: 0,
+            last_successful_write: None,
+            raid_status: None,
+            nvmeof_targets: Vec::new(),
+            ublk_device: None,
+            scheduled_node: None,
+            has_local_replica: false,
+            scheduling_policy: None,
+            replica_nodes: Vec::new(),
+            read_optimized: false,
+            read_policy: None,
+            local_replica_performance: None,
+        }
+    }
 }
 
 // Add new struct for ublk device information

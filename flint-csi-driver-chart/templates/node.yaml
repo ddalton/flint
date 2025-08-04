@@ -49,6 +49,7 @@ spec:
               mountPath: /var/tmp
             - name: device-dir
               mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
@@ -88,6 +89,9 @@ spec:
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
+            - name: device-dir
+              mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
         # Node Agent Container (Disk Management & API)
@@ -116,6 +120,7 @@ spec:
           volumeMounts:
             - name: device-dir
               mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
         {{- else if .Values.deployment.nodeMode | eq "two-container" }}
@@ -146,6 +151,7 @@ spec:
               mountPath: /var/tmp
             - name: device-dir
               mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
@@ -177,6 +183,7 @@ spec:
               mountPath: /csi
             - name: device-dir
               mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
         {{- else }}
@@ -221,6 +228,7 @@ spec:
               mountPath: /csi
             - name: device-dir
               mountPath: /dev
+              mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
         {{- end }}

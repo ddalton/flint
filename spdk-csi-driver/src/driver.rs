@@ -125,6 +125,18 @@ impl SpdkCsiDriver {
     ) -> Result<String, Box<dyn std::error::Error>> {
         println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
         
+        // Check if device already exists
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        if std::path::Path::new(&device_path).exists() {
+            println!("ublk device {} already exists, cleaning up first", device_path);
+            // Try to stop the existing device
+            if let Err(e) = self.delete_ublk_device(ublk_id).await {
+                println!("Warning: Failed to cleanup existing ublk device {}: {}", ublk_id, e);
+            }
+            // Wait a moment for cleanup
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        
         // Ensure ublk target exists first
         self.ensure_ublk_target().await?;
         
@@ -144,8 +156,6 @@ impl SpdkCsiDriver {
             return Err(format!("SPDK RPC error: {}", error).into());
         }
         
-        // ublk devices appear as /dev/ublkb{id}
-        let device_path = format!("/dev/ublkb{}", ublk_id);
         println!("Successfully created ublk device: {} -> {}", bdev_name, device_path);
         Ok(device_path)
     }

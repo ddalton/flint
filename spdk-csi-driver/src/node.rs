@@ -929,9 +929,13 @@ impl NodeService {
         let volume = volumes_api.get(volume_id).await
             .map_err(|e| Status::not_found(format!("Volume {} not found: {}", volume_id, e)))?;
         
-        // Update status
-        let mut status = volume.status.unwrap_or_default();
-        status.ublk_device = ublk_device;
+            // Update status
+    let mut status = volume.status.unwrap_or_else(|| {
+        let mut default_status = SpdkVolumeStatus::default();
+        default_status.state = "creating".to_string(); // Set valid state instead of empty string
+        default_status
+    });
+    status.ublk_device = ublk_device;
         
         // Patch the status
         let patch = json!({ "status": status });

@@ -162,10 +162,10 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
             Ok(Some(raid_info)) => {
                 status.raid_status = Some(raid_info.clone());
                 status.state = match raid_info.state.as_str() {
-                    "online" => "Healthy".to_string(),
-                    "degraded" => "Degraded".to_string(),
-                    "failed" | "broken" => "Failed".to_string(),
-                    _ => raid_info.state.clone(),
+                    "online" => "ready".to_string(), // Use CRD-compliant state
+                    "degraded" => "degraded".to_string(), // Use CRD-compliant state
+                    "failed" | "broken" => "failed".to_string(), // Use CRD-compliant state
+                    _ => "degraded".to_string(), // Default to degraded for unknown states
                 };
                 status.degraded = raid_info.state == "degraded";
                 
@@ -182,7 +182,7 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                         for &failed_index in &failed_replicas {
                             if let Err(e) = handle_failed_replica(&spdk_volume, &ctx, failed_index, &spdk_disks).await {
                                 eprintln!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
-                                status.state = "RebuildFailed".to_string();
+                                status.state = "failed".to_string();
                             }
                         }
                     }
@@ -192,8 +192,8 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
             }
             Ok(None) => {
                 // RAID not found, might be single replica or error
-                if status.state != "NotFound" {
-                    status.state = "NotFound".to_string();
+                            if status.state != "failed" {
+                status.state = "failed".to_string();
                     status_update_needed = true;
                 }
             }
@@ -211,10 +211,10 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                 match get_lvol_status(&ctx, &bdev_name).await {
                     Ok(lvol_status) => {
                         let should_be_healthy = lvol_status.is_healthy;
-                        let currently_healthy = status.state == "Healthy";
+                        let currently_healthy = status.state == "ready";
                         
                         if should_be_healthy != currently_healthy {
-                            status.state = if should_be_healthy { "Healthy" } else { "Failed" }.to_string();
+                            status.state = if should_be_healthy { "ready" } else { "failed" }.to_string();
                             status.degraded = !should_be_healthy;
                             
                             if !should_be_healthy {
@@ -657,12 +657,12 @@ async fn perform_periodic_health_check(ctx: &Context) -> Result<(), ControllerEr
                 
                 if status_changed {
                     status.raid_status = Some(raid_status.clone());
-                    status.state = match raid_status.state.as_str() {
-                        "online" => "Healthy".to_string(),
-                        "degraded" => "Degraded".to_string(),
-                        "failed" | "broken" => "Failed".to_string(),
-                        _ => raid_status.state.clone(),
-                    };
+                                status.state = match raid_status.state.as_str() {
+                "online" => "ready".to_string(),
+                "degraded" => "degraded".to_string(),
+                "failed" | "broken" => "failed".to_string(),
+                _ => "degraded".to_string(),
+            };
                     status.degraded = raid_status.state == "degraded";
                     status.last_checked = Utc::now().to_rfc3339();
                     needs_update = true;
