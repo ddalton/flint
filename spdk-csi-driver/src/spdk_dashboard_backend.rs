@@ -1731,14 +1731,16 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
         }
     };
     
-    // Delete the volume using bdev_lvol_delete
+    // Delete the volume using bdev_lvol_delete with the UUID as bdev_name
+    println!("🗑️ [DELETE_RAW] Attempting to delete volume with bdev_name (UUID): '{}'", target_volume.uuid);
+    
     let http_client = HttpClient::new();
     let delete_response = http_client
         .post(rpc_url)
         .json(&json!({
             "method": "bdev_lvol_delete",
             "params": {
-                "name": target_volume.name  // Delete by name, not UUID
+                "bdev_name": target_volume.uuid  // SPDK bdev name is the UUID
             },
             "id": 1
         }))
