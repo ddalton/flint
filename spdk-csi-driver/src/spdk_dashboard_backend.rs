@@ -550,6 +550,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and(state_filter.clone())
             .and_then(get_dashboard_data)
         .or(
+            // GET /api/volumes/{id}/spdk?node=... - Get detailed SPDK information for a volume
+            warp::path("volumes")
+                .and(warp::path::param::<String>())
+                .and(warp::path("spdk"))
+                .and(warp::get())
+                .and(warp::query::<QueryParameters>())
+                .and(state_filter.clone())
+                .and_then(get_volume_spdk_details)
+        )
+        .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
                 .and(warp::get())
@@ -699,16 +709,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(warp::body::json())
                 .and(state_filter.clone())
                 .and_then(delete_orphaned_spdk_volume)
-        )
-        .or(
-            // GET /api/volumes/{id}/spdk?node=... - Get detailed SPDK information for a volume
-            warp::path("volumes")
-                .and(warp::path::param::<String>())
-                .and(warp::path("spdk"))
-                .and(warp::get())
-                .and(warp::query::<QueryParameters>())
-                .and(state_filter.clone())
-                .and_then(get_volume_spdk_details)
         )
     );
 
