@@ -49,6 +49,35 @@ export interface SpdkValidationStatus {
   validation_severity: 'info' | 'warning' | 'error';
 }
 
+export interface SpdkVolumeDetails {
+  volume_name: string;
+  volume_uuid: string;
+  lvs_name: string;
+  lvs_uuid: string;
+  node: string;
+  // Volume-specific information
+  allocated_clusters: number;
+  cluster_size: number;
+  size_bytes: number;
+  size_gb: number;
+  is_thin_provisioned: boolean;
+  is_clone: boolean;
+  is_snapshot: boolean;
+  // LVS information
+  lvs_total_clusters: number;
+  lvs_free_clusters: number;
+  lvs_block_size: number;
+  lvs_base_bdev: string;
+  lvs_capacity_gb: number;
+  lvs_used_gb: number;
+  lvs_utilization_pct: number;
+  // SPDK bdev information
+  bdev_name: string;
+  bdev_alias?: string;
+  // Additional metadata
+  last_updated: string;
+}
+
 // --- End of new/updated interfaces ---
 
 
