@@ -20,6 +20,7 @@ pub struct SpdkCsiDriver {
     pub nvmeof_target_port: u16,
     pub nvmeof_transport: String,
     pub target_namespace: String,
+    pub ublk_target_initialized: Arc<Mutex<bool>>,
 }
 
 impl SpdkCsiDriver {
@@ -86,6 +87,36 @@ impl SpdkCsiDriver {
         Ok(self.get_node_ip(&current_node).await?)
     }
 
+    /// Ensure ublk target is created (required before starting disks)
+    /// Only calls ublk_create_target once per CSI driver instance
+    async fn ensure_ublk_target(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut initialized = self.ublk_target_initialized.lock().await;
+        
+        if *initialized {
+            // Target already created, nothing to do
+            return Ok(());
+        }
+        
+        println!("Creating ublk target (first time)");
+        
+        let rpc_request = json!({
+            "method": "ublk_create_target",
+            "params": {}
+        });
+        
+        let response = self.call_spdk_rpc(&rpc_request).await?;
+        
+        // Check for SPDK RPC errors
+        if let Some(error) = response.get("error") {
+            return Err(format!("Failed to create ublk target: {}", error).into());
+        }
+        
+        // Mark as initialized
+        *initialized = true;
+        println!("ublk target created successfully");
+        Ok(())
+    }
+
     /// Create ublk device for a bdev
     pub async fn create_ublk_device(
         &self,
@@ -93,6 +124,9 @@ impl SpdkCsiDriver {
         ublk_id: u32,
     ) -> Result<String, Box<dyn std::error::Error>> {
         println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
+        
+        // Ensure ublk target exists first
+        self.ensure_ublk_target().await?;
         
         // Use the same SPDK RPC pattern as node_agent.rs
         let rpc_request = json!({

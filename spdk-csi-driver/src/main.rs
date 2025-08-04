@@ -98,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
         target_namespace,
+        ublk_target_initialized: Arc::new(Mutex::new(false)),
     });
     
     println!("🎯 [CONFIG] Using namespace for custom resources: {}", driver.target_namespace);

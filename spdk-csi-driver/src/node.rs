@@ -84,10 +84,10 @@ impl NodeService {
         // Prepare base bdevs for RAID1 creation
         for replica in &volume.spec.replicas {
             let base_bdev_name = if replica.node == self.driver.node_id {
-                // Local replica: use direct lvol access for better performance
+                // Local replica: use the logical volume's UUID as bdev name
                 if let Some(lvol_uuid) = &replica.lvol_uuid {
-                    let lvs_name = format!("lvs_{}", replica.disk_ref);
-                    format!("{}/{}", lvs_name, lvol_uuid)
+                    // Each replica is a separate logical volume with its own UUID
+                    lvol_uuid.clone()
                 } else {
                     return Err(Status::internal(format!("Local replica missing lvol_uuid")));
                 }
@@ -301,6 +301,8 @@ impl NodeService {
     async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
         let ublk_id = self.driver.generate_ublk_id(volume_id);
         
+        // Delete the specific ublk device
+        // Note: SPDK process will automatically clean up ublk target on shutdown
         self.driver.delete_ublk_device(ublk_id).await
             .map_err(|e| Status::internal(format!("Failed to delete ublk device: {}", e)))?;
             
