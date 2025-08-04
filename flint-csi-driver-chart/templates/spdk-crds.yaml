@@ -25,6 +25,8 @@ spec:
             - size_bytes
             - num_replicas
             - replicas
+            - write_ordering_enabled
+            - raid_auto_rebuild
             properties:
               volume_id:
                 type: string
@@ -39,9 +41,11 @@ spec:
                 description: "UUID of the primary logical volume"
               write_ordering_enabled:
                 type: boolean
+                default: false
                 description: "Whether write ordering is enabled for consistency"
               raid_auto_rebuild:
                 type: boolean
+                default: false
                 description: "Whether RAID auto-rebuild is enabled"
               # NVMe-oF configuration
               nvmeof_transport:
@@ -69,6 +73,9 @@ spec:
                   - disk_ref
                   - health_status
                   - raid_member_index
+                  - local_pod_scheduled
+                  - write_sequence
+                  - raid_member_state
                   properties:
                     node:
                       type: string
@@ -101,6 +108,7 @@ spec:
                       description: "UUID of the logical volume in SPDK"
                     local_pod_scheduled:
                       type: boolean
+                      default: false
                       description: "Whether pods can be scheduled locally to this replica"
                     pod_name:
                       type: string
@@ -109,6 +117,7 @@ spec:
                     raid_member_state:
                       type: string
                       enum: ["online", "offline", "degraded", "failed", "rebuilding", "spare", "removing"]
+                      default: "online"
                       description: "State of this replica in RAID configuration"
                     last_io_timestamp:
                       type: string
@@ -117,6 +126,7 @@ spec:
                     write_sequence:
                       type: integer
                       format: int64
+                      default: 0
                       description: "Write sequence number for consistency"
           status:
             type: object

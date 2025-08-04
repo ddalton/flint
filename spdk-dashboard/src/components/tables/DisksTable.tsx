@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { 
   X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
-  Server, Database, CheckCircle, Activity
+  Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
 } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 
@@ -46,6 +46,15 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   const [sortField, setSortField] = useState<DiskSortField>('id');
   const [sortOrder, setSortOrder] = useState<DiskSortOrder>('asc');
   const [showFilters, setShowFilters] = useState(false);
+
+  // Delete orphaned volume state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [volumeToDelete, setVolumeToDelete] = useState<{
+    volume: any;
+    diskNode: string;
+  } | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Get unique nodes for filter dropdown
   const availableNodes = useMemo(() => {
@@ -258,6 +267,63 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     return sortOrder === 'asc' ? 
       <SortAsc className="w-4 h-4" /> : 
       <SortDesc className="w-4 h-4" />;
+  };
+
+  // Delete orphaned volume handlers
+  const handleDeleteOrphanedVolume = (volume: any, diskNode: string) => {
+    setVolumeToDelete({ volume, diskNode });
+    setDeleteConfirmText('');
+    setShowDeleteDialog(true);
+  };
+
+  const confirmDeleteOrphanedVolume = async () => {
+    if (!volumeToDelete || deleteConfirmText !== 'DELETE') {
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      const response = await fetch('/api/volumes/orphaned', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          node: volumeToDelete.diskNode,
+          volume_name: volumeToDelete.volume.spdk_volume_name,
+          volume_uuid: volumeToDelete.volume.spdk_volume_uuid,
+          reason: `User deleted orphaned volume via dashboard`
+        })
+      });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        console.log('✅ Successfully deleted orphaned volume:', result.deleted_volume);
+        // Reset dialog state
+        setShowDeleteDialog(false);
+        setVolumeToDelete(null);
+        setDeleteConfirmText('');
+        
+        // TODO: Refresh dashboard data to show the change
+        // For now, user can refresh the page manually
+        alert(`Successfully deleted orphaned volume '${volumeToDelete.volume.spdk_volume_name}' (${result.deleted_volume?.size_gb?.toFixed(2)}GB)`);
+      } else {
+        console.error('❌ Failed to delete orphaned volume:', result.message);
+        alert(`Failed to delete orphaned volume: ${result.message}`);
+      }
+    } catch (error) {
+      console.error('❌ Error deleting orphaned volume:', error);
+      alert(`Error deleting orphaned volume: ${error}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const cancelDeleteOrphanedVolume = () => {
+    setShowDeleteDialog(false);
+    setVolumeToDelete(null);
+    setDeleteConfirmText('');
   };
 
   return (
@@ -678,7 +744,39 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       </span>
                       {disk.blobstore_initialized && (
                         <div className="text-xs text-gray-500 mt-1">
-                          {disk.lvol_count} logical volumes
+                          <div className="flex items-center gap-1">
+                            <span>{disk.lvol_count} logical volumes</span>
+                            {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
+                              <span 
+                                className="text-orange-500 flex items-center gap-1" 
+                                title={`${disk.orphaned_spdk_volumes.length} orphaned SPDK volume${disk.orphaned_spdk_volumes.length !== 1 ? 's' : ''} (${disk.orphaned_spdk_volumes.reduce((total, orphan) => total + orphan.size_gb, 0).toFixed(1)}GB)`}
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                <span className="text-xs">+{disk.orphaned_spdk_volumes.length} orphaned</span>
+                              </span>
+                            )}
+                          </div>
+                          
+                          {/* Show individual orphaned volumes with delete buttons */}
+                          {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                              {disk.orphaned_spdk_volumes.map((orphan, idx) => (
+                                <div key={idx} className="flex items-center justify-between bg-orange-50 rounded px-2 py-1">
+                                  <div className="flex-1">
+                                    <div className="text-xs font-medium text-orange-800">{orphan.spdk_volume_name}</div>
+                                    <div className="text-xs text-orange-600">{orphan.size_gb.toFixed(2)}GB • Orphaned</div>
+                                  </div>
+                                  <button
+                                    onClick={() => handleDeleteOrphanedVolume(orphan, disk.node)}
+                                    className="ml-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded p-1"
+                                    title={`Delete orphaned volume ${orphan.spdk_volume_name}`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
                     </td>
@@ -861,6 +959,81 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           >
             Sort by Performance
           </button>
+        </div>
+      )}
+
+      {/* Delete Orphaned Volume Confirmation Dialog */}
+      {showDeleteDialog && volumeToDelete && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                Delete Orphaned SPDK Volume
+              </h3>
+              
+              <div className="mb-4">
+                <div className="bg-red-50 border border-red-200 rounded p-3 mb-4">
+                  <div className="flex items-center">
+                    <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
+                    <span className="text-red-800 font-medium">Warning: Permanent Deletion</span>
+                  </div>
+                  <p className="text-red-700 text-sm mt-1">
+                    This will permanently delete the SPDK logical volume and free up storage space. 
+                    This action cannot be undone.
+                  </p>
+                </div>
+                
+                <div className="space-y-2 text-sm">
+                  <div><strong>Volume:</strong> {volumeToDelete.volume.spdk_volume_name}</div>
+                  <div><strong>UUID:</strong> {volumeToDelete.volume.spdk_volume_uuid}</div>
+                  <div><strong>Node:</strong> {volumeToDelete.diskNode}</div>
+                  <div><strong>Size:</strong> {volumeToDelete.volume.size_gb.toFixed(2)}GB</div>
+                  <div><strong>Status:</strong> <span className="text-orange-600">Orphaned (no Kubernetes tracking)</span></div>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Type <code className="bg-gray-100 px-1 rounded">DELETE</code> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  placeholder="Type DELETE to confirm"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={cancelDeleteOrphanedVolume}
+                  disabled={isDeleting}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteOrphanedVolume}
+                  disabled={deleteConfirmText !== 'DELETE' || isDeleting}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                >
+                  {isDeleting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Delete Volume
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

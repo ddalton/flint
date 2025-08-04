@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, AlertCircle, ShieldAlert } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
 import { useOperations } from '../../contexts/OperationsContext';
@@ -312,6 +312,16 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                           <StateIcon className="w-3 h-3 mr-1" />
                           {volume.state}
                         </span>
+
+                        {/* SPDK Validation Status Indicator */}
+                        {volume.spdk_validation_status && !volume.spdk_validation_status.has_spdk_backing && (
+                          <span 
+                            className="text-red-500" 
+                            title={volume.spdk_validation_status.validation_message || "No SPDK backing found"}
+                          >
+                            <ShieldAlert className="w-4 h-4" />
+                          </span>
+                        )}
 
                         {stateInfo.tooltip && (
                           <span className="text-xs text-gray-400" title={stateInfo.tooltip}>

@@ -1,5 +1,5 @@
-use warp::Filter;
-use serde::Serialize;
+use warp::{Filter, Reply, Rejection};
+use serde::{Serialize, Deserialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,6 +35,47 @@ struct SpdkBdevDetails {
 }
 // --- End of New API Response Structs ---
 
+// Volume validation result structures
+#[derive(Debug, Clone)]
+struct SpdkVolumeInfo {
+    name: String,
+    node: String,
+    lvs_name: String,
+    num_blocks: u64,
+    uuid: String,
+}
+
+#[derive(Debug, Clone)]
+struct PhantomVolumeInfo {
+    volume_id: String,
+    expected_node: String,
+    expected_lvol_uuid: String,
+}
+
+#[derive(Debug, Clone)]
+struct VolumeValidationResult {
+    orphaned_spdk_volumes: Vec<SpdkVolumeInfo>,
+    phantom_k8s_volumes: Vec<PhantomVolumeInfo>,
+}
+
+// SPDK validation status for frontend display
+#[derive(Serialize, Debug, Clone)]
+struct SpdkValidationStatus {
+    has_spdk_backing: bool,
+    validation_message: Option<String>,
+    validation_severity: ValidationSeverity, // info, warning, error
+}
+
+#[derive(Serialize, Debug, Clone)]
+enum ValidationSeverity {
+    #[serde(rename = "info")]
+    Info,
+    #[serde(rename = "warning")] 
+    Warning,
+    #[serde(rename = "error")]
+    Error,
+}
+
 // Enhanced dashboard API response types with NVMe-oF instead of vhost
 #[derive(Serialize, Debug, Clone)]
 struct DashboardVolume {
@@ -57,6 +98,8 @@ struct DashboardVolume {
     // Enhanced RAID status from SPDK
     raid_status: Option<DashboardRaidStatus>,
     ublk_device: Option<serde_json::Value>,
+    // SPDK validation status
+    spdk_validation_status: SpdkValidationStatus,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -151,6 +194,8 @@ struct DashboardDisk {
     write_latency: u64,
     brought_online: String,
     provisioned_volumes: Vec<ProvisionedVolume>,
+    // Orphaned SPDK volumes on this disk
+    orphaned_spdk_volumes: Vec<OrphanedVolumeInfo>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -161,6 +206,15 @@ struct ProvisionedVolume {
     provisioned_at: String,
     replica_type: String,
     status: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct OrphanedVolumeInfo {
+    spdk_volume_name: String,
+    spdk_volume_uuid: String,
+    size_blocks: u64,
+    size_gb: f64,
+    orphaned_since: String, // When we detected it was orphaned
 }
 
 #[derive(Serialize, Debug)]
@@ -204,6 +258,229 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
     // Fallback to default if running outside cluster
     println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
     Ok("flint-system".to_string())
+}
+
+// Request/Response structures for orphaned volume deletion
+#[derive(Deserialize, Debug)]
+struct DeleteOrphanedVolumeRequest {
+    node: String,
+    volume_name: String,  // Can be UUID or alias of the logical volume
+    volume_uuid: String,
+    reason: Option<String>, // Optional reason for deletion
+}
+
+#[derive(Serialize, Debug)]
+struct DeleteOrphanedVolumeResponse {
+    success: bool,
+    message: String,
+    deleted_volume: Option<DeletedVolumeInfo>,
+}
+
+#[derive(Serialize, Debug)]
+struct DeletedVolumeInfo {
+    node: String,
+    volume_name: String,
+    volume_uuid: String,
+    size_gb: f64,
+    deleted_at: String,
+}
+
+/// Delete orphaned SPDK logical volume using bdev_lvol_delete RPC
+async fn delete_orphaned_spdk_volume(
+    request: DeleteOrphanedVolumeRequest,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    println!("🗑️ [DELETE_ORPHAN] Received request to delete orphaned volume '{}' on node '{}'", 
+        request.volume_name, request.node);
+    
+    // Verify node exists and get RPC URL
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let rpc_url = match spdk_nodes.get(&request.node) {
+        Some(url) => url,
+        None => {
+            println!("❌ [DELETE_ORPHAN] Node '{}' not found in SPDK nodes", request.node);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Node '{}' not found", request.node),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::NOT_FOUND
+            ));
+        }
+    };
+    
+    // First, verify the volume still exists and is indeed orphaned
+    println!("🔍 [DELETE_ORPHAN] Verifying volume '{}' exists on node '{}'", request.volume_name, request.node);
+    
+    let http_client = HttpClient::new();
+    
+    // Check if volume exists by querying current logical volumes
+    let verification_response = match http_client
+        .post(rpc_url)
+        .json(&json!({
+            "method": "bdev_get_bdevs",
+            "params": {},
+            "id": 1
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            println!("❌ [DELETE_ORPHAN] Failed to verify volume existence: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Failed to verify volume existence: {}", e),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ));
+        }
+    };
+    
+    if !verification_response.status().is_success() {
+        println!("❌ [DELETE_ORPHAN] SPDK verification query failed with status: {}", verification_response.status());
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&DeleteOrphanedVolumeResponse {
+                success: false,
+                message: format!("SPDK verification query failed"),
+                deleted_volume: None,
+            }),
+            warp::http::StatusCode::BAD_GATEWAY
+        ));
+    }
+    
+    let verification_text = match verification_response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            println!("❌ [DELETE_ORPHAN] Failed to read verification response: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Failed to read verification response: {}", e),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ));
+        }
+    };
+    
+    let verification_info: serde_json::Value = match serde_json::from_str(&verification_text) {
+        Ok(info) => info,
+        Err(e) => {
+            println!("❌ [DELETE_ORPHAN] Failed to parse verification response: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Failed to parse verification response: {}", e),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ));
+        }
+    };
+    
+    // Find the volume in the bdev list
+    let mut found_volume = None;
+    let mut volume_size_gb = 0.0;
+    
+    if let Some(bdevs) = verification_info["result"].as_array() {
+        for bdev in bdevs {
+            if let Some(bdev_name) = bdev["name"].as_str() {
+                if bdev_name == request.volume_name || 
+                   (bdev.get("aliases").and_then(|a| a.as_array()).map_or(false, |aliases| 
+                       aliases.iter().any(|alias| alias.as_str() == Some(&request.volume_name)))) {
+                    found_volume = Some(bdev.clone());
+                    if let Some(num_blocks) = bdev["num_blocks"].as_u64() {
+                        volume_size_gb = (num_blocks * 512) as f64 / (1024.0 * 1024.0 * 1024.0);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    
+    let _volume_info = match found_volume {
+        Some(vol) => vol,
+        None => {
+            println!("⚠️ [DELETE_ORPHAN] Volume '{}' not found on node '{}' - may have been already deleted", 
+                request.volume_name, request.node);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Volume '{}' not found - may have been already deleted", request.volume_name),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::NOT_FOUND
+            ));
+        }
+    };
+    
+    // Now perform the actual deletion using bdev_lvol_delete
+    println!("🗑️ [DELETE_ORPHAN] Deleting SPDK logical volume '{}' on node '{}'", request.volume_name, request.node);
+    
+    let delete_response = match http_client
+        .post(rpc_url)
+        .json(&json!({
+            "method": "bdev_lvol_delete",
+            "params": {
+                "name": request.volume_name
+            },
+            "id": 1
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            println!("❌ [DELETE_ORPHAN] Failed to send delete request: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&DeleteOrphanedVolumeResponse {
+                    success: false,
+                    message: format!("Failed to send delete request: {}", e),
+                    deleted_volume: None,
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ));
+        }
+    };
+    
+    let delete_status = delete_response.status();
+    if delete_status.is_success() {
+        let deleted_info = DeletedVolumeInfo {
+            node: request.node.clone(),
+            volume_name: request.volume_name.clone(),
+            volume_uuid: request.volume_uuid.clone(),
+            size_gb: volume_size_gb,
+            deleted_at: chrono::Utc::now().to_rfc3339(),
+        };
+        
+        println!("✅ [DELETE_ORPHAN] Successfully deleted orphaned volume '{}' ({:.2}GB) on node '{}'", 
+            request.volume_name, volume_size_gb, request.node);
+        
+        Ok(warp::reply::with_status(
+            warp::reply::json(&DeleteOrphanedVolumeResponse {
+                success: true,
+                message: format!("Successfully deleted orphaned volume '{}' ({:.2}GB)", request.volume_name, volume_size_gb),
+                deleted_volume: Some(deleted_info),
+            }),
+            warp::http::StatusCode::OK
+        ))
+    } else {
+        let error_text = delete_response.text().await.unwrap_or_default();
+        println!("❌ [DELETE_ORPHAN] SPDK delete failed with status {}: {}", delete_status, error_text);
+        
+        Ok(warp::reply::with_status(
+            warp::reply::json(&DeleteOrphanedVolumeResponse {
+                success: false,
+                message: format!("SPDK delete failed: {}", error_text),
+                deleted_volume: None,
+            }),
+            warp::http::StatusCode::BAD_GATEWAY
+        ))
+    }
 }
 
 #[tokio::main]
@@ -377,6 +654,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(warp::get())
                 .and(state_filter.clone())
                 .and_then(get_snapshots_tree)
+        )
+        .or(
+            // DELETE /api/volumes/orphaned - Delete orphaned SPDK logical volumes
+            warp::path("volumes")
+                .and(warp::path("orphaned"))
+                .and(warp::delete())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(delete_orphaned_spdk_volume)
         )
     );
     
@@ -657,6 +943,12 @@ fn convert_volume_to_dashboard(volume: &SpdkVolume) -> DashboardVolume {
         target_port,
         raid_status,
         ublk_device,
+        // Default validation status - will be updated by validation process
+        spdk_validation_status: SpdkValidationStatus {
+            has_spdk_backing: true, // Assume true until validation proves otherwise
+            validation_message: None,
+            validation_severity: ValidationSeverity::Info,
+        },
     }
 }
 
@@ -722,6 +1014,8 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
         write_latency: status.io_stats.write_latency_us,
         brought_online: status.last_checked.clone(),
         provisioned_volumes,
+        // Default empty - will be populated by validation process
+        orphaned_spdk_volumes: Vec::new(),
     }
 }
 
@@ -913,7 +1207,242 @@ async fn enhance_with_spdk_metrics(
         }
     }
     
+    // NEW: Validate SPDK logical volumes against Kubernetes CRDs
+    match validate_spdk_volumes_against_crds(volumes, state).await {
+        Ok(validation_result) => {
+            println!("✅ [SPDK_VALIDATION] Volume validation completed successfully");
+            
+            // Apply validation results to volumes
+            apply_validation_results_to_dashboard(volumes, disks, &validation_result).await;
+            
+            if !validation_result.orphaned_spdk_volumes.is_empty() {
+                println!("⚠️ [SPDK_VALIDATION] Found {} orphaned SPDK volumes consuming storage", 
+                    validation_result.orphaned_spdk_volumes.len());
+                for orphan in &validation_result.orphaned_spdk_volumes {
+                    println!("   - Orphaned: {} on node {} (size: {} blocks)", 
+                        orphan.name, orphan.node, orphan.num_blocks);
+                }
+            }
+            if !validation_result.phantom_k8s_volumes.is_empty() {
+                println!("⚠️ [SPDK_VALIDATION] Found {} phantom Kubernetes volumes with no SPDK backing", 
+                    validation_result.phantom_k8s_volumes.len());
+                for phantom in &validation_result.phantom_k8s_volumes {
+                    println!("   - Phantom: {} (expected on node {})", phantom.volume_id, phantom.expected_node);
+                }
+            }
+        }
+        Err(e) => {
+            println!("⚠️ [SPDK_VALIDATION] Volume validation failed: {}", e);
+            // Continue without validation rather than failing entirely
+        }
+    }
+    
     Ok(())
+}
+
+/// Apply validation results to dashboard volumes and disks for frontend display
+async fn apply_validation_results_to_dashboard(
+    volumes: &mut [DashboardVolume],
+    disks: &mut [DashboardDisk],
+    validation_result: &VolumeValidationResult,
+) {
+    println!("🔄 [SPDK_VALIDATION] Applying validation results to dashboard data");
+    
+    // Update phantom volumes (K8s exists, SPDK missing)
+    for phantom in &validation_result.phantom_k8s_volumes {
+        for volume in volumes.iter_mut() {
+            if volume.id == phantom.volume_id {
+                volume.spdk_validation_status = SpdkValidationStatus {
+                    has_spdk_backing: false,
+                    validation_message: Some(format!(
+                        "⚠️ Volume exists in Kubernetes but no SPDK backing found on node '{}'", 
+                        phantom.expected_node
+                    )),
+                    validation_severity: ValidationSeverity::Error,
+                };
+                println!("🔴 [SPDK_VALIDATION] Marked volume '{}' as phantom (no SPDK backing)", volume.id);
+                break;
+            }
+        }
+    }
+    
+    // Update disk orphaned volumes (SPDK exists, K8s missing)
+    for disk in disks.iter_mut() {
+        let orphans_on_disk: Vec<OrphanedVolumeInfo> = validation_result.orphaned_spdk_volumes
+            .iter()
+            .filter(|orphan| orphan.node == disk.node)
+            .map(|orphan| OrphanedVolumeInfo {
+                spdk_volume_name: orphan.name.clone(),
+                spdk_volume_uuid: orphan.uuid.clone(),
+                size_blocks: orphan.num_blocks,
+                size_gb: (orphan.num_blocks * 512) as f64 / (1024.0 * 1024.0 * 1024.0), // Assuming 512-byte blocks
+                orphaned_since: chrono::Utc::now().to_rfc3339(),
+            })
+            .collect();
+        
+        if !orphans_on_disk.is_empty() {
+            disk.orphaned_spdk_volumes = orphans_on_disk;
+            println!("🟡 [SPDK_VALIDATION] Added {} orphaned volumes to disk '{}' on node '{}'", 
+                disk.orphaned_spdk_volumes.len(), disk.id, disk.node);
+        }
+    }
+    
+    println!("✅ [SPDK_VALIDATION] Applied validation results: {} phantom volumes, {} orphaned volumes", 
+        validation_result.phantom_k8s_volumes.len(), 
+        validation_result.orphaned_spdk_volumes.len());
+}
+
+/// Validate SPDK logical volumes against Kubernetes CRDs using bdev_lvol_get_lvols
+async fn validate_spdk_volumes_against_crds(
+    k8s_volumes: &[DashboardVolume],
+    state: &AppState,
+) -> Result<VolumeValidationResult, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 [SPDK_VALIDATION] Starting validation of {} Kubernetes volumes against SPDK reality", k8s_volumes.len());
+    
+    let mut orphaned_spdk_volumes = Vec::new();
+    let mut phantom_k8s_volumes = Vec::new();
+    
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let http_client = HttpClient::new();
+    
+    // Step 1: Collect all SPDK logical volumes from all nodes
+    let mut all_spdk_volumes = Vec::new();
+    
+    for (node_name, rpc_url) in spdk_nodes.iter() {
+        println!("🌐 [SPDK_VALIDATION] Querying logical volumes on node '{}'", node_name);
+        
+        // First get logical volume stores on this node
+        let lvs_response = http_client
+            .post(rpc_url)
+            .json(&json!({
+                "method": "bdev_lvol_get_lvstores",
+                "params": {},
+                "id": 1
+            }))
+            .send()
+            .await?;
+            
+        if !lvs_response.status().is_success() {
+            println!("⚠️ [SPDK_VALIDATION] LVS query to {} failed with status: {}", node_name, lvs_response.status());
+            continue;
+        }
+        
+        let lvs_text = lvs_response.text().await?;
+        let lvs_info: serde_json::Value = serde_json::from_str(&lvs_text)?;
+        
+        if let Some(lvs_list) = lvs_info["result"].as_array() {
+            println!("🔍 [SPDK_VALIDATION] Found {} logical volume stores on {}", lvs_list.len(), node_name);
+            
+            for lvs in lvs_list {
+                if let (Some(lvs_name), Some(lvs_uuid)) = (lvs["name"].as_str(), lvs["uuid"].as_str()) {
+                    println!("🔍 [SPDK_VALIDATION] Querying volumes in LVS '{}' (UUID: {})", lvs_name, lvs_uuid);
+                    
+                    // Now query logical volumes in this LVS using bdev_lvol_get_lvols
+                    let lvols_response = http_client
+                        .post(rpc_url)
+                        .json(&json!({
+                            "method": "bdev_lvol_get_lvols",
+                            "params": {
+                                "lvs_name": lvs_name
+                            },
+                            "id": 1
+                        }))
+                        .send()
+                        .await?;
+                        
+                    if lvols_response.status().is_success() {
+                        let lvols_text = lvols_response.text().await?;
+                        let lvols_info: serde_json::Value = serde_json::from_str(&lvols_text)?;
+                        
+                        if let Some(lvols_list) = lvols_info["result"].as_array() {
+                            println!("✅ [SPDK_VALIDATION] Found {} logical volumes in LVS '{}' on {}", 
+                                lvols_list.len(), lvs_name, node_name);
+                                
+                            for lvol in lvols_list {
+                                if let (Some(vol_name), Some(vol_uuid), Some(num_blocks)) = (
+                                    lvol["name"].as_str(),
+                                    lvol["uuid"].as_str(), 
+                                    lvol["num_blocks"].as_u64()
+                                ) {
+                                    all_spdk_volumes.push(SpdkVolumeInfo {
+                                        name: vol_name.to_string(),
+                                        node: node_name.clone(),
+                                        lvs_name: lvs_name.to_string(),
+                                        num_blocks,
+                                        uuid: vol_uuid.to_string(),
+                                    });
+                                    println!("📋 [SPDK_VALIDATION] SPDK volume: {} (UUID: {}, {} blocks) on {}", 
+                                        vol_name, vol_uuid, num_blocks, node_name);
+                                }
+                            }
+                        }
+                    } else {
+                        println!("⚠️ [SPDK_VALIDATION] Failed to query volumes in LVS '{}': {}", 
+                            lvs_name, lvols_response.status());
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("📊 [SPDK_VALIDATION] Total SPDK volumes found: {}", all_spdk_volumes.len());
+    
+    // Step 2: Find phantom Kubernetes volumes (exist in K8s but not in SPDK)
+    for k8s_volume in k8s_volumes {
+        let mut found_in_spdk = false;
+        let mut expected_node = String::new();
+        let expected_uuid = String::new();
+        
+        // Extract expected SPDK details from K8s volume
+        for replica in &k8s_volume.replica_statuses {
+            expected_node = replica.node.clone();
+            // Try to find corresponding SPDK volume by matching volume ID patterns
+            for spdk_volume in &all_spdk_volumes {
+                if spdk_volume.name.contains(&k8s_volume.id) || 
+                   k8s_volume.id.contains(&spdk_volume.uuid) ||
+                   spdk_volume.name.contains("vol_") && spdk_volume.name.contains(&k8s_volume.id.replace("pvc-", "")) {
+                    found_in_spdk = true;
+                    break;
+                }
+            }
+            break; // Just check first replica for now
+        }
+        
+        if !found_in_spdk {
+            phantom_k8s_volumes.push(PhantomVolumeInfo {
+                volume_id: k8s_volume.id.clone(),
+                expected_node,
+                expected_lvol_uuid: expected_uuid,
+            });
+        }
+    }
+    
+    // Step 3: Find orphaned SPDK volumes (exist in SPDK but not in K8s)
+    for spdk_volume in &all_spdk_volumes {
+        let mut found_in_k8s = false;
+        
+        for k8s_volume in k8s_volumes {
+            if spdk_volume.name.contains(&k8s_volume.id) || 
+               k8s_volume.id.contains(&spdk_volume.uuid) ||
+               spdk_volume.name.contains("vol_") && spdk_volume.name.contains(&k8s_volume.id.replace("pvc-", "")) {
+                found_in_k8s = true;
+                break;
+            }
+        }
+        
+        if !found_in_k8s {
+            orphaned_spdk_volumes.push(spdk_volume.clone());
+        }
+    }
+    
+    println!("📊 [SPDK_VALIDATION] Validation summary:");
+    println!("   - Orphaned SPDK volumes: {}", orphaned_spdk_volumes.len());
+    println!("   - Phantom K8s volumes: {}", phantom_k8s_volumes.len());
+    
+    Ok(VolumeValidationResult {
+        orphaned_spdk_volumes,
+        phantom_k8s_volumes,
+    })
 }
 
 fn update_volume_with_live_raid_status(volume: &mut DashboardVolume, raid_bdev: &serde_json::Value) {

@@ -35,6 +35,15 @@ export interface Volume {
     id: number;
     device_path: string;  // e.g., "/dev/ublkb42"
   };
+  
+  // SPDK validation status for frontend display
+  spdk_validation_status: SpdkValidationStatus;
+}
+
+export interface SpdkValidationStatus {
+  has_spdk_backing: boolean;
+  validation_message?: string;
+  validation_severity: 'info' | 'warning' | 'error';
 }
 
 // --- End of new/updated interfaces ---
@@ -119,6 +128,8 @@ export interface Disk {
   write_latency: number;
   brought_online: string;
   provisioned_volumes: ProvisionedVolume[];
+  // Orphaned SPDK volumes on this disk
+  orphaned_spdk_volumes: OrphanedVolumeInfo[];
 }
 
 export interface ProvisionedVolume {
@@ -128,6 +139,14 @@ export interface ProvisionedVolume {
   provisioned_at: string;
   replica_type: string;
   status: string;
+}
+
+export interface OrphanedVolumeInfo {
+  spdk_volume_name: string;
+  spdk_volume_uuid: string;
+  size_blocks: number;
+  size_gb: number;
+  orphaned_since: string;
 }
 
 export interface DashboardData {
