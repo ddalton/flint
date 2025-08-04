@@ -253,9 +253,9 @@ impl NodeService {
             
             if replica.node == self.driver.node_id {
                 // Local replica: Direct ublk exposure
-                if let Some(_lvol_uuid) = &replica.lvol_uuid {
-                    // Use the volume name directly - this matches SPDK's actual bdev naming
-                    let lvol_bdev = format!("vol_{}", volume.spec.volume_id);
+                if let Some(lvol_uuid) = &replica.lvol_uuid {
+                    // Use the logical volume UUID directly - this matches RAID behavior and SPDK's actual bdev naming
+                    let lvol_bdev = lvol_uuid.clone();
                     
                     // Create ublk device for lvol
                     self.driver.create_ublk_device(&lvol_bdev, ublk_id).await
