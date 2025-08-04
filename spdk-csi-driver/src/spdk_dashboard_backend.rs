@@ -1668,7 +1668,9 @@ async fn get_volume_spdk_details(
 
 /// Delete a raw SPDK logical volume by UUID
 async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    println!("🗑️ [DELETE_RAW] Received request to delete raw SPDK volume '{}'", volume_uuid);
+    println!("🗑️ [DELETE_RAW] ========== STARTING DELETE REQUEST ===========");
+    println!("🗑️ [DELETE_RAW] Volume UUID to delete: '{}'", volume_uuid);
+    println!("🗑️ [DELETE_RAW] Timestamp: {}", chrono::Utc::now().to_rfc3339());
     
     // First, find which node has this volume
     let raw_volumes = match get_raw_spdk_volumes(&state).await {
@@ -1732,22 +1734,38 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
     };
     
     // Delete the volume using bdev_lvol_delete with UUID (SPDK will try UUID lookup)
-    println!("🗑️ [DELETE_RAW] Attempting to delete volume with UUID: '{}'", target_volume.uuid);
+    println!("🗑️ [DELETE_RAW] Attempting SPDK deletion:");
+    println!("🗑️ [DELETE_RAW]   Volume UUID: '{}'", target_volume.uuid);
+    println!("🗑️ [DELETE_RAW]   Volume Name: '{}'", target_volume.name);
+    println!("🗑️ [DELETE_RAW]   Target Node: '{}'", target_volume.node);
+    println!("🗑️ [DELETE_RAW]   RPC URL: {}", rpc_url);
+    
+    let rpc_payload = json!({
+        "method": "bdev_lvol_delete",
+        "params": { "name": target_volume.uuid },
+        "id": 1
+    });
+    println!("🗑️ [DELETE_RAW]   RPC Payload: {}", rpc_payload);
     
     let http_client = HttpClient::new();
     let delete_response = http_client
         .post(rpc_url)
-        .json(&json!({
-            "method": "bdev_lvol_delete",
-            "params": { "name": target_volume.uuid },  // Just UUID - SPDK will parse and lookup
-            "id": 1
-        }))
+        .json(&rpc_payload)
         .send()
         .await;
         
     match delete_response {
         Ok(response) => {
-            if response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            
+            println!("🗑️ [DELETE_RAW] HTTP Response received:");
+            println!("🗑️ [DELETE_RAW]   Status: {}", status);
+            println!("🗑️ [DELETE_RAW]   Headers: {:?}", headers);
+            
+            if status.is_success() {
+                let response_text = response.text().await.unwrap_or_else(|_| "No response body".to_string());
+                println!("🗑️ [DELETE_RAW]   Response Body: {}", response_text);
                 println!("✅ [DELETE_RAW] Successfully deleted volume '{}' from node '{}'", 
                     target_volume.name, target_volume.node);
                 
@@ -1770,8 +1788,11 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
                     warp::http::StatusCode::OK
                 ))
             } else {
+                let status = response.status();
                 let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                println!("❌ [DELETE_RAW] SPDK deletion failed: {}", error_text);
+                println!("❌ [DELETE_RAW] SPDK deletion failed:");
+                println!("❌ [DELETE_RAW]   Status: {}", status);
+                println!("❌ [DELETE_RAW]   Error Body: {}", error_text);
                 Ok(warp::reply::with_status(
                     warp::reply::json(&json!({
                         "success": false,
@@ -1782,7 +1803,9 @@ async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<
             }
         }
         Err(e) => {
-            println!("❌ [DELETE_RAW] Network error during deletion: {}", e);
+            println!("❌ [DELETE_RAW] Network/HTTP error during deletion:");
+            println!("❌ [DELETE_RAW]   Error: {}", e);
+            println!("❌ [DELETE_RAW]   Error Debug: {:?}", e);
             Ok(warp::reply::with_status(
                 warp::reply::json(&json!({
                     "success": false,

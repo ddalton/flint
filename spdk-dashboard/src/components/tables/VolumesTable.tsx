@@ -201,30 +201,27 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     
     setIsDeleting(true);
     
+    // Close dialog immediately - deletion is asynchronous
+    setShowDeleteDialog(false);
+    setVolumeToDelete(null);
+    setDeleteConfirmText('');
+    
     try {
       const response = await fetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
         method: 'DELETE'
       });
       
       if (response.ok) {
-        await response.json(); // Parse response but don't need the result
-        console.log(`Volume "${volumeToDelete.name}" deleted successfully`);
-        // Refresh dashboard data
-        onRefresh?.();
-        // Close dialog
-        setShowDeleteDialog(false);
-        setVolumeToDelete(null);
-        setDeleteConfirmText('');
+        console.log(`Volume "${volumeToDelete.name}" deletion initiated successfully`);
       } else {
-        const error = await response.json();
-        console.error(`Failed to delete volume: ${error.message || 'Unknown error'}`);
-        // Could add toast notification here instead of alert
+        console.error(`Failed to initiate volume deletion: ${response.status}`);
       }
     } catch (error) {
-      console.error('Error deleting volume:', error);
-      // Could add toast notification here instead of alert
+      console.error('Error initiating volume deletion:', error);
     } finally {
       setIsDeleting(false);
+      // Refresh dashboard data to show updated state
+      onRefresh?.();
     }
   };
 
@@ -656,6 +653,19 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     This will permanently delete the SPDK logical volume and free up storage space. 
                     This action cannot be undone.
                   </p>
+                </div>
+                
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                  <div className="flex items-center">
+                    <Info className="w-5 h-5 text-blue-500 mr-2" />
+                    <span className="text-blue-800 font-medium">Deletion Process</span>
+                  </div>
+                  <div className="text-blue-700 text-sm mt-1 space-y-1">
+                    <p>• Volume entry will be removed from the list immediately</p>
+                    <p>• Storage space reclamation happens in the background</p>
+                    <p>• Large volumes may take several minutes to fully reclaim space</p>
+                    <p>• LVS free space will update once reclamation completes</p>
+                  </div>
                 </div>
                 
                 <div className="bg-gray-50 rounded-lg p-4 space-y-2">
