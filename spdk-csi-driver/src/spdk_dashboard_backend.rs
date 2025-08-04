@@ -209,6 +209,17 @@ struct ProvisionedVolume {
 }
 
 #[derive(Serialize, Debug, Clone)]
+struct RawSpdkVolume {
+    name: String,
+    uuid: String,
+    node: String,
+    lvs_name: String,
+    size_blocks: u64,
+    size_gb: f64,
+    is_managed: bool, // Whether this volume has a corresponding SpdkVolume CRD
+}
+
+#[derive(Serialize, Debug, Clone)]
 struct OrphanedVolumeInfo {
     spdk_volume_name: String,
     spdk_volume_uuid: String,
@@ -219,7 +230,8 @@ struct OrphanedVolumeInfo {
 
 #[derive(Serialize, Debug)]
 struct DashboardData {
-    volumes: Vec<DashboardVolume>,
+    volumes: Vec<DashboardVolume>,        // Managed volumes (with SpdkVolume CRDs)
+    raw_volumes: Vec<RawSpdkVolume>,      // Unmanaged SPDK volumes (orphaned/leftover)
     disks: Vec<DashboardDisk>,
     nodes: Vec<String>,
 }
@@ -656,7 +668,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_snapshots_tree)
         )
         .or(
-            // DELETE /api/volumes/orphaned - Delete orphaned SPDK logical volumes
+            // Get raw SPDK volumes (unmanaged volumes)
+            warp::path("spdk")
+                .and(warp::path("volumes"))
+                .and(warp::path("raw"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(get_raw_spdk_volumes_endpoint)
+        )
+        .or(
+            // DELETE /api/spdk/volumes/raw/{uuid} - Delete unmanaged SPDK logical volume by UUID
+            warp::path("spdk")
+                .and(warp::path("volumes"))
+                .and(warp::path("raw"))
+                .and(warp::path::param::<String>()) // volume UUID
+                .and(warp::delete())
+                .and(state_filter.clone())
+                .and_then(delete_raw_spdk_volume)
+        )
+        .or(
+            // DELETE /api/volumes/orphaned - Delete orphaned SPDK logical volumes (legacy endpoint)
             warp::path("volumes")
                 .and(warp::path("orphaned"))
                 .and(warp::delete())
@@ -787,6 +818,7 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
     
     let dashboard_data = DashboardData {
         volumes: dashboard_volumes,
+        raw_volumes: raw_spdk_volumes,
         disks: dashboard_disks,
         nodes: nodes.into_iter().collect(),
     };
@@ -1207,35 +1239,33 @@ async fn enhance_with_spdk_metrics(
         }
     }
     
-    // NEW: Validate SPDK logical volumes against Kubernetes CRDs
-    match validate_spdk_volumes_against_crds(volumes, state).await {
-        Ok(validation_result) => {
-            println!("✅ [SPDK_VALIDATION] Volume validation completed successfully");
-            
-            // Apply validation results to volumes
-            apply_validation_results_to_dashboard(volumes, disks, &validation_result).await;
-            
-            if !validation_result.orphaned_spdk_volumes.is_empty() {
-                println!("⚠️ [SPDK_VALIDATION] Found {} orphaned SPDK volumes consuming storage", 
-                    validation_result.orphaned_spdk_volumes.len());
-                for orphan in &validation_result.orphaned_spdk_volumes {
-                    println!("   - Orphaned: {} on node {} (size: {} blocks)", 
-                        orphan.name, orphan.node, orphan.num_blocks);
+    // Collect raw SPDK volumes for the dashboard
+    let raw_spdk_volumes = match get_raw_spdk_volumes(state).await {
+        Ok(mut raw_volumes) => {
+            // Check which volumes are managed against the managed volume list
+            for raw_vol in &mut raw_volumes {
+                for managed_vol in &volumes_list.items {
+                    if raw_vol.name.contains(&managed_vol.spec.volume_id) ||
+                       managed_vol.spec.volume_id.contains(&raw_vol.uuid) ||
+                       raw_vol.name.contains("vol_") && raw_vol.name.contains(&managed_vol.spec.volume_id.replace("pvc-", "")) {
+                        raw_vol.is_managed = true;
+                        break;
+                    }
                 }
             }
-            if !validation_result.phantom_k8s_volumes.is_empty() {
-                println!("⚠️ [SPDK_VALIDATION] Found {} phantom Kubernetes volumes with no SPDK backing", 
-                    validation_result.phantom_k8s_volumes.len());
-                for phantom in &validation_result.phantom_k8s_volumes {
-                    println!("   - Phantom: {} (expected on node {})", phantom.volume_id, phantom.expected_node);
-                }
-            }
+            // Return only unmanaged volumes for the dashboard
+            raw_volumes.into_iter().filter(|v| !v.is_managed).collect()
         }
         Err(e) => {
-            println!("⚠️ [SPDK_VALIDATION] Volume validation failed: {}", e);
-            // Continue without validation rather than failing entirely
+            println!("⚠️ [DASHBOARD_REFRESH] Failed to get raw SPDK volumes: {}", e);
+            Vec::new()
         }
-    }
+    };
+    
+    println!("✅ [DASHBOARD_REFRESH] Found {} unmanaged SPDK volumes", raw_spdk_volumes.len());
+    
+    // Validation removed - raw SPDK volumes are now included in dashboard data
+    println!("✅ [DASHBOARD_REFRESH] SPDK metrics enhancement completed successfully");
     
     Ok(())
 }
@@ -1292,157 +1322,257 @@ async fn apply_validation_results_to_dashboard(
         validation_result.orphaned_spdk_volumes.len());
 }
 
-/// Validate SPDK logical volumes against Kubernetes CRDs using bdev_lvol_get_lvols
-async fn validate_spdk_volumes_against_crds(
-    k8s_volumes: &[DashboardVolume],
+/// Get raw SPDK logical volumes from all nodes
+async fn get_raw_spdk_volumes(
     state: &AppState,
-) -> Result<VolumeValidationResult, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 [SPDK_VALIDATION] Starting validation of {} Kubernetes volumes against SPDK reality", k8s_volumes.len());
-    
-    let mut orphaned_spdk_volumes = Vec::new();
-    let mut phantom_k8s_volumes = Vec::new();
+) -> Result<Vec<RawSpdkVolume>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 [RAW_SPDK] Collecting raw SPDK logical volumes from all nodes");
     
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
-    
-    // Step 1: Collect all SPDK logical volumes from all nodes
-    let mut all_spdk_volumes = Vec::new();
+    let mut raw_volumes = Vec::new();
     
     for (node_name, rpc_url) in spdk_nodes.iter() {
-        println!("🌐 [SPDK_VALIDATION] Querying logical volumes on node '{}'", node_name);
+        println!("🌐 [RAW_SPDK] Querying logical volumes on node '{}'", node_name);
         
-        // First get logical volume stores on this node
-        let lvs_response = http_client
+        let lvols_response = http_client
             .post(rpc_url)
             .json(&json!({
-                "method": "bdev_lvol_get_lvstores",
+                "method": "bdev_lvol_get_lvols",
                 "params": {},
                 "id": 1
             }))
             .send()
             .await?;
             
-        if !lvs_response.status().is_success() {
-            println!("⚠️ [SPDK_VALIDATION] LVS query to {} failed with status: {}", node_name, lvs_response.status());
+        if !lvols_response.status().is_success() {
+            println!("⚠️ [RAW_SPDK] Query to {} failed with status: {}", node_name, lvols_response.status());
             continue;
         }
         
-        let lvs_text = lvs_response.text().await?;
-        let lvs_info: serde_json::Value = serde_json::from_str(&lvs_text)?;
+        let lvols_text = lvols_response.text().await?;
+        let lvols_info: serde_json::Value = serde_json::from_str(&lvols_text)?;
         
-        if let Some(lvs_list) = lvs_info["result"].as_array() {
-            println!("🔍 [SPDK_VALIDATION] Found {} logical volume stores on {}", lvs_list.len(), node_name);
+        let lvols_list = if let Some(result_array) = lvols_info["result"].as_array() {
+            result_array
+        } else if let Some(direct_array) = lvols_info.as_array() {
+            direct_array
+        } else {
+            println!("⚠️ [RAW_SPDK] Unexpected response format from {}: {}", node_name, lvols_text);
+            continue;
+        };
+        
+        println!("✅ [RAW_SPDK] Found {} logical volumes on {}", lvols_list.len(), node_name);
             
-            for lvs in lvs_list {
-                if let (Some(lvs_name), Some(lvs_uuid)) = (lvs["name"].as_str(), lvs["uuid"].as_str()) {
-                    println!("🔍 [SPDK_VALIDATION] Querying volumes in LVS '{}' (UUID: {})", lvs_name, lvs_uuid);
+        for lvol in lvols_list {
+            if let (Some(vol_name), Some(vol_uuid), Some(lvs_info)) = (
+                lvol["name"].as_str(),
+                lvol["uuid"].as_str(),
+                lvol["lvs"].as_object()
+            ) {
+                let lvs_name = lvs_info.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
                     
-                    // Now query logical volumes in this LVS using bdev_lvol_get_lvols
-                    let lvols_response = http_client
-                        .post(rpc_url)
-                        .json(&json!({
-                            "method": "bdev_lvol_get_lvols",
-                            "params": {
-                                "lvs_name": lvs_name
-                            },
-                            "id": 1
-                        }))
-                        .send()
-                        .await?;
-                        
-                    if lvols_response.status().is_success() {
-                        let lvols_text = lvols_response.text().await?;
-                        let lvols_info: serde_json::Value = serde_json::from_str(&lvols_text)?;
-                        
-                        if let Some(lvols_list) = lvols_info["result"].as_array() {
-                            println!("✅ [SPDK_VALIDATION] Found {} logical volumes in LVS '{}' on {}", 
-                                lvols_list.len(), lvs_name, node_name);
-                                
-                            for lvol in lvols_list {
-                                if let (Some(vol_name), Some(vol_uuid), Some(num_blocks)) = (
-                                    lvol["name"].as_str(),
-                                    lvol["uuid"].as_str(), 
-                                    lvol["num_blocks"].as_u64()
-                                ) {
-                                    all_spdk_volumes.push(SpdkVolumeInfo {
-                                        name: vol_name.to_string(),
-                                        node: node_name.clone(),
-                                        lvs_name: lvs_name.to_string(),
-                                        num_blocks,
-                                        uuid: vol_uuid.to_string(),
-                                    });
-                                    println!("📋 [SPDK_VALIDATION] SPDK volume: {} (UUID: {}, {} blocks) on {}", 
-                                        vol_name, vol_uuid, num_blocks, node_name);
-                                }
-                            }
+                let num_blocks = lvol["num_blocks"].as_u64()
+                    .or_else(|| lvol["size_in_bytes"].as_u64().map(|bytes| bytes / 512))
+                    .unwrap_or(0);
+                
+                let size_gb = (num_blocks * 512) as f64 / (1024.0 * 1024.0 * 1024.0);
+                
+                raw_volumes.push(RawSpdkVolume {
+                    name: vol_name.to_string(),
+                    uuid: vol_uuid.to_string(),
+                    node: node_name.clone(),
+                    lvs_name: lvs_name.to_string(),
+                    size_blocks: num_blocks,
+                    size_gb,
+                    is_managed: false, // Will be updated below
+                });
+                
+                println!("📋 [RAW_SPDK] Raw volume: {} ({:.2}GB) on {}", vol_name, size_gb, node_name);
+            }
+        }
+    }
+    
+    println!("📊 [RAW_SPDK] Total raw SPDK volumes found: {}", raw_volumes.len());
+    Ok(raw_volumes)
+}
+
+/// Delete a raw SPDK logical volume by UUID
+async fn delete_raw_spdk_volume(volume_uuid: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🗑️ [DELETE_RAW] Received request to delete raw SPDK volume '{}'", volume_uuid);
+    
+    // First, find which node has this volume
+    let raw_volumes = match get_raw_spdk_volumes(&state).await {
+        Ok(volumes) => volumes,
+        Err(e) => {
+            println!("❌ [DELETE_RAW] Failed to get raw volumes: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&json!({
+                    "success": false,
+                    "message": format!("Failed to query volumes: {}", e)
+                })),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ));
+        }
+    };
+    
+    // Find the target volume
+    let target_volume = match raw_volumes.iter().find(|v| v.uuid == volume_uuid) {
+        Some(vol) => vol,
+        None => {
+            println!("❌ [DELETE_RAW] Volume '{}' not found", volume_uuid);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&json!({
+                    "success": false,
+                    "message": format!("Volume '{}' not found", volume_uuid)
+                })),
+                warp::http::StatusCode::NOT_FOUND
+            ));
+        }
+    };
+    
+    // Check if volume is managed - don't allow deletion of managed volumes
+    if target_volume.is_managed {
+        println!("❌ [DELETE_RAW] Volume '{}' is managed by Kubernetes - use PVC deletion instead", volume_uuid);
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&json!({
+                "success": false,
+                "message": "Cannot delete managed volume - delete the PVC instead"
+            })),
+            warp::http::StatusCode::BAD_REQUEST
+        ));
+    }
+    
+    println!("✅ [DELETE_RAW] Found unmanaged volume '{}' on node '{}' - proceeding with deletion", 
+        target_volume.name, target_volume.node);
+    
+    // Get the RPC URL for the target node
+    let spdk_nodes = state.spdk_nodes.read().await;
+    let rpc_url = match spdk_nodes.get(&target_volume.node) {
+        Some(url) => url,
+        None => {
+            println!("❌ [DELETE_RAW] Node '{}' not found in SPDK nodes", target_volume.node);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&json!({
+                    "success": false,
+                    "message": format!("Node '{}' not found", target_volume.node)
+                })),
+                warp::http::StatusCode::NOT_FOUND
+            ));
+        }
+    };
+    
+    // Delete the volume using bdev_lvol_delete
+    let http_client = HttpClient::new();
+    let delete_response = http_client
+        .post(rpc_url)
+        .json(&json!({
+            "method": "bdev_lvol_delete",
+            "params": {
+                "name": target_volume.name  // Delete by name, not UUID
+            },
+            "id": 1
+        }))
+        .send()
+        .await;
+        
+    match delete_response {
+        Ok(response) => {
+            if response.status().is_success() {
+                println!("✅ [DELETE_RAW] Successfully deleted volume '{}' from node '{}'", 
+                    target_volume.name, target_volume.node);
+                
+                // Force refresh dashboard data to update UI
+                if let Err(e) = refresh_dashboard_data(&state).await {
+                    println!("⚠️ [DELETE_RAW] Failed to refresh dashboard after deletion: {}", e);
+                }
+                
+                Ok(warp::reply::json(&json!({
+                    "success": true,
+                    "message": format!("Volume '{}' deleted successfully", target_volume.name),
+                    "deleted_volume": {
+                        "name": target_volume.name,
+                        "uuid": target_volume.uuid,
+                        "node": target_volume.node,
+                        "size_gb": target_volume.size_gb
+                    }
+                })))
+            } else {
+                let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                println!("❌ [DELETE_RAW] SPDK deletion failed: {}", error_text);
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({
+                        "success": false,
+                        "message": format!("SPDK deletion failed: {}", error_text)
+                    })),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR
+                ))
+            }
+        }
+        Err(e) => {
+            println!("❌ [DELETE_RAW] Network error during deletion: {}", e);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&json!({
+                    "success": false,
+                    "message": format!("Network error: {}", e)
+                })),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ))
+        }
+    }
+}
+
+/// Endpoint to get raw SPDK volumes with management status
+async fn get_raw_spdk_volumes_endpoint(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    match get_raw_spdk_volumes(&state).await {
+        Ok(mut raw_volumes) => {
+            // Check which volumes are managed by getting SpdkVolume CRDs
+            let spdk_volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+            
+            if let Ok(managed_volumes) = spdk_volumes_api.list(&ListParams::default()).await {
+                // Mark volumes as managed if they have corresponding CRDs
+                for raw_vol in &mut raw_volumes {
+                    for managed_vol in &managed_volumes.items {
+                        // Check if this raw volume corresponds to a managed volume
+                        if raw_vol.name.contains(&managed_vol.spec.volume_id) ||
+                           managed_vol.spec.volume_id.contains(&raw_vol.uuid) ||
+                           raw_vol.name.contains("vol_") && raw_vol.name.contains(&managed_vol.spec.volume_id.replace("pvc-", "")) {
+                            raw_vol.is_managed = true;
+                            break;
                         }
-                    } else {
-                        println!("⚠️ [SPDK_VALIDATION] Failed to query volumes in LVS '{}': {}", 
-                            lvs_name, lvols_response.status());
                     }
                 }
             }
-        }
-    }
-    
-    println!("📊 [SPDK_VALIDATION] Total SPDK volumes found: {}", all_spdk_volumes.len());
-    
-    // Step 2: Find phantom Kubernetes volumes (exist in K8s but not in SPDK)
-    for k8s_volume in k8s_volumes {
-        let mut found_in_spdk = false;
-        let mut expected_node = String::new();
-        let expected_uuid = String::new();
-        
-        // Extract expected SPDK details from K8s volume
-        for replica in &k8s_volume.replica_statuses {
-            expected_node = replica.node.clone();
-            // Try to find corresponding SPDK volume by matching volume ID patterns
-            for spdk_volume in &all_spdk_volumes {
-                if spdk_volume.name.contains(&k8s_volume.id) || 
-                   k8s_volume.id.contains(&spdk_volume.uuid) ||
-                   spdk_volume.name.contains("vol_") && spdk_volume.name.contains(&k8s_volume.id.replace("pvc-", "")) {
-                    found_in_spdk = true;
-                    break;
+            
+            // Separate managed and unmanaged volumes
+            let managed_volumes: Vec<_> = raw_volumes.iter().filter(|v| v.is_managed).cloned().collect();
+            let unmanaged_volumes: Vec<_> = raw_volumes.iter().filter(|v| !v.is_managed).cloned().collect();
+            
+            println!("📊 [RAW_SPDK] Returning {} managed volumes, {} unmanaged volumes", 
+                managed_volumes.len(), unmanaged_volumes.len());
+            
+            Ok(warp::reply::json(&json!({
+                "managed_volumes": managed_volumes,
+                "unmanaged_volumes": unmanaged_volumes,
+                "total_volumes": raw_volumes.len(),
+                "summary": {
+                    "managed_count": managed_volumes.len(),
+                    "unmanaged_count": unmanaged_volumes.len(),
+                    "total_size_gb": raw_volumes.iter().map(|v| v.size_gb).sum::<f64>()
                 }
-            }
-            break; // Just check first replica for now
+            })))
         }
-        
-        if !found_in_spdk {
-            phantom_k8s_volumes.push(PhantomVolumeInfo {
-                volume_id: k8s_volume.id.clone(),
-                expected_node,
-                expected_lvol_uuid: expected_uuid,
-            });
-        }
-    }
-    
-    // Step 3: Find orphaned SPDK volumes (exist in SPDK but not in K8s)
-    for spdk_volume in &all_spdk_volumes {
-        let mut found_in_k8s = false;
-        
-        for k8s_volume in k8s_volumes {
-            if spdk_volume.name.contains(&k8s_volume.id) || 
-               k8s_volume.id.contains(&spdk_volume.uuid) ||
-               spdk_volume.name.contains("vol_") && spdk_volume.name.contains(&k8s_volume.id.replace("pvc-", "")) {
-                found_in_k8s = true;
-                break;
-            }
-        }
-        
-        if !found_in_k8s {
-            orphaned_spdk_volumes.push(spdk_volume.clone());
+        Err(e) => {
+            println!("❌ [RAW_SPDK] Failed to get raw volumes: {}", e);
+            Ok(warp::reply::json(&json!({
+                "error": format!("Failed to get raw SPDK volumes: {}", e),
+                "managed_volumes": [],
+                "unmanaged_volumes": []
+            })))
         }
     }
-    
-    println!("📊 [SPDK_VALIDATION] Validation summary:");
-    println!("   - Orphaned SPDK volumes: {}", orphaned_spdk_volumes.len());
-    println!("   - Phantom K8s volumes: {}", phantom_k8s_volumes.len());
-    
-    Ok(VolumeValidationResult {
-        orphaned_spdk_volumes,
-        phantom_k8s_volumes,
-    })
 }
 
 fn update_volume_with_live_raid_status(volume: &mut DashboardVolume, raid_bdev: &serde_json::Value) {
@@ -1556,6 +1686,7 @@ async fn get_dashboard_data(state: AppState) -> Result<impl warp::Reply, warp::R
     } else {
         let empty_data = DashboardData {
             volumes: vec![],
+            raw_volumes: vec![],
             disks: vec![],
             nodes: vec![],
         };

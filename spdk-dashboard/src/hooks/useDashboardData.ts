@@ -38,6 +38,9 @@ export interface Volume {
   
   // SPDK validation status for frontend display
   spdk_validation_status: SpdkValidationStatus;
+  
+  // PV/PVC information for managed volumes
+  pvc_info?: PvcInfo;
 }
 
 export interface SpdkValidationStatus {
@@ -149,8 +152,29 @@ export interface OrphanedVolumeInfo {
   orphaned_since: string;
 }
 
+export interface RawSpdkVolume {
+  name: string;
+  uuid: string;
+  node: string;
+  lvs_name: string;
+  size_blocks: number;
+  size_gb: number;
+  is_managed: boolean;
+}
+
+export interface PvcInfo {
+  pvc_name: string;
+  pvc_namespace: string;
+  pv_name: string;
+  storage_class: string;
+  access_modes: string[];
+  claim_status: string;
+  created_at: string;
+}
+
 export interface DashboardData {
   volumes: Volume[];
+  raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
 }
@@ -163,6 +187,7 @@ export interface DashboardStats {
   faultedVolumes: number;
   volumesWithRebuilding: number;
   localNVMeVolumes: number;
+  orphanedVolumes: number;
   totalDisks: number;
   healthyDisks: number;
   formattedDisks: number;
@@ -170,11 +195,12 @@ export interface DashboardStats {
 
 export type VolumeFilter = 
   | 'all' 
+  | 'orphaned'     // Show only raw/orphaned volumes
   | 'healthy' 
   | 'degraded' 
   | 'failed' 
-  | 'faulted' 
-  | 'rebuilding' 
+  | 'faulted'
+  | 'rebuilding'
   | 'local-nvme';
 
 export type DiskFilter = string | null;
@@ -604,6 +630,19 @@ const mockData: DashboardData = {
       orphaned_spdk_volumes: []
     }
   ],
+
+  raw_volumes: [
+    {
+      name: "old_test_volume",
+      uuid: "raw-12345678-1234-1234-1234-123456789abc",
+      node: "worker-node-2",
+      lvs_name: "lvs_worker-node-2-nvme1n1",
+      size_blocks: 104857600,
+      size_gb: 50.0,
+      is_managed: false
+    }
+  ],
+
   nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
 };
 
@@ -611,6 +650,7 @@ const mockData: DashboardData = {
 export const useDashboardData = (autoRefresh: boolean = true) => {
   const [data, setData] = useState<DashboardData>({
     volumes: [],
+    raw_volumes: [],
     disks: [],
     nodes: []
   });
@@ -634,18 +674,20 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     ).length;
     
     const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
+    const orphanedVolumes = data.raw_volumes.length;
     
     const healthyDisks = data.disks.filter(d => d.healthy).length;
     const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
 
     return {
-      totalVolumes: data.volumes.length,
+      totalVolumes: data.volumes.length + data.raw_volumes.length,
       healthyVolumes,
       degradedVolumes,
       failedVolumes,
       faultedVolumes,
       volumesWithRebuilding,
       localNVMeVolumes,
+      orphanedVolumes,
       totalDisks: data.disks.length,
       healthyDisks,
       formattedDisks,
@@ -720,6 +762,7 @@ const transformBackendData = (backendData: any): DashboardData => {
       primary_replica_uuid: vol.primary_lvol_uuid,
       nvmeof_targets: vol.nvmeof_targets || [],
     })) || [],
+    raw_volumes: backendData.raw_volumes || [],
     disks: backendData.disks?.map((disk: any) => ({
       ...disk,
       // Ensure compatibility with existing frontend code

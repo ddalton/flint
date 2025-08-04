@@ -1,27 +1,31 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert } from 'lucide-react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
-import type { Disk, Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
+import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
 import { useOperations } from '../../contexts/OperationsContext';
 
 interface VolumesTableProps {
   volumes: Volume[];
+  rawVolumes?: RawSpdkVolume[];
   disks?: Disk[];
   activeFilter?: VolumeFilter;
   diskFilter?: DiskFilter;
   onClearFilter?: () => void;
   onClearDiskFilter?: () => void;
   onReplicaClick?: (volumeId: string, volumeName: string) => void;
+  onRefresh?: () => void;
 }
 
 export const VolumesTable: React.FC<VolumesTableProps> = ({ 
   disks,
   volumes, 
+  rawVolumes = [],
   activeFilter, 
   diskFilter,
   onClearFilter,
   onClearDiskFilter,
-  onReplicaClick
+  onReplicaClick,
+  onRefresh
 }) => {
   const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<Volume | null>(null);
   const { setDialogVisible } = useOperations();
@@ -29,13 +33,55 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  
+  // Delete dialog state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [volumeToDelete, setVolumeToDelete] = useState<RawSpdkVolume | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     setDialogVisible(selectedVolumeDetail !== null);
   }, [selectedVolumeDetail, setDialogVisible]);
 
+  // Extended volume interface for combining managed and raw volumes
+  interface ExtendedVolume extends Volume {
+    isRaw?: boolean;
+    rawVolumeData?: RawSpdkVolume;
+  }
+
+  // Combine managed and raw volumes into a single list
+  const combinedVolumes = useMemo(() => {
+    const managedVols: ExtendedVolume[] = volumes.map(v => ({ ...v, isRaw: false }));
+    
+    const rawVols: ExtendedVolume[] = rawVolumes.map(rv => ({
+      id: rv.uuid,
+      name: rv.name,
+      size: `${rv.size_gb.toFixed(1)}GB`,
+      state: 'Raw',
+      replicas: 0,
+      active_replicas: 0,
+      local_nvme: false,
+      access_method: 'raw',
+      rebuild_progress: null,
+      nodes: [rv.node],
+      replica_statuses: [],
+      nvmeof_targets: [],
+      nvmeof_enabled: false,
+      spdk_validation_status: {
+        has_spdk_backing: true,
+        validation_message: 'Raw SPDK volume (unmanaged)',
+        validation_severity: 'warning' as const
+      },
+      isRaw: true,
+      rawVolumeData: rv
+    }));
+    
+    return [...managedVols, ...rawVols];
+  }, [volumes, rawVolumes]);
+
   const filteredVolumes = useMemo(() => {
-    let result = volumes;
+    let result = combinedVolumes;
 
     // Apply volume filter first
     if (activeFilter && activeFilter !== 'all') {
@@ -64,6 +110,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
         case 'local-nvme':
           result = result.filter(v => v.local_nvme);
           break;
+        case 'orphaned':
+          result = result.filter(v => (v as ExtendedVolume).isRaw);
+          break;
       }
     }
 
@@ -82,7 +131,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     }
 
     return result;
-  }, [volumes, activeFilter, diskFilter, disks]);
+  }, [combinedVolumes, activeFilter, diskFilter, disks]);
 
   // Calculate pagination
   const totalPages = Math.ceil(filteredVolumes.length / pageSize);
@@ -101,6 +150,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       case 'faulted': return 'Faulted Volumes (Degraded + Failed)';
       case 'rebuilding': return 'Volumes with Rebuilding Replicas';
       case 'local-nvme': return 'Local NVMe Volumes';
+      case 'orphaned': return 'Orphaned Volumes (Raw SPDK)';
       default: return 'All Volumes';
     }
   };
@@ -134,6 +184,56 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           priority: 4
         };
     }
+  };
+
+
+
+  // Handle raw volume deletion - open dialog
+  const handleDeleteRaw = (rawVolume: RawSpdkVolume) => {
+    setVolumeToDelete(rawVolume);
+    setDeleteConfirmText('');
+    setShowDeleteDialog(true);
+  };
+
+  // Confirm and execute deletion
+  const confirmDeleteRaw = async () => {
+    if (!volumeToDelete || deleteConfirmText !== 'DELETE') return;
+    
+    setIsDeleting(true);
+    
+    try {
+      const response = await fetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`Volume "${volumeToDelete.name}" deleted successfully`);
+        // Refresh dashboard data
+        onRefresh?.();
+        // Close dialog
+        setShowDeleteDialog(false);
+        setVolumeToDelete(null);
+        setDeleteConfirmText('');
+      } else {
+        const error = await response.json();
+        console.error(`Failed to delete volume: ${error.message || 'Unknown error'}`);
+        // Could add toast notification here instead of alert
+      }
+    } catch (error) {
+      console.error('Error deleting volume:', error);
+      // Could add toast notification here instead of alert
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Cancel deletion
+  const cancelDeleteRaw = () => {
+    setShowDeleteDialog(false);
+    setVolumeToDelete(null);
+    setDeleteConfirmText('');
+    setIsDeleting(false);
   };
 
   // Sort volumes by state priority (Failed -> Degraded -> Healthy)
@@ -288,6 +388,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               </tr>
             ) : (
               sortedVolumes.map((volume) => {
+                const extVolume = volume as ExtendedVolume;
                 const stateInfo = getVolumeStateInfo(volume.state);
                 const StateIcon = stateInfo.icon;
                 const rebuildingActivity = hasRebuildingActivity(volume);
@@ -330,14 +431,19 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                         )}
                       </div>
                     </td>
+
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <button
-                        onClick={() => onReplicaClick?.(volume.id, volume.name)}
-                        className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
-                        title={`Click to see disks with replicas for ${volume.name}`}
-                      >
-                        {volume.active_replicas}/{volume.replicas}
-                      </button>
+                      {extVolume.isRaw ? (
+                        <span className="text-gray-400">N/A</span>
+                      ) : (
+                        <button
+                          onClick={() => onReplicaClick?.(volume.id, volume.name)}
+                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                          title={`Click to see disks with replicas for ${volume.name}`}
+                        >
+                          {volume.active_replicas}/{volume.replicas}
+                        </button>
+                      )}
                       {volume.active_replicas < volume.replicas && (
                         <div className="text-xs text-red-600 mt-1">
                           {volume.replicas - volume.active_replicas} replica{volume.replicas - volume.active_replicas !== 1 ? 's' : ''} down
@@ -345,7 +451,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {volume.local_nvme ? (
+                      {extVolume.isRaw ? (
+                        <span className="text-gray-400">N/A</span>
+                      ) : volume.local_nvme ? (
                         <div className="flex items-center gap-1 text-green-600">
                           <CheckCircle className="w-5 h-5" />
                           <span className="text-xs">High Perf</span>
@@ -355,7 +463,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {rebuildingActivity ? (
+                      {extVolume.isRaw ? (
+                        <span className="text-gray-400">N/A</span>
+                      ) : rebuildingActivity ? (
                         <div className="flex items-center gap-2">
                           <Settings className="w-4 h-4 text-orange-600 animate-spin" />
                           {maxRebuildProgress > 0 ? (
@@ -386,13 +496,29 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => handleVolumeNameClick(volume)}
-                        className="inline-flex items-center px-3 py-1 border border-transparent text-xs leading-4 font-medium rounded text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                      >
-                        <Info className="w-3 h-3 mr-1" />
-                        Details
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {extVolume.isRaw ? (
+                          <>
+                            {extVolume.rawVolumeData && (
+                              <button
+                                onClick={() => handleDeleteRaw(extVolume.rawVolumeData!)}
+                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50"
+                                title="Delete orphaned SPDK volume"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => handleVolumeNameClick(volume)}
+                            className="inline-flex items-center px-3 py-1 border border-transparent text-xs leading-4 font-medium rounded text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                          >
+                            <Info className="w-3 h-3 mr-1" />
+                            Details
+                          </button>
+                        )}
+                      </div>
                     </td>
                     {diskFilter && (
                       <td className="px-6 py-4 whitespace-nowrap">
@@ -508,6 +634,101 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           volumeData={selectedVolumeDetail} // Pass the full volume
           onClose={() => setSelectedVolumeDetail(null)}
         />
+      )}
+
+      {/* Delete Orphaned Volume Confirmation Dialog */}
+      {showDeleteDialog && volumeToDelete && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <AlertTriangle className="w-8 h-8 text-red-600" />
+                <h3 className="text-lg font-bold text-gray-900">Delete Orphaned SPDK Volume</h3>
+              </div>
+              
+              <div className="mb-6">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+                  <div className="flex items-center">
+                    <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
+                    <span className="text-red-800 font-medium">Warning: Permanent Deletion</span>
+                  </div>
+                  <p className="text-red-700 text-sm mt-1">
+                    This will permanently delete the SPDK logical volume and free up storage space. 
+                    This action cannot be undone.
+                  </p>
+                </div>
+                
+                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                  <div className="flex justify-between">
+                    <span className="font-medium">Volume:</span>
+                    <span className="font-mono">{volumeToDelete.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">UUID:</span>
+                    <span className="font-mono text-xs">{volumeToDelete.uuid}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Node:</span>
+                    <span>{volumeToDelete.node}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Size:</span>
+                    <span>{volumeToDelete.size_gb.toFixed(1)}GB</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">LVS:</span>
+                    <span className="font-mono text-xs">{volumeToDelete.lvs_name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Status:</span>
+                    <span className="text-amber-600">Orphaned (no Kubernetes tracking)</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  To confirm deletion, type <code className="bg-gray-100 px-1 rounded font-mono">DELETE</code>:
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  placeholder="Type DELETE to confirm"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={cancelDeleteRaw}
+                  disabled={isDeleting}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteRaw}
+                  disabled={deleteConfirmText !== 'DELETE' || isDeleting}
+                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {isDeleting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      Delete Volume
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

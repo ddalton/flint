@@ -18,7 +18,7 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
 }) => {
   return (
     <header className="bg-white shadow-sm border-b">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center py-4">
           <div className="flex items-center gap-4">
             <div className="flex items-center">

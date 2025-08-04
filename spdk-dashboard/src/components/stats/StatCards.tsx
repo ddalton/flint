@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap } from 'lucide-react';
+import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap, Shield } from 'lucide-react';
 import type { VolumeFilter } from '../../hooks/useDashboardData';
 
 interface StatCardsProps {
@@ -11,6 +11,7 @@ interface StatCardsProps {
     faultedVolumes: number;
     volumesWithRebuilding: number;
     localNVMeVolumes: number;
+    orphanedVolumes: number;
   };
   activeFilter?: VolumeFilter;
   onFilterClick: (filter: VolumeFilter) => void;
@@ -76,11 +77,21 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       bgColor: 'bg-blue-50',
       borderColor: 'border-blue-200',
       subtitle: 'High performance storage'
+    },
+    {
+      id: 'orphaned' as VolumeFilter,
+      title: 'Orphaned',
+      value: stats.orphanedVolumes,
+      icon: Shield,
+      color: 'text-amber-600',
+      bgColor: 'bg-amber-50',
+      borderColor: 'border-amber-200',
+      subtitle: 'Raw SPDK volumes (needs cleanup)'
     }
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 xl:grid-cols-7 gap-4">
       {cards.map((card) => {
         const isActive = activeFilter === card.id;
         const Icon = card.icon;

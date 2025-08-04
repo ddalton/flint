@@ -25,6 +25,7 @@ interface DashboardProps {
     faultedVolumes: number;
     volumesWithRebuilding: number;
     localNVMeVolumes: number;
+    orphanedVolumes: number;
     totalDisks: number;
     healthyDisks: number;
     formattedDisks: number;
@@ -176,6 +177,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
           bgColor: 'bg-blue-50',
           borderColor: 'border-blue-200'
         };
+      case 'orphaned':
+        return {
+          name: 'Orphaned Volumes',
+          severity: 'cleanup',
+          icon: '🛡️',
+          description: 'Raw SPDK volumes without Kubernetes backing - cleanup candidates',
+          bgColor: 'bg-amber-50',
+          borderColor: 'border-amber-200'
+        };
       default:
         return {
           name: 'All Volumes',
@@ -205,12 +215,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return (
           <VolumesTable 
             volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
+            rawVolumes={data.raw_volumes}
             disks={data.disks}
             activeFilter={volumeFilter}
             diskFilter={diskFilter}
             onClearFilter={handleClearFilter}
             onClearDiskFilter={handleClearDiskFilter}
             onReplicaClick={handleReplicaClick}
+            onRefresh={onRefresh}
           />
         );
 
@@ -262,7 +274,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         usingMockData={usingMockData}
       />
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Enhanced filter indication */}
         {volumeFilter !== 'all' && (
           <div className="mb-6">
