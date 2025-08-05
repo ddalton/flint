@@ -140,28 +140,32 @@ done\n\
 \n\
 # Initialize NVMe-oF transports (TCP and RDMA for complete support)\n\
 echo "Initializing NVMe-oF TCP transport..."\n\
-python3 -c "\n\
+cat > /tmp/init_transport.py << 'PYEOF'\n\
 import json, socket\n\
-s = socket.socket(socket.AF_UNIX)\n\
-s.connect(\\"/var/tmp/spdk.sock\\\") \n\
-rpc = {\\\"id\\\": 1, \\\"method\\\": \\\"nvmf_create_transport\\\", \\\"jsonrpc\\\": \\\"2.0\\\", \\\"params\\\": {\\\"trtype\\\": \\\"TCP\\\"}}\n\
-s.send((json.dumps(rpc) + \\\"\\\\n\\\").encode())\n\
-response = s.recv(4096).decode()\n\
-print(f\\\"TCP transport init response: {response}\\\")\n\
-s.close()\n\
-"\n\
 \n\
-echo "Initializing NVMe-oF RDMA transport..."\n\
-python3 -c "\n\
-import json, socket\n\
-s = socket.socket(socket.AF_UNIX)\n\
-s.connect(\\"/var/tmp/spdk.sock\\\") \n\
-rpc = {\\\"id\\\": 2, \\\"method\\\": \\\"nvmf_create_transport\\\", \\\"jsonrpc\\\": \\\"2.0\\\", \\\"params\\\": {\\\"trtype\\\": \\\"RDMA\\\"}}\n\
-s.send((json.dumps(rpc) + \\\"\\\\n\\\").encode())\n\
-response = s.recv(4096).decode()\n\
-print(f\\\"RDMA transport init response: {response}\\\")\n\
-s.close()\n\
-"\n\
+def init_transport(transport_type, rpc_id):\n\
+    try:\n\
+        s = socket.socket(socket.AF_UNIX)\n\
+        s.connect("/var/tmp/spdk.sock")\n\
+        rpc = {"id": rpc_id, "method": "nvmf_create_transport", "jsonrpc": "2.0", "params": {"trtype": transport_type}}\n\
+        s.send((json.dumps(rpc) + "\\n").encode())\n\
+        response = s.recv(4096).decode()\n\
+        print(f"{transport_type} transport init response: {response}")\n\
+        s.close()\n\
+        return True\n\
+    except Exception as e:\n\
+        print(f"Error initializing {transport_type} transport: {e}")\n\
+        return False\n\
+\n\
+# Initialize TCP transport\n\
+init_transport("TCP", 1)\n\
+\n\
+# Initialize RDMA transport\n\
+init_transport("RDMA", 2)\n\
+PYEOF\n\
+\n\
+python3 /tmp/init_transport.py\n\
+rm -f /tmp/init_transport.py\n\
 \n\
 echo "SPDK NVMe-oF transports (TCP + RDMA) initialized successfully!"\n\
 echo "SPDK is ready for CSI operations with full NVMe-oF support"\n\
