@@ -367,10 +367,8 @@ impl NodeService {
     /// Mounts a device to the target path
     async fn mount_device(&self, device_path: &str, target_path: &str, fs_type: &str, mount_options: &[String]) -> Result<(), Status> {
         // Create target directory
-        if let Some(parent) = Path::new(target_path).parent() {
-            fs::create_dir_all(parent).await
-                .map_err(|e| Status::internal(format!("Failed to create mount directory: {}", e)))?;
-        }
+        fs::create_dir_all(target_path).await
+            .map_err(|e| Status::internal(format!("Failed to create mount directory: {}", e)))?;
 
         // Prepare mount command
         let mut cmd_args = vec![device_path, target_path];
