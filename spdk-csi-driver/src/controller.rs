@@ -1,5 +1,7 @@
 // controller.rs - Controller service implementation
 use std::sync::Arc;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 use crate::driver::SpdkCsiDriver;
 use crate::csi_snapshotter::*;
 use spdk_csi_driver::csi::{
@@ -357,6 +359,35 @@ impl ControllerService {
 
             let node_ip = self.driver.get_node_ip(&disk.spec.node_id).await?;
             let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
+            
+            // Create NVMe-oF target for remote access
+            let lvs_name = disk.status.as_ref()
+                .and_then(|s| s.lvs_name.as_ref())
+                .ok_or_else(|| Status::internal("Disk LVS name missing"))?;
+            let bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
+            
+            // Get driver instance for the replica node to create NVMe-oF target
+            let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await
+                .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", disk.spec.node_id, e)))?;
+            
+            // Create a temporary driver instance for this node's SPDK
+            let node_driver = SpdkCsiDriver {
+                spdk_rpc_url: rpc_url,
+                nvmeof_transport: self.driver.nvmeof_transport.clone(),
+                nvmeof_target_port: self.driver.nvmeof_target_port,
+                node_id: disk.spec.node_id.clone(),
+                target_namespace: self.driver.target_namespace.clone(),
+                kube_client: self.driver.kube_client.clone(),
+                spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
+                ublk_target_initialized: Arc::new(Mutex::new(false)),
+            };
+            
+            if let Err(e) = node_driver.create_nvmeof_target(&bdev_name, &nqn).await {
+                println!("⚠️ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
+                // Continue anyway - target can be created later if needed
+            } else {
+                println!("✅ [NVMEOF_TARGET] Created NVMe-oF target: {} -> {}", bdev_name, nqn);
+            }
 
             let replica = Replica {
                 node: disk.spec.node_id.clone(),
