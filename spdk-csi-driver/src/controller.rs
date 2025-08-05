@@ -516,14 +516,25 @@ impl ControllerService {
         }
         
         println!("🔍 [CREATE_LVOL] Extracting UUID from result...");
-        let lvol_uuid = lvol_info["result"]["uuid"]
-            .as_str()
-            .ok_or_else(|| {
-                let result = lvol_info.get("result").cloned().unwrap_or(json!(null));
+        let lvol_uuid = {
+            let result = lvol_info.get("result").cloned().unwrap_or(json!(null));
+            
+            // Try to extract UUID from different possible response formats
+            let uuid_str = if let Some(uuid_in_object) = result.get("uuid").and_then(|u| u.as_str()) {
+                // Format: {"result": {"uuid": "abc-123"}}
+                println!("📝 [CREATE_LVOL] Found UUID in nested object format");
+                uuid_in_object
+            } else if let Some(uuid_direct) = result.as_str() {
+                // Format: {"result": "abc-123"}
+                println!("📝 [CREATE_LVOL] Found UUID in direct string format");
+                uuid_direct
+            } else {
                 println!("❌ [CREATE_LVOL] No UUID found in result. Result section: {}", serde_json::to_string_pretty(&result).unwrap_or_else(|_| format!("{:?}", result)));
-                "Failed to get lvol UUID from SPDK response"
-            })?
-            .to_string();
+                return Err("Failed to get lvol UUID from SPDK response".into());
+            };
+            
+            uuid_str.to_string()
+        };
 
         println!("✅ [CREATE_LVOL] Successfully created logical volume with UUID: {}", lvol_uuid);
 
