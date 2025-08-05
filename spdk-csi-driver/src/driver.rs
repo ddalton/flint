@@ -293,11 +293,17 @@ impl SpdkCsiDriver {
         }
 
         let subsystems: serde_json::Value = subsystem_response.json().await?;
-        println!("🔍 [NVMEOF_DEBUG] Retrieved {} subsystems from SPDK", 
-                 subsystems.as_array().map(|a| a.len()).unwrap_or(0));
+        
+        // CRITICAL FIX: SPDK responses have {"result": [...]} structure, not direct array
+        let subsystem_list = subsystems.get("result").and_then(|r| r.as_array());
+        let subsystem_count = subsystem_list.map(|a| a.len()).unwrap_or(0);
+        
+        println!("🔍 [NVMEOF_DEBUG] Retrieved {} subsystems from SPDK", subsystem_count);
+        println!("🔍 [NVMEOF_DEBUG] Raw response structure: {}", 
+                 serde_json::to_string_pretty(&subsystems).unwrap_or_else(|_| "Parse error".to_string()));
         
         // Debug: List all subsystems
-        if let Some(subsystem_list) = subsystems.as_array() {
+        if let Some(subsystem_list) = subsystem_list {
             println!("🔍 [NVMEOF_DEBUG] All configured subsystems:");
             for (i, subsystem) in subsystem_list.iter().enumerate() {
                 if let Some(existing_nqn) = subsystem.get("nqn").and_then(|v| v.as_str()) {
@@ -308,7 +314,7 @@ impl SpdkCsiDriver {
         
         // Step 2: Find our specific subsystem
         println!("🔍 [NVMEOF_DEBUG] Step 2: Searching for target subsystem: {}", nqn);
-        if let Some(subsystem_list) = subsystems.as_array() {
+        if let Some(subsystem_list) = subsystem_list {
             for subsystem in subsystem_list {
                 if let Some(subsystem_nqn) = subsystem.get("nqn").and_then(|v| v.as_str()) {
                     if subsystem_nqn == nqn {
