@@ -521,7 +521,11 @@ impl Node for NodeService {
             if let Some(access_type) = volume_capability.access_type {
                 match access_type {
                     volume_capability::AccessType::Mount(mount_config) => {
-                        let fs_type = mount_config.fs_type;
+                        let fs_type = if mount_config.fs_type.is_empty() {
+                            "ext4".to_string()  // Default to ext4 if no filesystem specified
+                        } else {
+                            mount_config.fs_type
+                        };
                         let mount_flags = mount_config.mount_flags;
 
                         // Format device if needed
