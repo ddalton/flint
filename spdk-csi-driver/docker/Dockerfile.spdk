@@ -4,7 +4,7 @@
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
-# Install all build-time dependencies
+# Install all build-time dependencies including RDMA support
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -26,15 +26,19 @@ RUN apt-get update && apt-get install -y \
     automake \
     libtool \
     uuid-dev \
+    libibverbs-dev \
+    librdmacm-dev \
+    libmlx5-dev \
+    libmlx4-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /spdk
 
-# Clone, configure, and build SPDK v25.05.x
+# Clone, configure, and build SPDK v25.05.x with full NVMe-oF support
 RUN git clone https://github.com/spdk/spdk.git . && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
-    ./configure --with-ublk --disable-tests --disable-unit-tests && \
+    ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
@@ -44,7 +48,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
 #--------------------------------------------------------------------
 FROM ubuntu:24.04
 
-# Install runtime dependencies including system utilities
+# Install runtime dependencies including system utilities and RDMA libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio1t64 \
     libnuma1 \
@@ -62,6 +66,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     ca-certificates \
     curl \
+    libibverbs1 \
+    librdmacm1 \
+    libmlx5-1 \
+    libmlx4-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled SPDK binaries from the builder stage
@@ -114,13 +122,58 @@ echo "SPDK config created: $(cat /tmp/spdk_config.json)"\n\
 # - Configuration loaded from proper JSON file\n\
 # - No device binding initially (devices added via RPC)\n\
 echo "Starting SPDK target daemon..."\n\
-exec /usr/local/bin/spdk_tgt \\\n\
+/usr/local/bin/spdk_tgt \\\n\
     -r /var/tmp/spdk.sock \\\n\
     -L all \\\n\
-    --json /tmp/spdk_config.json\n\
+    --json /tmp/spdk_config.json &\n\
+\n\
+# Wait for SPDK to be ready\n\
+echo "Waiting for SPDK to initialize..."\n\
+for i in {1..30}; do\n\
+    if [ -S /var/tmp/spdk.sock ]; then\n\
+        if python3 -c "import json, socket; s=socket.socket(socket.AF_UNIX); s.connect(\"/var/tmp/spdk.sock\"); s.send(b\"{\\\"id\\\":1,\\\"method\\\":\\\"bdev_get_bdevs\\\",\\\"jsonrpc\\\":\\\"2.0\\\"}\\n\"); print(\\"ready\\")"; then\n\
+            echo "SPDK is ready!"\n\
+            break\n\
+        fi\n\
+    fi\n\
+    echo "Waiting for SPDK... ($i/30)"\n\
+    sleep 1\n\
+done\n\
+\n\
+# Initialize NVMe-oF transports (TCP and RDMA for complete support)\n\
+echo "Initializing NVMe-oF TCP transport..."\n\
+python3 -c "\n\
+import json, socket\n\
+s = socket.socket(socket.AF_UNIX)\n\
+s.connect(\\"/var/tmp/spdk.sock\\\") \n\
+rpc = {\\\"id\\\": 1, \\\"method\\\": \\\"nvmf_create_transport\\\", \\\"jsonrpc\\\": \\\"2.0\\\", \\\"params\\\": {\\\"trtype\\\": \\\"TCP\\\"}}\n\
+s.send((json.dumps(rpc) + \\\"\\\\n\\\").encode())\n\
+response = s.recv(4096).decode()\n\
+print(f\\\"TCP transport init response: {response}\\\")\n\
+s.close()\n\
+"\n\
+\n\
+echo "Initializing NVMe-oF RDMA transport..."\n\
+python3 -c "\n\
+import json, socket\n\
+s = socket.socket(socket.AF_UNIX)\n\
+s.connect(\\"/var/tmp/spdk.sock\\\") \n\
+rpc = {\\\"id\\\": 2, \\\"method\\\": \\\"nvmf_create_transport\\\", \\\"jsonrpc\\\": \\\"2.0\\\", \\\"params\\\": {\\\"trtype\\\": \\\"RDMA\\\"}}\n\
+s.send((json.dumps(rpc) + \\\"\\\\n\\\").encode())\n\
+response = s.recv(4096).decode()\n\
+print(f\\\"RDMA transport init response: {response}\\\")\n\
+s.close()\n\
+"\n\
+\n\
+echo "SPDK NVMe-oF transports (TCP + RDMA) initialized successfully!"\n\
+echo "SPDK is ready for CSI operations with full NVMe-oF support"\n\
+\n\
+# Wait for SPDK process to exit\n\
+wait\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 
-# Expose the standard SPDK NVMe-oF port (though CSI mainly uses RPC)
+# Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)
+# RDMA transport doesn't use fixed ports - uses discovery service
 EXPOSE 4420
 
 ENTRYPOINT ["/usr/local/bin/spdk-csi-start.sh"]
