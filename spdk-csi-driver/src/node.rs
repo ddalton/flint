@@ -162,7 +162,6 @@ impl NodeService {
         println!("{}   Transport: {}", ctx.log_prefix(), transport);
 
         // Step 1: Test network connectivity with metrics
-        let network_start = Instant::now();
         match test_network_connectivity(target_ip, target_port, &ctx).await {
             Ok(duration) => {
                 metrics.network_test_time_ms = Some(duration.as_millis() as u64);

@@ -389,8 +389,26 @@ impl ControllerService {
                     println!("❌ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
                     
                     // Clean up the logical volume on failure to maintain consistency
-                    if let Err(cleanup_err) = node_driver.delete_lvol(&lvs_name, &format!("vol_{}", volume_id)).await {
-                        println!("⚠️ [CLEANUP] Failed to clean up lvol after NVMe-oF failure: {}", cleanup_err);
+                    let cleanup_result = HttpClient::new()
+                        .post(&node_driver.spdk_rpc_url)
+                        .json(&json!({
+                            "method": "bdev_lvol_delete",
+                            "params": { "name": lvol_uuid }
+                        }))
+                        .send()
+                        .await;
+                    
+                    match cleanup_result {
+                        Ok(response) if response.status().is_success() => {
+                            println!("✅ [CLEANUP] Successfully cleaned up lvol after NVMe-oF failure");
+                        }
+                        Ok(response) => {
+                            let error_text = response.text().await.unwrap_or_default();
+                            println!("⚠️ [CLEANUP] Failed to clean up lvol: {}", error_text);
+                        }
+                        Err(e) => {
+                            println!("⚠️ [CLEANUP] Failed to clean up lvol after NVMe-oF failure: {}", e);
+                        }
                     }
                     
                     return Err(Status::internal(format!(
