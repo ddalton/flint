@@ -210,10 +210,22 @@ impl NodeService {
                 println!("✅ [NVMEOF_CONNECT_DEBUG] SPDK connection successful");
                 println!("🔗 [NVMEOF_CONNECT_DEBUG] Response: {}", response);
                 
+                // Debug: Check the response structure
+                if response.is_object() {
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Response is an object");
+                    if let Some(obj) = response.as_object() {
+                        println!("🔍 [NVMEOF_CONNECT_DEBUG] Response keys: {:?}", obj.keys().collect::<Vec<_>>());
+                    }
+                } else {
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Response is not an object: {}", response);
+                }
+                
                 // Check for SPDK RPC errors in the response
                 if let Some(error) = response.get("error") {
                     println!("❌ [NVMEOF_CONNECT_DEBUG] SPDK returned error: {}", error);
                     return Err(Status::internal(format!("NVMe-oF connection failed: {}", error)));
+                } else {
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] No error field found in response");
                 }
                 
                 // Step 3: Verify the bdev was created
