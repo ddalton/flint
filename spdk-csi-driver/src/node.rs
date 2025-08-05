@@ -160,6 +160,168 @@ impl NodeService {
         Ok(())
     }
 
+    /// Connect to NVMe-oF target with comprehensive debugging
+    async fn connect_nvmeof_target_debug(
+        &self,
+        bdev_name: &str,
+        nqn: &str,
+        target_ip: &str,
+        target_port: &str,
+        transport: &str,
+    ) -> Result<(), Status> {
+        println!("🔗 [NVMEOF_CONNECT_DEBUG] Attempting to connect to NVMe-oF target");
+        println!("🔗 [NVMEOF_CONNECT_DEBUG] Parameters:");
+        println!("🔗 [NVMEOF_CONNECT_DEBUG]   bdev_name: {}", bdev_name);
+        println!("🔗 [NVMEOF_CONNECT_DEBUG]   nqn: {}", nqn);
+        println!("🔗 [NVMEOF_CONNECT_DEBUG]   target_ip: {}", target_ip);
+        println!("🔗 [NVMEOF_CONNECT_DEBUG]   target_port: {}", target_port);
+        println!("🔗 [NVMEOF_CONNECT_DEBUG]   transport: {}", transport);
+
+        // Step 1: Test network connectivity to target
+        println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 1: Testing network connectivity...");
+        match tokio::net::TcpStream::connect(format!("{}:{}", target_ip, target_port)).await {
+            Ok(_) => {
+                println!("✅ [NVMEOF_CONNECT_DEBUG] Network connectivity test passed");
+            }
+            Err(e) => {
+                println!("❌ [NVMEOF_CONNECT_DEBUG] Network connectivity test failed: {}", e);
+                println!("🔍 [NVMEOF_CONNECT_DEBUG] This indicates the target is not listening or network issues");
+                return Err(Status::internal(format!("Cannot connect to NVMe-oF target {}:{}: {}", target_ip, target_port, e)));
+            }
+        }
+
+        // Step 2: Attempt the actual NVMe-oF connection
+        println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 2: Creating SPDK NVMe-oF connection...");
+        let connect_payload = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": bdev_name,
+                "trtype": transport.to_lowercase(),
+                "traddr": target_ip,
+                "trsvcid": target_port,
+                "subnqn": nqn,
+                "adrfam": "ipv4"
+            }
+        });
+        println!("🔗 [NVMEOF_CONNECT_DEBUG] SPDK RPC payload: {}", connect_payload);
+
+        match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
+            Ok(response) => {
+                println!("✅ [NVMEOF_CONNECT_DEBUG] SPDK connection successful");
+                println!("🔗 [NVMEOF_CONNECT_DEBUG] Response: {}", response);
+                
+                // Step 3: Verify the bdev was created
+                println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 3: Verifying remote bdev creation...");
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await; // Allow time for bdev creation
+                
+                match self.verify_remote_bdev_exists(bdev_name).await {
+                    Ok(_) => {
+                        println!("✅ [NVMEOF_CONNECT_DEBUG] Remote bdev {} verified", bdev_name);
+                    }
+                    Err(e) => {
+                        println!("❌ [NVMEOF_CONNECT_DEBUG] Remote bdev verification failed: {}", e);
+                        return Err(Status::internal(format!("NVMe-oF connected but bdev not available: {}", e)));
+                    }
+                }
+            }
+            Err(e) => {
+                println!("❌ [NVMEOF_CONNECT_DEBUG] SPDK connection failed: {}", e);
+                println!("🔍 [NVMEOF_CONNECT_DEBUG] Analyzing error...");
+                
+                let error_str = e.to_string();
+                if error_str.contains("Connection refused") || error_str.contains("No such device") {
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] This suggests the NVMe-oF target is not properly configured");
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Check if the target node has the subsystem listening on port {}", target_port);
+                } else if error_str.contains("already exists") {
+                    println!("ℹ️ [NVMEOF_CONNECT_DEBUG] Connection already exists (acceptable)");
+                } else {
+                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Unexpected error type: {}", error_str);
+                }
+                
+                return Err(Status::internal(format!("Failed to connect NVMe-oF: {}", e)));
+            }
+        }
+
+        println!("✅ [NVMEOF_CONNECT_DEBUG] NVMe-oF target connection complete: {} -> {}", nqn, bdev_name);
+        Ok(())
+    }
+
+    /// Verify that a remote bdev exists after NVMe-oF connection
+    async fn verify_remote_bdev_exists(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [BDEV_REMOTE_VERIFY] Verifying remote bdev: {}", bdev_name);
+        
+        let verify_payload = json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": bdev_name
+            }
+        });
+
+        let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &verify_payload).await?;
+        
+        if let Some(bdev_list) = response.as_array() {
+            if bdev_list.is_empty() {
+                return Err(format!("Remote bdev '{}' not found after connection", bdev_name).into());
+            }
+            
+            // Show details of the remote bdev
+            for bdev in bdev_list {
+                if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                    let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                    println!("🔍 [BDEV_REMOTE_VERIFY] Remote bdev: name={}, blocks={}, block_size={}", 
+                             name, size, block_size);
+                }
+            }
+        }
+        
+        println!("✅ [BDEV_REMOTE_VERIFY] Remote bdev {} verified successfully", bdev_name);
+        Ok(())
+    }
+
+    /// Diagnose ublk device creation failures
+    async fn diagnose_ublk_failure(&self, bdev_name: &str, ublk_id: u32) {
+        println!("🔍 [UBLK_DIAGNOSE] Starting ublk failure diagnosis");
+        println!("🔍 [UBLK_DIAGNOSE] Target bdev: {}", bdev_name);
+        println!("🔍 [UBLK_DIAGNOSE] Target ublk ID: {}", ublk_id);
+
+        // Check 1: Verify bdev still exists
+        println!("🔍 [UBLK_DIAGNOSE] Check 1: Verifying bdev exists...");
+        match self.verify_remote_bdev_exists(bdev_name).await {
+            Ok(_) => println!("✅ [UBLK_DIAGNOSE] Bdev exists"),
+            Err(e) => println!("❌ [UBLK_DIAGNOSE] Bdev missing: {}", e),
+        }
+
+        // Check 2: List all current bdevs
+        println!("🔍 [UBLK_DIAGNOSE] Check 2: Listing all available bdevs...");
+        match call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs",
+            "params": {}
+        })).await {
+            Ok(response) => {
+                if let Some(bdev_list) = response.as_array() {
+                    println!("🔍 [UBLK_DIAGNOSE] Found {} total bdevs:", bdev_list.len());
+                    for (i, bdev) in bdev_list.iter().enumerate() {
+                        if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                            println!("🔍 [UBLK_DIAGNOSE]   {}: {}", i + 1, name);
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("❌ [UBLK_DIAGNOSE] Failed to list bdevs: {}", e),
+        }
+
+        // Check 3: Check if ublk ID is already in use
+        println!("🔍 [UBLK_DIAGNOSE] Check 3: Checking ublk device status...");
+        if std::path::Path::new(&format!("/dev/ublkc{}", ublk_id)).exists() {
+            println!("⚠️ [UBLK_DIAGNOSE] ublk device /dev/ublkc{} already exists", ublk_id);
+        } else {
+            println!("ℹ️ [UBLK_DIAGNOSE] ublk device /dev/ublkc{} does not exist (expected)", ublk_id);
+        }
+
+        println!("🔍 [UBLK_DIAGNOSE] Diagnosis complete");
+    }
+
     /// Deletes the RAID1 bdev and disconnects NVMe-oF targets
     async fn cleanup_raid1_bdev(&self, volume: &SpdkVolume) -> Result<(), Status> {
         let raid_name = &volume.spec.volume_id;
@@ -273,7 +435,12 @@ impl NodeService {
                     &replica.ip, 
                     &replica.port
                 ) {
-                    self.connect_nvmeof_target(
+                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Starting NVMe-oF client connection");
+                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Target: {}:{}", ip, port);
+                    println!("🔗 [NVMEOF_CLIENT_DEBUG] NQN: {}", nqn);
+                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Remote bdev name: {}", remote_bdev_name);
+                    
+                    self.connect_nvmeof_target_debug(
                         &remote_bdev_name,
                         nqn,
                         ip,
@@ -281,9 +448,25 @@ impl NodeService {
                         &self.driver.nvmeof_transport,
                     ).await?;
                     
-                    // Then expose the NVMe-oF bdev via ublk
-                    self.driver.create_ublk_device(&remote_bdev_name, ublk_id).await
-                        .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
+                    // Then expose the NVMe-oF bdev via ublk with debugging
+                    println!("🔗 [UBLK_CREATE_DEBUG] Creating ublk device for remote bdev: {}", remote_bdev_name);
+                    println!("🔗 [UBLK_CREATE_DEBUG] ublk ID: {}", ublk_id);
+                    
+                    match self.driver.create_ublk_device_debug(&remote_bdev_name, ublk_id).await {
+                        Ok(device_path) => {
+                            println!("✅ [UBLK_CREATE_DEBUG] Successfully created ublk device: {}", device_path);
+                            device_path
+                        }
+                        Err(e) => {
+                            println!("❌ [UBLK_CREATE_DEBUG] Failed to create ublk device: {}", e);
+                            println!("🔍 [UBLK_CREATE_DEBUG] Attempting to diagnose the issue...");
+                            
+                            // Add diagnostic information
+                            self.diagnose_ublk_failure(&remote_bdev_name, ublk_id).await;
+                            
+                            return Err(Status::internal(format!("Failed to create ublk device: {}", e)));
+                        }
+                    }
                 } else {
                     return Err(Status::internal("Remote replica missing connection details"));
                 }

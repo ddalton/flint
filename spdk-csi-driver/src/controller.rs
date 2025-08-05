@@ -382,11 +382,24 @@ impl ControllerService {
                 ublk_target_initialized: Arc::new(Mutex::new(false)),
             };
             
-            if let Err(e) = node_driver.create_nvmeof_target(&bdev_name, &nqn).await {
-                println!("⚠️ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
-                // Continue anyway - target can be created later if needed
-            } else {
-                println!("✅ [NVMEOF_TARGET] Created NVMe-oF target: {} -> {}", bdev_name, nqn);
+            // Create NVMe-oF target with retry logic and comprehensive debugging - this is critical for multinode access
+            match node_driver.create_nvmeof_target_debug(&bdev_name, &nqn).await {
+                Ok(_) => {
+                    println!("✅ [NVMEOF_TARGET] Successfully created and validated NVMe-oF target: {} -> {}", bdev_name, nqn);
+                }
+                Err(e) => {
+                    println!("❌ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
+                    
+                    // Clean up the logical volume on failure to maintain consistency
+                    if let Err(cleanup_err) = node_driver.delete_lvol(&lvs_name, &format!("vol_{}", volume_id)).await {
+                        println!("⚠️ [CLEANUP] Failed to clean up lvol after NVMe-oF failure: {}", cleanup_err);
+                    }
+                    
+                    return Err(Status::internal(format!(
+                        "Failed to create NVMe-oF target for replica on {}: {}. Volume creation aborted to prevent incomplete state.",
+                        disk.spec.node_id, e
+                    )));
+                }
             }
 
             let replica = Replica {
