@@ -28,8 +28,7 @@ RUN apt-get update && apt-get install -y \
     uuid-dev \
     libibverbs-dev \
     librdmacm-dev \
-    libmlx5-dev \
-    libmlx4-dev \
+    rdma-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /spdk
@@ -68,8 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libibverbs1 \
     librdmacm1 \
-    libmlx5-1 \
-    libmlx4-1 \
+    rdma-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled SPDK binaries from the builder stage
