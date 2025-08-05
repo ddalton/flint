@@ -1494,7 +1494,7 @@ async fn get_volume_spdk_details(
     query: QueryParameters,
     state: AppState,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    println!("🔍 [VOLUME_SPDK] Getting SPDK details for volume: {}", volume_id);
+    println!("🔍 [VOLUME_SPDK] Getting SPDK details for volume/UUID: {}", volume_id);
     
     let spdk_nodes = state.spdk_nodes.read().await;
     let http_client = HttpClient::new();
@@ -1504,7 +1504,7 @@ async fn get_volume_spdk_details(
         spdk_nodes.keys().next().unwrap_or(&"unknown".to_string()).clone()
     });
     
-    println!("🎯 [VOLUME_SPDK] Querying node '{}' for volume '{}'", target_node, volume_id);
+    println!("🎯 [VOLUME_SPDK] Querying node '{}' for volume/UUID '{}'", target_node, volume_id);
     
     let rpc_url = spdk_nodes.get(&target_node).ok_or_else(|| {
         println!("❌ [VOLUME_SPDK] Node '{}' not found in SPDK nodes", target_node);
@@ -1580,10 +1580,13 @@ async fn get_volume_spdk_details(
         let empty_lvols = Vec::new();
         let lvols_list = lvols_info["result"].as_array().unwrap_or(&empty_lvols);
         
-    // Find the volume by checking if volume_id is contained in the volume name
+    // Find the volume by checking if volume_id is contained in the volume name OR matches the UUID
     for lvol in lvols_list {
         if let Some(vol_name) = lvol["name"].as_str() {
-            if vol_name.contains(&volume_id) {
+            let vol_uuid = lvol["uuid"].as_str().unwrap_or("");
+            
+            // Check if volume_id matches either the name pattern (for managed volumes) or the UUID (for raw volumes)
+            if vol_name.contains(&volume_id) || vol_uuid == volume_id {
                 // Found the volume! Extract details
                 let vol_uuid = lvol["uuid"].as_str().unwrap_or("unknown");
                 let lvs_info = lvol["lvs"].as_object().unwrap();
