@@ -210,6 +210,12 @@ impl NodeService {
                 println!("✅ [NVMEOF_CONNECT_DEBUG] SPDK connection successful");
                 println!("🔗 [NVMEOF_CONNECT_DEBUG] Response: {}", response);
                 
+                // Check for SPDK RPC errors in the response
+                if let Some(error) = response.get("error") {
+                    println!("❌ [NVMEOF_CONNECT_DEBUG] SPDK returned error: {}", error);
+                    return Err(Status::internal(format!("NVMe-oF connection failed: {}", error)));
+                }
+                
                 // Step 3: Verify the bdev was created
                 println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 3: Verifying remote bdev creation...");
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await; // Allow time for bdev creation
@@ -259,20 +265,31 @@ impl NodeService {
 
         let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &verify_payload).await?;
         
-        if let Some(bdev_list) = response.as_array() {
-            if bdev_list.is_empty() {
-                return Err(format!("Remote bdev '{}' not found after connection", bdev_name).into());
-            }
-            
-            // Show details of the remote bdev
-            for bdev in bdev_list {
-                if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                    let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                    println!("🔍 [BDEV_REMOTE_VERIFY] Remote bdev: name={}, blocks={}, block_size={}", 
-                             name, size, block_size);
+        // Check for SPDK RPC errors first
+        if let Some(error) = response.get("error") {
+            return Err(format!("Failed to query bdev {}: {}", bdev_name, error).into());
+        }
+        
+        if let Some(result) = response.get("result") {
+            if let Some(bdev_list) = result.as_array() {
+                if bdev_list.is_empty() {
+                    return Err(format!("Remote bdev '{}' not found after connection", bdev_name).into());
                 }
+                
+                // Show details of the remote bdev
+                for bdev in bdev_list {
+                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                        let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!("🔍 [BDEV_REMOTE_VERIFY] Remote bdev: name={}, blocks={}, block_size={}", 
+                                 name, size, block_size);
+                    }
+                }
+            } else {
+                return Err(format!("Unexpected response format for bdev {}", bdev_name).into());
             }
+        } else {
+            return Err(format!("No result field in SPDK response for bdev {}", bdev_name).into());
         }
         
         println!("✅ [BDEV_REMOTE_VERIFY] Remote bdev {} verified successfully", bdev_name);
