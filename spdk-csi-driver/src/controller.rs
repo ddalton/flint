@@ -383,7 +383,7 @@ impl ControllerService {
             };
             
             // Create NVMe-oF target with retry logic and comprehensive debugging - this is critical for multinode access
-            match node_driver.create_nvmeof_target_debug(&bdev_name, &nqn).await {
+            match node_driver.create_nvmeof_target(&bdev_name, &nqn).await {
                 Ok(_) => {
                     println!("✅ [NVMEOF_TARGET] Successfully created and validated NVMe-oF target: {} -> {}", bdev_name, nqn);
                 }

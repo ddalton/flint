@@ -134,7 +134,9 @@ impl NodeService {
         Ok(raid_name.clone())
     }
 
-    /// Connects to a remote NVMe-oF target
+
+
+    /// Connect to NVMe-oF target with comprehensive logging and metrics
     async fn connect_nvmeof_target(
         &self,
         bdev_name: &str,
@@ -143,55 +145,37 @@ impl NodeService {
         target_port: &str,
         transport: &str,
     ) -> Result<(), Status> {
-        call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
-            "method": "bdev_nvme_attach_controller",
-            "params": {
-                "name": bdev_name,
-                "trtype": transport.to_lowercase(),  // Fixed: SPDK expects lowercase per documentation
-                "traddr": target_ip,
-                "trsvcid": target_port,
-                "subnqn": nqn,
-                "adrfam": "ipv4"
+        use spdk_csi_driver::nvmeof_utils::*;
+        use std::time::Instant;
+
+        let overall_start = Instant::now();
+        
+        // Create structured logging context
+        let ctx = NvmfContext::new(self.driver.node_id.clone(), "connect")
+            .with_target(target_ip.to_string(), target_port.to_string())
+            .with_nqn(nqn.to_string())
+            .with_bdev(bdev_name.to_string());
+
+        let mut metrics = NvmfMetrics::default();
+
+        println!("{}🔗 Starting NVMe-oF target connection", ctx.log_prefix());
+        println!("{}   Transport: {}", ctx.log_prefix(), transport);
+
+        // Step 1: Test network connectivity with metrics
+        let network_start = Instant::now();
+        match test_network_connectivity(target_ip, target_port, &ctx).await {
+            Ok(duration) => {
+                metrics.network_test_time_ms = Some(duration.as_millis() as u64);
             }
-        })).await
-        .map_err(|e| Status::internal(format!("Failed to connect NVMe-oF: {}", e)))?;
-
-        println!("Connected to NVMe-oF target: {} -> {}", nqn, bdev_name);
-        Ok(())
-    }
-
-    /// Connect to NVMe-oF target with comprehensive debugging
-    async fn connect_nvmeof_target_debug(
-        &self,
-        bdev_name: &str,
-        nqn: &str,
-        target_ip: &str,
-        target_port: &str,
-        transport: &str,
-    ) -> Result<(), Status> {
-        println!("🔗 [NVMEOF_CONNECT_DEBUG] Attempting to connect to NVMe-oF target");
-        println!("🔗 [NVMEOF_CONNECT_DEBUG] Parameters:");
-        println!("🔗 [NVMEOF_CONNECT_DEBUG]   bdev_name: {}", bdev_name);
-        println!("🔗 [NVMEOF_CONNECT_DEBUG]   nqn: {}", nqn);
-        println!("🔗 [NVMEOF_CONNECT_DEBUG]   target_ip: {}", target_ip);
-        println!("🔗 [NVMEOF_CONNECT_DEBUG]   target_port: {}", target_port);
-        println!("🔗 [NVMEOF_CONNECT_DEBUG]   transport: {}", transport);
-
-        // Step 1: Test network connectivity to target
-        println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 1: Testing network connectivity...");
-        match tokio::net::TcpStream::connect(format!("{}:{}", target_ip, target_port)).await {
-            Ok(_) => {
-                println!("✅ [NVMEOF_CONNECT_DEBUG] Network connectivity test passed");
-            }
-            Err(e) => {
-                println!("❌ [NVMEOF_CONNECT_DEBUG] Network connectivity test failed: {}", e);
-                println!("🔍 [NVMEOF_CONNECT_DEBUG] This indicates the target is not listening or network issues");
-                return Err(Status::internal(format!("Cannot connect to NVMe-oF target {}:{}: {}", target_ip, target_port, e)));
+            Err(nvmf_error) => {
+                return Err(Status::internal(nvmf_error.user_message()));
             }
         }
 
-        // Step 2: Attempt the actual NVMe-oF connection
-        println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 2: Creating SPDK NVMe-oF connection...");
+        // Step 2: Attempt the actual NVMe-oF connection with metrics
+        println!("{}🔗 Step 2: Creating SPDK NVMe-oF connection...", ctx.log_prefix());
+        let connection_start = Instant::now();
+        
         let connect_payload = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
@@ -203,64 +187,67 @@ impl NodeService {
                 "adrfam": "ipv4"
             }
         });
-        println!("🔗 [NVMEOF_CONNECT_DEBUG] SPDK RPC payload: {}", connect_payload);
 
-        match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
-            Ok(response) => {
-                println!("✅ [NVMEOF_CONNECT_DEBUG] SPDK connection successful");
-                println!("🔗 [NVMEOF_CONNECT_DEBUG] Response: {}", response);
-                
-                // Debug: Check the response structure
-                if response.is_object() {
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Response is an object");
-                    if let Some(obj) = response.as_object() {
-                        println!("🔍 [NVMEOF_CONNECT_DEBUG] Response keys: {:?}", obj.keys().collect::<Vec<_>>());
-                    }
-                } else {
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Response is not an object: {}", response);
-                }
-                
-                // Check for SPDK RPC errors in the response
-                if let Some(error) = response.get("error") {
-                    println!("❌ [NVMEOF_CONNECT_DEBUG] SPDK returned error: {}", error);
-                    return Err(Status::internal(format!("NVMe-oF connection failed: {}", error)));
-                } else {
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] No error field found in response");
-                }
-                
-                // Step 3: Verify the bdev was created
-                println!("🔗 [NVMEOF_CONNECT_DEBUG] Step 3: Verifying remote bdev creation...");
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await; // Allow time for bdev creation
-                
-                match self.verify_remote_bdev_exists(bdev_name).await {
-                    Ok(_) => {
-                        println!("✅ [NVMEOF_CONNECT_DEBUG] Remote bdev {} verified", bdev_name);
-                    }
-                    Err(e) => {
-                        println!("❌ [NVMEOF_CONNECT_DEBUG] Remote bdev verification failed: {}", e);
-                        return Err(Status::internal(format!("NVMe-oF connected but bdev not available: {}", e)));
-                    }
-                }
+        let rpc_start = Instant::now();
+        let response = match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
+            Ok(resp) => {
+                metrics.rpc_call_time_ms = Some(rpc_start.elapsed().as_millis() as u64);
+                resp
             }
             Err(e) => {
-                println!("❌ [NVMEOF_CONNECT_DEBUG] SPDK connection failed: {}", e);
-                println!("🔍 [NVMEOF_CONNECT_DEBUG] Analyzing error...");
-                
-                let error_str = e.to_string();
-                if error_str.contains("Connection refused") || error_str.contains("No such device") {
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] This suggests the NVMe-oF target is not properly configured");
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Check if the target node has the subsystem listening on port {}", target_port);
-                } else if error_str.contains("already exists") {
-                    println!("ℹ️ [NVMEOF_CONNECT_DEBUG] Connection already exists (acceptable)");
+                let nvmf_error = NvmfError::from_spdk_error(&e.to_string(), "bdev_nvme_attach_controller");
+                nvmf_error.log_detailed(&ctx);
+                return Err(Status::internal(nvmf_error.user_message()));
+            }
+        };
+
+        // Handle SPDK response with centralized error handling
+        match handle_spdk_response(response, "bdev_nvme_attach_controller", &ctx).await {
+            Ok(_result) => {
+                metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
+                println!("{}✅ SPDK connection established successfully", ctx.log_prefix());
+            }
+            Err(nvmf_error) => {
+                // Handle "already exists" as acceptable
+                if matches!(nvmf_error, NvmfError::ConnectionExists { .. }) {
+                    println!("{}ℹ️ Connection already exists - proceeding", ctx.log_prefix());
+                    metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
                 } else {
-                    println!("🔍 [NVMEOF_CONNECT_DEBUG] Unexpected error type: {}", error_str);
+                    return Err(Status::internal(nvmf_error.user_message()));
                 }
-                
-                return Err(Status::internal(format!("Failed to connect NVMe-oF: {}", e)));
             }
         }
 
-        println!("✅ [NVMEOF_CONNECT_DEBUG] NVMe-oF target connection complete: {} -> {}", nqn, bdev_name);
+        // Step 3: Verify the bdev was created with metrics
+        println!("{}🔗 Step 3: Verifying remote bdev creation...", ctx.log_prefix());
+        let verification_start = Instant::now();
+        
+        // Allow time for bdev creation
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        
+        match self.verify_remote_bdev_exists(bdev_name).await {
+            Ok(_) => {
+                metrics.verification_time_ms = Some(verification_start.elapsed().as_millis() as u64);
+                println!("{}✅ Remote bdev {} verified successfully", ctx.log_prefix(), bdev_name);
+            }
+            Err(e) => {
+                let nvmf_error = NvmfError::BdevNotFound {
+                    bdev_name: bdev_name.to_string(),
+                    details: e.to_string(),
+                };
+                nvmf_error.log_detailed(&ctx);
+                return Err(Status::internal(nvmf_error.user_message()));
+            }
+        }
+
+        // Log final metrics and connection health
+        metrics.total_time_ms = Some(overall_start.elapsed().as_millis() as u64);
+        metrics.log_summary(&ctx);
+        
+        // Perform connection health check
+        log_connection_health(&ctx, &self.driver.spdk_rpc_url).await;
+
+        println!("{}✅ NVMe-oF target connection complete", ctx.log_prefix());
         Ok(())
     }
 
@@ -469,7 +456,7 @@ impl NodeService {
                     println!("🔗 [NVMEOF_CLIENT_DEBUG] NQN: {}", nqn);
                     println!("🔗 [NVMEOF_CLIENT_DEBUG] Remote bdev name: {}", remote_bdev_name);
                     
-                    self.connect_nvmeof_target_debug(
+                    self.connect_nvmeof_target(
                         &remote_bdev_name,
                         nqn,
                         ip,
@@ -481,7 +468,7 @@ impl NodeService {
                     println!("🔗 [UBLK_CREATE_DEBUG] Creating ublk device for remote bdev: {}", remote_bdev_name);
                     println!("🔗 [UBLK_CREATE_DEBUG] ublk ID: {}", ublk_id);
                     
-                    match self.driver.create_ublk_device_debug(&remote_bdev_name, ublk_id).await {
+                    match self.driver.create_ublk_device_enhanced(&remote_bdev_name, ublk_id).await {
                         Ok(device_path) => {
                             println!("✅ [UBLK_CREATE_DEBUG] Successfully created ublk device: {}", device_path);
                             device_path

@@ -214,94 +214,7 @@ impl SpdkCsiDriver {
         (hasher.finish() % 1024) as u32
     }
 
-    /// Create NVMe-oF target for a volume
-    pub async fn create_nvmeof_target(
-        &self,
-        bdev_name: &str,
-        nqn: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let http_client = HttpClient::new();
-        let node_ip = self.get_current_node_ip().await?;
 
-        println!("Creating NVMe-oF target for bdev {} with NQN {}", bdev_name, nqn);
-
-        // 1. Create NVMe-oF subsystem
-        let subsystem_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_create_subsystem",
-                "params": {
-                    "nqn": nqn,
-                    "allow_any_host": true,
-                    "serial_number": format!("SPDK-{}", uuid::Uuid::new_v4()),
-                    "model_number": "SPDK CSI Volume",
-                    "max_namespaces": 1
-                }
-            }))
-            .send()
-            .await?;
-
-        if !subsystem_response.status().is_success() {
-            let error_text = subsystem_response.text().await?;
-            // Ignore "already exists" errors
-            if !error_text.contains("already exists") {
-                return Err(format!("Failed to create NVMf subsystem: {}", error_text).into());
-            }
-        }
-
-        // 2. Add namespace to subsystem
-        let namespace_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_ns",
-                "params": {
-                    "nqn": nqn,
-                    "namespace": {
-                        "nsid": 1,
-                        "bdev_name": bdev_name
-                    }
-                }
-            }))
-            .send()
-            .await?;
-
-        if !namespace_response.status().is_success() {
-            let error_text = namespace_response.text().await?;
-            // Handle "already exists" for namespace
-            if !error_text.contains("already exists") && !error_text.contains("Namespace already exists") {
-                return Err(format!("Failed to add namespace to NVMf subsystem: {}", error_text).into());
-            }
-        }
-
-        // 3. Add listener to subsystem
-        let listener_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "nvmf_subsystem_add_listener",
-                "params": {
-                    "nqn": nqn,
-                    "listen_address": {
-                        "trtype": self.nvmeof_transport.to_uppercase(),
-                        "traddr": "0.0.0.0", // Listen on all interfaces
-                        "trsvcid": self.nvmeof_target_port.to_string(),
-                        "adrfam": "ipv4"
-                    }
-                }
-            }))
-            .send()
-            .await?;
-
-        if !listener_response.status().is_success() {
-            let error_text = listener_response.text().await?;
-            // Handle "already exists" for listener
-            if !error_text.contains("already exists") && !error_text.contains("Listener already exists") {
-                return Err(format!("Failed to add listener to NVMf subsystem: {}", error_text).into());
-            }
-        }
-
-        println!("Successfully created NVMe-oF target: {} on {}:{}", nqn, node_ip, self.nvmeof_target_port);
-        Ok(())
-    }
 
     /// Create NVMe-oF target with validation and retry logic
     pub async fn create_nvmeof_target_with_validation(
@@ -526,35 +439,50 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Enhanced NVMe-oF target creation with detailed debugging
-    pub async fn create_nvmeof_target_debug(
+    /// Enhanced NVMe-oF target creation with detailed logging and metrics
+    pub async fn create_nvmeof_target(
         &self,
         bdev_name: &str,
         nqn: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use spdk_csi_driver::nvmeof_utils::*;
+        use std::time::Instant;
+
+        let overall_start = Instant::now();
         let http_client = HttpClient::new();
         let node_ip = self.get_current_node_ip().await?;
 
-        println!("🚀 [NVMEOF_CREATE_DEBUG] Starting NVMe-oF target creation");
-        println!("🚀 [NVMEOF_CREATE_DEBUG] Parameters:");
-        println!("🚀 [NVMEOF_CREATE_DEBUG]   bdev_name: {}", bdev_name);
-        println!("🚀 [NVMEOF_CREATE_DEBUG]   nqn: {}", nqn);
-        println!("🚀 [NVMEOF_CREATE_DEBUG]   node_ip: {}", node_ip);
-        println!("🚀 [NVMEOF_CREATE_DEBUG]   port: {}", self.nvmeof_target_port);
-        println!("🚀 [NVMEOF_CREATE_DEBUG]   transport: {}", self.nvmeof_transport);
+        // Create structured logging context
+        let ctx = NvmfContext::new(self.node_id.clone(), "create_target")
+            .with_nqn(nqn.to_string())
+            .with_bdev(bdev_name.to_string())
+            .with_target(node_ip.clone(), self.nvmeof_target_port.to_string());
+
+        let mut metrics = NvmfMetrics::default();
+
+        println!("{}🚀 Starting NVMe-oF target creation", ctx.log_prefix());
+        println!("{}   Transport: {} on port {}", ctx.log_prefix(), self.nvmeof_transport, self.nvmeof_target_port);
 
         // Step 1: Verify bdev exists before creating subsystem
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Step 1: Verifying bdev exists...");
+        println!("{}🔍 Step 1: Verifying bdev exists...", ctx.log_prefix());
+        let verify_start = Instant::now();
         match self.verify_bdev_exists(bdev_name).await {
-            Ok(_) => println!("✅ [NVMEOF_CREATE_DEBUG] Bdev {} exists", bdev_name),
+            Ok(_) => {
+                let verify_time = verify_start.elapsed().as_millis() as u64;
+                println!("{}✅ Bdev {} verified in {}ms", ctx.log_prefix(), bdev_name, verify_time);
+            }
             Err(e) => {
-                println!("❌ [NVMEOF_CREATE_DEBUG] Bdev {} not found: {}", bdev_name, e);
-                return Err(format!("Cannot create NVMe-oF target: bdev {} does not exist: {}", bdev_name, e).into());
+                let nvmf_error = NvmfError::BdevNotFound {
+                    bdev_name: bdev_name.to_string(),
+                    details: e.to_string(),
+                };
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Cannot create NVMe-oF target: {}", nvmf_error.user_message()).into());
             }
         }
 
-        // Step 2: Create NVMe-oF subsystem with detailed logging
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Step 2: Creating NVMe-oF subsystem...");
+        // Step 2: Create NVMe-oF subsystem with detailed logging (simplified to avoid closure complexity)
+        println!("{}🔍 Step 2: Creating NVMe-oF subsystem...", ctx.log_prefix());
         let subsystem_payload = json!({
             "method": "nvmf_create_subsystem",
             "params": {
@@ -565,7 +493,6 @@ impl SpdkCsiDriver {
                 "max_namespaces": 1
             }
         });
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Subsystem RPC payload: {}", subsystem_payload);
 
         let subsystem_response = http_client
             .post(&self.spdk_rpc_url)
@@ -575,21 +502,21 @@ impl SpdkCsiDriver {
 
         if !subsystem_response.status().is_success() {
             let error_text = subsystem_response.text().await?;
-            println!("⚠️ [NVMEOF_CREATE_DEBUG] Subsystem creation response: {}", error_text);
             
-            // Ignore "already exists" errors but log them
+            // Handle "already exists" as acceptable
             if error_text.contains("already exists") {
-                println!("ℹ️ [NVMEOF_CREATE_DEBUG] Subsystem already exists (continuing)");
+                println!("{}ℹ️ Subsystem already exists (acceptable)", ctx.log_prefix());
             } else {
-                println!("❌ [NVMEOF_CREATE_DEBUG] Subsystem creation failed: {}", error_text);
-                return Err(format!("Failed to create NVMf subsystem: {}", error_text).into());
+                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_create_subsystem");
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Failed to create subsystem: {}", nvmf_error.user_message()).into());
             }
         } else {
-            println!("✅ [NVMEOF_CREATE_DEBUG] Subsystem created successfully");
+            println!("{}✅ Subsystem created successfully", ctx.log_prefix());
         }
 
-        // Step 3: Add namespace to subsystem with detailed logging
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Step 3: Adding namespace to subsystem...");
+        // Step 3: Add namespace to subsystem
+        println!("{}🔍 Step 3: Adding namespace to subsystem...", ctx.log_prefix());
         let namespace_payload = json!({
             "method": "nvmf_subsystem_add_ns",
             "params": {
@@ -600,7 +527,6 @@ impl SpdkCsiDriver {
                 }
             }
         });
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Namespace RPC payload: {}", namespace_payload);
 
         let namespace_response = http_client
             .post(&self.spdk_rpc_url)
@@ -610,21 +536,21 @@ impl SpdkCsiDriver {
 
         if !namespace_response.status().is_success() {
             let error_text = namespace_response.text().await?;
-            println!("⚠️ [NVMEOF_CREATE_DEBUG] Namespace addition response: {}", error_text);
             
             // Handle "already exists" for namespace
             if error_text.contains("already exists") || error_text.contains("Namespace already exists") {
-                println!("ℹ️ [NVMEOF_CREATE_DEBUG] Namespace already exists (continuing)");
+                println!("{}ℹ️ Namespace already exists (acceptable)", ctx.log_prefix());
             } else {
-                println!("❌ [NVMEOF_CREATE_DEBUG] Namespace addition failed: {}", error_text);
-                return Err(format!("Failed to add namespace to NVMf subsystem: {}", error_text).into());
+                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_add_ns");
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Failed to add namespace: {}", nvmf_error.user_message()).into());
             }
         } else {
-            println!("✅ [NVMEOF_CREATE_DEBUG] Namespace added successfully");
+            println!("{}✅ Namespace added successfully", ctx.log_prefix());
         }
 
-        // Step 4: Add listener to subsystem with detailed logging
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Step 4: Adding listener to subsystem...");
+        // Step 4: Add listener to subsystem
+        println!("{}🔍 Step 4: Adding listener to subsystem...", ctx.log_prefix());
         let listener_payload = json!({
             "method": "nvmf_subsystem_add_listener",
             "params": {
@@ -637,7 +563,6 @@ impl SpdkCsiDriver {
                 }
             }
         });
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Listener RPC payload: {}", listener_payload);
 
         let listener_response = http_client
             .post(&self.spdk_rpc_url)
@@ -647,40 +572,51 @@ impl SpdkCsiDriver {
 
         if !listener_response.status().is_success() {
             let error_text = listener_response.text().await?;
-            println!("⚠️ [NVMEOF_CREATE_DEBUG] Listener addition response: {}", error_text);
             
             // Handle "already exists" for listener
             if error_text.contains("already exists") || error_text.contains("Listener already exists") {
-                println!("ℹ️ [NVMEOF_CREATE_DEBUG] Listener already exists (continuing)");
+                println!("{}ℹ️ Listener already exists (acceptable)", ctx.log_prefix());
             } else {
-                println!("❌ [NVMEOF_CREATE_DEBUG] Listener addition failed: {}", error_text);
-                return Err(format!("Failed to add listener to NVMf subsystem: {}", error_text).into());
+                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_add_listener");
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Failed to add listener: {}", nvmf_error.user_message()).into());
             }
         } else {
-            println!("✅ [NVMEOF_CREATE_DEBUG] Listener added successfully");
+            println!("{}✅ Listener added successfully", ctx.log_prefix());
         }
 
         // Step 5: Verify the complete configuration
-        println!("🔍 [NVMEOF_CREATE_DEBUG] Step 5: Verifying complete configuration...");
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // Small delay for consistency
+        println!("{}🔍 Step 5: Verifying complete configuration...", ctx.log_prefix());
+        let validation_start = Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // Allow configuration to settle
         
         match self.validate_nvmeof_target(nqn).await {
             Ok(_) => {
-                println!("✅ [NVMEOF_CREATE_DEBUG] Complete NVMe-oF target creation and validation successful");
-                println!("🚀 [NVMEOF_CREATE_DEBUG] Target accessible at: {}:{} (transport: {})", 
-                         node_ip, self.nvmeof_target_port, self.nvmeof_transport);
+                metrics.verification_time_ms = Some(validation_start.elapsed().as_millis() as u64);
+                println!("{}✅ NVMe-oF target validation successful", ctx.log_prefix());
+                println!("{}🚀 Target accessible at: {}:{} (transport: {})", 
+                         ctx.log_prefix(), node_ip, self.nvmeof_target_port, self.nvmeof_transport);
             }
             Err(e) => {
-                println!("❌ [NVMEOF_CREATE_DEBUG] Post-creation validation failed: {}", e);
-                return Err(format!("NVMe-oF target created but validation failed: {}", e).into());
+                let nvmf_error = NvmfError::ValidationFailed {
+                    resource: format!("NVMe-oF target {}", nqn),
+                    details: e.to_string(),
+                };
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("NVMe-oF target created but validation failed: {}", nvmf_error.user_message()).into());
             }
         }
 
+        // Log performance metrics
+        metrics.total_time_ms = Some(overall_start.elapsed().as_millis() as u64);
+        metrics.log_summary(&ctx);
+
+        println!("{}🎉 NVMe-oF target creation completed successfully", ctx.log_prefix());
         Ok(())
     }
 
-    /// Verify that a bdev exists in SPDK with enhanced debugging
-    async fn verify_bdev_exists_debug(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Verify that a bdev exists in SPDK with enhanced logging
+    async fn verify_bdev_exists_impl(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [BDEV_VERIFY_DEBUG] Checking if bdev '{}' exists...", bdev_name);
         
         let bdev_payload = json!({
@@ -749,7 +685,7 @@ impl SpdkCsiDriver {
     
     /// Verify that a bdev exists in SPDK (legacy function for compatibility)
     async fn verify_bdev_exists(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.verify_bdev_exists_debug(bdev_name).await
+        self.verify_bdev_exists_impl(bdev_name).await
     }
 
     /// Delete a logical volume for cleanup purposes
@@ -782,8 +718,8 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Enhanced ublk device creation with comprehensive debugging
-    pub async fn create_ublk_device_debug(&self, bdev_name: &str, ublk_id: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    /// Enhanced ublk device creation with comprehensive logging
+    pub async fn create_ublk_device_enhanced(&self, bdev_name: &str, ublk_id: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [UBLK_CREATE_DEBUG] Starting ublk device creation with debugging");
         println!("🔧 [UBLK_CREATE_DEBUG] Parameters:");
         println!("🔧 [UBLK_CREATE_DEBUG]   bdev_name: {}", bdev_name);
@@ -805,7 +741,7 @@ impl SpdkCsiDriver {
             
             // Try to clean up existing device first
             println!("🔧 [UBLK_CREATE_DEBUG] Attempting to cleanup existing device...");
-            if let Err(e) = self.cleanup_ublk_device_debug(ublk_id).await {
+            if let Err(e) = self.cleanup_ublk_device(ublk_id).await {
                 println!("⚠️ [UBLK_CREATE_DEBUG] Cleanup warning: {}", e);
             }
             
@@ -825,7 +761,7 @@ impl SpdkCsiDriver {
             
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10), 
-                self.verify_bdev_exists_debug(bdev_name)
+                self.verify_bdev_exists_impl(bdev_name)
             ).await {
                 Ok(Ok(_)) => {
                     println!("✅ [UBLK_CREATE_DEBUG] Target bdev verification successful on attempt {}", attempt);
@@ -971,8 +907,8 @@ impl SpdkCsiDriver {
         Ok(device_path)
     }
 
-    /// Enhanced ublk device cleanup with debugging
-    pub async fn cleanup_ublk_device_debug(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Enhanced ublk device cleanup with logging
+    pub async fn cleanup_ublk_device(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🧹 [UBLK_CLEANUP_DEBUG] Starting ublk device cleanup for ID {}", ublk_id);
         
         let device_path = format!("/dev/ublkb{}", ublk_id);
