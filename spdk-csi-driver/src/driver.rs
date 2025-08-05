@@ -79,12 +79,16 @@ impl SpdkCsiDriver {
     }
 
     /// Get current node IP address (cached for efficiency)
+    /// Uses the driver's node_id field instead of environment variables to support cross-node operations
     pub async fn get_current_node_ip(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let current_node = std::env::var("NODE_NAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| self.node_id.clone());
+        // Use the driver's node_id which is set correctly for the target node
+        // This supports controller operations on behalf of other nodes
+        println!("🔍 [NODE_IP_DEBUG] Getting IP for node: {}", self.node_id);
         
-        Ok(self.get_node_ip(&current_node).await?)
+        let node_ip = self.get_node_ip(&self.node_id).await?;
+        println!("✅ [NODE_IP_DEBUG] Resolved node '{}' to IP: {}", self.node_id, node_ip);
+        
+        Ok(node_ip)
     }
 
     /// Ensure ublk target is created (required before starting disks)
@@ -809,21 +813,50 @@ impl SpdkCsiDriver {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        // Verify bdev exists with timeout
-        println!("🔧 [UBLK_CREATE_DEBUG] Verifying target bdev exists...");
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10), 
-            self.verify_bdev_exists_debug(bdev_name)
-        ).await {
-            Ok(Ok(_)) => println!("✅ [UBLK_CREATE_DEBUG] Target bdev verified"),
-            Ok(Err(e)) => {
-                println!("❌ [UBLK_CREATE_DEBUG] Target bdev verification failed: {}", e);
-                return Err(format!("Cannot create ublk device: target bdev '{}' not found: {}", bdev_name, e).into());
+        // Verify bdev exists with retry mechanism for NVMe-oF timing issues
+        println!("🔧 [UBLK_CREATE_DEBUG] Verifying target bdev exists (with retry for NVMe-oF timing)...");
+        
+        let max_retries = 5;
+        let mut last_error = String::new();
+        let mut verification_succeeded = false;
+        
+        for attempt in 1..=max_retries {
+            println!("🔧 [UBLK_CREATE_DEBUG] Attempt {}/{}: Checking bdev availability...", attempt, max_retries);
+            
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10), 
+                self.verify_bdev_exists_debug(bdev_name)
+            ).await {
+                Ok(Ok(_)) => {
+                    println!("✅ [UBLK_CREATE_DEBUG] Target bdev verification successful on attempt {}", attempt);
+                    verification_succeeded = true;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    last_error = e.to_string();
+                    println!("⚠️ [UBLK_CREATE_DEBUG] Attempt {}/{} failed: {}", attempt, max_retries, e);
+                    
+                    if attempt < max_retries {
+                        let delay_ms = attempt * 500; // Exponential backoff: 500ms, 1s, 1.5s, 2s
+                        println!("🔧 [UBLK_CREATE_DEBUG] Waiting {}ms before retry (NVMe-oF bdev may need time to register)...", delay_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+                Err(_) => {
+                    last_error = "verification timed out".to_string();
+                    println!("⚠️ [UBLK_CREATE_DEBUG] Attempt {}/{} timed out", attempt, max_retries);
+                    
+                    if attempt < max_retries {
+                        println!("🔧 [UBLK_CREATE_DEBUG] Retrying after timeout...");
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    }
+                }
             }
-            Err(_) => {
-                println!("❌ [UBLK_CREATE_DEBUG] Target bdev verification timed out after 10 seconds");
-                return Err(format!("Timeout verifying bdev '{}' existence", bdev_name).into());
-            }
+        }
+        
+        if !verification_succeeded {
+            println!("❌ [UBLK_CREATE_DEBUG] All {} attempts failed. Final error: {}", max_retries, last_error);
+            return Err(format!("Cannot create ublk device: target bdev '{}' not available after {} attempts: {}", bdev_name, max_retries, last_error).into());
         }
 
         // Step 2: Create ublk device with detailed logging
