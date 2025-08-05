@@ -361,10 +361,8 @@ impl ControllerService {
             let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
             
             // Create NVMe-oF target for remote access
-            let lvs_name = disk.status.as_ref()
-                .and_then(|s| s.lvs_name.as_ref())
-                .ok_or_else(|| Status::internal("Disk LVS name missing"))?;
-            let bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
+            // Use UUID directly as bdev name for SPDK NVMe-oF target creation
+            let bdev_name = lvol_uuid.clone();
             
             // Get driver instance for the replica node to create NVMe-oF target
             let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await
@@ -669,14 +667,8 @@ impl ControllerService {
             // Delete lvol
             if let Some(lvol_uuid) = &replica.lvol_uuid {
                 // Get the actual LVS name from the disk CRD status
-                let lvs_name = match self.get_actual_lvs_name(&replica.disk_ref).await {
-                    Ok(name) => name,
-                    Err(e) => {
-                        println!("⚠️ [DELETE_VOLUME] Failed to get LVS name for disk {}: {}, using fallback", replica.disk_ref, e);
-                        format!("lvs_{}", replica.disk_ref) // Fallback to old naming
-                    }
-                };
-                let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
+                // Use UUID directly for logical volume deletion
+                let lvol_bdev_name = lvol_uuid.clone();
                 
                 let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
                 let http_client = HttpClient::new();
@@ -1015,14 +1007,8 @@ impl Controller for ControllerService {
                 let http_client = HttpClient::new();
                 
                 // Get the actual LVS name from the disk CRD status
-                let lvs_name = match self.get_actual_lvs_name(&replica.disk_ref).await {
-                    Ok(name) => name,
-                    Err(e) => {
-                        println!("⚠️ [EXPAND_VOLUME] Failed to get LVS name for disk {}: {}, using fallback", replica.disk_ref, e);
-                        format!("lvs_{}", replica.disk_ref) // Fallback to old naming
-                    }
-                };
-                let lvol_name = format!("{}/{}", lvs_name, lvol_uuid);
+                // Use UUID directly for logical volume expansion
+                let lvol_name = lvol_uuid.clone();
 
                 // Convert bytes to MiB as required by SPDK bdev_lvol_resize RPC
                 let size_in_mib = (new_capacity + 1048575) / 1048576; // Round up to nearest MiB
