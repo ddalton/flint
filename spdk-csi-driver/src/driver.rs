@@ -504,7 +504,7 @@ impl SpdkCsiDriver {
             let error_text = subsystem_response.text().await?;
             
             // Handle "already exists" as acceptable
-            if error_text.contains("already exists") {
+            if error_text.contains("already exists") || error_text.contains("Subsystem NQN") && error_text.contains("already exists") {
                 println!("{}ℹ️ Subsystem already exists (acceptable)", ctx.log_prefix());
             } else {
                 let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_create_subsystem");

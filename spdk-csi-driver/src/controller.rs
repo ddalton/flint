@@ -388,8 +388,31 @@ impl ControllerService {
                 Err(e) => {
                     println!("❌ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
                     
-                    // Clean up the logical volume on failure to maintain consistency
-                    let cleanup_result = HttpClient::new()
+                    // Clean up both the NVMe-oF subsystem and logical volume on failure to maintain consistency
+                    println!("🔧 [CLEANUP] Cleaning up NVMe-oF subsystem: {}", nqn);
+                    let subsystem_cleanup = HttpClient::new()
+                        .post(&node_driver.spdk_rpc_url)
+                        .json(&json!({
+                            "method": "nvmf_delete_subsystem",
+                            "params": { "nqn": nqn }
+                        }))
+                        .send()
+                        .await;
+                    
+                    match subsystem_cleanup {
+                        Ok(response) if response.status().is_success() => {
+                            println!("✅ [CLEANUP] Successfully cleaned up NVMe-oF subsystem");
+                        }
+                        Ok(_) => {
+                            println!("⚠️ [CLEANUP] NVMe-oF subsystem cleanup failed (may not exist)");
+                        }
+                        Err(e) => {
+                            println!("⚠️ [CLEANUP] Failed to clean up NVMe-oF subsystem: {}", e);
+                        }
+                    }
+                    
+                    println!("🔧 [CLEANUP] Cleaning up logical volume: {}", lvol_uuid);
+                    let lvol_cleanup = HttpClient::new()
                         .post(&node_driver.spdk_rpc_url)
                         .json(&json!({
                             "method": "bdev_lvol_delete",
@@ -398,7 +421,7 @@ impl ControllerService {
                         .send()
                         .await;
                     
-                    match cleanup_result {
+                    match lvol_cleanup {
                         Ok(response) if response.status().is_success() => {
                             println!("✅ [CLEANUP] Successfully cleaned up lvol after NVMe-oF failure");
                         }
