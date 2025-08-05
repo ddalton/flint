@@ -140,6 +140,9 @@ setup_vfio_drivers() {
     modprobe vfio-pci 2>/dev/null || echo "⚠️  vfio-pci module load failed"
     modprobe vfio 2>/dev/null || echo "⚠️  vfio module load failed"
     
+    # Load ublk driver for userspace block devices
+    modprobe ublk_drv 2>/dev/null || echo "⚠️  ublk_drv module load failed"
+    
     # Check IOMMU groups
     local iommu_groups=$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)
     echo "   📊 IOMMU groups available: $iommu_groups"
@@ -176,6 +179,9 @@ setup_bare_metal_drivers() {
     
     # Also make vfio-pci available as fallback
     modprobe vfio-pci 2>/dev/null || echo "   ⚠️  vfio-pci fallback not available"
+    
+    # Load ublk driver for userspace block devices
+    modprobe ublk_drv 2>/dev/null || echo "   ⚠️  ublk_drv module load failed"
 }
 
 # Function to detect CPU vendor and configure IOMMU if needed

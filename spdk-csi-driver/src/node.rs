@@ -297,15 +297,41 @@ impl NodeService {
         Ok(target_device)
     }
     
-    /// Clean up ublk devices on unpublish
+    /// Clean up ublk devices on unpublish (idempotent with retry)
     async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
         let ublk_id = self.driver.generate_ublk_id(volume_id);
         
-        // Delete the specific ublk device
-        // Note: SPDK process will automatically clean up ublk target on shutdown
-        self.driver.delete_ublk_device(ublk_id).await
-            .map_err(|e| Status::internal(format!("Failed to delete ublk device: {}", e)))?;
-            
+        println!("🗑️ [CLEANUP] Deleting ublk device {} for volume {}", ublk_id, volume_id);
+        
+        // Retry deletion up to 3 times for robustness
+        for attempt in 1..=3 {
+            match self.driver.delete_ublk_device(ublk_id).await {
+                Ok(_) => {
+                    println!("✅ [CLEANUP] Successfully deleted ublk device {} (attempt {})", ublk_id, attempt);
+                    return Ok(());
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    
+                    // If device doesn't exist, that's success (idempotent)
+                    if error_str.contains("does not exist") || error_str.contains("not found") {
+                        println!("ℹ️ [CLEANUP] ublk device {} already deleted", ublk_id);
+                        return Ok(());
+                    }
+                    
+                    // For other errors, retry or fail
+                    if attempt == 3 {
+                        println!("❌ [CLEANUP] Failed to delete ublk device {} after {} attempts: {}", ublk_id, attempt, error_str);
+                        return Err(Status::internal(format!("Failed to delete ublk device after retries: {}", error_str)));
+                    } else {
+                        println!("⚠️ [CLEANUP] Attempt {} failed for ublk device {}: {}. Retrying...", attempt, ublk_id, error_str);
+                        // Sleep between retries
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 
@@ -400,6 +426,8 @@ impl NodeService {
 
     /// Unmounts a device
     async fn unmount_device(&self, mount_path: &str) -> Result<(), Status> {
+        println!("🗂️ [UNMOUNT] Attempting to unmount: {}", mount_path);
+        
         let output = Command::new("umount")
             .arg(mount_path)
             .output()
@@ -409,31 +437,41 @@ impl NodeService {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stderr.contains("not mounted") {
+                println!("❌ [UNMOUNT] Failed to unmount {}: {}", mount_path, stderr);
                 return Err(Status::internal(format!("Unmount failed: {}", stderr)));
+            } else {
+                println!("ℹ️ [UNMOUNT] {} was not mounted (already unmounted)", mount_path);
             }
+        } else {
+            println!("✅ [UNMOUNT] Successfully unmounted {}", mount_path);
         }
 
-        println!("Unmounted {}", mount_path);
         Ok(())
     }
 
     /// Clean up all SPDK resources for a volume
     async fn cleanup_spdk_resources(&self, volume: &SpdkVolume) -> Result<(), Status> {
+        println!("🔧 [SPDK_CLEANUP] Starting SPDK resource cleanup for volume {}", volume.spec.volume_id);
+        
         if volume.spec.num_replicas > 1 {
             // Multi-replica: Clean up RAID and remote connections
+            println!("🔧 [SPDK_CLEANUP] Multi-replica volume: cleaning up RAID bdev");
             self.cleanup_raid1_bdev(volume).await?;
         } else if volume.spec.num_replicas == 1 {
             // Single replica: Clean up remote NVMe-oF connection if needed
             if let Some(replica) = volume.spec.replicas.first() {
                 if replica.node != self.driver.node_id {
                     // Remote replica: disconnect NVMe-oF
+                    println!("🔧 [SPDK_CLEANUP] Single remote replica: disconnecting NVMe-oF");
                     let remote_bdev_name = format!("nvmf_remote_{}", volume.spec.volume_id);
                     self.disconnect_nvmeof_bdev(&remote_bdev_name).await?;
+                } else {
+                    println!("🔧 [SPDK_CLEANUP] Single local replica: no additional cleanup needed");
                 }
-                // Local replica: no additional cleanup needed (lvol remains for future use)
             }
         }
         
+        println!("✅ [SPDK_CLEANUP] Completed SPDK resource cleanup for volume {}", volume.spec.volume_id);
         Ok(())
     }
 
@@ -561,33 +599,53 @@ impl Node for NodeService {
             return Err(Status::invalid_argument("Volume ID and staging target path are required"));
         }
 
-        println!("Unstaging volume {} from {}", volume_id, staging_target_path);
+        println!("🚀 [UNSTAGE] Starting unstage for volume {} from {}", volume_id, staging_target_path);
 
         // Step 1: Unmount the staging path
-        self.unmount_device(&staging_target_path).await.ok();
+        println!("📝 [UNSTAGE] Step 1: Unmounting staging path");
+        if let Err(e) = self.unmount_device(&staging_target_path).await {
+            println!("⚠️ [UNSTAGE] Unmount warning (non-fatal): {}", e);
+        }
 
-        // Step 2: Get volume information for cleanup decisions
+        // Step 2: Always clean up ublk device first (idempotent - works even if CRD is gone)
+        println!("🧹 [UNSTAGE] Cleaning up ublk device for volume: {}", volume_id);
+        if let Err(e) = self.cleanup_ublk_device(&volume_id).await {
+            println!("⚠️ [UNSTAGE] ublk cleanup warning (non-fatal): {}", e);
+            // Continue with other cleanup - don't fail the unstage operation
+        }
+
+        // Step 3: Get volume information for additional cleanup (if CRD still exists)
+        println!("📝 [UNSTAGE] Step 3: Checking for volume CRD");
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         match volumes_api.get(&volume_id).await {
             Ok(volume) => {
-                // Step 3: Clean up ublk device (replaces NVMe-oF loopback cleanup)
-                self.cleanup_ublk_device(&volume_id).await?;
+                println!("✅ [UNSTAGE] Found volume CRD, performing complete cleanup");
                 
                 // Step 4: Clean up SPDK resources
-                self.cleanup_spdk_resources(&volume).await?;
+                println!("📝 [UNSTAGE] Step 4: Cleaning up SPDK resources");
+                if let Err(e) = self.cleanup_spdk_resources(&volume).await {
+                    println!("⚠️ [UNSTAGE] SPDK cleanup warning (non-fatal): {}", e);
+                }
                 
                 // Step 5: Update scheduling status
-                self.update_volume_scheduling_status(&volume_id, false).await?;
+                println!("📝 [UNSTAGE] Step 5: Updating volume scheduling status");
+                if let Err(e) = self.update_volume_scheduling_status(&volume_id, false).await {
+                    println!("⚠️ [UNSTAGE] Status update warning (non-fatal): {}", e);
+                }
 
-                // Clear ublk device status
-                self.update_volume_ublk_status(&volume_id, None).await?;
+                // Step 6: Clear ublk device status
+                println!("📝 [UNSTAGE] Step 6: Clearing ublk device status");
+                if let Err(e) = self.update_volume_ublk_status(&volume_id, None).await {
+                    println!("⚠️ [UNSTAGE] ublk status clear warning (non-fatal): {}", e);
+                }
             }
             Err(e) => {
-                println!("Volume {} not found during unstage, skipping cleanup: {}", volume_id, e);
+                println!("ℹ️ [UNSTAGE] Volume {} CRD not found (may be already deleted): {}", volume_id, e);
+                println!("ℹ️ [UNSTAGE] This is normal for deleted volumes - basic cleanup completed");
             }
         }
 
-        println!("Successfully unstaged volume {}", volume_id);
+        println!("🎉 [UNSTAGE] Successfully completed unstage for volume {}", volume_id);
         Ok(Response::new(NodeUnstageVolumeResponse {}))
     }
 

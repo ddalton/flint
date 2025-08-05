@@ -2312,6 +2312,17 @@ impl NodeAgent {
             }
         }
 
+        // Load ublk driver for userspace block devices
+        match self.load_ublk_driver().await {
+            Ok(_) => {
+                println!("✅ [SETUP_HANDLER] ublk_drv module loaded successfully");
+            }
+            Err(e) => {
+                result.warnings.push(format!("ublk_drv setup warning: {}", e));
+                println!("⚠️ [SETUP_HANDLER] ublk_drv setup warning: {}", e);
+            }
+        }
+
         // Process each disk
         println!("🔧 [SETUP_HANDLER] Step 3: Processing {} disks for setup...", request.pci_addresses.len());
         for pci_addr in &request.pci_addresses {
@@ -3476,6 +3487,36 @@ impl NodeAgent {
 
         println!("Auto-calculated hugepages: {}MB for system with {}GB RAM", hugepage_mb, total_mem_gb);
         Ok(hugepage_mb)
+    }
+
+    /// Load ublk driver module for userspace block devices
+    async fn load_ublk_driver(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 Loading ublk_drv module for userspace block devices...");
+        
+        // Check if module is already loaded
+        let output = Command::new("lsmod")
+            .output()?;
+
+        let modules = String::from_utf8(output.stdout)?;
+        if modules.contains("ublk_drv") {
+            println!("✅ ublk_drv module already loaded");
+            return Ok(());
+        }
+
+        // Load the ublk_drv module
+        let output = Command::new("modprobe")
+            .arg("ublk_drv")
+            .output()?;
+
+        if !output.status.success() {
+            let error_msg = format!("Failed to load ublk_drv module: {}", 
+                String::from_utf8_lossy(&output.stderr));
+            println!("⚠️ {}", error_msg);
+            return Err(error_msg.into());
+        }
+
+        println!("✅ ublk_drv module loaded successfully");
+        Ok(())
     }
 
     async fn reset_disks_to_kernel(&self, pci_addresses: Vec<String>) -> Result<DiskSetupResult, Box<dyn std::error::Error + Send + Sync>> {

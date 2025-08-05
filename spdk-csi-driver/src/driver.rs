@@ -79,7 +79,7 @@ impl SpdkCsiDriver {
     }
 
     /// Get current node IP address (cached for efficiency)
-    pub async fn get_current_node_ip(&self) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn get_current_node_ip(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let current_node = std::env::var("NODE_NAME")
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| self.node_id.clone());
@@ -89,7 +89,7 @@ impl SpdkCsiDriver {
 
     /// Ensure ublk target is created (required before starting disks)
     /// Only calls ublk_create_target once per CSI driver instance
-    async fn ensure_ublk_target(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn ensure_ublk_target(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut initialized = self.ublk_target_initialized.lock().await;
         
         if *initialized {
@@ -122,7 +122,7 @@ impl SpdkCsiDriver {
         &self,
         bdev_name: &str,
         ublk_id: u32,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
         
         // Check if device already exists
@@ -164,8 +164,8 @@ impl SpdkCsiDriver {
     pub async fn delete_ublk_device(
         &self,
         ublk_id: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Deleting ublk device with ID {}", ublk_id);
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🗑️ [UBLK_DELETE] Deleting ublk device with ID {}", ublk_id);
         
         // Use the same SPDK RPC pattern as node_agent.rs
         let rpc_request = json!({
@@ -175,17 +175,29 @@ impl SpdkCsiDriver {
             }
         });
         
-        let response = self.call_spdk_rpc(&rpc_request).await?;
+        // Add timeout protection for the RPC call
+        let timeout_duration = tokio::time::Duration::from_secs(10);
+        let response = match tokio::time::timeout(timeout_duration, self.call_spdk_rpc(&rpc_request)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                println!("⚠️ [UBLK_DELETE] RPC call timed out for ublk device {}", ublk_id);
+                return Err("SPDK RPC call timed out".into());
+            }
+        };
         
         // Check for SPDK RPC errors, but ignore "does not exist" type errors
         if let Some(error) = response.get("error") {
             let error_str = error.to_string();
-            if !error_str.contains("does not exist") && !error_str.contains("not found") {
+            if error_str.contains("does not exist") || error_str.contains("not found") {
+                println!("ℹ️ [UBLK_DELETE] ublk device {} already deleted or doesn't exist", ublk_id);
+                return Ok(()); // Not an error - device is already gone
+            } else {
+                println!("❌ [UBLK_DELETE] SPDK RPC error for ublk device {}: {}", ublk_id, error);
                 return Err(format!("SPDK RPC error: {}", error).into());
             }
         }
         
-        println!("Deleted ublk device with ID {}", ublk_id);
+        println!("✅ [UBLK_DELETE] Successfully deleted ublk device with ID {}", ublk_id);
         Ok(())
     }
     
@@ -203,7 +215,7 @@ impl SpdkCsiDriver {
         &self,
         bdev_name: &str,
         nqn: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let http_client = HttpClient::new();
         let node_ip = self.get_current_node_ip().await?;
 
@@ -285,7 +297,7 @@ impl SpdkCsiDriver {
     async fn call_spdk_rpc(
         &self,
         rpc_request: &serde_json::Value,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
         if self.spdk_rpc_url.starts_with("unix://") {
             // Unix socket connection
             let socket_path = self.spdk_rpc_url.trim_start_matches("unix://");
