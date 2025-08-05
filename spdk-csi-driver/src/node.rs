@@ -608,10 +608,8 @@ impl Node for NodeService {
         println!("Publishing volume {} from {} to {}", volume_id, staging_target_path, target_path);
 
         // Create target directory
-        if let Some(parent) = Path::new(&target_path).parent() {
-            fs::create_dir_all(parent).await
-                .map_err(|e| Status::internal(format!("Failed to create target directory: {}", e)))?;
-        }
+        fs::create_dir_all(&target_path).await
+            .map_err(|e| Status::internal(format!("Failed to create target directory: {}", e)))?;
 
         // Determine if this is a block or filesystem volume
         let is_block_volume = req.volume_capability
