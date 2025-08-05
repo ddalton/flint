@@ -488,7 +488,7 @@ impl SpdkCsiDriver {
             "params": {
                 "nqn": nqn,
                 "allow_any_host": true,
-                "serial_number": format!("SPDK-{}", uuid::Uuid::new_v4()),
+                "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64),
                 "model_number": "SPDK CSI Volume",
                 "max_namespaces": 1
             }
