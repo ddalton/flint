@@ -675,51 +675,77 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Verify that a bdev exists in SPDK
-    async fn verify_bdev_exists(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let http_client = HttpClient::new();
+    /// Verify that a bdev exists in SPDK with enhanced debugging
+    async fn verify_bdev_exists_debug(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [BDEV_VERIFY_DEBUG] Checking if bdev '{}' exists...", bdev_name);
         
-        println!("🔍 [BDEV_VERIFY] Checking if bdev '{}' exists...", bdev_name);
+        let bdev_payload = json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": bdev_name
+            }
+        });
+        println!("🔍 [BDEV_VERIFY_DEBUG] RPC payload: {}", bdev_payload);
         
-        let bdev_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_get_bdevs",
-                "params": {
-                    "name": bdev_name
-                }
-            }))
-            .send()
-            .await?;
-
-        if !bdev_response.status().is_success() {
-            let error_text = bdev_response.text().await?;
-            println!("❌ [BDEV_VERIFY] Failed to query bdev: {}", error_text);
-            return Err(format!("Failed to query bdev {}: {}", bdev_name, error_text).into());
+        let response = self.call_spdk_rpc(&bdev_payload).await?;
+        println!("🔍 [BDEV_VERIFY_DEBUG] RPC response: {}", response);
+        
+        // Check for SPDK RPC errors
+        if let Some(error) = response.get("error") {
+            println!("❌ [BDEV_VERIFY_DEBUG] SPDK RPC error: {}", error);
+            return Err(format!("Failed to query bdev {}: {}", bdev_name, error).into());
         }
-
-        let bdevs: serde_json::Value = bdev_response.json().await?;
         
-        if let Some(bdev_list) = bdevs.as_array() {
-            if bdev_list.is_empty() {
-                println!("❌ [BDEV_VERIFY] Bdev '{}' not found", bdev_name);
-                return Err(format!("Bdev '{}' does not exist", bdev_name).into());
-            }
-            
-            println!("✅ [BDEV_VERIFY] Bdev '{}' exists", bdev_name);
-            
-            // Debug: Show bdev details
-            for bdev in bdev_list {
-                if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                    let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                    println!("🔍 [BDEV_VERIFY] Bdev details: name={}, blocks={}, block_size={}", 
-                             name, size, block_size);
+        if let Some(result) = response.get("result") {
+            if let Some(bdev_list) = result.as_array() {
+                if bdev_list.is_empty() {
+                    println!("❌ [BDEV_VERIFY_DEBUG] Bdev '{}' not found", bdev_name);
+                    
+                    // Debug: List all available bdevs
+                    println!("🔍 [BDEV_VERIFY_DEBUG] Listing all available bdevs...");
+                    let all_bdevs_payload = json!({
+                        "method": "bdev_get_bdevs",
+                        "params": {}
+                    });
+                    if let Ok(all_response) = self.call_spdk_rpc(&all_bdevs_payload).await {
+                        if let Some(all_result) = all_response.get("result") {
+                            if let Some(all_bdev_list) = all_result.as_array() {
+                                let bdev_names: Vec<String> = all_bdev_list
+                                    .iter()
+                                    .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                                    .collect();
+                                println!("🔍 [BDEV_VERIFY_DEBUG] Available bdevs: {:?}", bdev_names);
+                            }
+                        }
+                    }
+                    
+                    return Err(format!("Bdev '{}' does not exist", bdev_name).into());
+                }
+                
+                println!("✅ [BDEV_VERIFY_DEBUG] Bdev '{}' exists", bdev_name);
+                
+                // Debug: Show bdev details
+                for bdev in bdev_list {
+                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                        let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let bdev_type = bdev.get("product_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        println!("🔍 [BDEV_VERIFY_DEBUG] Bdev details: name={}, type={}, blocks={}, block_size={}", 
+                                 name, bdev_type, size, block_size);
+                    }
                 }
             }
+        } else {
+            println!("❌ [BDEV_VERIFY_DEBUG] Unexpected response format: missing 'result' field");
+            return Err("Unexpected response format from SPDK".into());
         }
         
         Ok(())
+    }
+    
+    /// Verify that a bdev exists in SPDK (legacy function for compatibility)
+    async fn verify_bdev_exists(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.verify_bdev_exists_debug(bdev_name).await
     }
 
     /// Delete a logical volume for cleanup purposes
@@ -762,19 +788,41 @@ impl SpdkCsiDriver {
         // Step 1: Pre-flight checks
         println!("🔧 [UBLK_CREATE_DEBUG] Step 1: Pre-flight checks...");
         
-        // Check if device already exists
-        let device_path = format!("/dev/ublkc{}", ublk_id);
-        if std::path::Path::new(&device_path).exists() {
-            println!("⚠️ [UBLK_CREATE_DEBUG] ublk device {} already exists", device_path);
-            return Ok(device_path);
+        // FIXED: Use correct ublk device path format (/dev/ublkb{id} for block devices)
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        println!("🔧 [UBLK_CREATE_DEBUG] Expected device path: {}", device_path);
+        
+        // Check for any existing ublk devices with this ID
+        let control_path = format!("/dev/ublkc{}", ublk_id);
+        if std::path::Path::new(&device_path).exists() || std::path::Path::new(&control_path).exists() {
+            println!("⚠️ [UBLK_CREATE_DEBUG] ublk device with ID {} already exists", ublk_id);
+            println!("🔧 [UBLK_CREATE_DEBUG] Block device: exists={}", std::path::Path::new(&device_path).exists());
+            println!("🔧 [UBLK_CREATE_DEBUG] Control device: exists={}", std::path::Path::new(&control_path).exists());
+            
+            // Try to clean up existing device first
+            println!("🔧 [UBLK_CREATE_DEBUG] Attempting to cleanup existing device...");
+            if let Err(e) = self.cleanup_ublk_device_debug(ublk_id).await {
+                println!("⚠️ [UBLK_CREATE_DEBUG] Cleanup warning: {}", e);
+            }
+            
+            // Wait for cleanup to complete
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        // Verify bdev exists
-        match self.verify_bdev_exists(bdev_name).await {
-            Ok(_) => println!("✅ [UBLK_CREATE_DEBUG] Target bdev verified"),
-            Err(e) => {
+        // Verify bdev exists with timeout
+        println!("🔧 [UBLK_CREATE_DEBUG] Verifying target bdev exists...");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10), 
+            self.verify_bdev_exists_debug(bdev_name)
+        ).await {
+            Ok(Ok(_)) => println!("✅ [UBLK_CREATE_DEBUG] Target bdev verified"),
+            Ok(Err(e)) => {
                 println!("❌ [UBLK_CREATE_DEBUG] Target bdev verification failed: {}", e);
                 return Err(format!("Cannot create ublk device: target bdev '{}' not found: {}", bdev_name, e).into());
+            }
+            Err(_) => {
+                println!("❌ [UBLK_CREATE_DEBUG] Target bdev verification timed out after 10 seconds");
+                return Err(format!("Timeout verifying bdev '{}' existence", bdev_name).into());
             }
         }
 
@@ -789,33 +837,46 @@ impl SpdkCsiDriver {
         });
         println!("🔧 [UBLK_CREATE_DEBUG] SPDK RPC payload: {}", ublk_payload);
 
-        let http_client = HttpClient::new();
-        let ublk_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&ublk_payload)
-            .send()
-            .await?;
+        // FIXED: Use consistent RPC calling method with timeout
+        let rpc_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.call_spdk_rpc(&ublk_payload)
+        ).await;
 
-        if !ublk_response.status().is_success() {
-            let error_text = ublk_response.text().await?;
-            println!("❌ [UBLK_CREATE_DEBUG] ublk creation failed: {}", error_text);
-            
-            // Analyze the error
-            if error_text.contains("No such device") || error_text.contains("-19") {
-                println!("🔍 [UBLK_CREATE_DEBUG] Error analysis: bdev not found or not accessible");
-                println!("🔍 [UBLK_CREATE_DEBUG] This typically means:");
-                println!("🔍 [UBLK_CREATE_DEBUG]   1. The NVMe-oF connection failed");
-                println!("🔍 [UBLK_CREATE_DEBUG]   2. The remote bdev name is incorrect");
-                println!("🔍 [UBLK_CREATE_DEBUG]   3. The target subsystem is not properly configured");
-            } else if error_text.contains("already exists") {
-                println!("ℹ️ [UBLK_CREATE_DEBUG] Device already exists (acceptable)");
-            } else {
-                println!("🔍 [UBLK_CREATE_DEBUG] Unexpected error: {}", error_text);
+        match rpc_result {
+            Ok(Ok(response)) => {
+                println!("✅ [UBLK_CREATE_DEBUG] ublk RPC call successful");
+                println!("🔧 [UBLK_CREATE_DEBUG] RPC response: {}", response);
+                
+                // Check for SPDK RPC errors in the response
+                if let Some(error) = response.get("error") {
+                    let error_str = error.to_string();
+                    println!("❌ [UBLK_CREATE_DEBUG] SPDK RPC returned error: {}", error_str);
+                    
+                    // Analyze the error
+                    if error_str.contains("No such device") || error_str.contains("-19") {
+                        println!("🔍 [UBLK_CREATE_DEBUG] Error analysis: bdev not found or not accessible");
+                        println!("🔍 [UBLK_CREATE_DEBUG] This typically means:");
+                        println!("🔍 [UBLK_CREATE_DEBUG]   1. The NVMe-oF connection failed");
+                        println!("🔍 [UBLK_CREATE_DEBUG]   2. The remote bdev name is incorrect");
+                        println!("🔍 [UBLK_CREATE_DEBUG]   3. The target subsystem is not properly configured");
+                    } else if error_str.contains("already exists") {
+                        println!("ℹ️ [UBLK_CREATE_DEBUG] Device already exists - continuing...");
+                    } else {
+                        println!("🔍 [UBLK_CREATE_DEBUG] Unexpected error: {}", error_str);
+                    }
+                    
+                    return Err(format!("SPDK RPC error: {}", error_str).into());
+                }
             }
-            
-            return Err(format!("ublk device creation failed: {}", error_text).into());
-        } else {
-            println!("✅ [UBLK_CREATE_DEBUG] ublk RPC call successful");
+            Ok(Err(e)) => {
+                println!("❌ [UBLK_CREATE_DEBUG] ublk RPC call failed: {}", e);
+                return Err(format!("ublk device creation failed: {}", e).into());
+            }
+            Err(_) => {
+                println!("❌ [UBLK_CREATE_DEBUG] ublk RPC call timed out after 15 seconds");
+                return Err("ublk device creation timed out".into());
+            }
         }
 
         // Step 3: Wait for device to appear and verify
@@ -832,6 +893,15 @@ impl SpdkCsiDriver {
             attempts += 1;
             if attempts % 5 == 0 {
                 println!("🔧 [UBLK_CREATE_DEBUG] Still waiting for device... ({}/{})", attempts, max_attempts);
+                // Debug: List all ublk devices that exist
+                if let Ok(devices) = std::fs::read_dir("/dev") {
+                    let ublk_devices: Vec<String> = devices
+                        .filter_map(|entry| entry.ok())
+                        .filter_map(|entry| entry.file_name().into_string().ok())
+                        .filter(|name| name.starts_with("ublk"))
+                        .collect();
+                    println!("🔧 [UBLK_CREATE_DEBUG] Current ublk devices: {:?}", ublk_devices);
+                }
             }
             
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -839,6 +909,17 @@ impl SpdkCsiDriver {
 
         if !std::path::Path::new(&device_path).exists() {
             println!("❌ [UBLK_CREATE_DEBUG] Device {} did not appear after {} seconds", device_path, max_attempts);
+            
+            // Final debug: Check what ublk devices exist
+            if let Ok(devices) = std::fs::read_dir("/dev") {
+                let ublk_devices: Vec<String> = devices
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with("ublk"))
+                    .collect();
+                println!("❌ [UBLK_CREATE_DEBUG] Final ublk devices list: {:?}", ublk_devices);
+            }
+            
             return Err(format!("ublk device {} did not appear within timeout", device_path).into());
         }
 
@@ -855,6 +936,63 @@ impl SpdkCsiDriver {
 
         println!("✅ [UBLK_CREATE_DEBUG] ublk device creation complete: {}", device_path);
         Ok(device_path)
+    }
+
+    /// Enhanced ublk device cleanup with debugging
+    pub async fn cleanup_ublk_device_debug(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧹 [UBLK_CLEANUP_DEBUG] Starting ublk device cleanup for ID {}", ublk_id);
+        
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        let control_path = format!("/dev/ublkc{}", ublk_id);
+        
+        println!("🧹 [UBLK_CLEANUP_DEBUG] Checking device paths:");
+        println!("🧹 [UBLK_CLEANUP_DEBUG]   Block device: {} (exists: {})", device_path, std::path::Path::new(&device_path).exists());
+        println!("🧹 [UBLK_CLEANUP_DEBUG]   Control device: {} (exists: {})", control_path, std::path::Path::new(&control_path).exists());
+        
+        // Try to stop the ublk device via SPDK RPC
+        let cleanup_payload = json!({
+            "method": "ublk_stop_disk",
+            "params": {
+                "ublk_id": ublk_id
+            }
+        });
+        println!("🧹 [UBLK_CLEANUP_DEBUG] SPDK RPC payload: {}", cleanup_payload);
+        
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.call_spdk_rpc(&cleanup_payload)
+        ).await {
+            Ok(Ok(response)) => {
+                println!("✅ [UBLK_CLEANUP_DEBUG] SPDK RPC call successful");
+                println!("🧹 [UBLK_CLEANUP_DEBUG] RPC response: {}", response);
+                
+                if let Some(error) = response.get("error") {
+                    let error_str = error.to_string();
+                    if error_str.contains("not found") || error_str.contains("does not exist") {
+                        println!("ℹ️ [UBLK_CLEANUP_DEBUG] Device was already cleaned up: {}", error_str);
+                    } else {
+                        println!("⚠️ [UBLK_CLEANUP_DEBUG] Cleanup warning: {}", error_str);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                println!("⚠️ [UBLK_CLEANUP_DEBUG] SPDK RPC failed: {}", e);
+            }
+            Err(_) => {
+                println!("⚠️ [UBLK_CLEANUP_DEBUG] SPDK RPC timed out after 10 seconds");
+            }
+        }
+        
+        // Wait a moment for cleanup to complete
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        
+        // Check if devices are actually gone
+        println!("🧹 [UBLK_CLEANUP_DEBUG] Post-cleanup device status:");
+        println!("🧹 [UBLK_CLEANUP_DEBUG]   Block device: {} (exists: {})", device_path, std::path::Path::new(&device_path).exists());
+        println!("🧹 [UBLK_CLEANUP_DEBUG]   Control device: {} (exists: {})", control_path, std::path::Path::new(&control_path).exists());
+        
+        println!("✅ [UBLK_CLEANUP_DEBUG] ublk device cleanup completed for ID {}", ublk_id);
+        Ok(())
     }
 
     /// Call SPDK RPC using the same pattern as node_agent.rs
