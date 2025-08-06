@@ -130,9 +130,25 @@ echo "Starting SPDK target daemon..."\n\
 \n\
 # Wait for SPDK to be ready\n\
 echo "Waiting for SPDK to initialize..."\n\
+\n\
+# Create SPDK readiness check script\n\
+cat > /tmp/check_spdk_ready.py << 'PYEOF'\n\
+import json, socket\n\
+try:\n\
+    s = socket.socket(socket.AF_UNIX)\n\
+    s.connect("/var/tmp/spdk.sock")\n\
+    rpc = {"id": 1, "method": "bdev_get_bdevs", "jsonrpc": "2.0"}\n\
+    s.send((json.dumps(rpc) + "\\n").encode())\n\
+    s.close()\n\
+    print("ready")\n\
+except Exception as e:\n\
+    print(f"not ready: {e}")\n\
+    exit(1)\n\
+PYEOF\n\
+\n\
 for i in {1..30}; do\n\
     if [ -S /var/tmp/spdk.sock ]; then\n\
-        if python3 -c "import json, socket; s=socket.socket(socket.AF_UNIX); s.connect('/var/tmp/spdk.sock'); s.send(b'{\"id\":1,\"method\":\"bdev_get_bdevs\",\"jsonrpc\":\"2.0\"}\\n'); print('ready')"; then\n\
+        if python3 /tmp/check_spdk_ready.py > /dev/null 2>&1; then\n\
             echo "SPDK is ready!"\n\
             break\n\
         fi\n\
@@ -140,6 +156,9 @@ for i in {1..30}; do\n\
     echo "Waiting for SPDK... ($i/30)"\n\
     sleep 1\n\
 done\n\
+\n\
+# Clean up the check script\n\
+rm -f /tmp/check_spdk_ready.py\n\
 \n\
 # Initialize NVMe-oF transports (TCP and RDMA for complete support)\n\
 echo "Initializing NVMe-oF TCP transport..."\n\
