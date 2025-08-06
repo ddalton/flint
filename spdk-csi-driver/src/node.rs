@@ -100,28 +100,22 @@ impl NodeService {
                     // Ensure NVMe-oF target exists on the remote node
                     self.ensure_nvmeof_target_if_needed(replica, volume).await?;
                     
-                    // Connect to remote NVMe-oF target
-                    self.connect_nvmeof_target(
+                    // Connect to remote NVMe-oF target and get actual bdev name
+                    match self.connect_nvmeof_target(
                         &nvmf_bdev_name,
                         nqn,
                         replica.ip.as_deref().unwrap_or("unknown"),
                         replica.port.as_deref().unwrap_or("4420"),
                         &volume.spec.nvmeof_transport.as_deref().unwrap_or("tcp"),
                         Some(&replica.node),
-                    ).await?;
-                    
-                    // Find the actual bdev name created by SPDK for RAID member
-                    match self.find_actual_remote_bdev_name(&nvmf_bdev_name, nqn).await {
+                    ).await {
                         Ok(actual_name) => {
-                            println!("✅ [RAID_BDEV_RESOLVE] Found actual bdev name for replica {}: {}", 
+                            println!("✅ [RAID_BDEV_RESOLVE] Got actual bdev name for replica {}: {}", 
                                      replica.raid_member_index, actual_name);
                             actual_name
                         }
                         Err(e) => {
-                            println!("⚠️ [RAID_BDEV_RESOLVE] Could not resolve actual bdev name for replica {}: {}", 
-                                     replica.raid_member_index, e);
-                            println!("🔧 [RAID_BDEV_RESOLVE] Falling back to expected name: {}", nvmf_bdev_name);
-                            nvmf_bdev_name
+                            return Err(e);
                         }
                     }
                 } else {
@@ -281,7 +275,7 @@ impl NodeService {
         target_port: &str,
         transport: &str,
         target_node_name: Option<&str>,
-    ) -> Result<(), Status> {
+    ) -> Result<String, Status> {
         use spdk_csi_driver::nvmeof_utils::*;
         use std::time::Instant;
 
@@ -308,7 +302,7 @@ impl NodeService {
             }
         }
 
-        // Step 2: Attempt the actual NVMe-oF connection with metrics
+        // Step 2: Create SPDK NVMe-oF connection
         println!("{}🔗 Step 2: Creating SPDK NVMe-oF connection...", ctx.log_prefix());
         let connection_start = Instant::now();
         
@@ -371,22 +365,47 @@ impl NodeService {
             }
         };
 
-        // Handle SPDK response with centralized error handling
-        match handle_spdk_response(response, "bdev_nvme_attach_controller", &ctx).await {
-            Ok(_result) => {
+        // Handle SPDK response and capture actual bdev names created
+        let actual_bdev_names = match handle_spdk_response(response, "bdev_nvme_attach_controller", &ctx).await {
+            Ok(result) => {
                 metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
                 println!("{}✅ SPDK connection established successfully", ctx.log_prefix());
+                
+                // Extract actual bdev names from result array
+                if let Some(bdev_array) = result.as_array() {
+                    let names: Vec<String> = bdev_array.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    
+                    println!("{}📋 Actual bdevs created: {:?}", ctx.log_prefix(), names);
+                    names
+                } else {
+                    println!("{}❌ Unexpected response format from SPDK", ctx.log_prefix());
+                    return Err(Status::internal("SPDK returned unexpected response format"));
+                }
             }
             Err(nvmf_error) => {
-                // Handle "already exists" as acceptable
+                // Handle "already exists" as acceptable (cleanup might have failed)
                 if matches!(nvmf_error, NvmfError::ConnectionExists { .. }) {
-                    println!("{}ℹ️ Connection already exists - proceeding", ctx.log_prefix());
+                    println!("{}ℹ️ Connection already exists - querying for existing bdev", ctx.log_prefix());
                     metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
+                    
+                    // Query for existing bdev since we couldn't get it from connection response
+                    match self.find_actual_remote_bdev_name(bdev_name, nqn).await {
+                        Ok(existing_name) => {
+                            println!("{}✅ Found existing bdev: {}", ctx.log_prefix(), existing_name);
+                            vec![existing_name]
+                        }
+                        Err(e) => {
+                            println!("{}❌ Failed to find existing bdev: {}", ctx.log_prefix(), e);
+                            return Err(Status::internal(format!("Connection exists but cannot find bdev: {}", e)));
+                        }
+                    }
                 } else {
                     return Err(Status::internal(nvmf_error.user_message()));
                 }
             }
-        }
+        };
 
         // Step 3: Verify the bdev was created with metrics
         println!("{}🔗 Step 3: Verifying remote bdev creation...", ctx.log_prefix());
@@ -395,14 +414,27 @@ impl NodeService {
         // Allow time for bdev creation
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         
-        match self.verify_remote_bdev_exists(bdev_name).await {
+        // Use the actual bdev name from SPDK response
+        let actual_bdev_name = if !actual_bdev_names.is_empty() {
+            // Use the first bdev name returned by SPDK (typically there's only one for single-namespace volumes)
+            let chosen_name = &actual_bdev_names[0];
+            println!("{}🎯 Using actual bdev name from SPDK response: {}", ctx.log_prefix(), chosen_name);
+            chosen_name.clone()
+        } else {
+            // This shouldn't happen with proper SPDK responses, but handle gracefully
+            println!("{}⚠️ No bdev names in SPDK response, this is unexpected", ctx.log_prefix());
+            return Err(Status::internal("SPDK did not return any bdev names in response"));
+        };
+        
+        // Verify the determined bdev exists
+        match self.verify_remote_bdev_exists(&actual_bdev_name).await {
             Ok(_) => {
                 metrics.verification_time_ms = Some(verification_start.elapsed().as_millis() as u64);
-                println!("{}✅ Remote bdev {} verified successfully", ctx.log_prefix(), bdev_name);
+                println!("{}✅ Remote bdev {} verified successfully", ctx.log_prefix(), actual_bdev_name);
             }
             Err(e) => {
                 let nvmf_error = NvmfError::BdevNotFound {
-                    bdev_name: bdev_name.to_string(),
+                    bdev_name: actual_bdev_name.clone(),
                     details: e.to_string(),
                 };
                 nvmf_error.log_detailed(&ctx);
@@ -418,7 +450,71 @@ impl NodeService {
         log_connection_health(&ctx, &self.driver.spdk_rpc_url).await;
 
         println!("{}✅ NVMe-oF target connection complete", ctx.log_prefix());
-        Ok(())
+        println!("{}🎯 Returning actual bdev name: {}", ctx.log_prefix(), actual_bdev_name);
+        Ok(actual_bdev_name)
+    }
+
+    /// Query SPDK for existing NVMe-oF bdevs that match our expected pattern
+    async fn query_existing_nvmeof_bdevs(&self, expected_prefix: &str, nqn: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::driver::SpdkCsiDriver;
+        println!("🔍 [BDEV_QUERY] Querying existing NVMe-oF bdevs for prefix: {}", expected_prefix);
+        
+        // Get all bdevs from SPDK
+        let query_payload = json!({
+            "method": "bdev_get_bdevs"
+        });
+        
+        let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &query_payload).await?;
+        
+        if let Some(result) = response.get("result") {
+            if let Some(bdevs) = result.as_array() {
+                let mut matching_bdevs = Vec::new();
+                
+                for bdev in bdevs {
+                    if let Some(name) = bdev.get("name").and_then(|n| n.as_str()) {
+                        // Check if this bdev matches our expected pattern or NQN-based UUID
+                        if name.starts_with(expected_prefix) || 
+                           name == &SpdkCsiDriver::generate_namespace_uuid_from_nqn(nqn) ||
+                           (name.starts_with("nvmf_") && self.is_bdev_for_nqn(bdev, nqn)) {
+                            println!("🎯 [BDEV_QUERY] Found matching bdev: {}", name);
+                            matching_bdevs.push(name.to_string());
+                        }
+                    }
+                }
+                
+                println!("📋 [BDEV_QUERY] Found {} matching bdevs", matching_bdevs.len());
+                Ok(matching_bdevs)
+            } else {
+                Err("Invalid bdev_get_bdevs response format".into())
+            }
+        } else {
+            Err("No result in bdev_get_bdevs response".into())
+        }
+    }
+    
+    /// Check if a bdev belongs to the specified NQN by examining driver name or other properties
+    fn is_bdev_for_nqn(&self, bdev: &serde_json::Value, nqn: &str) -> bool {
+        // Check if this is an NVMe bdev by looking at driver_specific info
+        if let Some(driver_specific) = bdev.get("driver_specific") {
+            if let Some(nvme_info) = driver_specific.get("nvme") {
+                // Check if the bdev's namespace info matches our NQN pattern
+                if let Some(ns_info) = nvme_info.as_array().and_then(|arr| arr.first()) {
+                    if let Some(bdev_nqn) = ns_info.get("nqn").and_then(|n| n.as_str()) {
+                        return bdev_nqn == nqn;
+                    }
+                }
+            }
+        }
+        
+        // Fallback: check if the bdev name pattern suggests it's for this NQN
+        if let Some(name) = bdev.get("name").and_then(|n| n.as_str()) {
+            // Extract PVC ID from NQN and see if it's in the bdev name
+            if let Some(pvc_id) = nqn.split(':').last().and_then(|part| part.split('-').nth(1)) {
+                return name.contains(pvc_id);
+            }
+        }
+        
+        false
     }
 
     /// Verify that a remote bdev exists after NVMe-oF connection and find its actual name
@@ -520,6 +616,10 @@ impl NodeService {
         let predictable_uuid = crate::driver::SpdkCsiDriver::generate_namespace_uuid_from_nqn(target_nqn);
         println!("🔍 [BDEV_NAME_RESOLVE] Trying predictable UUID: {}", predictable_uuid);
         
+        // Also try the expected name with "n1" suffix (SPDK appends namespace ID to our prefix)
+        let expected_with_suffix = format!("{}n1", expected_name);
+        println!("🔍 [BDEV_NAME_RESOLVE] Trying expected name with suffix: {}", expected_with_suffix);
+        
         // Get all bdevs
         let all_bdevs_payload = json!({
             "method": "bdev_get_bdevs",
@@ -540,7 +640,17 @@ impl NodeService {
                     }
                 }
                 
-                // Second, try to find bdev by expected name
+                // Second, try to find bdev by expected name with "n1" suffix
+                for bdev in bdev_list {
+                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                        if name == expected_with_suffix {
+                            println!("✅ [BDEV_NAME_RESOLVE] Found expected name with suffix: {}", name);
+                            return Ok(name.to_string());
+                        }
+                    }
+                }
+                
+                // Third, try to find bdev by expected name (without suffix)
                 for bdev in bdev_list {
                     if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
                         if name == expected_name {
@@ -755,7 +865,8 @@ impl NodeService {
                     // Ensure NVMe-oF target exists on the remote node
                     self.ensure_nvmeof_target_if_needed(replica, volume).await?;
                     
-                    self.connect_nvmeof_target(
+                    // Connect to NVMe-oF target and get actual bdev name
+                    let actual_bdev_name = self.connect_nvmeof_target(
                         &remote_bdev_name,
                         nqn,
                         ip,
@@ -763,19 +874,6 @@ impl NodeService {
                         &self.driver.nvmeof_transport,
                         Some(&replica.node),
                     ).await?;
-                    
-                    // Find the actual bdev name created by SPDK (it may be different from our expected name)
-                    let actual_bdev_name = match self.find_actual_remote_bdev_name(&remote_bdev_name, nqn).await {
-                        Ok(name) => {
-                            println!("✅ [BDEV_RESOLVE] Found actual remote bdev name: {}", name);
-                            name
-                        }
-                        Err(e) => {
-                            println!("⚠️ [BDEV_RESOLVE] Could not resolve actual bdev name: {}", e);
-                            println!("🔧 [BDEV_RESOLVE] Falling back to expected name: {}", remote_bdev_name);
-                            remote_bdev_name.clone()
-                        }
-                    };
                     
                     // Then expose the actual NVMe-oF bdev via ublk with debugging
                     println!("🔗 [UBLK_CREATE_DEBUG] Creating ublk device for actual remote bdev: {}", actual_bdev_name);
