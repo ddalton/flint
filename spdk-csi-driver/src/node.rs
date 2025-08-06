@@ -370,6 +370,7 @@ impl NodeService {
             Ok(result) => {
                 metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
                 println!("{}✅ SPDK connection established successfully", ctx.log_prefix());
+                println!("{}📋 Raw SPDK response: {}", ctx.log_prefix(), result);
                 
                 // Extract actual bdev names from result array
                 if let Some(bdev_array) = result.as_array() {
@@ -388,6 +389,8 @@ impl NodeService {
                 // Handle "already exists" as acceptable (cleanup might have failed)
                 if matches!(nvmf_error, NvmfError::ConnectionExists { .. }) {
                     println!("{}ℹ️ Connection already exists - querying for existing bdev", ctx.log_prefix());
+                    println!("{}🔍 Expected bdev prefix: {}", ctx.log_prefix(), bdev_name);
+                    println!("{}🔍 Target NQN: {}", ctx.log_prefix(), nqn);
                     metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
                     
                     // Query for existing bdev since we couldn't get it from connection response
@@ -630,6 +633,14 @@ impl NodeService {
         
         if let Some(result) = response.get("result") {
             if let Some(bdev_list) = result.as_array() {
+                println!("🔍 [BDEV_NAME_RESOLVE] Available bdevs ({} total):", bdev_list.len());
+                for (i, bdev) in bdev_list.iter().enumerate() {
+                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
+                        let driver = bdev.get("driver_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        println!("🔍 [BDEV_NAME_RESOLVE]   {}: {} (driver: {})", i + 1, name, driver);
+                    }
+                }
+                
                 // First, try to find bdev by predictable UUID
                 for bdev in bdev_list {
                     if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
