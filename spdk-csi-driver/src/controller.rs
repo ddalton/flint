@@ -1,7 +1,5 @@
 // controller.rs - Controller service implementation
 use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::Mutex;
 use crate::driver::SpdkCsiDriver;
 use crate::csi_snapshotter::*;
 use spdk_csi_driver::csi::{
