@@ -188,6 +188,20 @@ impl NodeService {
         let nqn = replica.nqn.as_ref()
             .ok_or_else(|| Status::internal("Replica missing NQN"))?;
 
+        // First check if the NVMe-oF target already exists to avoid unnecessary creation attempts
+        match Self::check_nvmeof_subsystem_exists(&node_driver, nqn).await {
+            Ok(true) => {
+                println!("✅ [NVMEOF_ONDEMAND] NVMe-oF target already exists: {}", nqn);
+                return Ok(());
+            }
+            Ok(false) => {
+                println!("🔧 [NVMEOF_ONDEMAND] NVMe-oF target does not exist, creating: {}", nqn);
+            }
+            Err(e) => {
+                println!("⚠️ [NVMEOF_ONDEMAND] Failed to check subsystem existence, proceeding with creation: {}", e);
+            }
+        }
+
         // Create the NVMe-oF target on the remote node
         match node_driver.create_nvmeof_target(bdev_name, nqn).await {
             Ok(_) => {
@@ -195,8 +209,11 @@ impl NodeService {
                 Ok(())
             }
             Err(e) => {
-                // Check if the target already exists (idempotent operation)
-                if e.to_string().contains("already exists") || e.to_string().contains("File exists") {
+                // Enhanced error handling for different SPDK error messages
+                let error_msg = e.to_string();
+                if error_msg.contains("already exists") || 
+                   error_msg.contains("File exists") ||
+                   error_msg.contains("Subsystem NQN") && error_msg.contains("already exists") {
                     println!("✅ [NVMEOF_ONDEMAND] NVMe-oF target already exists (idempotent): {}", nqn);
                     Ok(())
                 } else {
@@ -204,6 +221,41 @@ impl NodeService {
                     Err(Status::internal(format!("Failed to create NVMe-oF target on {}: {}", replica.node, e)))
                 }
             }
+        }
+    }
+
+    /// Check if an NVMe-oF subsystem already exists using SPDK RPC
+    async fn check_nvmeof_subsystem_exists(
+        node_driver: &SpdkCsiDriver,
+        nqn: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [NVMEOF_CHECK] Checking if subsystem exists: {}", nqn);
+        
+        let rpc_request = json!({
+            "method": "nvmf_get_subsystems"
+        });
+
+        let response = call_spdk_rpc(&node_driver.spdk_rpc_url, &rpc_request).await?;
+
+        // Check for SPDK RPC errors
+        if let Some(error) = response.get("error") {
+            return Err(format!("SPDK RPC error: {}", error).into());
+        }
+
+        // Parse the result array and look for our NQN
+        if let Some(subsystems) = response.get("result").and_then(|r| r.as_array()) {
+            for subsystem in subsystems {
+                if let Some(subsystem_nqn) = subsystem.get("nqn").and_then(|n| n.as_str()) {
+                    if subsystem_nqn == nqn {
+                        println!("✅ [NVMEOF_CHECK] Found existing subsystem: {}", nqn);
+                        return Ok(true);
+                    }
+                }
+            }
+            println!("🔍 [NVMEOF_CHECK] Subsystem not found: {}", nqn);
+            Ok(false)
+        } else {
+            Err("Invalid response format from nvmf_get_subsystems".into())
         }
     }
 
