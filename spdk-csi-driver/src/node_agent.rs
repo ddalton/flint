@@ -4331,13 +4331,26 @@ impl NodeAgent {
         
         println!("🔧 [LVS_CREATE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
         
+        // Check if force clean initialization is requested
+        let force_clean = std::env::var("FORCE_CLEAN_BLOBSTORE_INIT")
+            .unwrap_or_default()
+            .to_lowercase() == "true";
+            
+        let mut params = json!({
+            "bdev_name": bdev_name,
+            "lvs_name": lvs_name,
+            "cluster_sz": 4194304
+        });
+        
+        // Add clear_method if force clean is enabled
+        if force_clean {
+            params["clear_method"] = json!("write_zeroes");
+            println!("🧹 [LVS_CREATE] Force clean initialization enabled - will clear existing metadata");
+        }
+
         match call_spdk_rpc(&self.spdk_rpc_url, &json!({
             "method": "bdev_lvol_create_lvstore",
-            "params": {
-                "bdev_name": bdev_name,
-                "lvs_name": lvs_name,
-                "cluster_sz": 4194304
-            }
+            "params": params
         })).await {
             Ok(_) => {
                 println!("✅ [LVS_CREATE] Successfully created LVS: {}", lvs_name);

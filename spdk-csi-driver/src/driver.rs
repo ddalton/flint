@@ -591,69 +591,32 @@ impl SpdkCsiDriver {
             println!("{}✅ Namespace added successfully", ctx.log_prefix());
         }
 
-        // Step 4: Add listeners to subsystem (both specific IP and 0.0.0.0 for maximum compatibility)
-        println!("{}🔍 Step 4: Adding listeners to subsystem...", ctx.log_prefix());
+        // Step 4: Add listener to subsystem (using specific node IP for better access control)
+        println!("{}🔍 Step 4: Adding listener to subsystem...", ctx.log_prefix());
         
         // Get the current node's IP address for the specific listener
         let node_ip = self.get_current_node_ip().await
             .map_err(|e| format!("Failed to get node IP for listener: {}", e))?;
-        println!("{}🔍 Adding specific IP listener: {}", ctx.log_prefix(), node_ip);
+        println!("{}🔍 Adding listener for IP: {}", ctx.log_prefix(), node_ip);
         
-        // Add listener for specific node IP (this should fix the access control issue)
-        let specific_adrfam = Self::determine_address_family(&self.nvmeof_transport, &node_ip)?;
-        let specific_listener_payload = json!({
+        // Use specific node IP for precise access control (this fixes the SPDK v25.05.x access issue)
+        let adrfam = Self::determine_address_family(&self.nvmeof_transport, &node_ip)?;
+        let listener_payload = json!({
             "method": "nvmf_subsystem_add_listener",
             "params": {
                 "nqn": nqn,
                 "listen_address": {
                     "trtype": self.nvmeof_transport.to_uppercase(),
-                    "traddr": node_ip, // Specific node IP for precise access control
+                    "traddr": node_ip, // Use specific node IP to fix access control
                     "trsvcid": self.nvmeof_target_port.to_string(),
-                    "adrfam": specific_adrfam
-                }
-            }
-        });
-
-        let specific_listener_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&specific_listener_payload)
-            .send()
-            .await?;
-
-        if !specific_listener_response.status().is_success() {
-            let error_text = specific_listener_response.text().await?;
-            
-            // Handle "already exists" for specific IP listener
-            if error_text.contains("already exists") || error_text.contains("Listener already exists") {
-                println!("{}ℹ️ Specific IP listener already exists (acceptable)", ctx.log_prefix());
-            } else {
-                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_add_listener");
-                nvmf_error.log_detailed(&ctx);
-                return Err(format!("Failed to add specific IP listener: {}", nvmf_error.user_message()).into());
-            }
-        } else {
-            println!("{}✅ Specific IP listener added successfully", ctx.log_prefix());
-        }
-
-        // Add listener for 0.0.0.0 (backward compatibility)
-        println!("{}🔍 Adding 0.0.0.0 listener for backward compatibility...", ctx.log_prefix());
-        let generic_adrfam = Self::determine_address_family(&self.nvmeof_transport, "0.0.0.0")?;
-        let generic_listener_payload = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": nqn,
-                "listen_address": {
-                    "trtype": self.nvmeof_transport.to_uppercase(),
-                    "traddr": "0.0.0.0", // Generic listener for backward compatibility
-                    "trsvcid": self.nvmeof_target_port.to_string(),
-                    "adrfam": generic_adrfam
+                    "adrfam": adrfam
                 }
             }
         });
 
         let listener_response = http_client
             .post(&self.spdk_rpc_url)
-            .json(&generic_listener_payload)
+            .json(&listener_payload)
             .send()
             .await?;
 
