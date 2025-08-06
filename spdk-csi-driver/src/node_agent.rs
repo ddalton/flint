@@ -1440,6 +1440,18 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
         println!("✅ [SPEC_UPDATE] Successfully updated CRD spec with current device information");
     }
     
+    // TODO: Add proper disk migration support using persistent identifiers
+    // For now, we do NOT update node_id to avoid data loss scenarios.
+    // When a disk moves between nodes:
+    // 1. Old node's SpdkDisk becomes "offline" (PCIe address not found)
+    // 2. New node should detect this and create appropriate migration logic
+    // 3. Use serial number + model for proper disk identity across nodes
+    if disk.spec.node_id != agent.node_name {
+        println!("⚠️ [MIGRATION] Disk {} appears to have moved from {} to {} - manual intervention may be required", 
+                 disk_name, disk.spec.node_id, agent.node_name);
+        println!("⚠️ [MIGRATION] PCIe address: {} - consider implementing serial-based disk identity", disk.spec.pcie_addr);
+    }
+    
     // Use enhanced reconciliation logic that handles both AIO bdev and LVS properly
     println!("🔄 [STATE_SYNC] Running enhanced state reconciliation...");
     if let Err(e) = agent.reconcile_disk_state_with_spdk(disk_name).await {
