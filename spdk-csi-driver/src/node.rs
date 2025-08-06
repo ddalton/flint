@@ -107,6 +107,7 @@ impl NodeService {
                         replica.ip.as_deref().unwrap_or("unknown"),
                         replica.port.as_deref().unwrap_or("4420"),
                         &volume.spec.nvmeof_transport.as_deref().unwrap_or("tcp"),
+                        Some(&replica.node),
                     ).await?;
                     
                     nvmf_bdev_name
@@ -266,6 +267,7 @@ impl NodeService {
         target_ip: &str,
         target_port: &str,
         transport: &str,
+        target_node_name: Option<&str>,
     ) -> Result<(), Status> {
         use spdk_csi_driver::nvmeof_utils::*;
         use std::time::Instant;
@@ -316,9 +318,43 @@ impl NodeService {
                 resp
             }
             Err(e) => {
-                let nvmf_error = NvmfError::from_spdk_error(&e.to_string(), "bdev_nvme_attach_controller");
-                nvmf_error.log_detailed(&ctx);
-                return Err(Status::internal(nvmf_error.user_message()));
+                let error_string = e.to_string();
+                
+                // Check if this is a host access denial error due to SPDK v25.05.x bug
+                if error_string.contains("does not allow host") || error_string.contains("access denied") {
+                    println!("{}🔐 Connection failed due to host access denial, attempting to add host...", ctx.log_prefix());
+                    
+                    // Try to add the current node's host NQN to the subsystem
+                    match self.add_current_host_to_subsystem(target_node_name, nqn, &error_string).await {
+                        Ok(_) => {
+                            println!("{}✅ Host added, retrying connection...", ctx.log_prefix());
+                            
+                            // Retry the connection
+                            match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
+                                Ok(retry_resp) => {
+                                    metrics.rpc_call_time_ms = Some(rpc_start.elapsed().as_millis() as u64);
+                                    println!("{}✅ Connection successful after host addition", ctx.log_prefix());
+                                    retry_resp
+                                }
+                                Err(retry_e) => {
+                                    let nvmf_error = NvmfError::from_spdk_error(&retry_e.to_string(), "bdev_nvme_attach_controller");
+                                    nvmf_error.log_detailed(&ctx);
+                                    return Err(Status::internal(format!("Connection failed even after adding host: {}", nvmf_error.user_message())));
+                                }
+                            }
+                        }
+                        Err(host_err) => {
+                            println!("{}⚠️ Failed to add host: {}", ctx.log_prefix(), host_err);
+                            let nvmf_error = NvmfError::from_spdk_error(&error_string, "bdev_nvme_attach_controller");
+                            nvmf_error.log_detailed(&ctx);
+                            return Err(Status::internal(nvmf_error.user_message()));
+                        }
+                    }
+                } else {
+                    let nvmf_error = NvmfError::from_spdk_error(&error_string, "bdev_nvme_attach_controller");
+                    nvmf_error.log_detailed(&ctx);
+                    return Err(Status::internal(nvmf_error.user_message()));
+                }
             }
         };
 
@@ -585,6 +621,7 @@ impl NodeService {
                         ip,
                         port,
                         &self.driver.nvmeof_transport,
+                        Some(&replica.node),
                     ).await?;
                     
                     // Then expose the NVMe-oF bdev via ublk with debugging
@@ -818,6 +855,64 @@ impl NodeService {
             }
         }
         
+        Ok(())
+    }
+
+    /// Add the current node's host NQN to a subsystem to fix SPDK v25.05.x allow_any_host bug
+    async fn add_current_host_to_subsystem(
+        &self,
+        target_node_name: Option<&str>,
+        subsystem_nqn: &str,
+        error_message: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Extract the host NQN from the error message
+        // Error format: "Subsystem 'nqn.xxx' does not allow host 'nqn.2014-08.org.nvmexpress:uuid:xxx' to connect"
+        let host_nqn = if let Some(start) = error_message.find("does not allow host '") {
+            let start_pos = start + "does not allow host '".len();
+            if let Some(end) = error_message[start_pos..].find("'") {
+                error_message[start_pos..start_pos + end].to_string()
+            } else {
+                return Err("Could not extract host NQN from error message".into());
+            }
+        } else {
+            return Err("Error message does not contain expected host NQN pattern".into());
+        };
+        
+        println!("🔐 Adding host NQN to subsystem: {}", host_nqn);
+        
+        // Get the target node's RPC URL
+        let target_rpc_url = if let Some(node_name) = target_node_name {
+            self.driver.get_rpc_url_for_node(node_name).await
+                .map_err(|e| format!("Failed to get RPC URL for node {}: {}", node_name, e))?
+        } else {
+            return Err("Target node name not provided for dynamic host addition".into());
+        };
+        
+        let add_host_payload = json!({
+            "method": "nvmf_subsystem_add_host",
+            "params": {
+                "nqn": subsystem_nqn,
+                "host": host_nqn
+            }
+        });
+        
+        let response = call_spdk_rpc(&target_rpc_url, &add_host_payload).await
+            .map_err(|e| format!("Failed to call SPDK RPC: {}", e))?;
+        
+        // Check for SPDK RPC errors
+        if let Some(error) = response.get("error") {
+            let error_str = error.to_string();
+            
+            // Handle "already exists" as success
+            if error_str.contains("already exists") || error_str.contains("Host already exists") {
+                println!("🔐 Host NQN already exists in subsystem (acceptable)");
+                return Ok(());
+            } else {
+                return Err(format!("Failed to add host to subsystem: {}", error_str).into());
+            }
+        }
+        
+        println!("🔐 Successfully added host NQN to subsystem");
         Ok(())
     }
 }
