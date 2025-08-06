@@ -119,16 +119,24 @@ impl SpdkCsiDriver {
             
             // Handle specific error cases that might be recoverable
             match error_code {
-                -32603 => {
-                    // "Internal error" - could be transient resource issue
-                    if error_msg.contains("Device or resource busy") || error_msg.contains("No such file or directory") {
-                        println!("⚠️ [UBLK_TARGET] Kernel ublk issue detected - this might be environment-specific");
-                        println!("⚠️ [UBLK_TARGET] Marking target as 'initialized' to skip further attempts");
-                        // Set initialized to true to avoid infinite retry loops
-                        *initialized = true;
-                        return Ok(()); // Continue despite the error
-                    }
-                }
+                                 -32603 => {
+                     // "Internal error" - could be transient resource issue
+                     if error_msg.contains("Device or resource busy") || error_msg.contains("No such file or directory") {
+                         println!("⚠️ [UBLK_TARGET] Kernel ublk issue detected - this might be environment-specific");
+                         
+                         // Create Kubernetes event for missing ublk_drv module
+                         if error_msg.contains("No such file or directory") {
+                             if let Err(e) = self.create_ublk_kernel_missing_event().await {
+                                 println!("⚠️ [UBLK_TARGET] Failed to create Kubernetes event: {}", e);
+                             }
+                         }
+                         
+                         println!("⚠️ [UBLK_TARGET] Marking target as 'initialized' to skip further attempts");
+                         // Set initialized to true to avoid infinite retry loops
+                         *initialized = true;
+                         return Ok(()); // Continue despite the error
+                     }
+                 }
                 -32601 => {
                     // "Method not found" - SPDK doesn't support ublk
                     println!("⚠️ [UBLK_TARGET] SPDK doesn't support ublk methods - skipping target creation");
@@ -1051,38 +1059,82 @@ impl SpdkCsiDriver {
         format!("00000000-0000-0000-0000-{:012x}", hasher.finish() % 0x1000000000000)
     }
 
-    /// Determine the appropriate address family for NVMe-oF transport
-    fn determine_address_family(transport: &str, target_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        match transport.to_lowercase().as_str() {
-            "tcp" => {
-                // TCP transport: determine IPv4 vs IPv6
-                if target_addr.contains(':') && !target_addr.starts_with('[') {
-                    // Simple IPv6 detection (more sophisticated parsing could be added)
-                    Ok("ipv6".to_string())
-                } else {
-                    Ok("ipv4".to_string())
-                }
-            }
-            "rdma" => {
-                // RDMA transport: could be IB, RoCE (IPv4/IPv6), or iWARP
-                if target_addr.contains(':') && !target_addr.starts_with('[') {
-                    Ok("ipv6".to_string()) // RoCE v2 over IPv6
-                } else if target_addr.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                    Ok("ipv4".to_string()) // RoCE v2 over IPv4 or iWARP
-                } else {
-                    // InfiniBand GID or other IB addressing
-                    Ok("ib".to_string())
-                }
-            }
-            "fc" => {
-                // Fibre Channel
-                Ok("fc".to_string())
-            }
-            _ => {
-                // Default to IPv4 for unknown transports
-                println!("⚠️ Unknown transport '{}', defaulting to IPv4", transport);
-                Ok("ipv4".to_string())
-            }
-        }
-    }
+         /// Determine the appropriate address family for NVMe-oF transport
+     fn determine_address_family(transport: &str, target_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+         match transport.to_lowercase().as_str() {
+             "tcp" => {
+                 // TCP transport: determine IPv4 vs IPv6
+                 if target_addr.contains(':') && !target_addr.starts_with('[') {
+                     // Simple IPv6 detection (more sophisticated parsing could be added)
+                     Ok("ipv6".to_string())
+                 } else {
+                     Ok("ipv4".to_string())
+                 }
+             }
+             "rdma" => {
+                 // RDMA transport: could be IB, RoCE (IPv4/IPv6), or iWARP
+                 if target_addr.contains(':') && !target_addr.starts_with('[') {
+                     Ok("ipv6".to_string()) // RoCE v2 over IPv6
+                 } else if target_addr.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                     Ok("ipv4".to_string()) // RoCE v2 over IPv4 or iWARP
+                 } else {
+                     // InfiniBand GID or other IB addressing
+                     Ok("ib".to_string())
+                 }
+             }
+             "fc" => {
+                 // Fibre Channel
+                 Ok("fc".to_string())
+             }
+             _ => {
+                 // Default to IPv4 for unknown transports
+                 println!("⚠️ Unknown transport '{}', defaulting to IPv4", transport);
+                 Ok("ipv4".to_string())
+             }
+         }
+     }
+
+     /// Create Kubernetes event for missing ublk_drv kernel module
+     async fn create_ublk_kernel_missing_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+         use k8s_openapi::api::core::v1::Event;
+         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+         use kube::api::PostParams;
+         use chrono::Utc;
+
+         let events_api: kube::Api<Event> = kube::Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+         
+         let event = Event {
+             metadata: ObjectMeta {
+                 generate_name: Some("ublk-kernel-missing-".to_string()),
+                 namespace: Some(self.target_namespace.clone()),
+                 ..Default::default()
+             },
+             involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                 api_version: Some("apps/v1".to_string()),
+                 kind: Some("DaemonSet".to_string()),
+                 name: Some("flint-csi-node".to_string()),
+                 namespace: Some(self.target_namespace.clone()),
+                 ..Default::default()
+             },
+             message: Some(format!(
+                 "ublk_drv kernel module not available on node {}. All volumes using ublk backend will fail to mount. Solution: Install ublk kernel module with 'modprobe ublk_drv'", 
+                 self.node_id
+             )),
+             reason: Some("UblkKernelModuleMissing".to_string()),
+             type_: Some("Warning".to_string()),
+             action: Some("CheckKernelConfiguration".to_string()),
+             first_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now())),
+             last_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now())),
+             count: Some(1),
+             source: Some(k8s_openapi::api::core::v1::EventSource {
+                 component: Some("flint-csi-driver".to_string()),
+                 host: Some(self.node_id.clone()),
+             }),
+             ..Default::default()
+         };
+
+         events_api.create(&PostParams::default(), &event).await?;
+         println!("✅ [K8S_EVENT] Created ublk kernel missing event");
+         Ok(())
+     }
 }
