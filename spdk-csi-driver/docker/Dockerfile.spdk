@@ -37,6 +37,9 @@ WORKDIR /spdk
 RUN git clone https://github.com/spdk/spdk.git . && \
     git checkout v25.05.x && \
     git submodule update --init --recursive && \
+    # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
+    sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
+    sed -i 's/subsystem->subnqn, hostnqn);/subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid->trtype), listen_trid->traddr, listen_trid->trsvcid);/' lib/nvmf/ctrlr.c && \
     ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
