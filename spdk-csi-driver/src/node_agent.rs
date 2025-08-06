@@ -649,7 +649,7 @@ async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std
     // Get Kubernetes client
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
     
-    // Get all SpdkDisks for this node
+    // Get SpdkDisks for this node using efficient label-based filtering
     let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
     match spdk_disks.list(&lp).await {
         Ok(disk_list) => {
@@ -780,14 +780,12 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
     
-    // Get all existing SpdkDisk CRDs for this node
-    let existing_disks = match spdk_disks.list(&ListParams::default()).await {
+    // Get all existing SpdkDisk CRDs for this node using efficient label-based filtering
+    let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
+    let existing_disks = match spdk_disks.list(&lp).await {
         Ok(disk_list) => {
-            let node_disks: Vec<SpdkDisk> = disk_list.items.into_iter()
-                .filter(|disk| disk.spec.node_id == agent.node_name)
-                .collect();
-            println!("🔍 [DISCOVERY] Found {} existing SpdkDisk CRDs for node: {}", node_disks.len(), agent.node_name);
-            node_disks
+            println!("🔍 [DISCOVERY] Found {} existing SpdkDisk CRDs for node: {}", disk_list.items.len(), agent.node_name);
+            disk_list.items
         }
         Err(e) => {
             println!("⚠️ [DISCOVERY] Failed to list existing SpdkDisk CRDs: {}", e);

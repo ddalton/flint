@@ -458,11 +458,19 @@ impl SpdkSnapshot {
 impl SpdkDisk {
     pub fn new_with_metadata(name: &str, spec: SpdkDiskSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
+        use std::collections::BTreeMap;
+        
+        // Create labels for efficient node filtering
+        let mut labels = BTreeMap::new();
+        labels.insert("node".to_string(), spec.node_id.clone());
+        labels.insert("app".to_string(), "flint-csi".to_string());
+        labels.insert("component".to_string(), "spdk-disk".to_string());
         
         SpdkDisk {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
+                labels: Some(labels),
                 ..Default::default()
             },
             spec,
