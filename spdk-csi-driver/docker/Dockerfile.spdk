@@ -132,7 +132,7 @@ echo "Starting SPDK target daemon..."\n\
 echo "Waiting for SPDK to initialize..."\n\
 for i in {1..30}; do\n\
     if [ -S /var/tmp/spdk.sock ]; then\n\
-        if python3 -c "import json, socket; s=socket.socket(socket.AF_UNIX); s.connect(\"/var/tmp/spdk.sock\"); s.send(b\"{\\\"id\\\":1,\\\"method\\\":\\\"bdev_get_bdevs\\\",\\\"jsonrpc\\\":\\\"2.0\\\"}\\n\"); print(\\"ready\\")"; then\n\
+        if python3 -c "import json, socket; s=socket.socket(socket.AF_UNIX); s.connect('/var/tmp/spdk.sock'); s.send(b'{\"id\":1,\"method\":\"bdev_get_bdevs\",\"jsonrpc\":\"2.0\"}\\n'); print('ready')"; then\n\
             echo "SPDK is ready!"\n\
             break\n\
         fi\n\

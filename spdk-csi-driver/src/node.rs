@@ -320,31 +320,31 @@ impl NodeService {
             Err(e) => {
                 let error_string = e.to_string();
                 
-                // Check if this is a host access denial error due to SPDK v25.05.x bug
-                if error_string.contains("does not allow host") || error_string.contains("access denied") {
-                    println!("{}🔐 Connection failed due to host access denial, attempting to add host...", ctx.log_prefix());
+                // Check if this is a listener access denial error 
+                if error_string.contains("does not allow host") && error_string.contains("to connect at this address") {
+                    println!("{}🔐 Connection failed due to missing listener, attempting to add listener...", ctx.log_prefix());
                     
-                    // Try to add the current node's host NQN to the subsystem
-                    match self.add_current_host_to_subsystem(target_node_name, nqn, &error_string).await {
+                    // Try to add a listener for the specific connection address
+                    match self.add_listener_for_connection(target_node_name, nqn, target_ip, target_port).await {
                         Ok(_) => {
-                            println!("{}✅ Host added, retrying connection...", ctx.log_prefix());
+                            println!("{}✅ Listener added, retrying connection...", ctx.log_prefix());
                             
                             // Retry the connection
                             match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
                                 Ok(retry_resp) => {
                                     metrics.rpc_call_time_ms = Some(rpc_start.elapsed().as_millis() as u64);
-                                    println!("{}✅ Connection successful after host addition", ctx.log_prefix());
+                                    println!("{}✅ Connection successful after listener addition", ctx.log_prefix());
                                     retry_resp
                                 }
                                 Err(retry_e) => {
                                     let nvmf_error = NvmfError::from_spdk_error(&retry_e.to_string(), "bdev_nvme_attach_controller");
                                     nvmf_error.log_detailed(&ctx);
-                                    return Err(Status::internal(format!("Connection failed even after adding host: {}", nvmf_error.user_message())));
+                                    return Err(Status::internal(format!("Connection failed even after adding listener: {}", nvmf_error.user_message())));
                                 }
                             }
                         }
-                        Err(host_err) => {
-                            println!("{}⚠️ Failed to add host: {}", ctx.log_prefix(), host_err);
+                        Err(listener_err) => {
+                            println!("{}⚠️ Failed to add listener: {}", ctx.log_prefix(), listener_err);
                             let nvmf_error = NvmfError::from_spdk_error(&error_string, "bdev_nvme_attach_controller");
                             nvmf_error.log_detailed(&ctx);
                             return Err(Status::internal(nvmf_error.user_message()));
@@ -858,45 +858,42 @@ impl NodeService {
         Ok(())
     }
 
-    /// Add the current node's host NQN to a subsystem to fix SPDK v25.05.x allow_any_host bug
-    async fn add_current_host_to_subsystem(
+    /// Add a listener for the specific connection address to fix listener access control
+    async fn add_listener_for_connection(
         &self,
         target_node_name: Option<&str>,
         subsystem_nqn: &str,
-        error_message: &str,
+        target_ip: &str,
+        target_port: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Extract the host NQN from the error message
-        // Error format: "Subsystem 'nqn.xxx' does not allow host 'nqn.2014-08.org.nvmexpress:uuid:xxx' to connect"
-        let host_nqn = if let Some(start) = error_message.find("does not allow host '") {
-            let start_pos = start + "does not allow host '".len();
-            if let Some(end) = error_message[start_pos..].find("'") {
-                error_message[start_pos..start_pos + end].to_string()
-            } else {
-                return Err("Could not extract host NQN from error message".into());
-            }
-        } else {
-            return Err("Error message does not contain expected host NQN pattern".into());
-        };
-        
-        println!("🔐 Adding host NQN to subsystem: {}", host_nqn);
+        println!("🔐 Adding listener to subsystem: {} for connection {}:{} (transport: {})", 
+                 subsystem_nqn, target_ip, target_port, self.driver.nvmeof_transport);
         
         // Get the target node's RPC URL
         let target_rpc_url = if let Some(node_name) = target_node_name {
             self.driver.get_rpc_url_for_node(node_name).await
                 .map_err(|e| format!("Failed to get RPC URL for node {}: {}", node_name, e))?
         } else {
-            return Err("Target node name not provided for dynamic host addition".into());
+            return Err("Target node name not provided for dynamic listener addition".into());
         };
+
+        // Determine address family based on transport and IP
+        let adrfam = Self::determine_address_family(&self.driver.nvmeof_transport, target_ip)?;
         
-        let add_host_payload = json!({
-            "method": "nvmf_subsystem_add_host",
+        let add_listener_payload = json!({
+            "method": "nvmf_subsystem_add_listener",
             "params": {
                 "nqn": subsystem_nqn,
-                "host": host_nqn
+                "listen_address": {
+                    "trtype": self.driver.nvmeof_transport.to_uppercase(),
+                    "traddr": target_ip,  // Use the specific IP that the client is connecting to
+                    "trsvcid": target_port,
+                    "adrfam": adrfam
+                }
             }
         });
         
-        let response = call_spdk_rpc(&target_rpc_url, &add_host_payload).await
+        let response = call_spdk_rpc(&target_rpc_url, &add_listener_payload).await
             .map_err(|e| format!("Failed to call SPDK RPC: {}", e))?;
         
         // Check for SPDK RPC errors
@@ -904,16 +901,51 @@ impl NodeService {
             let error_str = error.to_string();
             
             // Handle "already exists" as success
-            if error_str.contains("already exists") || error_str.contains("Host already exists") {
-                println!("🔐 Host NQN already exists in subsystem (acceptable)");
+            if error_str.contains("already exists") || error_str.contains("Listener already exists") {
+                println!("🔐 Listener already exists for this address (acceptable)");
                 return Ok(());
             } else {
-                return Err(format!("Failed to add host to subsystem: {}", error_str).into());
+                return Err(format!("Failed to add listener to subsystem: {}", error_str).into());
             }
         }
         
-        println!("🔐 Successfully added host NQN to subsystem");
+        println!("🔐 Successfully added listener to subsystem");
         Ok(())
+    }
+
+    /// Determine the appropriate address family for NVMe-oF transport
+    fn determine_address_family(transport: &str, target_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match transport.to_lowercase().as_str() {
+            "tcp" => {
+                // TCP transport: determine IPv4 vs IPv6
+                if target_addr.contains(':') && !target_addr.starts_with('[') {
+                    // Simple IPv6 detection (more sophisticated parsing could be added)
+                    Ok("ipv6".to_string())
+                } else {
+                    Ok("ipv4".to_string())
+                }
+            }
+            "rdma" => {
+                // RDMA transport: could be IB, RoCE (IPv4/IPv6), or iWARP
+                if target_addr.contains(':') && !target_addr.starts_with('[') {
+                    Ok("ipv6".to_string()) // RoCE v2 over IPv6
+                } else if target_addr.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    Ok("ipv4".to_string()) // RoCE v2 over IPv4 or iWARP
+                } else {
+                    // InfiniBand GID or other IB addressing
+                    Ok("ib".to_string())
+                }
+            }
+            "fc" => {
+                // Fibre Channel
+                Ok("fc".to_string())
+            }
+            _ => {
+                // Default to IPv4 for unknown transports
+                println!("⚠️ Unknown transport '{}', defaulting to IPv4", transport);
+                Ok("ipv4".to_string())
+            }
+        }
     }
 }
 

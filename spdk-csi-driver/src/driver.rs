@@ -591,24 +591,69 @@ impl SpdkCsiDriver {
             println!("{}✅ Namespace added successfully", ctx.log_prefix());
         }
 
-        // Step 4: Add listener to subsystem
-        println!("{}🔍 Step 4: Adding listener to subsystem...", ctx.log_prefix());
-        let listener_payload = json!({
+        // Step 4: Add listeners to subsystem (both specific IP and 0.0.0.0 for maximum compatibility)
+        println!("{}🔍 Step 4: Adding listeners to subsystem...", ctx.log_prefix());
+        
+        // Get the current node's IP address for the specific listener
+        let node_ip = self.get_current_node_ip().await
+            .map_err(|e| format!("Failed to get node IP for listener: {}", e))?;
+        println!("{}🔍 Adding specific IP listener: {}", ctx.log_prefix(), node_ip);
+        
+        // Add listener for specific node IP (this should fix the access control issue)
+        let specific_adrfam = Self::determine_address_family(&self.nvmeof_transport, &node_ip)?;
+        let specific_listener_payload = json!({
             "method": "nvmf_subsystem_add_listener",
             "params": {
                 "nqn": nqn,
                 "listen_address": {
                     "trtype": self.nvmeof_transport.to_uppercase(),
-                    "traddr": "0.0.0.0", // Listen on all interfaces
+                    "traddr": node_ip, // Specific node IP for precise access control
                     "trsvcid": self.nvmeof_target_port.to_string(),
-                    "adrfam": "ipv4"
+                    "adrfam": specific_adrfam
+                }
+            }
+        });
+
+        let specific_listener_response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&specific_listener_payload)
+            .send()
+            .await?;
+
+        if !specific_listener_response.status().is_success() {
+            let error_text = specific_listener_response.text().await?;
+            
+            // Handle "already exists" for specific IP listener
+            if error_text.contains("already exists") || error_text.contains("Listener already exists") {
+                println!("{}ℹ️ Specific IP listener already exists (acceptable)", ctx.log_prefix());
+            } else {
+                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_add_listener");
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Failed to add specific IP listener: {}", nvmf_error.user_message()).into());
+            }
+        } else {
+            println!("{}✅ Specific IP listener added successfully", ctx.log_prefix());
+        }
+
+        // Add listener for 0.0.0.0 (backward compatibility)
+        println!("{}🔍 Adding 0.0.0.0 listener for backward compatibility...", ctx.log_prefix());
+        let generic_adrfam = Self::determine_address_family(&self.nvmeof_transport, "0.0.0.0")?;
+        let generic_listener_payload = json!({
+            "method": "nvmf_subsystem_add_listener",
+            "params": {
+                "nqn": nqn,
+                "listen_address": {
+                    "trtype": self.nvmeof_transport.to_uppercase(),
+                    "traddr": "0.0.0.0", // Generic listener for backward compatibility
+                    "trsvcid": self.nvmeof_target_port.to_string(),
+                    "adrfam": generic_adrfam
                 }
             }
         });
 
         let listener_response = http_client
             .post(&self.spdk_rpc_url)
-            .json(&listener_payload)
+            .json(&generic_listener_payload)
             .send()
             .await?;
 
@@ -1048,6 +1093,41 @@ impl SpdkCsiDriver {
             
             let response_json = response.json().await?;
             Ok(response_json)
+        }
+    }
+
+    /// Determine the appropriate address family for NVMe-oF transport
+    fn determine_address_family(transport: &str, target_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match transport.to_lowercase().as_str() {
+            "tcp" => {
+                // TCP transport: determine IPv4 vs IPv6
+                if target_addr.contains(':') && !target_addr.starts_with('[') {
+                    // Simple IPv6 detection (more sophisticated parsing could be added)
+                    Ok("ipv6".to_string())
+                } else {
+                    Ok("ipv4".to_string())
+                }
+            }
+            "rdma" => {
+                // RDMA transport: could be IB, RoCE (IPv4/IPv6), or iWARP
+                if target_addr.contains(':') && !target_addr.starts_with('[') {
+                    Ok("ipv6".to_string()) // RoCE v2 over IPv6
+                } else if target_addr.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    Ok("ipv4".to_string()) // RoCE v2 over IPv4 or iWARP
+                } else {
+                    // InfiniBand GID or other IB addressing
+                    Ok("ib".to_string())
+                }
+            }
+            "fc" => {
+                // Fibre Channel
+                Ok("fc".to_string())
+            }
+            _ => {
+                // Default to IPv4 for unknown transports
+                println!("⚠️ Unknown transport '{}', defaulting to IPv4", transport);
+                Ok("ipv4".to_string())
+            }
         }
     }
 }
