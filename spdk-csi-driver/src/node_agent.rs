@@ -363,8 +363,7 @@ async fn start_api_server(agent: NodeAgent) {
 
         .or(
             // Generic SPDK RPC proxy for cross-node communication
-            warp::path("api")
-                .and(warp::path("spdk"))
+            warp::path("spdk")
                 .and(warp::path("rpc"))
                 .and(warp::post())
                 .and(warp::body::json())
