@@ -557,15 +557,21 @@ impl SpdkCsiDriver {
             }
         }
 
-        // Step 3: Add namespace to subsystem
+        // Step 3: Add namespace to subsystem with predictable UUID
         println!("{}🔍 Step 3: Adding namespace to subsystem...", ctx.log_prefix());
+        
+        let volume_uuid = Self::generate_namespace_uuid_from_nqn(nqn);
+        
+        println!("{}🔍 Using namespace UUID: {}", ctx.log_prefix(), volume_uuid);
+        
         let namespace_payload = json!({
             "method": "nvmf_subsystem_add_ns",
             "params": {
                 "nqn": nqn,
                 "namespace": {
                     "nsid": 1,
-                    "bdev_name": bdev_name
+                    "bdev_name": bdev_name,
+                    "uuid": volume_uuid
                 }
             }
         });
@@ -1057,6 +1063,27 @@ impl SpdkCsiDriver {
             let response_json = response.json().await?;
             Ok(response_json)
         }
+    }
+
+    /// Generate predictable namespace UUID from NQN for consistent client-server naming
+    pub fn generate_namespace_uuid_from_nqn(nqn: &str) -> String {
+        // Extract volume ID from NQN to create a predictable namespace UUID
+        // NQN format: nqn.2025-05.io.spdk:volume-pvc-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX-replica-N
+        if let Some(start) = nqn.find("volume-pvc-") {
+            let uuid_start = start + "volume-pvc-".len();
+            if let Some(end) = nqn[uuid_start..].find("-replica-") {
+                let uuid_part = &nqn[uuid_start..uuid_start + end];
+                // Convert PVC UUID to namespace UUID by using last 12 chars
+                return format!("00000000-0000-0000-0000-{}", &uuid_part[uuid_part.len().saturating_sub(12)..]);
+            }
+        }
+        
+        // Fallback: generate a UUID based on the NQN hash  
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        nqn.hash(&mut hasher);
+        format!("00000000-0000-0000-0000-{:012x}", hasher.finish() % 0x1000000000000)
     }
 
     /// Determine the appropriate address family for NVMe-oF transport
