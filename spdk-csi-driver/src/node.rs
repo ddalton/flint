@@ -1,6 +1,7 @@
 // node.rs - CSI Node service implementation with dynamic RAID1 creation via NVMe-oF
 use std::sync::Arc;
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 use std::path::Path;
 use crate::driver::SpdkCsiDriver;
 use spdk_csi_driver::csi::{
@@ -92,9 +93,12 @@ impl NodeService {
                     return Err(Status::internal(format!("Local replica missing lvol_uuid")));
                 }
             } else {
-                // Remote replica: use NVMe-oF
+                // Remote replica: create NVMe-oF target on-demand, then connect
                 if let Some(nqn) = &replica.nqn {
                     let nvmf_bdev_name = format!("nvmf_{}", replica.raid_member_index);
+                    
+                    // Ensure NVMe-oF target exists on the remote node
+                    self.ensure_nvmeof_target_if_needed(replica, volume).await?;
                     
                     // Connect to remote NVMe-oF target
                     self.connect_nvmeof_target(
@@ -137,6 +141,72 @@ impl NodeService {
 
 
     /// Connect to NVMe-oF target with comprehensive logging and metrics
+    /// Create NVMe-oF target on-demand based on specific rules:
+    /// - Single replica volumes: Only when pod runs on different node than replica
+    /// - Multi-replica volumes: Only for remote replica members in RAID bdev
+    async fn ensure_nvmeof_target_if_needed(
+        &self,
+        replica: &Replica,
+        volume: &SpdkVolume,
+    ) -> Result<(), Status> {
+        // Determine if we need an NVMe-oF target
+        let needs_nvmeof_target = if volume.spec.num_replicas == 1 {
+            // Single replica: Only if replica is on different node than this pod
+            replica.node != self.driver.node_id
+        } else {
+            // Multi-replica: Only if this specific replica is on a remote node
+            replica.node != self.driver.node_id
+        };
+
+        if !needs_nvmeof_target {
+            println!("📋 [NVMEOF_ONDEMAND] No NVMe-oF target needed for replica on node {} (pod on node {})", 
+                replica.node, self.driver.node_id);
+            return Ok(());
+        }
+
+        println!("🔧 [NVMEOF_ONDEMAND] Creating NVMe-oF target for remote replica on node {}", replica.node);
+
+        // Get the target node's SPDK RPC URL
+        let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await
+            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", replica.node, e)))?;
+
+        // Create a temporary driver instance for the target node's SPDK
+        let node_driver = SpdkCsiDriver {
+            spdk_rpc_url: rpc_url,
+            nvmeof_transport: self.driver.nvmeof_transport.clone(),
+            nvmeof_target_port: self.driver.nvmeof_target_port,
+            node_id: replica.node.clone(),
+            target_namespace: self.driver.target_namespace.clone(),
+            kube_client: self.driver.kube_client.clone(),
+            spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
+            ublk_target_initialized: Arc::new(Mutex::new(false)),
+        };
+
+        // Get the bdev name and NQN for the target
+        let bdev_name = replica.lvol_uuid.as_ref()
+            .ok_or_else(|| Status::internal("Replica missing lvol_uuid"))?;
+        let nqn = replica.nqn.as_ref()
+            .ok_or_else(|| Status::internal("Replica missing NQN"))?;
+
+        // Create the NVMe-oF target on the remote node
+        match node_driver.create_nvmeof_target(bdev_name, nqn).await {
+            Ok(_) => {
+                println!("✅ [NVMEOF_ONDEMAND] Successfully created NVMe-oF target: {} -> {}", bdev_name, nqn);
+                Ok(())
+            }
+            Err(e) => {
+                // Check if the target already exists (idempotent operation)
+                if e.to_string().contains("already exists") || e.to_string().contains("File exists") {
+                    println!("✅ [NVMEOF_ONDEMAND] NVMe-oF target already exists (idempotent): {}", nqn);
+                    Ok(())
+                } else {
+                    println!("❌ [NVMEOF_ONDEMAND] Failed to create NVMe-oF target: {}", e);
+                    Err(Status::internal(format!("Failed to create NVMe-oF target on {}: {}", replica.node, e)))
+                }
+            }
+        }
+    }
+
     async fn connect_nvmeof_target(
         &self,
         bdev_name: &str,
@@ -441,8 +511,7 @@ impl NodeService {
                     return Err(Status::internal("Local replica missing lvol_uuid"));
                 }
             } else {
-                // Remote replica: Still need NVMe-oF for remote access
-                // First connect to remote NVMe-oF target as bdev
+                // Remote replica: Create NVMe-oF target on-demand, then connect
                 let remote_bdev_name = format!("nvmf_remote_{}", volume.spec.volume_id);
                 
                 if let (Some(nqn), Some(ip), Some(port)) = (
@@ -450,10 +519,13 @@ impl NodeService {
                     &replica.ip, 
                     &replica.port
                 ) {
-                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Starting NVMe-oF client connection");
+                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Starting NVMe-oF client connection for single replica");
                     println!("🔗 [NVMEOF_CLIENT_DEBUG] Target: {}:{}", ip, port);
                     println!("🔗 [NVMEOF_CLIENT_DEBUG] NQN: {}", nqn);
                     println!("🔗 [NVMEOF_CLIENT_DEBUG] Remote bdev name: {}", remote_bdev_name);
+                    
+                    // Ensure NVMe-oF target exists on the remote node
+                    self.ensure_nvmeof_target_if_needed(replica, volume).await?;
                     
                     self.connect_nvmeof_target(
                         &remote_bdev_name,

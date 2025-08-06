@@ -360,86 +360,12 @@ impl ControllerService {
             let node_ip = self.driver.get_node_ip(&disk.spec.node_id).await?;
             let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
             
-            // Create NVMe-oF target for remote access
-            // Use UUID directly as bdev name for SPDK NVMe-oF target creation
-            let bdev_name = lvol_uuid.clone();
-            
-            // Get driver instance for the replica node to create NVMe-oF target
-            let rpc_url = self.driver.get_rpc_url_for_node(&disk.spec.node_id).await
-                .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", disk.spec.node_id, e)))?;
-            
-            // Create a temporary driver instance for this node's SPDK
-            let node_driver = SpdkCsiDriver {
-                spdk_rpc_url: rpc_url,
-                nvmeof_transport: self.driver.nvmeof_transport.clone(),
-                nvmeof_target_port: self.driver.nvmeof_target_port,
-                node_id: disk.spec.node_id.clone(),
-                target_namespace: self.driver.target_namespace.clone(),
-                kube_client: self.driver.kube_client.clone(),
-                spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
-                ublk_target_initialized: Arc::new(Mutex::new(false)),
-            };
-            
-            // Create NVMe-oF target with retry logic and comprehensive debugging - this is critical for multinode access
-            match node_driver.create_nvmeof_target(&bdev_name, &nqn).await {
-                Ok(_) => {
-                    println!("✅ [NVMEOF_TARGET] Successfully created and validated NVMe-oF target: {} -> {}", bdev_name, nqn);
-                }
-                Err(e) => {
-                    println!("❌ [NVMEOF_TARGET] Failed to create NVMe-oF target for {}: {}", nqn, e);
-                    
-                    // Clean up both the NVMe-oF subsystem and logical volume on failure to maintain consistency
-                    println!("🔧 [CLEANUP] Cleaning up NVMe-oF subsystem: {}", nqn);
-                    let subsystem_cleanup = HttpClient::new()
-                        .post(&node_driver.spdk_rpc_url)
-                        .json(&json!({
-                            "method": "nvmf_delete_subsystem",
-                            "params": { "nqn": nqn }
-                        }))
-                        .send()
-                        .await;
-                    
-                    match subsystem_cleanup {
-                        Ok(response) if response.status().is_success() => {
-                            println!("✅ [CLEANUP] Successfully cleaned up NVMe-oF subsystem");
-                        }
-                        Ok(_) => {
-                            println!("⚠️ [CLEANUP] NVMe-oF subsystem cleanup failed (may not exist)");
-                        }
-                        Err(e) => {
-                            println!("⚠️ [CLEANUP] Failed to clean up NVMe-oF subsystem: {}", e);
-                        }
-                    }
-                    
-                    println!("🔧 [CLEANUP] Cleaning up logical volume: {}", lvol_uuid);
-                    let lvol_cleanup = HttpClient::new()
-                        .post(&node_driver.spdk_rpc_url)
-                        .json(&json!({
-                            "method": "bdev_lvol_delete",
-                            "params": { "name": lvol_uuid }
-                        }))
-                        .send()
-                        .await;
-                    
-                    match lvol_cleanup {
-                        Ok(response) if response.status().is_success() => {
-                            println!("✅ [CLEANUP] Successfully cleaned up lvol after NVMe-oF failure");
-                        }
-                        Ok(response) => {
-                            let error_text = response.text().await.unwrap_or_default();
-                            println!("⚠️ [CLEANUP] Failed to clean up lvol: {}", error_text);
-                        }
-                        Err(e) => {
-                            println!("⚠️ [CLEANUP] Failed to clean up lvol after NVMe-oF failure: {}", e);
-                        }
-                    }
-                    
-                    return Err(Status::internal(format!(
-                        "Failed to create NVMe-oF target for replica on {}: {}. Volume creation aborted to prevent incomplete state.",
-                        disk.spec.node_id, e
-                    )));
-                }
-            }
+            // NOTE: NVMe-oF targets are now created on-demand during node staging
+            // based on specific rules:
+            // - Single replica volumes: Only when pod runs on different node than replica
+            // - Multi-replica volumes: Only for remote replica members in RAID bdev
+            println!("✅ [REPLICA_CREATE] Created logical volume replica on node {}: {}", disk.spec.node_id, lvol_uuid);
+            println!("📋 [REPLICA_CREATE] NVMe-oF target will be created on-demand during pod staging if needed");
 
             let replica = Replica {
                 node: disk.spec.node_id.clone(),
