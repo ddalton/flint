@@ -85,7 +85,7 @@ metadata:
   name: flint-csi-node
 rules:
   - apiGroups: [""]
-    resources: ["configmaps", "nodes", "pods"]
+    resources: ["configmaps", "nodes", "pods", "events"]
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["flint.csi.storage.io"]
     resources: ["spdkdisks", "spdkvolumes"]
