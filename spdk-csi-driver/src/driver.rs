@@ -521,6 +521,34 @@ impl SpdkCsiDriver {
             println!("{}✅ Subsystem created successfully", ctx.log_prefix());
         }
 
+        // Step 2.5: Explicitly enable allow_any_host for the subsystem
+        println!("{}🔍 Step 2.5: Enabling allow_any_host for subsystem...", ctx.log_prefix());
+        let allow_host_payload = json!({
+            "method": "nvmf_subsystem_allow_any_host",
+            "params": {
+                "nqn": nqn,
+                "allow": true
+            }
+        });
+
+        let allow_host_response = http_client
+            .post(&self.spdk_rpc_url)
+            .json(&allow_host_payload)
+            .send()
+            .await?;
+
+        if !allow_host_response.status().is_success() {
+            let error_text = allow_host_response.text().await?;
+            // This might already be set, so don't fail on "already configured"
+            if !error_text.contains("already") && !error_text.contains("enabled") {
+                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_allow_any_host");
+                nvmf_error.log_detailed(&ctx);
+                return Err(format!("Failed to enable allow_any_host: {}", nvmf_error.user_message()).into());
+            }
+        } else {
+            println!("{}✅ Allow any host enabled successfully", ctx.log_prefix());
+        }
+
         // Step 3: Add namespace to subsystem
         println!("{}🔍 Step 3: Adding namespace to subsystem...", ctx.log_prefix());
         let namespace_payload = json!({
