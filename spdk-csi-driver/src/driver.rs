@@ -496,7 +496,11 @@ impl SpdkCsiDriver {
                 "allow_any_host": true,
                 "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64),
                 "model_number": "SPDK CSI Volume",
-                "max_namespaces": 1
+                "max_namespaces": 1,
+                // Explicitly set these for v25.05.x compatibility
+                "ana_reporting": false,
+                "min_cntlid": 1,
+                "max_cntlid": 65519
             }
         });
 
@@ -521,32 +525,36 @@ impl SpdkCsiDriver {
             println!("{}✅ Subsystem created successfully", ctx.log_prefix());
         }
 
-        // Step 2.5: Explicitly enable allow_any_host for the subsystem
-        println!("{}🔍 Step 2.5: Enabling allow_any_host for subsystem...", ctx.log_prefix());
-        let allow_host_payload = json!({
-            "method": "nvmf_subsystem_allow_any_host",
-            "params": {
-                "nqn": nqn,
-                "allow": true
-            }
+        // Verify allow_any_host was set correctly
+        println!("{}🔍 Verifying allow_any_host configuration...", ctx.log_prefix());
+        let verify_payload = json!({
+            "method": "nvmf_get_subsystems",
+            "params": {}
         });
 
-        let allow_host_response = http_client
+        let verify_response = http_client
             .post(&self.spdk_rpc_url)
-            .json(&allow_host_payload)
+            .json(&verify_payload)
             .send()
             .await?;
 
-        if !allow_host_response.status().is_success() {
-            let error_text = allow_host_response.text().await?;
-            // This might already be set, so don't fail on "already configured"
-            if !error_text.contains("already") && !error_text.contains("enabled") {
-                let nvmf_error = NvmfError::from_spdk_error(&error_text, "nvmf_subsystem_allow_any_host");
-                nvmf_error.log_detailed(&ctx);
-                return Err(format!("Failed to enable allow_any_host: {}", nvmf_error.user_message()).into());
+        if verify_response.status().is_success() {
+            let subsystems: serde_json::Value = verify_response.json().await?;
+            if let Some(subsystem_list) = subsystems.get("result").and_then(|r| r.as_array()) {
+                for subsystem in subsystem_list {
+                    if let Some(subsystem_nqn) = subsystem.get("nqn").and_then(|v| v.as_str()) {
+                        if subsystem_nqn == nqn {
+                            let allow_any_host = subsystem.get("allow_any_host").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if allow_any_host {
+                                println!("{}✅ Allow any host is correctly enabled", ctx.log_prefix());
+                            } else {
+                                println!("{}⚠️ Warning: allow_any_host is not enabled, connections may fail", ctx.log_prefix());
+                            }
+                            break;
+                        }
+                    }
+                }
             }
-        } else {
-            println!("{}✅ Allow any host enabled successfully", ctx.log_prefix());
         }
 
         // Step 3: Add namespace to subsystem
