@@ -763,9 +763,14 @@ async fn start_health_server() {
             warp::reply::with_status("OK", warp::http::StatusCode::OK)
         });
 
-    println!("Starting health server on port 9809");
+    let health_port = std::env::var("HEALTH_PORT")
+        .unwrap_or("9809".to_string())
+        .parse()
+        .unwrap_or(9809);
+    
+    println!("Starting health server on port {}", health_port);
     warp::serve(health)
-        .run(([0, 0, 0, 0], 9809))
+        .run(([0, 0, 0, 0], health_port))
         .await;
 }
 
