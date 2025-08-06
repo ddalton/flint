@@ -36,11 +36,13 @@ spec:
               value: "{{ .Values.driver.useHostnameTopology }}"
             - name: FLINT_NAMESPACE
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
+            - name: HEALTH_PORT
+              value: "{{ .Values.healthCheck.controllerPort | default 9809 }}"
           args:
             - "--v={{ .Values.logLevel }}"
           ports:
             - name: healthz
-              containerPort: 9809
+              containerPort: {{ .Values.healthCheck.controllerPort | default 9809 }}
               protocol: TCP
           livenessProbe:
             httpGet:
