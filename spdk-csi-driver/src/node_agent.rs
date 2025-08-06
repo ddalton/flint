@@ -238,6 +238,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Wait for SPDK to be ready via RPC
     wait_for_spdk_ready(&agent).await?;
     
+    // 🚀 NEW: Immediately create AIO bdevs for all known disks to enable SPDK auto-discovery
+    println!("🔧 [STARTUP] Creating AIO bdevs immediately to enable SPDK LVS auto-discovery");
+    if let Err(e) = recover_existing_aio_bdevs(&agent).await {
+        println!("⚠️ [STARTUP] AIO bdev recovery failed: {}", e);
+        // Continue startup even if recovery fails
+    }
+    
     // Start HTTP API server for disk setup operations
     let api_agent = agent.clone();
     tokio::spawn(async move {
@@ -633,6 +640,105 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
     }
     
     Ok(())
+}
+
+/// Immediately create bdevs (AIO or NVMe) for all known SpdkDisks to enable SPDK auto-discovery
+async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔧 [RECOVERY] Starting immediate bdev recovery from SpdkDisk CRDs (AIO + NVMe)");
+    
+    // Get Kubernetes client
+    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
+    
+    // Get all SpdkDisks for this node
+    let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
+    match spdk_disks.list(&lp).await {
+        Ok(disk_list) => {
+            println!("🔍 [RECOVERY] Found {} SpdkDisk CRDs for node {}", disk_list.items.len(), agent.node_name);
+            
+            for disk in disk_list.items {
+                if let Some(disk_name) = &disk.metadata.name {
+                    println!("🔧 [RECOVERY] Creating bdev for disk: {}", disk_name);
+                    
+                    // Try to create appropriate bdev type (AIO for kernel, NVMe for userspace)
+                    if let Err(e) = recover_disk_bdev(agent, &disk).await {
+                        println!("⚠️ [RECOVERY] Failed to create bdev for {}: {}", disk_name, e);
+                        // Continue with other disks - don't fail the whole startup
+                    } else {
+                        println!("✅ [RECOVERY] Bdev ready for: {}", disk_name);
+                    }
+                }
+            }
+            
+            // Give SPDK a moment to discover LVS on the newly created bdevs
+            println!("⏳ [RECOVERY] Waiting 3 seconds for SPDK to auto-discover existing LVS...");
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            
+            println!("✅ [RECOVERY] Bdev recovery completed");
+        }
+        Err(e) => {
+            println!("⚠️ [RECOVERY] Failed to list SpdkDisk CRDs: {}", e);
+            // Don't fail startup - continue without recovery
+        }
+    }
+    
+    Ok(())
+}
+
+/// Helper function to create the appropriate bdev type (AIO or NVMe) for a disk
+async fn recover_disk_bdev(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Get current device name from discovery (not potentially stale CRD spec)
+    let device_name = match agent.find_nvme_device_name(&disk.spec.pcie_addr).await {
+        Ok(name) => {
+            println!("🔍 [RECOVERY] Found current device name: {} for PCI: {}", name, disk.spec.pcie_addr);
+            name
+        }
+        Err(_) => {
+            println!("⚠️ [RECOVERY] Could not find current device name, using CRD spec as fallback");
+            if let Some(controller_id) = &disk.spec.nvme_controller_id {
+                controller_id.clone()
+            } else {
+                disk.spec.device_path.trim_start_matches("/dev/").to_string()
+            }
+        }
+    };
+    
+    // Check if kernel device path exists (for AIO bdev)
+    let kernel_device_path = format!("/dev/{}", device_name);
+    
+    if std::path::Path::new(&kernel_device_path).exists() {
+        // Kernel-attached device - create AIO bdev
+        println!("🔧 [RECOVERY] Device is kernel-attached, creating AIO bdev: {}", kernel_device_path);
+        agent.ensure_aio_bdev_exists(disk).await
+    } else {
+        // SPDK userspace device - attach NVMe controller
+        println!("🔌 [RECOVERY] Device is userspace-bound, attaching NVMe controller at PCIe: {}", disk.spec.pcie_addr);
+        let controller_id = disk.spec.nvme_controller_id.as_deref().unwrap_or("nvme0");
+        
+        let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": controller_id,
+                "trtype": "PCIe",
+                "traddr": disk.spec.pcie_addr
+            }
+        })).await;
+        
+        match attach_result {
+            Ok(_) => {
+                println!("✅ [RECOVERY] Successfully attached NVMe controller: {}", controller_id);
+                Ok(())
+            }
+            Err(e) => {
+                if e.to_string().contains("already attached") || e.to_string().contains("already exists") {
+                    println!("✅ [RECOVERY] NVMe controller {} already attached", controller_id);
+                    Ok(())
+                } else {
+                    println!("❌ [RECOVERY] Failed to attach NVMe controller {}: {}", controller_id, e);
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
