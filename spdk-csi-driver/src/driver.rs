@@ -121,46 +121,171 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Create ublk device for a bdev
+    /// Create ublk device for a bdev (unified robust implementation)
     pub async fn create_ublk_device(
         &self,
         bdev_name: &str,
         ublk_id: u32,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
+        println!("🔧 [UBLK_CREATE] Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
         
-        // Check if device already exists
         let device_path = format!("/dev/ublkb{}", ublk_id);
+
+        // Step 1: Clean up any existing device
         if std::path::Path::new(&device_path).exists() {
-            println!("ublk device {} already exists, cleaning up first", device_path);
-            // Try to stop the existing device
-            if let Err(e) = self.delete_ublk_device(ublk_id).await {
-                println!("Warning: Failed to cleanup existing ublk device {}: {}", ublk_id, e);
+            println!("🔧 [UBLK_CREATE] Device {} already exists, cleaning up first", device_path);
+            if let Err(e) = self.cleanup_ublk_device(ublk_id).await {
+                println!("⚠️ [UBLK_CREATE] Cleanup warning: {}", e);
             }
-            // Wait a moment for cleanup
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            
+            // Wait for cleanup to complete
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Step 2: Verify bdev exists with retry mechanism (important for NVMe-oF timing)
+        println!("🔧 [UBLK_CREATE] Verifying target bdev exists...");
+        
+        let max_retries = 5;
+        let mut last_error = String::new();
+        let mut verification_succeeded = false;
+        
+        for attempt in 1..=max_retries {
+            println!("🔧 [UBLK_CREATE] Attempt {}/{}: Checking bdev availability...", attempt, max_retries);
+            
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10), 
+                self.verify_bdev_exists_impl(bdev_name)
+            ).await {
+                Ok(Ok(_)) => {
+                    println!("✅ [UBLK_CREATE] Target bdev verification successful on attempt {}", attempt);
+                    verification_succeeded = true;
+                    break;
+                }
+                Ok(Err(e)) => {
+                    last_error = e.to_string();
+                    println!("⚠️ [UBLK_CREATE] Attempt {}/{} failed: {}", attempt, max_retries, e);
+                    
+                    if attempt < max_retries {
+                        let delay_ms = attempt * 500; // Exponential backoff: 500ms, 1s, 1.5s, 2s
+                        println!("🔧 [UBLK_CREATE] Waiting {}ms before retry...", delay_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+                Err(_) => {
+                    last_error = "verification timed out".to_string();
+                    println!("⚠️ [UBLK_CREATE] Attempt {}/{} timed out", attempt, max_retries);
+                    
+                    if attempt < max_retries {
+                        println!("🔧 [UBLK_CREATE] Retrying after timeout...");
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    }
+                }
+            }
         }
         
-        // Ensure ublk target exists first
+        if !verification_succeeded {
+            println!("❌ [UBLK_CREATE] All {} attempts failed. Final error: {}", max_retries, last_error);
+            return Err(format!("Cannot create ublk device: target bdev '{}' not available after {} attempts: {}", bdev_name, max_retries, last_error).into());
+        }
+
+        // Step 3: Ensure ublk target exists (required before creating disks)
+        println!("🔧 [UBLK_CREATE] Ensuring ublk target exists...");
         self.ensure_ublk_target().await?;
         
-        // Use the same SPDK RPC pattern as node_agent.rs
-        let rpc_request = json!({
+        // Step 4: Create ublk device with detailed logging
+        println!("🔧 [UBLK_CREATE] Creating ublk device...");
+        let ublk_payload = json!({
             "method": "ublk_start_disk",
             "params": {
-                "bdev_name": bdev_name,
-                "ublk_id": ublk_id
+                "ublk_id": ublk_id,
+                "bdev_name": bdev_name
             }
         });
-        
-        let response = self.call_spdk_rpc(&rpc_request).await?;
-        
-        // Check for SPDK RPC errors
+        println!("🔧 [UBLK_CREATE] SPDK RPC payload: {}", ublk_payload);
+
+        // Call RPC with timeout
+        let rpc_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.call_spdk_rpc(&ublk_payload)
+        ).await;
+
+        match rpc_result {
+            Ok(Ok(response)) => {
+                println!("✅ [UBLK_CREATE] ublk RPC call successful");
+                println!("🔧 [UBLK_CREATE] RPC response: {}", response);
+                
+                // Check for SPDK RPC errors in the response
         if let Some(error) = response.get("error") {
-            return Err(format!("SPDK RPC error: {}", error).into());
+                    let error_str = error.to_string();
+                    println!("❌ [UBLK_CREATE] SPDK RPC returned error: {}", error_str);
+                    
+                    // Analyze the error
+                    if error_str.contains("No such device") || error_str.contains("-19") {
+                        println!("🔍 [UBLK_CREATE] Error analysis: bdev not found or not accessible");
+                    } else if error_str.contains("already exists") {
+                        println!("ℹ️ [UBLK_CREATE] Device already exists - continuing...");
+                    } else {
+                        println!("🔍 [UBLK_CREATE] Unexpected error: {}", error_str);
+                    }
+                    
+                    return Err(format!("SPDK RPC error: {}", error_str).into());
+                }
+            }
+            Ok(Err(e)) => {
+                println!("❌ [UBLK_CREATE] ublk RPC call failed: {}", e);
+                return Err(format!("ublk device creation failed: {}", e).into());
+            }
+            Err(_) => {
+                println!("❌ [UBLK_CREATE] ublk RPC call timed out after 15 seconds");
+                return Err("ublk device creation timed out".into());
+            }
         }
+
+        // Step 5: Wait for device to appear and verify
+        println!("🔧 [UBLK_CREATE] Waiting for device to appear...");
+        let mut attempts = 0;
+        let max_attempts = 30; // 30 seconds maximum
         
-        println!("Successfully created ublk device: {} -> {}", bdev_name, device_path);
+        while attempts < max_attempts {
+            if std::path::Path::new(&device_path).exists() {
+                println!("✅ [UBLK_CREATE] Device {} appeared after {} seconds", device_path, attempts);
+                break;
+            }
+            
+            attempts += 1;
+            if attempts % 5 == 0 {
+                println!("🔧 [UBLK_CREATE] Still waiting for device... ({}/{})", attempts, max_attempts);
+                // Debug: List all ublk devices that exist
+                if let Ok(devices) = std::fs::read_dir("/dev") {
+                    let ublk_devices: Vec<String> = devices
+                        .filter_map(|entry| entry.ok())
+                        .filter_map(|entry| entry.file_name().into_string().ok())
+                        .filter(|name| name.starts_with("ublk"))
+                        .collect();
+                    println!("🔧 [UBLK_CREATE] Current ublk devices: {:?}", ublk_devices);
+                }
+            }
+            
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        if !std::path::Path::new(&device_path).exists() {
+            println!("❌ [UBLK_CREATE] Device {} did not appear after {} seconds", device_path, max_attempts);
+            
+            // Final debug: Check what ublk devices exist
+            if let Ok(devices) = std::fs::read_dir("/dev") {
+                let ublk_devices: Vec<String> = devices
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with("ublk"))
+                    .collect();
+                println!("❌ [UBLK_CREATE] Final ublk devices list: {:?}", ublk_devices);
+            }
+            
+            return Err(format!("ublk device {} did not appear after {} seconds", device_path, max_attempts).into());
+        }
+
+        println!("✅ [UBLK_CREATE] Successfully created ublk device: {} -> {}", bdev_name, device_path);
         Ok(device_path)
     }
     
@@ -774,194 +899,7 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Enhanced ublk device creation with comprehensive logging
-    pub async fn create_ublk_device_enhanced(&self, bdev_name: &str, ublk_id: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔧 [UBLK_CREATE_DEBUG] Starting ublk device creation with debugging");
-        println!("🔧 [UBLK_CREATE_DEBUG] Parameters:");
-        println!("🔧 [UBLK_CREATE_DEBUG]   bdev_name: {}", bdev_name);
-        println!("🔧 [UBLK_CREATE_DEBUG]   ublk_id: {}", ublk_id);
 
-        // Step 1: Pre-flight checks
-        println!("🔧 [UBLK_CREATE_DEBUG] Step 1: Pre-flight checks...");
-        
-        // FIXED: Use correct ublk device path format (/dev/ublkb{id} for block devices)
-        let device_path = format!("/dev/ublkb{}", ublk_id);
-        println!("🔧 [UBLK_CREATE_DEBUG] Expected device path: {}", device_path);
-        
-        // Check for any existing ublk devices with this ID
-        let control_path = format!("/dev/ublkc{}", ublk_id);
-        if std::path::Path::new(&device_path).exists() || std::path::Path::new(&control_path).exists() {
-            println!("⚠️ [UBLK_CREATE_DEBUG] ublk device with ID {} already exists", ublk_id);
-            println!("🔧 [UBLK_CREATE_DEBUG] Block device: exists={}", std::path::Path::new(&device_path).exists());
-            println!("🔧 [UBLK_CREATE_DEBUG] Control device: exists={}", std::path::Path::new(&control_path).exists());
-            
-            // Try to clean up existing device first
-            println!("🔧 [UBLK_CREATE_DEBUG] Attempting to cleanup existing device...");
-            if let Err(e) = self.cleanup_ublk_device(ublk_id).await {
-                println!("⚠️ [UBLK_CREATE_DEBUG] Cleanup warning: {}", e);
-            }
-            
-            // Wait for cleanup to complete
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-
-        // Verify bdev exists with retry mechanism for NVMe-oF timing issues
-        println!("🔧 [UBLK_CREATE_DEBUG] Verifying target bdev exists (with retry for NVMe-oF timing)...");
-        
-        let max_retries = 5;
-        let mut last_error = String::new();
-        let mut verification_succeeded = false;
-        
-        for attempt in 1..=max_retries {
-            println!("🔧 [UBLK_CREATE_DEBUG] Attempt {}/{}: Checking bdev availability...", attempt, max_retries);
-            
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10), 
-                self.verify_bdev_exists_impl(bdev_name)
-            ).await {
-                Ok(Ok(_)) => {
-                    println!("✅ [UBLK_CREATE_DEBUG] Target bdev verification successful on attempt {}", attempt);
-                    verification_succeeded = true;
-                    break;
-                }
-                Ok(Err(e)) => {
-                    last_error = e.to_string();
-                    println!("⚠️ [UBLK_CREATE_DEBUG] Attempt {}/{} failed: {}", attempt, max_retries, e);
-                    
-                    if attempt < max_retries {
-                        let delay_ms = attempt * 500; // Exponential backoff: 500ms, 1s, 1.5s, 2s
-                        println!("🔧 [UBLK_CREATE_DEBUG] Waiting {}ms before retry (NVMe-oF bdev may need time to register)...", delay_ms);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
-                }
-                Err(_) => {
-                    last_error = "verification timed out".to_string();
-                    println!("⚠️ [UBLK_CREATE_DEBUG] Attempt {}/{} timed out", attempt, max_retries);
-                    
-                    if attempt < max_retries {
-                        println!("🔧 [UBLK_CREATE_DEBUG] Retrying after timeout...");
-                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    }
-                }
-            }
-        }
-        
-        if !verification_succeeded {
-            println!("❌ [UBLK_CREATE_DEBUG] All {} attempts failed. Final error: {}", max_retries, last_error);
-            return Err(format!("Cannot create ublk device: target bdev '{}' not available after {} attempts: {}", bdev_name, max_retries, last_error).into());
-        }
-
-        // Step 2: Create ublk device with detailed logging
-        println!("🔧 [UBLK_CREATE_DEBUG] Step 2: Creating ublk device...");
-        let ublk_payload = json!({
-            "method": "ublk_start_disk",
-            "params": {
-                "ublk_id": ublk_id,
-                "bdev_name": bdev_name
-            }
-        });
-        println!("🔧 [UBLK_CREATE_DEBUG] SPDK RPC payload: {}", ublk_payload);
-
-        // FIXED: Use consistent RPC calling method with timeout
-        let rpc_result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            self.call_spdk_rpc(&ublk_payload)
-        ).await;
-
-        match rpc_result {
-            Ok(Ok(response)) => {
-                println!("✅ [UBLK_CREATE_DEBUG] ublk RPC call successful");
-                println!("🔧 [UBLK_CREATE_DEBUG] RPC response: {}", response);
-                
-                // Check for SPDK RPC errors in the response
-                if let Some(error) = response.get("error") {
-                    let error_str = error.to_string();
-                    println!("❌ [UBLK_CREATE_DEBUG] SPDK RPC returned error: {}", error_str);
-                    
-                    // Analyze the error
-                    if error_str.contains("No such device") || error_str.contains("-19") {
-                        println!("🔍 [UBLK_CREATE_DEBUG] Error analysis: bdev not found or not accessible");
-                        println!("🔍 [UBLK_CREATE_DEBUG] This typically means:");
-                        println!("🔍 [UBLK_CREATE_DEBUG]   1. The NVMe-oF connection failed");
-                        println!("🔍 [UBLK_CREATE_DEBUG]   2. The remote bdev name is incorrect");
-                        println!("🔍 [UBLK_CREATE_DEBUG]   3. The target subsystem is not properly configured");
-                    } else if error_str.contains("already exists") {
-                        println!("ℹ️ [UBLK_CREATE_DEBUG] Device already exists - continuing...");
-                    } else {
-                        println!("🔍 [UBLK_CREATE_DEBUG] Unexpected error: {}", error_str);
-                    }
-                    
-                    return Err(format!("SPDK RPC error: {}", error_str).into());
-                }
-            }
-            Ok(Err(e)) => {
-                println!("❌ [UBLK_CREATE_DEBUG] ublk RPC call failed: {}", e);
-                return Err(format!("ublk device creation failed: {}", e).into());
-            }
-            Err(_) => {
-                println!("❌ [UBLK_CREATE_DEBUG] ublk RPC call timed out after 15 seconds");
-                return Err("ublk device creation timed out".into());
-            }
-        }
-
-        // Step 3: Wait for device to appear and verify
-        println!("🔧 [UBLK_CREATE_DEBUG] Step 3: Waiting for device to appear...");
-        let mut attempts = 0;
-        let max_attempts = 30; // 30 seconds maximum
-        
-        while attempts < max_attempts {
-            if std::path::Path::new(&device_path).exists() {
-                println!("✅ [UBLK_CREATE_DEBUG] Device {} appeared after {} seconds", device_path, attempts);
-                break;
-            }
-            
-            attempts += 1;
-            if attempts % 5 == 0 {
-                println!("🔧 [UBLK_CREATE_DEBUG] Still waiting for device... ({}/{})", attempts, max_attempts);
-                // Debug: List all ublk devices that exist
-                if let Ok(devices) = std::fs::read_dir("/dev") {
-                    let ublk_devices: Vec<String> = devices
-                        .filter_map(|entry| entry.ok())
-                        .filter_map(|entry| entry.file_name().into_string().ok())
-                        .filter(|name| name.starts_with("ublk"))
-                        .collect();
-                    println!("🔧 [UBLK_CREATE_DEBUG] Current ublk devices: {:?}", ublk_devices);
-                }
-            }
-            
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-
-        if !std::path::Path::new(&device_path).exists() {
-            println!("❌ [UBLK_CREATE_DEBUG] Device {} did not appear after {} seconds", device_path, max_attempts);
-            
-            // Final debug: Check what ublk devices exist
-            if let Ok(devices) = std::fs::read_dir("/dev") {
-                let ublk_devices: Vec<String> = devices
-                    .filter_map(|entry| entry.ok())
-                    .filter_map(|entry| entry.file_name().into_string().ok())
-                    .filter(|name| name.starts_with("ublk"))
-                    .collect();
-                println!("❌ [UBLK_CREATE_DEBUG] Final ublk devices list: {:?}", ublk_devices);
-            }
-            
-            return Err(format!("ublk device {} did not appear within timeout", device_path).into());
-        }
-
-        // Step 4: Final verification
-        println!("🔧 [UBLK_CREATE_DEBUG] Step 4: Final device verification...");
-        
-        // Check device properties
-        if let Ok(metadata) = std::fs::metadata(&device_path) {
-            println!("🔧 [UBLK_CREATE_DEBUG] Device properties:");
-            println!("🔧 [UBLK_CREATE_DEBUG]   Path: {}", device_path);
-            println!("🔧 [UBLK_CREATE_DEBUG]   Size: {} bytes", metadata.len());
-            println!("🔧 [UBLK_CREATE_DEBUG]   Type: {:?}", metadata.file_type());
-        }
-
-        println!("✅ [UBLK_CREATE_DEBUG] ublk device creation complete: {}", device_path);
-        Ok(device_path)
-    }
 
     /// Enhanced ublk device cleanup with logging
     pub async fn cleanup_ublk_device(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

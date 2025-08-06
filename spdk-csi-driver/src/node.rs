@@ -581,10 +581,10 @@ impl NodeService {
                             // This looks like a UUID - check if it's an NVMe bdev
                             if let Some(driver_name) = bdev.get("driver_name").and_then(|v| v.as_str()) {
                                 if driver_name == "nvme" {
-                                    let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
                                     println!("🔍 [BDEV_REMOTE_VERIFY] Found NVMe UUID bdev: name={}, blocks={}, block_size={}", 
-                                             name, size, block_size);
+                                 name, size, block_size);
                                     found_nvme_bdevs.push(name.to_string());
                                 }
                             }
@@ -598,7 +598,7 @@ impl NodeService {
                         println!("📋 [BDEV_REMOTE_VERIFY] Available NVMe bdev: {}", bdev_name);
                     }
                     return Ok(());
-                } else {
+            } else {
                     println!("❌ [BDEV_REMOTE_VERIFY] No NVMe UUID bdevs found after connection");
                 }
             }
@@ -704,7 +704,7 @@ impl NodeService {
                         println!("🔍 [BDEV_NAME_RESOLVE] Candidate: {}", candidate);
                     }
                     return Ok(actual_name.clone());
-                } else {
+        } else {
                     println!("❌ [BDEV_NAME_RESOLVE] No suitable NVMe UUID bdevs found");
                 }
             }
@@ -890,7 +890,7 @@ impl NodeService {
                     println!("🔗 [UBLK_CREATE_DEBUG] Creating ublk device for actual remote bdev: {}", actual_bdev_name);
                     println!("🔗 [UBLK_CREATE_DEBUG] ublk ID: {}", ublk_id);
                     
-                    match self.driver.create_ublk_device_enhanced(&actual_bdev_name, ublk_id).await {
+                    match self.driver.create_ublk_device(&actual_bdev_name, ublk_id).await {
                         Ok(device_path) => {
                             println!("✅ [UBLK_CREATE_DEBUG] Successfully created ublk device: {}", device_path);
                             device_path
@@ -1141,7 +1141,7 @@ impl NodeService {
 
         // Determine address family based on transport and IP
         let adrfam = Self::determine_address_family(&self.driver.nvmeof_transport, target_ip)?;
-        
+
         let add_listener_payload = json!({
             "method": "nvmf_subsystem_add_listener",
             "params": {
