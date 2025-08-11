@@ -20,7 +20,7 @@ use warp::Filter;
 use warp::{reply, Rejection, Reply};
 use warp::http::StatusCode;
 
-use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics, FlintDiskMetadata, DiskAttachmentRecord};
+use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics, FlintDiskMetadata};
 use spdk_csi_driver::spdk_native::SpdkNative;
 
 /// SPDK RPC interface for CSI operations
@@ -272,6 +272,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🔌 [RPC] Using RPC mode - waiting for SPDK to be ready");
     // Wait for SPDK to be ready via RPC
     wait_for_spdk_ready(&agent).await?;
+    
+    // 🚀 Initialize NVMe-oF transports after SPDK is ready
+    println!("🔧 [STARTUP] Initializing NVMe-oF transports (TCP + RDMA)");
+    if let Err(e) = initialize_nvmeof_transports(&agent).await {
+        println!("⚠️ [STARTUP] NVMe-oF transport initialization failed: {}", e);
+        // Continue startup even if transport initialization fails
+    }
     
     // 🚀 NEW: Immediately create AIO bdevs for all known disks to enable SPDK auto-discovery
     println!("🔧 [STARTUP] Creating AIO bdevs immediately to enable SPDK LVS auto-discovery");
@@ -677,6 +684,65 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+/// Initialize NVMe-oF transports (TCP and RDMA) for SPDK
+async fn initialize_nvmeof_transports(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🚀 [NVMEOF_TRANSPORT] Initializing NVMe-oF transports...");
+    
+    // Try to initialize TCP transport
+    match initialize_single_transport(&agent, "TCP").await {
+        Ok(_) => println!("✅ [NVMEOF_TRANSPORT] TCP transport initialized successfully"),
+        Err(e) => {
+            // Check if error is because transport already exists
+            if e.to_string().contains("already exists") || e.to_string().contains("File exists") {
+                println!("✅ [NVMEOF_TRANSPORT] TCP transport already exists (acceptable)");
+            } else {
+                println!("⚠️ [NVMEOF_TRANSPORT] TCP transport initialization failed: {}", e);
+                // Don't return error, continue with RDMA
+            }
+        }
+    }
+    
+    // Try to initialize RDMA transport
+    match initialize_single_transport(&agent, "RDMA").await {
+        Ok(_) => println!("✅ [NVMEOF_TRANSPORT] RDMA transport initialized successfully"),
+        Err(e) => {
+            // Check if error is because transport already exists
+            if e.to_string().contains("already exists") || e.to_string().contains("File exists") {
+                println!("✅ [NVMEOF_TRANSPORT] RDMA transport already exists (acceptable)");
+            } else {
+                println!("⚠️ [NVMEOF_TRANSPORT] RDMA transport initialization failed: {}", e);
+                // Don't return error, this is not critical
+            }
+        }
+    }
+    
+    println!("🎉 [NVMEOF_TRANSPORT] NVMe-oF transport initialization completed");
+    Ok(())
+}
+
+/// Initialize a single NVMe-oF transport
+async fn initialize_single_transport(agent: &NodeAgent, transport_type: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔧 [NVMEOF_TRANSPORT] Initializing {} transport...", transport_type);
+    
+    let transport_payload = json!({
+        "method": "nvmf_create_transport",
+        "params": {
+            "trtype": transport_type
+        }
+    });
+    
+    let response = call_spdk_rpc(&agent.spdk_rpc_url, &transport_payload).await?;
+    
+    // Check for SPDK RPC errors
+    if let Some(error) = response.get("error") {
+        let error_msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+        return Err(format!("SPDK RPC error for {} transport: {}", transport_type, error_msg).into());
+    }
+    
+    println!("✅ [NVMEOF_TRANSPORT] {} transport created successfully", transport_type);
+    Ok(())
+}
+
 /// Immediately create bdevs (AIO or NVMe) for all known SpdkDisks to enable SPDK auto-discovery
 async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🔧 [RECOVERY] Starting immediate bdev recovery from SpdkDisk CRDs (AIO + NVMe)");
@@ -932,7 +998,7 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
                     println!("    Serial: {}", device.serial_number);
                     
                     // First, try to reconcile by updating existing CRD with new path
-                    match attempt_disk_reconciliation(agent, device, &existing_disks).await {
+                    match attempt_disk_reconciliation(agent, &device, &existing_disks).await {
                         Ok(true) => {
                             println!("✅ [RECONCILIATION] Successfully reconciled disk with changed path");
                         }
@@ -1001,6 +1067,12 @@ async fn create_new_disk_resource_internal(
         size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)),
         blobstore_uuid: None,
         nvme_controller_id: Some(device.controller_id.clone()),
+        
+        // Health status fields
+        status: Some("online".to_string()),
+        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+        health_status: Some("healthy".to_string()),
+        failure_reason: None,
     }, &agent.target_namespace);
     
     // Set initial status
@@ -3397,10 +3469,24 @@ impl NodeAgent {
                     SpdkDiskSpec {
                         node_id: self.node_name.clone(),
                         device_path: format!("/dev/{}", actual_device_name),
+                        pcie_addr: pci_addr.to_string(),
+                        disk_id: format!("/dev/disk/by-id/nvme-{}", actual_device_name),
+                        serial_number: "unknown".to_string(),
+                        wwn: None,
+                        model: "unknown".to_string(),
+                        vendor: "unknown".to_string(),
+                        cluster_id: None,
+                        disk_uuid: None,
+                        pool_uuid: None,
+                        first_attached_node: None,
+                        initialized_at: None,
                         size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
-                        pcie_addr: pci_addr.to_string(),  // Use PCI address from parameter
                         blobstore_uuid: None,
                         nvme_controller_id: Some(actual_device_name.clone()),
+                        status: Some("online".to_string()),
+                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+                        health_status: Some("healthy".to_string()),
+                        failure_reason: None,
                     },
                     &self.target_namespace
                 );
@@ -3842,10 +3928,24 @@ impl NodeAgent {
                     SpdkDiskSpec {
                         node_id: self.node_name.clone(),
                         device_path: format!("/dev/{}", actual_device_name),
+                        pcie_addr: pci_addr.to_string(),
+                        disk_id: format!("/dev/disk/by-id/nvme-{}", actual_device_name),
+                        serial_number: "unknown".to_string(),
+                        wwn: None,
+                        model: "unknown".to_string(),
+                        vendor: "unknown".to_string(),
+                        cluster_id: None,
+                        disk_uuid: None,
+                        pool_uuid: None,
+                        first_attached_node: None,
+                        initialized_at: None,
                         size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
-                        pcie_addr: pci_addr.to_string(),  // Use PCI address from parameter
                         blobstore_uuid: None,
                         nvme_controller_id: Some(actual_device_name.clone()),
+                        status: Some("online".to_string()),
+                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+                        health_status: Some("healthy".to_string()),
+                        failure_reason: None,
                     },
                     &self.target_namespace
                 );
@@ -4542,10 +4642,24 @@ impl NodeAgent {
                     SpdkDiskSpec {
                         node_id: self.node_name.clone(),
                         device_path: format!("/dev/{}", disk_info.device_name),
-                        size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
                         pcie_addr: disk_info.pci_address.clone(),
+                        disk_id: format!("/dev/disk/by-id/nvme-{}", disk_info.device_name),
+                        serial_number: "unknown".to_string(),
+                        wwn: None,
+                        model: "unknown".to_string(),
+                        vendor: "unknown".to_string(),
+                        cluster_id: None,
+                        disk_uuid: None,
+                        pool_uuid: None,
+                        first_attached_node: None,
+                        initialized_at: None,
+                        size: format!("{}Gi", disk_info.size_bytes / (1024*1024*1024)),
                         blobstore_uuid: None,
                         nvme_controller_id: Some(disk_info.device_name.clone()),
+                        status: Some("online".to_string()),
+                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
+                        health_status: Some("healthy".to_string()),
+                        failure_reason: None,
                     },
                     &self.target_namespace
                 );
@@ -5174,7 +5288,7 @@ async fn mark_disk_offline(agent: &NodeAgent, disk: &SpdkDisk, reason: &str) -> 
 /// Update a disk CRD in Kubernetes
 async fn update_disk_crd(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
     let client = kube::Client::try_default().await?;
-    let disks: Api<SpdkDisk> = Api::namespaced(client, &agent.namespace);
+    let disks: Api<SpdkDisk> = Api::namespaced(client, &agent.target_namespace);
     
     let disk_name = disk.metadata.name.as_ref().unwrap();
     disks.replace(disk_name, &PostParams::default(), disk).await?;

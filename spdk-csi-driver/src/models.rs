@@ -338,6 +338,18 @@ impl SpdkDiskSpec {
         format!("{}-{}", self.vendor, self.serial_number)
     }
     
+    /// Generate deterministic disk UUID from immutable hardware properties
+    pub fn generate_disk_uuid(serial: &str, model: &str, vendor: &str, device_id: &str) -> String {
+        use sha2::{Sha256, Digest};
+        let input = format!("{}-{}-{}-{}", serial, model, vendor, device_id);
+        let hash = Sha256::digest(input.as_bytes());
+        let hex = format!("{:x}", hash);
+        
+        // Format as UUID: 8-4-4-4-12
+        format!("{}-{}-{}-{}-{}", 
+                &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+    }
+    
     /// Check if this disk is initialized for Flint
     pub fn is_flint_initialized(&self) -> bool {
         self.disk_uuid.is_some()
