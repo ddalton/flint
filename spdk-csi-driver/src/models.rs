@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use chrono;
 use chrono::{DateTime, Utc};
+use uuid;
 
 // ============================================================================
 // SPDK VOLUME RELATED STRUCTURES
@@ -204,12 +205,239 @@ pub struct RaidRebuildInfo {
 #[kube(namespaced)]
 #[kube(status = "SpdkDiskStatus")]
 pub struct SpdkDiskSpec {
-    pub node_id: String,        // Changed from 'node' to match CRD
-    pub device_path: String,    // Added required field
-    pub size: String,           // Changed from 'capacity' (i64) to 'size' (String) to match CRD
-    pub pcie_addr: String,
+    // Location-dependent fields (can change when disk moves) - similar to Portworx node attachment
+    pub node_id: String,        // Current node where disk is located
+    pub device_path: String,    // Current device path (e.g., /dev/nvme1n1)
+    pub pcie_addr: String,      // Current PCIe address
+    
+    // Immutable disk identification (Portworx-style hardware identification)
+    pub disk_id: String,        // Hardware disk ID (/dev/disk/by-id/ path)
+    pub serial_number: String,  // NVMe serial number (primary identifier)
+    pub wwn: Option<String>,    // World Wide Name if available
+    pub model: String,          // Disk model
+    pub vendor: String,         // Disk vendor
+    
+    // Flint disk metadata (with cluster safety for NVMe-oF scenarios)  
+    pub cluster_id: Option<String>,      // Kubernetes cluster this disk belongs to (CRITICAL for security)
+    pub disk_uuid: Option<String>,       // Flint internal disk UUID (PRIMARY identifier, stored in blobstore)
+    pub pool_uuid: Option<String>,       // Storage pool UUID
+    pub first_attached_node: Option<String>, // Node that first initialized this disk
+    pub initialized_at: Option<String>,  // When disk joined the cluster
+    
+    // Storage configuration
+    pub size: String,           // Disk size
     pub blobstore_uuid: Option<String>,
     pub nvme_controller_id: Option<String>,
+    
+    // Disk health and status (for failure detection and recovery)
+    pub status: Option<String>,           // online, offline, failed, missing, degraded
+    pub last_seen: Option<String>,        // Last successful discovery timestamp
+    pub health_status: Option<String>,    // healthy, warning, critical
+    pub failure_reason: Option<String>,   // Reason for failure/offline status
+}
+
+impl SpdkDiskSpec {
+    /// Get the LVS name for this disk (legacy method for compatibility)
+    /// Uses cluster metadata if available, falls back to hardware ID
+    pub fn lvs_name(&self) -> String {
+        if let Some(disk_uuid) = &self.disk_uuid {
+            // Use stored disk UUID from cluster metadata (preferred)
+            format!("flint_{}", disk_uuid)
+        } else {
+            // Fallback: generate from hardware serial number (like Portworx does)
+            let safe_serial = self.serial_number
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>();
+            format!("flint_{}", safe_serial)
+        }
+    }
+    
+    /// Generate LVS name with embedded disk UUID and cluster ID (OPTIMIZED APPROACH)
+    /// Encodes full disk UUID + shortened cluster ID for perfect disk identification
+    /// Format: lvs_{32_char_disk_uuid}_{8_char_cluster_id} (45 chars total, well under 63 limit)
+    pub fn lvs_name_with_cluster(&self, cluster_id: &str) -> String {
+        match (&self.disk_uuid, &self.cluster_id) {
+            (Some(disk_uuid), Some(_)) => {
+                // Use FULL disk UUID (32 hex chars, no hyphens) for perfect identification
+                let disk_full = disk_uuid.replace("-", "");
+                
+                // Use first 8 hex chars of cluster ID (sufficient for cluster distinction)
+                let cluster_short = cluster_id.replace("-", "")
+                    .chars()
+                    .take(8)
+                    .collect::<String>();
+                    
+                let lvs_name = format!("lvs_{}_{}", disk_full, cluster_short);
+                
+                // Validate length constraint (should be ~45 chars, well under 63)
+                if lvs_name.len() > 63 {
+                    panic!("LVS name exceeds 63 character limit: {} (length: {})", lvs_name, lvs_name.len());
+                }
+                
+                println!("🔧 [LVS_NAME] Generated: {} (len: {}, disk: full, cluster: 8-char)", 
+                         lvs_name, lvs_name.len());
+                
+                lvs_name
+            }
+            _ => {
+                // Fallback for uninitialized disks or missing cluster info
+                self.lvs_name() // Uses existing serial-based naming
+            }
+        }
+    }
+    
+    /// Parse disk UUID and cluster ID from encoded LVS name (OPTIMIZED)
+    /// Returns (full_disk_uuid, cluster_id_prefix) for perfect disk matching
+    pub fn parse_lvs_name(lvs_name: &str) -> Option<(String, String)> {
+        if !lvs_name.starts_with("lvs_") {
+            return None;
+        }
+        
+        let parts: Vec<&str> = lvs_name[4..].split('_').collect();
+        if parts.len() != 2 || parts[0].len() != 32 || parts[1].len() != 8 {
+            return None;
+        }
+        
+        // Return full disk UUID (32 chars) and cluster prefix (8 chars)
+        let full_disk_uuid = format!("{}-{}-{}-{}-{}", 
+                                     &parts[0][0..8],   // 8 chars
+                                     &parts[0][8..12],  // 4 chars  
+                                     &parts[0][12..16], // 4 chars
+                                     &parts[0][16..20], // 4 chars
+                                     &parts[0][20..32]  // 12 chars
+        );
+        
+        Some((full_disk_uuid, parts[1].to_string()))
+    }
+    
+    /// Check if this disk's UUID matches the full UUID from LVS name (OPTIMIZED)
+    pub fn matches_disk_uuid_full(&self, uuid_from_lvs: &str) -> bool {
+        if let Some(disk_uuid) = &self.disk_uuid {
+            *disk_uuid == uuid_from_lvs
+        } else {
+            false
+        }
+    }
+    
+    /// Check if cluster ID matches the prefix from LVS name
+    pub fn matches_cluster_prefix(&self, cluster_prefix: &str) -> bool {
+        if let Some(cluster_id) = &self.cluster_id {
+            let cluster_short = cluster_id.replace("-", "")
+                .chars()
+                .take(8)
+                .collect::<String>();
+            cluster_short == cluster_prefix
+        } else {
+            false
+        }
+    }
+    
+    /// Generate a hardware-based disk identifier (similar to Portworx disk ID)
+    pub fn generate_hardware_disk_id(&self) -> String {
+        format!("{}-{}", self.vendor, self.serial_number)
+    }
+    
+    /// Check if this disk is initialized for Flint
+    pub fn is_flint_initialized(&self) -> bool {
+        self.disk_uuid.is_some()
+    }
+    
+    /// Update location-dependent fields when disk moves to a different node
+    /// Similar to Portworx node attachment updates
+    pub fn update_location(&mut self, node_id: String, device_path: String, pcie_addr: String, nvme_controller_id: Option<String>) {
+        println!("🔄 [DISK_MOVE] Disk {} moving from node {} to node {}", 
+                 self.serial_number, self.node_id, node_id);
+        
+        self.node_id = node_id;
+        self.device_path = device_path;
+        self.pcie_addr = pcie_addr;
+        self.nvme_controller_id = nvme_controller_id;
+    }
+    
+    /// Initialize disk for Flint usage with cluster protection
+    pub fn initialize_for_flint(&mut self, cluster_id: String, pool_uuid: String, node_id: String) {
+        self.cluster_id = Some(cluster_id);
+        self.pool_uuid = Some(pool_uuid);
+        self.disk_uuid = Some(uuid::Uuid::new_v4().to_string());
+        self.first_attached_node = Some(node_id);
+        self.initialized_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+    
+    /// Validate that this disk belongs to the specified cluster (CRITICAL for NVMe-oF safety)
+    pub fn validate_cluster_membership(&self, expected_cluster_id: &str) -> Result<(), String> {
+        match &self.cluster_id {
+            Some(disk_cluster_id) => {
+                if disk_cluster_id == expected_cluster_id {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "SECURITY: Disk belongs to cluster '{}' but current cluster is '{}'. Access blocked to prevent data corruption.",
+                        disk_cluster_id, expected_cluster_id
+                    ))
+                }
+            }
+            None => {
+                // Uninitialized disk - safe to use
+                Ok(())
+            }
+        }
+    }
+    
+    /// Mark disk as online and healthy
+    pub fn mark_online(&mut self) {
+        self.status = Some("online".to_string());
+        self.health_status = Some("healthy".to_string());
+        self.last_seen = Some(chrono::Utc::now().to_rfc3339());
+        self.failure_reason = None;
+    }
+    
+    /// Mark disk as offline due to detection failure
+    pub fn mark_offline(&mut self, reason: &str) {
+        self.status = Some("offline".to_string());
+        self.health_status = Some("critical".to_string());
+        self.failure_reason = Some(reason.to_string());
+        // Keep last_seen unchanged to track when it was last available
+    }
+    
+    /// Mark disk as failed (hardware failure detected)
+    pub fn mark_failed(&mut self, reason: &str) {
+        self.status = Some("failed".to_string());
+        self.health_status = Some("critical".to_string());
+        self.failure_reason = Some(reason.to_string());
+        // Keep last_seen unchanged to track when it was last available
+    }
+    
+    /// Mark disk as missing (not found during discovery)
+    pub fn mark_missing(&mut self) {
+        self.status = Some("missing".to_string());
+        self.health_status = Some("critical".to_string());
+        self.failure_reason = Some("Disk not found during discovery - may be physically removed".to_string());
+        // Keep last_seen unchanged to track when it was last available
+    }
+    
+    /// Check if disk is currently healthy and available
+    pub fn is_healthy(&self) -> bool {
+        matches!(self.status.as_deref(), Some("online")) && 
+        matches!(self.health_status.as_deref(), Some("healthy"))
+    }
+    
+    /// Check if disk is in a failed state
+    pub fn is_failed(&self) -> bool {
+        matches!(self.status.as_deref(), Some("failed" | "missing" | "offline"))
+    }
+    
+    /// Get human-readable status description
+    pub fn status_description(&self) -> String {
+        match (self.status.as_deref(), self.failure_reason.as_deref()) {
+            (Some("online"), _) => "Online and healthy".to_string(),
+            (Some("offline"), Some(reason)) => format!("Offline: {}", reason),
+            (Some("failed"), Some(reason)) => format!("Failed: {}", reason),
+            (Some("missing"), _) => "Missing - disk not found during discovery".to_string(),
+            (Some(status), _) => format!("Status: {}", status),
+            (None, _) => "Status unknown".to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
@@ -240,6 +468,80 @@ pub struct IoStatistics {
     pub read_latency_us: u64,
     pub write_latency_us: u64,
     pub error_count: u64,
+}
+
+// ============================================================================
+// FLINT CLUSTER METADATA (PORTWORX-STYLE)
+// ============================================================================
+
+/// Flint disk metadata stored in SPDK blobstore
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct FlintDiskMetadata {
+    pub version: u32,                    // Metadata format version
+    pub cluster_id: String,              // Kubernetes cluster this disk belongs to (CRITICAL for NVMe-oF safety)
+    pub cluster_name: Option<String>,    // Human-readable cluster name
+    pub disk_uuid: String,               // Unique disk identifier within Flint
+    pub pool_uuid: String,               // Storage pool this disk belongs to
+    pub pool_name: String,               // Human-readable pool name
+    
+    // Disk hardware identification
+    pub hardware_id: String,             // Hardware-based disk identifier
+    pub serial_number: String,           // NVMe serial number
+    pub model: String,                   // Disk model
+    pub vendor: String,                  // Disk vendor
+    pub wwn: Option<String>,             // World Wide Name if available
+    
+    // Cluster membership information
+    pub initialized_at: String,          // ISO 8601 timestamp when disk joined cluster
+    pub initialized_by_node: String,     // Node that first added this disk to cluster
+    pub last_attached_node: String,      // Last node this disk was attached to
+    pub attachment_history: Vec<DiskAttachmentRecord>, // History of node attachments
+    
+    // Storage configuration
+    pub total_size: u64,                 // Total disk size in bytes
+    pub usable_size: u64,                // Usable size after metadata overhead
+    pub sector_size: u32,                // Disk sector size
+    pub optimal_io_size: u32,            // Optimal I/O size for this disk
+}
+
+/// Record of disk attachment to a node (similar to Portworx attachment history)
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct DiskAttachmentRecord {
+    pub node_id: String,                 // Node ID
+    pub attached_at: String,             // ISO 8601 timestamp
+    pub detached_at: Option<String>,     // ISO 8601 timestamp when detached
+    pub pcie_addr: String,               // PCIe address on this node
+    pub device_path: String,             // Device path on this node
+    pub attachment_reason: String,       // Why disk was attached (discovery, migration, etc.)
+}
+
+/// Flint storage pool configuration (similar to Portworx pools)
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct FlintStoragePool {
+    pub uuid: String,                    // Pool UUID
+    pub name: String,                    // Pool name
+    pub pool_type: StoragePoolType,      // Pool type
+    pub disks: Vec<String>,              // List of disk UUIDs in this pool
+    pub total_size: u64,                 // Total pool size
+    pub used_size: u64,                  // Used space in pool
+    pub replication_factor: u32,         // Default replication factor
+    pub created_at: String,              // ISO 8601 timestamp
+    pub created_by_node: String,         // Node that created the pool
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StoragePoolType {
+    Auto,                                // Auto-managed pool
+    Manual,                              // Manually configured pool
+    Journal,                             // Journal/metadata pool
+    Cache,                               // Cache pool
+}
+
+impl Default for StoragePoolType {
+    fn default() -> Self {
+        StoragePoolType::Auto
+    }
 }
 
 // ============================================================================

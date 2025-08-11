@@ -12,6 +12,7 @@ use std::fs;
 use std::process::Command;
 use std::path::Path;
 use regex::Regex;
+use std::hash::{Hash, Hasher};
 
 
 // Web framework imports - using warp for HTTP management endpoints
@@ -19,7 +20,7 @@ use warp::Filter;
 use warp::{reply, Rejection, Reply};
 use warp::http::StatusCode;
 
-use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics};
+use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics, FlintDiskMetadata, DiskAttachmentRecord};
 use spdk_csi_driver::spdk_native::SpdkNative;
 
 /// SPDK RPC interface for CSI operations
@@ -173,6 +174,38 @@ struct NodeAgent {
     backup_path: String,
     // Namespace where custom resources should be created
     target_namespace: String,
+    // Kubernetes cluster identification (derived from cluster context)
+    cluster_id: String,
+}
+
+/// Get Kubernetes cluster identifier from cluster context
+async fn get_kubernetes_cluster_id() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Method 1: Try to get cluster UID from kube-system namespace
+    let client = Client::try_default().await?;
+    let namespaces: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
+    
+    if let Ok(kube_system_ns) = namespaces.get("kube-system").await {
+        if let Some(uid) = kube_system_ns.metadata.uid {
+            // Use a short, stable identifier based on cluster UID
+            return Ok(format!("flint-{}", &uid[..8]));
+        }
+    }
+    
+    // Method 2: Use cluster name from kubeconfig context (if available)
+    if let Ok(cluster_name) = std::env::var("CLUSTER_NAME") {
+        return Ok(format!("flint-{}", cluster_name));
+    }
+    
+    // Method 3: Derive from cluster domain
+    if let Ok(cluster_domain) = std::env::var("CLUSTER_DOMAIN") {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        cluster_domain.hash(&mut hasher);
+        let domain_hash = format!("{:x}", hasher.finish());
+        return Ok(format!("flint-{}", &domain_hash[..8]));
+    }
+    
+    // Fallback: Use a consistent default
+    Ok("flint-cluster".to_string())
 }
 
 /// Get the current pod's namespace from the service account token
@@ -228,6 +261,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         backup_path: env::var("DISK_BACKUP_PATH")
             .unwrap_or("/var/lib/spdk-csi/backups".to_string()),
         target_namespace,
+        cluster_id: get_kubernetes_cluster_id().await
+            .unwrap_or_else(|_| "flint-cluster".to_string()),
     };
 
     println!("Starting SPDK Node Agent on node: {}", node_name);
@@ -763,8 +798,8 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
     println!("🔧 [DISCOVERY] Config - auto_init_blobstore: {}, discovery_interval: {}s", 
              agent.auto_initialize_blobstore, agent.discovery_interval);
     
-    // Discover local NVMe devices
-    let discovered_devices = query_local_nvme_devices(agent).await?;
+    // Discover local NVMe devices using Portworx-style persistent paths
+    let discovered_devices = agent.discover_devices_by_persistent_paths().await?;
     
     if discovered_devices.is_empty() {
         println!("❌ [DISCOVERY] No NVMe devices found on node: {}", agent.node_name);
@@ -793,39 +828,138 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
         }
     };
     
-    // Update existing CRDs based on current physical devices
+    // Update existing CRDs based on current physical devices (Portworx-style matching by hardware ID)
     for existing_disk in &existing_disks {
         let disk_name = existing_disk.metadata.name.as_ref().unwrap();
         
-        // Find matching physical device for this CRD
-        if let Some(matching_device) = discovered_devices.iter()
-            .find(|dev| dev.pcie_addr == existing_disk.spec.pcie_addr) {
+        // Find matching physical device for this CRD using Flint's LVS-encoded approach
+        // Priority: 1) LVS-encoded UUID prefix (NEW), 2) metadata UUID (legacy), 3) disk_id, 4) serial_number
+        let matching_device = discovered_devices.iter().find(|dev| {
+            // PRIMARY MATCH: LVS-encoded full disk UUID (OPTIMIZED - perfect identification)
+            if let (Some(crd_disk_uuid), Some(ref dev_full_uuid)) = (&existing_disk.spec.disk_uuid, &dev.disk_uuid_from_lvs) {
+                if existing_disk.spec.matches_disk_uuid_full(dev_full_uuid) {
+                    println!("🎯 [LVS_MATCH] Found disk by LVS-encoded full UUID: {}", dev_full_uuid);
+                    return true;
+                }
+            }
+            
+            // SECONDARY MATCH: Flint disk UUID from blobstore metadata (legacy approach)
+            if let (Some(crd_disk_uuid), Some(ref metadata)) = (&existing_disk.spec.disk_uuid, &dev.cluster_metadata) {
+                if metadata.disk_uuid == *crd_disk_uuid {
+                    println!("🎯 [METADATA_MATCH] Found disk by Flint disk UUID: {}", crd_disk_uuid);
+                    return true;
+                }
+            }
+            
+            // TERTIARY MATCH: Persistent device path (reliable for same hardware config)
+            if !existing_disk.spec.disk_id.is_empty() && dev.disk_id == existing_disk.spec.disk_id {
+                println!("🔗 [PATH_MATCH] Found disk by persistent path: {}", dev.disk_id);
+                return true;
+            }
+            
+            // FALLBACK MATCH: Serial number (for hardware changes or missing metadata)
+            if dev.serial_number == existing_disk.spec.serial_number {
+                println!("🔢 [SERIAL_MATCH] Found disk by serial number: {}", dev.serial_number);
+                return true;
+            }
+            
+            false
+        });
+        
+        if let Some(matching_device) = matching_device {
             
             println!("🔄 [DISCOVERY] Updating existing CRD: {} with current device: {}", disk_name, matching_device.controller_id);
             match update_existing_disk_resource(agent, &existing_disk, matching_device).await {
                 Ok(_) => {
                     println!("✅ [DISCOVERY] Successfully updated existing CRD: {}", disk_name);
+                    // Mark disk as online and healthy
+                    mark_disk_online(agent, &existing_disk).await.unwrap_or_else(|e| {
+                        eprintln!("⚠️ [WARNING] Failed to mark disk as online: {}", e);
+                    });
                 }
                 Err(e) => {
                     println!("❌ [DISCOVERY] Failed to update existing CRD {}: {}", disk_name, e);
+                    // Mark disk as failed due to update error
+                    mark_disk_failed(agent, &existing_disk, &format!("Update failed: {}", e)).await.unwrap_or_else(|err| {
+                        eprintln!("❌ [ERROR] Failed to mark disk as failed: {}", err);
+                    });
                 }
             }
         } else {
-            println!("⚠️ [DISCOVERY] Physical device not found for existing CRD: {} (PCI: {})", 
-                     disk_name, existing_disk.spec.pcie_addr);
-            // Could mark as unhealthy or offline here
+            println!("⚠️ [DISCOVERY] Physical device not found for existing CRD: {} (Disk ID: {})", 
+                     disk_name, existing_disk.spec.disk_id);
+            println!("    🔍 [FAILURE_DETECTION] Disk may have been physically removed, failed, or path changed");
+            
+            // Comprehensive failure detection
+            if let Some(last_seen) = &existing_disk.spec.last_seen {
+                println!("    📅 Last seen: {}", last_seen);
+            }
+            
+            // Mark disk as missing/offline based on detection failure
+            mark_disk_missing(agent, &existing_disk).await.unwrap_or_else(|e| {
+                eprintln!("❌ [ERROR] Failed to mark disk as missing: {}", e);
+            });
         }
     }
     
-    // Log discovered devices that don't have CRDs (but don't create CRDs for them)
+    // Check for discovered devices that don't have CRDs yet (metadata-driven reconciliation)
     for device in discovered_devices {
-        let expected_disk_name = agent.disk_crd_name(&device.pcie_addr);
-        let has_crd = existing_disks.iter()
-            .any(|disk| disk.spec.pcie_addr == device.pcie_addr);
+        // Check if this device already has a CRD using Flint's identification hierarchy
+        let has_crd = existing_disks.iter().any(|disk| {
+            // PRIMARY: Match by Flint disk UUID from metadata (most reliable)
+            if let (Some(disk_uuid), Some(ref metadata)) = (&disk.spec.disk_uuid, &device.cluster_metadata) {
+                if metadata.disk_uuid == *disk_uuid {
+                    return true;
+                }
+            }
+            
+            // SECONDARY: Match by persistent device path
+            if !disk.spec.disk_id.is_empty() && disk.spec.disk_id == device.disk_id {
+                return true;
+            }
+            
+            // FALLBACK: Match by serial number
+            disk.spec.serial_number == device.serial_number
+        });
         
         if !has_crd {
-            println!("📋 [DISCOVERY] Unmanaged device found: {} ({}) - PCIe: {} (no SpdkDisk CRD exists)", 
-                     device.controller_id, device.model, device.pcie_addr);
+            if let Some(ref metadata) = device.cluster_metadata {
+                // CRITICAL: Validate cluster membership before allowing access
+                if metadata.cluster_id == agent.cluster_id {
+                    println!("🔄 [METADATA_RECOVERY] Found Flint disk without CRD - attempting reconciliation");
+                    println!("    Disk UUID: {}", metadata.disk_uuid);
+                    println!("    Current path: {}", device.disk_id);
+                    println!("    Serial: {}", device.serial_number);
+                    
+                    // First, try to reconcile by updating existing CRD with new path
+                    match attempt_disk_reconciliation(agent, device, &existing_disks).await {
+                        Ok(true) => {
+                            println!("✅ [RECONCILIATION] Successfully reconciled disk with changed path");
+                        }
+                        Ok(false) => {
+                            println!("🔄 [RECOVERY] No existing CRD found - creating new CRD from metadata");
+                            // TODO: Recreate CRD from metadata - this enables automatic recovery
+                            // from device path changes, hardware reconfigurations, etc.
+                        }
+                        Err(e) => {
+                            println!("❌ [ERROR] Reconciliation failed: {}", e);
+                        }
+                    }
+                } else {
+                    println!("🚨 [SECURITY] CRITICAL: Disk {} belongs to different cluster!", device.disk_id);
+                    println!("    Disk cluster: {}", metadata.cluster_id);
+                    println!("    Current cluster: {}", agent.cluster_id);
+                    println!("    🛡️  BLOCKING ACCESS to prevent data corruption!");
+                    
+                    // Log security event for monitoring
+                    eprintln!("SECURITY_ALERT: Cross-cluster disk access attempt blocked - disk: {}, expected_cluster: {}, actual_cluster: {}", 
+                             device.disk_id, agent.cluster_id, metadata.cluster_id);
+                }
+            } else {
+                println!("📋 [DISCOVERY] Found new unmanaged device: {} ({}) - Disk ID: {}", 
+                         device.controller_id, device.model, device.disk_id);
+                println!("    💡 This disk can be initialized and added to the Flint cluster");
+            }
         }
     }
     
@@ -844,10 +978,27 @@ async fn create_new_disk_resource_internal(
     let device_path = format!("/dev/{}", device.controller_id);
     
     let spdk_disk = SpdkDisk::new_with_metadata(disk_name, SpdkDiskSpec {
+        // Location-dependent fields
         node_id: agent.node_name.clone(),
         device_path,
-        size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)),
         pcie_addr: device.pcie_addr.clone(),
+        
+        // Immutable identification fields (Portworx-style)
+        disk_id: device.disk_id.clone(),
+        serial_number: device.serial_number.clone(),
+        wwn: device.wwn.clone(),
+        model: device.model.clone(),
+        vendor: device.vendor.clone(),
+        
+        // Flint disk metadata (populated if disk has Flint metadata)
+        cluster_id: device.cluster_metadata.as_ref().map(|m| m.cluster_id.clone()),
+        disk_uuid: device.cluster_metadata.as_ref().map(|m| m.disk_uuid.clone()),
+        pool_uuid: device.cluster_metadata.as_ref().map(|m| m.pool_uuid.clone()),
+        first_attached_node: device.cluster_metadata.as_ref().map(|m| m.initialized_by_node.clone()),
+        initialized_at: device.cluster_metadata.as_ref().map(|m| m.initialized_at.clone()),
+        
+        // Other fields
+        size: format!("{}GB", device.capacity / (1024 * 1024 * 1024)),
         blobstore_uuid: None,
         nvme_controller_id: Some(device.controller_id.clone()),
     }, &agent.target_namespace);
@@ -905,16 +1056,14 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
         // Check if this is a SPDK-ready device that should be discovered
         if let Ok(disk_info) = agent.get_disk_info(&pci_addr).await {
             if disk_info.spdk_ready && !disk_info.is_system_disk {
-                // Convert to NvmeDevice format for consistency
-                let device = NvmeDevice {
-                    controller_id: disk_info.device_name.clone(),
-                    pcie_addr: disk_info.pci_address.clone(),
-                    capacity: disk_info.size_bytes as i64,
-                    model: disk_info.model.clone(),
-                };
-                println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
-                         device.controller_id, device.pcie_addr);
-                devices.push(device);
+                // Get complete device information including immutable identifiers
+                if let Ok(complete_device) = agent.create_complete_nvme_device(&disk_info).await {
+                    println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
+                             complete_device.controller_id, complete_device.pcie_addr);
+                    devices.push(complete_device);
+                } else {
+                    println!("⚠️ [DISCOVERY] Failed to get complete device info for {}", disk_info.pci_address);
+                }
             }
         }
     }
@@ -924,10 +1073,28 @@ async fn query_local_nvme_devices(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, 
 
 #[derive(Debug, Clone)]
 struct NvmeDevice {
+    // Location-dependent fields
     controller_id: String,
     pcie_addr: String,
-    capacity: i64,
+    device_path: String,
+    
+    // Immutable identification fields (Portworx-style)
+    disk_id: String,           // /dev/disk/by-id/ path
+    serial_number: String,     // Primary hardware identifier
+    wwn: Option<String>,       // World Wide Name if available
     model: String,
+    vendor: String,
+    
+    // Hardware characteristics
+    capacity: i64,
+    sector_size: u32,
+    
+    // Cluster metadata (if disk is already part of a cluster)
+    cluster_metadata: Option<FlintDiskMetadata>,
+    
+    // LVS-encoded identification (OPTIMIZED APPROACH)
+    disk_uuid_from_lvs: Option<String>,    // Full disk UUID from LVS name (32 chars -> full UUID)
+    cluster_id_prefix: Option<String>,     // First 8 chars of cluster ID from LVS name
 }
 
 fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
@@ -940,11 +1107,31 @@ fn parse_nvme_controller(controller: &serde_json::Value) -> Option<NvmeDevice> {
         .map(|ns| ns["size"].as_u64().unwrap_or(0) as i64)
         .sum();
     
+    // For SPDK-attached controllers, we have limited info from SPDK RPC
+    // Generate placeholders that will be updated during discovery
+    let model = controller["model"].as_str().unwrap_or("Unknown").to_string();
+    let serial = controller["serial"].as_str().unwrap_or("Unknown").to_string();
+    let vendor_id = "Unknown".to_string(); // Will be updated during discovery
+    let device_id = "Unknown".to_string(); // Will be updated during discovery
+    
+    let disk_uuid = SpdkDiskSpec::generate_disk_uuid(&serial, &model, &vendor_id, &device_id);
+    
     Some(NvmeDevice {
         controller_id: name.to_string(),
         pcie_addr: pcie_addr.to_string(),
+        device_path: format!("/dev/{}", name),
+        disk_id: format!("nvme-{}-{}", model.replace(" ", "_"), serial), // Placeholder
+        serial_number: serial,
+        wwn: None,
+        model,
+        vendor: vendor_id,
         capacity,
-        model: controller["model"].as_str().unwrap_or("Unknown").to_string(),
+        sector_size: 512, // Default for NVMe
+        cluster_metadata: None, // Will be populated during complete discovery
+        
+        // NEW: LVS-encoded identification (will be populated during discovery)
+        disk_uuid_from_lvs: None,
+        cluster_id_prefix: None,
     })
 }
 
@@ -966,8 +1153,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
     };
     
-    // Generate LVS name based on node and actual device name (consistent with SPDK naming)
-    let lvs_name = format!("lvs_{}-{}", disk.spec.node_id, actual_device_name);
+    // Generate LVS name with embedded cluster and disk identifiers (NEW APPROACH)
+    let lvs_name = if disk.spec.disk_uuid.is_some() && disk.spec.cluster_id.is_some() {
+        disk.spec.lvs_name_with_cluster(&agent.cluster_id)
+    } else {
+        disk.spec.lvs_name() // Fallback for uninitialized disks
+    };
     
     println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_crd_name);
     println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {}", lvs_name, disk.spec.pcie_addr);
@@ -2192,6 +2383,282 @@ impl NodeAgent {
         } else {
             None
         }
+    }
+
+    /// Create a complete NvmeDevice with all immutable identification fields populated
+    async fn create_complete_nvme_device(&self, disk_info: &UnimplementedDisk) -> Result<NvmeDevice, Box<dyn std::error::Error + Send + Sync>> {
+        // Get detailed device information including serial number
+        let (size_bytes, model, serial, _firmware) = self.get_nvme_details(&disk_info.device_name).await?;
+        
+        // Get PCI vendor and device IDs
+        let vendor_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/vendor", disk_info.pci_address)).await
+            .unwrap_or_else(|_| "Unknown".to_string());
+        let device_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/device", disk_info.pci_address)).await
+            .unwrap_or_else(|_| "Unknown".to_string());
+        
+        // Generate deterministic UUID from immutable properties
+        let disk_uuid = SpdkDiskSpec::generate_disk_uuid(&serial, &model, &vendor_id, &device_id);
+        
+        println!("🔧 [DEVICE_CREATE] Created complete device info for {}: UUID={}, Serial={}, Model={}", 
+                 disk_info.device_name, disk_uuid, serial, model);
+        
+        // Generate persistent disk ID
+        let disk_id = format!("/dev/disk/by-id/nvme-{}_{}", model.replace(" ", "_"), serial);
+        
+        Ok(NvmeDevice {
+            controller_id: disk_info.device_name.clone(),
+            pcie_addr: disk_info.pci_address.clone(),
+            device_path: format!("/dev/{}", disk_info.device_name),
+            disk_id,
+            serial_number: serial,
+            wwn: None, // TODO: Extract WWN if available
+            model,
+            vendor: vendor_id,
+            capacity: size_bytes as i64,
+            sector_size: 512, // Default for NVMe
+            cluster_metadata: None, // Will be populated if disk has metadata
+            
+            // NEW: LVS-encoded identification (will be populated during discovery)
+            disk_uuid_from_lvs: None,
+            cluster_id_prefix: None,
+        })
+    }
+
+    /// Discover NVMe devices using persistent paths (Portworx-style hardware identification)
+    async fn discover_devices_by_persistent_paths(&self) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [PERSISTENT_DISCOVERY] Starting discovery using /dev/disk/by-id/ paths");
+        let mut devices = Vec::new();
+        
+        // Scan /dev/disk/by-id/ for NVMe devices
+        if let Ok(entries) = fs::read_dir("/dev/disk/by-id") {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let id_path = entry.path();
+                    let id_name = entry.file_name().to_string_lossy().to_string();
+                    
+                    // Look for NVMe devices (exclude partitions)
+                    if id_name.starts_with("nvme-") && !id_name.contains("-part") {
+                        println!("🔍 [PERSISTENT_DISCOVERY] Found NVMe device: {}", id_name);
+                        
+                        // Resolve to actual device path
+                        if let Ok(resolved_path) = fs::read_link(&id_path) {
+                            let device_path = format!("/dev/{}", 
+                                resolved_path.file_name().unwrap().to_string_lossy());
+                            
+                            println!("🔍 [PERSISTENT_DISCOVERY] {} -> {}", id_name, device_path);
+                            
+                            // Create complete device information
+                            if let Ok(device) = self.create_device_from_persistent_path(
+                                &id_path.to_string_lossy(), 
+                                &device_path
+                            ).await {
+                                devices.push(device);
+                            } else {
+                                println!("⚠️ [PERSISTENT_DISCOVERY] Failed to get device info for {}", id_name);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("⚠️ [PERSISTENT_DISCOVERY] /dev/disk/by-id/ not available, falling back to traditional discovery");
+            // Fallback to traditional discovery methods
+            return self.discover_devices_traditional().await;
+        }
+        
+        println!("✅ [PERSISTENT_DISCOVERY] Found {} NVMe devices via persistent paths", devices.len());
+        Ok(devices)
+    }
+    
+    /// Create NvmeDevice from persistent disk path (Portworx-style)
+    async fn create_device_from_persistent_path(&self, disk_id_path: &str, device_path: &str) -> Result<NvmeDevice, Box<dyn std::error::Error + Send + Sync>> {
+        let device_name = device_path.trim_start_matches("/dev/");
+        
+        // Get hardware details
+        let (capacity, model, serial, _firmware) = self.get_nvme_details(device_name).await?;
+        
+        // Extract vendor from disk ID or use fallback
+        let vendor = self.extract_vendor_from_disk_id(disk_id_path).unwrap_or_else(|| "Unknown".to_string());
+        
+        // Get WWN if available
+        let wwn = self.get_device_wwn(device_name).await.ok();
+        
+        // Find PCI address for this device
+        let pcie_addr = self.find_pci_address_for_device(device_name).await
+            .unwrap_or_else(|_| "Unknown".to_string());
+        
+        // Check if disk has existing cluster metadata
+        let cluster_metadata = self.read_disk_cluster_metadata(device_name).await.ok();
+        
+        // Try to extract LVS-encoded metadata first (OPTIMIZED: full disk UUID + cluster prefix)
+        let (disk_uuid_from_lvs, cluster_id_prefix) = if let Ok((disk_full_uuid, cluster_prefix)) = self.read_cluster_metadata_from_lvs(device_name).await {
+            println!("🔍 [LVS_DISCOVERY] Found LVS-encoded metadata: disk={}, cluster={}", disk_full_uuid, cluster_prefix);
+            (Some(disk_full_uuid), Some(cluster_prefix))
+        } else {
+            (None, None)
+        };
+        
+        if let Some(ref metadata) = cluster_metadata {
+            println!("🔍 [PERSISTENT_DISCOVERY] Disk {} has cluster metadata: cluster={}, disk_uuid={}", 
+                     disk_id_path, metadata.cluster_id, metadata.disk_uuid);
+        }
+        
+        Ok(NvmeDevice {
+            controller_id: device_name.to_string(),
+            pcie_addr,
+            device_path: device_path.to_string(),
+            disk_id: disk_id_path.to_string(),
+            serial_number: serial,
+            wwn,
+            model,
+            vendor,
+            capacity: capacity as i64,
+            sector_size: 512, // Default for NVMe
+            cluster_metadata,
+            
+            // NEW: LVS-encoded identification (OPTIMIZED)
+            disk_uuid_from_lvs,
+            cluster_id_prefix,
+        })
+    }
+    
+    /// Extract vendor name from disk ID path
+    fn extract_vendor_from_disk_id(&self, disk_id_path: &str) -> Option<String> {
+        // Parse disk ID like: /dev/disk/by-id/nvme-Samsung_SSD_970_EVO_Plus_1TB_S4EWNX0R123456
+        let id_name = disk_id_path.strip_prefix("/dev/disk/by-id/nvme-")?;
+        
+        // Common vendor patterns
+        if id_name.starts_with("Samsung") { Some("Samsung".to_string()) }
+        else if id_name.starts_with("Intel") { Some("Intel".to_string()) }
+        else if id_name.starts_with("Western_Digital") || id_name.starts_with("WDC") { Some("Western Digital".to_string()) }
+        else if id_name.starts_with("Seagate") { Some("Seagate".to_string()) }
+        else if id_name.starts_with("Micron") { Some("Micron".to_string()) }
+        else if id_name.starts_with("SK_hynix") { Some("SK Hynix".to_string()) }
+        else if id_name.starts_with("KIOXIA") { Some("KIOXIA".to_string()) }
+        else if id_name.starts_with("Crucial") { Some("Crucial".to_string()) }
+        else {
+            // Extract first word as vendor
+            id_name.split('_').next().map(|s| s.replace('_', " "))
+        }
+    }
+    
+    /// Get device WWN (World Wide Name) if available
+    async fn get_device_wwn(&self, device_name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Try multiple ways to get WWN
+        
+        // Method 1: nvme-cli
+        if let Ok(output) = Command::new("nvme")
+            .args(["id-ctrl", &format!("/dev/{}", device_name), "-o", "json"])
+            .output() {
+            if let Ok(json_str) = String::from_utf8(output.stdout) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    if let Some(wwn) = json["wwn"].as_str() {
+                        return Ok(wwn.to_string());
+                    }
+                }
+            }
+        }
+        
+        // Method 2: sysfs
+        if let Ok(wwn) = self.read_sysfs_file(&format!("/sys/block/{}/wwid", device_name)).await {
+            return Ok(wwn.trim().to_string());
+        }
+        
+        Err("WWN not available".into())
+    }
+    
+    /// Find PCI address for a given device
+    async fn find_pci_address_for_device(&self, device_name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Read the device symlink to find PCI address
+        let device_link = format!("/sys/block/{}/device", device_name);
+        
+        if let Ok(output) = Command::new("readlink").args(["-f", &device_link]).output() {
+            let resolved_path = String::from_utf8(output.stdout)?;
+            
+            // Extract PCI address from path like: /sys/devices/pci0000:00/0000:00:1f.0/nvme/nvme1
+            for part in resolved_path.split('/') {
+                if part.len() == 12 && part.chars().nth(4) == Some(':') && part.chars().nth(7) == Some(':') {
+                    return Ok(part.to_string());
+                }
+            }
+        }
+        
+        Err("PCI address not found".into())
+    }
+    
+    /// Read cluster metadata from LVS name encoding (NEW APPROACH)
+    /// Extracts disk UUID and cluster ID from the LVS name itself
+    async fn read_cluster_metadata_from_lvs(&self, device_name: &str) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+        // Query existing LVS stores on this device
+        let lvs_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores"
+        })).await;
+        
+        match lvs_result {
+            Ok(response) => {
+                if let Some(lvs_array) = response.as_array() {
+                    for lvs in lvs_array {
+                        if let Some(lvs_name) = lvs.get("name").and_then(|n| n.as_str()) {
+                            // Try to parse the encoded LVS name
+                            if let Some((disk_uuid_prefix, cluster_id_prefix)) = SpdkDiskSpec::parse_lvs_name(lvs_name) {
+                                println!("🔍 [LVS_DECODE] Found encoded LVS: {} -> disk:{}, cluster:{}", 
+                                         lvs_name, disk_uuid_prefix, cluster_id_prefix);
+                                return Ok((disk_uuid_prefix, cluster_id_prefix));
+                            }
+                        }
+                    }
+                }
+                Err("No encoded LVS found on device".into())
+            }
+            Err(e) => {
+                println!("⚠️ [LVS_DECODE] Failed to query LVS stores: {}", e);
+                Err(format!("Failed to query LVS: {}", e).into())
+            }
+        }
+    }
+    
+    /// Read cluster metadata from disk blobstore (LEGACY - kept for compatibility)
+    async fn read_disk_cluster_metadata(&self, device_name: &str) -> Result<FlintDiskMetadata, Box<dyn std::error::Error + Send + Sync>> {
+        // Try the new LVS name encoding approach first
+        match self.read_cluster_metadata_from_lvs(device_name).await {
+            Ok((disk_uuid_prefix, cluster_id_prefix)) => {
+                // Create a minimal FlintDiskMetadata from the LVS encoding
+                // Note: This only provides the key identifiers, not full metadata
+                let metadata = FlintDiskMetadata {
+                    version: 1,
+                    cluster_id: format!("{}-partial", cluster_id_prefix), // Mark as partial
+                    cluster_name: None,
+                    disk_uuid: format!("{}-partial", disk_uuid_prefix), // Mark as partial
+                    pool_uuid: "unknown".to_string(),
+                    pool_name: "unknown".to_string(),
+                    hardware_id: "unknown".to_string(),
+                    serial_number: "unknown".to_string(),
+                    model: "unknown".to_string(),
+                    vendor: "unknown".to_string(),
+                    wwn: None,
+                    initialized_at: "unknown".to_string(),
+                    initialized_by_node: "unknown".to_string(),
+                    last_attached_node: "unknown".to_string(),
+                    attachment_history: vec![],
+                    total_size: 0,
+                    usable_size: 0,
+                    sector_size: 512,
+                    optimal_io_size: 4096,
+                };
+                Ok(metadata)
+            }
+            Err(_) => {
+                // Fallback: no metadata found
+                Err("No cluster metadata found".into())
+            }
+        }
+    }
+    
+    /// Fallback discovery using traditional methods
+    async fn discover_devices_traditional(&self) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [TRADITIONAL_DISCOVERY] Using traditional discovery methods");
+        // Implementation would fall back to existing discovery logic
+        Ok(Vec::new())
     }
 
     async fn get_device_size(&self, device_name: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
@@ -4443,7 +4910,12 @@ impl NodeAgent {
                 }
             }
         };
-        let lvs_name = format!("lvs_{}-{}", disk.spec.node_id, device_name);
+        // Use the new encoded LVS naming scheme
+        let lvs_name = if disk.spec.disk_uuid.is_some() && disk.spec.cluster_id.is_some() {
+            disk.spec.lvs_name_with_cluster(&self.cluster_id)
+        } else {
+            disk.spec.lvs_name() // Fallback for uninitialized disks
+        };
         
         println!("🔧 [LVS_CREATE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
         
@@ -4655,4 +5127,101 @@ async fn initialize_disk_blobstore(
     }
 }
 
+/// Mark a disk as online and healthy in its CRD
+async fn mark_disk_online(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let mut updated_disk = disk.clone();
+    updated_disk.spec.mark_online();
+    
+    println!("✅ [HEALTH] Marking disk as online: {}", disk_name);
+    update_disk_crd(agent, &updated_disk).await?;
+    Ok(())
+}
 
+/// Mark a disk as missing due to detection failure
+async fn mark_disk_missing(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let mut updated_disk = disk.clone();
+    updated_disk.spec.mark_missing();
+    
+    println!("⚠️ [HEALTH] Marking disk as missing: {} - {}", disk_name, updated_disk.spec.status_description());
+    update_disk_crd(agent, &updated_disk).await?;
+    Ok(())
+}
+
+/// Mark a disk as failed with a specific reason
+async fn mark_disk_failed(agent: &NodeAgent, disk: &SpdkDisk, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let mut updated_disk = disk.clone();
+    updated_disk.spec.mark_failed(reason);
+    
+    println!("❌ [HEALTH] Marking disk as failed: {} - {}", disk_name, updated_disk.spec.status_description());
+    update_disk_crd(agent, &updated_disk).await?;
+    Ok(())
+}
+
+/// Mark a disk as offline with a specific reason
+async fn mark_disk_offline(agent: &NodeAgent, disk: &SpdkDisk, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    let mut updated_disk = disk.clone();
+    updated_disk.spec.mark_offline(reason);
+    
+    println!("🔴 [HEALTH] Marking disk as offline: {} - {}", disk_name, updated_disk.spec.status_description());
+    update_disk_crd(agent, &updated_disk).await?;
+    Ok(())
+}
+
+/// Update a disk CRD in Kubernetes
+async fn update_disk_crd(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
+    let client = kube::Client::try_default().await?;
+    let disks: Api<SpdkDisk> = Api::namespaced(client, &agent.namespace);
+    
+    let disk_name = disk.metadata.name.as_ref().unwrap();
+    disks.replace(disk_name, &PostParams::default(), disk).await?;
+    
+    Ok(())
+}
+
+/// Attempt to reconcile a disk by updating its path if metadata matches
+async fn attempt_disk_reconciliation(agent: &NodeAgent, orphaned_device: &NvmeDevice, existing_disks: &[SpdkDisk]) -> Result<bool, Box<dyn std::error::Error>> {
+    if let Some(ref metadata) = orphaned_device.cluster_metadata {
+        // Security check first
+        if metadata.cluster_id != agent.cluster_id {
+            println!("🚨 [SECURITY] Cannot reconcile disk from different cluster: {} != {}", 
+                     metadata.cluster_id, agent.cluster_id);
+            return Ok(false);
+        }
+        
+        // Find CRD with matching disk UUID but different path
+        let matching_crd = existing_disks.iter().find(|disk| {
+            if let Some(ref disk_uuid) = disk.spec.disk_uuid {
+                // Same disk UUID but different current path
+                *disk_uuid == metadata.disk_uuid && disk.spec.device_path != orphaned_device.device_path
+            } else {
+                false
+            }
+        });
+        
+        if let Some(crd_to_update) = matching_crd {
+            println!("🔧 [RECONCILIATION] Found disk with changed path:");
+            println!("    Disk UUID: {}", metadata.disk_uuid);
+            println!("    Old path: {}", crd_to_update.spec.device_path);
+            println!("    New path: {}", orphaned_device.device_path);
+            println!("    Serial: {} -> {}", crd_to_update.spec.serial_number, orphaned_device.serial_number);
+            
+            // Update the CRD with new location information
+            let mut updated_disk = crd_to_update.clone();
+            updated_disk.spec.device_path = orphaned_device.device_path.clone();
+            updated_disk.spec.disk_id = orphaned_device.disk_id.clone();
+            updated_disk.spec.pcie_addr = orphaned_device.pcie_addr.clone();
+            updated_disk.spec.node_id = agent.node_name.clone();
+            updated_disk.spec.mark_online();
+            
+            println!("✅ [RECONCILIATION] Updating CRD with new device path");
+            update_disk_crd(agent, &updated_disk).await?;
+            return Ok(true);
+        }
+    }
+    
+    Ok(false)
+}

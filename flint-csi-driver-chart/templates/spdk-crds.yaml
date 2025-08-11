@@ -191,19 +191,66 @@ spec:
             - node_id
             - size
             - pcie_addr
+            - disk_id
+            - serial_number
+            - model
+            - vendor
             properties:
+              # Location-dependent fields (can change when disk moves)
               device_path:
                 type: string
-                description: "Path to the device (e.g., /dev/nvme1n1)"
+                description: "Current path to the device (e.g., /dev/nvme1n1)"
               node_id:
                 type: string
-                description: "Kubernetes node name where the disk is located"
+                description: "Current Kubernetes node name where the disk is located"
+              pcie_addr:
+                type: string
+                description: "Current PCIe address of the NVMe device (e.g., 0000:00:1f.0)"
+              
+              # Immutable disk identification (Portworx-style hardware identification)
+              disk_id:
+                type: string
+                description: "Hardware disk ID from /dev/disk/by-id/ (e.g., nvme-Samsung_SSD_970_EVO_Plus_1TB_S4EWNX0R123456)"
+              serial_number:
+                type: string
+                description: "NVMe serial number (primary hardware identifier)"
+              wwn:
+                type: string
+                nullable: true
+                description: "World Wide Name if available"
+              model:
+                type: string
+                description: "Disk model"
+              vendor:
+                type: string
+                description: "Disk vendor"
+              
+              # Flint disk metadata (with cluster safety for NVMe-oF scenarios)
+              cluster_id:
+                type: string
+                nullable: true
+                description: "Kubernetes cluster this disk belongs to (CRITICAL for NVMe-oF security)"
+              disk_uuid:
+                type: string
+                nullable: true
+                description: "Flint internal disk UUID (stored in blobstore)"
+              pool_uuid:
+                type: string
+                nullable: true
+                description: "Storage pool UUID"
+              first_attached_node:
+                type: string
+                nullable: true
+                description: "Node that first initialized this disk"
+              initialized_at:
+                type: string
+                nullable: true
+                description: "When disk joined the cluster (ISO 8601)"
+              
+              # Other fields
               size:
                 type: string
                 description: "Size of the disk (e.g., 1000GB)"
-              pcie_addr:
-                type: string
-                description: "PCIe address of the NVMe device (e.g., 0000:00:1f.0)"
               blobstore_uuid:
                 type: string
                 nullable: true
@@ -212,6 +259,22 @@ spec:
                 type: string
                 nullable: true
                 description: "NVMe controller ID (e.g., nvme1n1)"
+              status:
+                type: string
+                nullable: true
+                description: "Current disk status: online, offline, failed, missing, degraded"
+              last_seen:
+                type: string
+                nullable: true
+                description: "Last successful discovery timestamp (RFC3339)"
+              health_status:
+                type: string
+                nullable: true
+                description: "Health status: healthy, warning, critical"
+              failure_reason:
+                type: string
+                nullable: true
+                description: "Reason for failure or offline status"
           status:
             type: object
             properties:
