@@ -40,7 +40,8 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            {{- toYaml .Values.nodeResources.spdkTarget | nindent 12 }}
+            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" }}
+            {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: hugepages
               mountPath: /hugepages
@@ -147,7 +148,8 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            {{- toYaml .Values.nodeResources.spdkTarget | nindent 12 }}
+            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" }}
+            {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: hugepages
               mountPath: /hugepages
