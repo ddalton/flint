@@ -121,7 +121,12 @@ echo "Starting SPDK target daemon as PID 1 for proper signal handling..."\n\
 \n\
 # Use exec to replace this shell with spdk_tgt as PID 1\n\
 # This ensures SIGTERM goes directly to spdk_tgt for graceful shutdown\n\
-exec /usr/local/bin/spdk_tgt \\\n\
+# CPU pinning: Use environment variable SPDK_CPU_CORE (default: CPU 1)\n\
+SPDK_CPU_CORE=${SPDK_CPU_CORE:-1}\n\
+echo "Pinning SPDK to CPU core: $SPDK_CPU_CORE"\n\
+\n\
+# Use taskset to pin SPDK to specific CPU core for optimal performance\n\
+exec taskset -c $SPDK_CPU_CORE /usr/local/bin/spdk_tgt \\\n\
     -r /var/tmp/spdk.sock \\\n\
     -L all \\\n\
     --json /tmp/spdk_config.json\n\

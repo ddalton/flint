@@ -29,6 +29,10 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if ne (.Values.nodeResources.spdkTarget.cpuCore | default 1 | int) -1 }}
+            - name: SPDK_CPU_CORE
+              value: "{{ .Values.nodeResources.spdkTarget.cpuCore | default 1 }}"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
@@ -132,6 +136,10 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if ne (.Values.nodeResources.spdkTarget.cpuCore | default 1 | int) -1 }}
+            - name: SPDK_CPU_CORE
+              value: "{{ .Values.nodeResources.spdkTarget.cpuCore | default 1 }}"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
