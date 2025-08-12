@@ -36,12 +36,7 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            limits:
-              hugepages-2Mi: "1Gi"
-              memory: "2Gi"
-            requests:
-              hugepages-2Mi: "1Gi" 
-              memory: "1Gi"
+            {{- toYaml .Values.nodeResources.spdkTarget | nindent 12 }}
           volumeMounts:
             - name: hugepages
               mountPath: /hugepages
@@ -88,6 +83,8 @@ spec:
             timeoutSeconds: 3
             periodSeconds: 10
             failureThreshold: 5
+          resources:
+            {{- toYaml .Values.nodeResources.flintCsiDriver | nindent 12 }}
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -119,6 +116,8 @@ spec:
             - name: api
               containerPort: 8081
               protocol: TCP
+          resources:
+            {{- toYaml .Values.nodeResources.nodeAgent | nindent 12 }}
           volumeMounts:
             - name: device-dir
               mountPath: /dev
@@ -140,12 +139,7 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            limits:
-              hugepages-2Mi: "1Gi"
-              memory: "2Gi"
-            requests:
-              hugepages-2Mi: "1Gi" 
-              memory: "1Gi"
+            {{- toYaml .Values.nodeResources.spdkTarget | nindent 12 }}
           volumeMounts:
             - name: hugepages
               mountPath: /hugepages
@@ -243,6 +237,8 @@ spec:
             - "--v=5"
             - "--csi-address=/csi/csi.sock"
             - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi.flint.com/csi.sock"
+          resources:
+            {{- toYaml .Values.nodeResources.nodeDriverRegistrar | nindent 12 }}
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -253,6 +249,8 @@ spec:
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
+          resources:
+            {{- toYaml .Values.nodeResources.livenessprobe | nindent 12 }}
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
