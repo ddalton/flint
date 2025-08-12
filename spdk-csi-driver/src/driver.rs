@@ -10,6 +10,7 @@ use reqwest::Client as HttpClient;
 use serde_json::json;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
+use spdk_csi_driver::models::NvmeClientDevice;
 
 #[derive(Clone)]
 pub struct SpdkCsiDriver {
@@ -20,7 +21,7 @@ pub struct SpdkCsiDriver {
     pub nvmeof_target_port: u16,
     pub nvmeof_transport: String,
     pub target_namespace: String,
-    pub ublk_target_initialized: Arc<Mutex<bool>>,
+    // Removed ublk_target_initialized - no longer needed with NVMe-oF
 }
 
 impl SpdkCsiDriver {
@@ -91,287 +92,179 @@ impl SpdkCsiDriver {
         Ok(node_ip)
     }
 
-    /// Ensure ublk target is created (required before starting disks)
-    /// Only calls ublk_create_target once per CSI driver instance
-    async fn ensure_ublk_target(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut initialized = self.ublk_target_initialized.lock().await;
-        
-        if *initialized {
-            // Target already created, nothing to do
-            return Ok(());
-        }
-        
-        println!("Creating ublk target (first time)");
-        
-        let rpc_request = json!({
-            "method": "ublk_create_target",
-            "params": {}
-        });
-        
-        let response = self.call_spdk_rpc(&rpc_request).await?;
-        
-        // Check for SPDK RPC errors
-        if let Some(error) = response.get("error") {
-            let error_code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-            let error_msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-            
-            println!("⚠️ [UBLK_TARGET] ublk_create_target failed: code={}, message={}", error_code, error_msg);
-            
-            // Handle specific error cases that might be recoverable
-            match error_code {
-                                 -32603 => {
-                     // "Internal error" - could be transient resource issue
-                     if error_msg.contains("Device or resource busy") || error_msg.contains("No such file or directory") {
-                         println!("⚠️ [UBLK_TARGET] Kernel ublk issue detected - this might be environment-specific");
-                         
-                         // Create Kubernetes event for missing ublk_drv module
-                         if error_msg.contains("No such file or directory") {
-                             if let Err(e) = self.create_ublk_kernel_missing_event().await {
-                                 println!("⚠️ [UBLK_TARGET] Failed to create Kubernetes event: {}", e);
-                             }
-                         }
-                         
-                         println!("⚠️ [UBLK_TARGET] Marking target as 'initialized' to skip further attempts");
-                         // Set initialized to true to avoid infinite retry loops
-                         *initialized = true;
-                         return Ok(()); // Continue despite the error
-                     }
-                 }
-                -32601 => {
-                    // "Method not found" - SPDK doesn't support ublk
-                    println!("⚠️ [UBLK_TARGET] SPDK doesn't support ublk methods - skipping target creation");
-                    *initialized = true;
-                    return Ok(()); // Continue despite the error
-                }
-                _ => {
-                    // Other errors - return the error but don't mark as initialized
-                    return Err(format!("Failed to create ublk target: {}", error).into());
-                }
-            }
-        }
-        
-        // Mark as initialized
-        *initialized = true;
-        println!("ublk target created successfully");
-        Ok(())
-    }
 
-    /// Create ublk device for a bdev (unified robust implementation)
-    pub async fn create_ublk_device(
+
+    /// Connect to NVMe-oF target using nvme connect (replaces ublk_start_disk)
+    /// This is the CLIENT-SIDE equivalent of ublk device creation
+    pub async fn connect_nvme_device(
         &self,
-        bdev_name: &str,
-        ublk_id: u32,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔧 [UBLK_CREATE] Creating ublk device for bdev {} with ID {}", bdev_name, ublk_id);
+        nqn: &str,
+        target_addr: &str,
+        target_port: u16,
+        transport: &str,
+        _volume_id: &str,
+    ) -> Result<NvmeClientDevice, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔗 [NVME_CONNECT] Connecting to NVMe-oF target {} at {}:{}", nqn, target_addr, target_port);
         
-        let device_path = format!("/dev/ublkb{}", ublk_id);
-
-        // Step 1: Clean up any existing device
-        if std::path::Path::new(&device_path).exists() {
-            println!("🔧 [UBLK_CREATE] Device {} already exists, cleaning up first", device_path);
-            if let Err(e) = self.cleanup_ublk_device(ublk_id).await {
-                println!("⚠️ [UBLK_CREATE] Cleanup warning: {}", e);
-            }
-            
-            // Wait for cleanup to complete
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Step 1: Check if already connected
+        if let Ok(existing_device) = self.find_existing_nvme_connection(nqn).await {
+            println!("ℹ️ [NVME_CONNECT] Already connected to {}: {}", nqn, existing_device.device_path);
+            return Ok(existing_device);
         }
-
-        // Step 2: Verify bdev exists with retry mechanism (important for NVMe-oF timing)
-        println!("🔧 [UBLK_CREATE] Verifying target bdev exists...");
         
-        let max_retries = 5;
-        let mut last_error = String::new();
-        let mut verification_succeeded = false;
+        // Step 2: Run nvme connect command
+        let transport_lower = transport.to_lowercase();
+        let connect_cmd = format!(
+            "nvme connect -t {} -a {} -s {} -n {}",
+            transport_lower, target_addr, target_port, nqn
+        );
         
-        for attempt in 1..=max_retries {
-            println!("🔧 [UBLK_CREATE] Attempt {}/{}: Checking bdev availability...", attempt, max_retries);
-            
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10), 
-                self.verify_bdev_exists_impl(bdev_name)
-            ).await {
-                Ok(Ok(_)) => {
-                    println!("✅ [UBLK_CREATE] Target bdev verification successful on attempt {}", attempt);
-                    verification_succeeded = true;
-                    break;
+        println!("🔧 [NVME_CONNECT] Running: {}", connect_cmd);
+        
+        let output = tokio::process::Command::new("nvme")
+            .args(&["connect", "-t", &transport_lower, "-a", target_addr, "-s", &target_port.to_string(), "-n", nqn])
+            .output()
+            .await?;
+        
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            if error_msg.contains("already connected") || error_msg.contains("already exists") {
+                println!("ℹ️ [NVME_CONNECT] Already connected (from nvme command)");
+                // Try to find the existing connection
+                if let Ok(existing_device) = self.find_existing_nvme_connection(nqn).await {
+                    return Ok(existing_device);
                 }
-                Ok(Err(e)) => {
-                    last_error = e.to_string();
-                    println!("⚠️ [UBLK_CREATE] Attempt {}/{} failed: {}", attempt, max_retries, e);
-                    
-                    if attempt < max_retries {
-                        let delay_ms = attempt * 500; // Exponential backoff: 500ms, 1s, 1.5s, 2s
-                        println!("🔧 [UBLK_CREATE] Waiting {}ms before retry...", delay_ms);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
-                }
-                Err(_) => {
-                    last_error = "verification timed out".to_string();
-                    println!("⚠️ [UBLK_CREATE] Attempt {}/{} timed out", attempt, max_retries);
-                    
-                    if attempt < max_retries {
-                        println!("🔧 [UBLK_CREATE] Retrying after timeout...");
-                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    }
-                }
+            } else {
+                println!("❌ [NVME_CONNECT] nvme connect failed: {}", error_msg);
+                return Err(format!("nvme connect failed: {}", error_msg).into());
             }
         }
         
-        if !verification_succeeded {
-            println!("❌ [UBLK_CREATE] All {} attempts failed. Final error: {}", max_retries, last_error);
-            return Err(format!("Cannot create ublk device: target bdev '{}' not available after {} attempts: {}", bdev_name, max_retries, last_error).into());
-        }
-
-        // Step 3: Ensure ublk target exists (required before creating disks)
-        println!("🔧 [UBLK_CREATE] Ensuring ublk target exists...");
-        self.ensure_ublk_target().await?;
-        
-        // Step 4: Create ublk device with detailed logging
-        println!("🔧 [UBLK_CREATE] Creating ublk device...");
-        let ublk_payload = json!({
-            "method": "ublk_start_disk",
-            "params": {
-                "ublk_id": ublk_id,
-                "bdev_name": bdev_name
-            }
-        });
-        println!("🔧 [UBLK_CREATE] SPDK RPC payload: {}", ublk_payload);
-
-        // Call RPC with timeout
-        let rpc_result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            self.call_spdk_rpc(&ublk_payload)
-        ).await;
-
-        match rpc_result {
-            Ok(Ok(response)) => {
-                println!("✅ [UBLK_CREATE] ublk RPC call successful");
-                println!("🔧 [UBLK_CREATE] RPC response: {}", response);
-                
-                // Check for SPDK RPC errors in the response
-        if let Some(error) = response.get("error") {
-                    let error_str = error.to_string();
-                    println!("❌ [UBLK_CREATE] SPDK RPC returned error: {}", error_str);
-                    
-                    // Analyze the error
-                    if error_str.contains("No such device") || error_str.contains("-19") {
-                        println!("🔍 [UBLK_CREATE] Error analysis: bdev not found or not accessible");
-                    } else if error_str.contains("already exists") {
-                        println!("ℹ️ [UBLK_CREATE] Device already exists - continuing...");
-                    } else {
-                        println!("🔍 [UBLK_CREATE] Unexpected error: {}", error_str);
-                    }
-                    
-                    return Err(format!("SPDK RPC error: {}", error_str).into());
-                }
-            }
-            Ok(Err(e)) => {
-                println!("❌ [UBLK_CREATE] ublk RPC call failed: {}", e);
-                return Err(format!("ublk device creation failed: {}", e).into());
-            }
-            Err(_) => {
-                println!("❌ [UBLK_CREATE] ublk RPC call timed out after 15 seconds");
-                return Err("ublk device creation timed out".into());
-            }
-        }
-
-        // Step 5: Wait for device to appear and verify
-        println!("🔧 [UBLK_CREATE] Waiting for device to appear...");
+        // Step 3: Wait for device to appear and find device path
+        println!("🔧 [NVME_CONNECT] Waiting for NVMe device to appear...");
         let mut attempts = 0;
-        let max_attempts = 30; // 30 seconds maximum
+        let max_attempts = 10;
         
         while attempts < max_attempts {
-            if std::path::Path::new(&device_path).exists() {
-                println!("✅ [UBLK_CREATE] Device {} appeared after {} seconds", device_path, attempts);
-                break;
+            if let Ok(device) = self.find_existing_nvme_connection(nqn).await {
+                println!("✅ [NVME_CONNECT] Successfully connected: {} -> {}", nqn, device.device_path);
+                return Ok(device);
             }
             
             attempts += 1;
-            if attempts % 5 == 0 {
-                println!("🔧 [UBLK_CREATE] Still waiting for device... ({}/{})", attempts, max_attempts);
-                // Debug: List all ublk devices that exist
-                if let Ok(devices) = std::fs::read_dir("/dev") {
-                    let ublk_devices: Vec<String> = devices
-                        .filter_map(|entry| entry.ok())
-                        .filter_map(|entry| entry.file_name().into_string().ok())
-                        .filter(|name| name.starts_with("ublk"))
-                        .collect();
-                    println!("🔧 [UBLK_CREATE] Current ublk devices: {:?}", ublk_devices);
+            println!("🔧 [NVME_CONNECT] Attempt {}/{}: Waiting for device...", attempts, max_attempts);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        
+        return Err(format!("NVMe device did not appear after {} seconds", max_attempts).into());
+    }
+    
+    /// Find existing NVMe connection by NQN
+    pub async fn find_existing_nvme_connection(&self, nqn: &str) -> Result<NvmeClientDevice, Box<dyn std::error::Error + Send + Sync>> {
+        // Run nvme list-subsys to find connected devices
+        let output = tokio::process::Command::new("nvme")
+            .args(&["list-subsys", "-o", "json"])
+            .output()
+            .await?;
+        
+        if !output.status.success() {
+            return Err("Failed to list NVMe subsystems".into());
+        }
+        
+        let json_str = String::from_utf8(output.stdout)?;
+        let subsystems: serde_json::Value = serde_json::from_str(&json_str)?;
+        
+        // Parse the JSON to find our NQN
+        if let Some(subsys_array) = subsystems["Subsystems"].as_array() {
+            for subsys in subsys_array {
+                if let Some(subsys_nqn) = subsys["NQN"].as_str() {
+                    if subsys_nqn == nqn {
+                        // Find the namespace path
+                        if let Some(namespaces) = subsys["Namespaces"].as_array() {
+                            for ns in namespaces {
+                                if let Some(device_path) = ns["NameSpace"].as_str() {
+                                    // Extract controller ID from device path
+                                    let controller_id = device_path
+                                        .strip_prefix("/dev/")
+                                        .and_then(|s| s.strip_suffix("n1"))
+                                        .map(|s| s.to_string());
+                                    
+                                    let device = NvmeClientDevice {
+                                        device_path: device_path.to_string(),
+                                        nqn: nqn.to_string(),
+                                        transport: "tcp".to_string(), // TODO: Get actual transport
+                                        target_addr: "unknown".to_string(), // TODO: Get actual address
+                                        target_port: 0, // TODO: Get actual port
+                                        connected_at: chrono::Utc::now().to_rfc3339(),
+                                        node: self.node_id.clone(),
+                                        controller_id,
+                                    };
+                                    
+                                    return Ok(device);
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
+        
+        Err("NVMe connection not found".into())
+    }
+    
+    /// Disconnect NVMe device using nvme disconnect (replaces ublk_stop_disk)
+    /// This is the CLIENT-SIDE equivalent of ublk device deletion
+    pub async fn disconnect_nvme_device(
+        &self,
+        nqn: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔌 [NVME_DISCONNECT] Disconnecting from NVMe-oF target {}", nqn);
+        
+        // Step 1: Check if device is actually connected
+        if let Err(_) = self.find_existing_nvme_connection(nqn).await {
+            println!("ℹ️ [NVME_DISCONNECT] NVMe target {} not connected", nqn);
+            return Ok(()); // Already disconnected
+        }
+        
+        // Step 2: Run nvme disconnect command
+        let output = tokio::process::Command::new("nvme")
+            .args(&["disconnect", "-n", nqn])
+            .output()
+            .await?;
+        
+        if !output.status.success() {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            if error_msg.contains("not connected") || error_msg.contains("not found") {
+                println!("ℹ️ [NVME_DISCONNECT] NVMe target {} already disconnected", nqn);
+                return Ok(()); // Already disconnected
+                    } else {
+                println!("❌ [NVME_DISCONNECT] nvme disconnect failed: {}", error_msg);
+                return Err(format!("nvme disconnect failed: {}", error_msg).into());
+            }
+        }
+        
+        // Step 3: Verify disconnection
+        let mut attempts = 0;
+        let max_attempts = 5;
+        
+        while attempts < max_attempts {
+            if let Err(_) = self.find_existing_nvme_connection(nqn).await {
+                println!("✅ [NVME_DISCONNECT] Successfully disconnected from {}", nqn);
+                return Ok(());
+            }
             
+            attempts += 1;
+            println!("🔧 [NVME_DISCONNECT] Attempt {}/{}: Waiting for disconnection...", attempts, max_attempts);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        if !std::path::Path::new(&device_path).exists() {
-            println!("❌ [UBLK_CREATE] Device {} did not appear after {} seconds", device_path, max_attempts);
-            
-            // Final debug: Check what ublk devices exist
-            if let Ok(devices) = std::fs::read_dir("/dev") {
-                let ublk_devices: Vec<String> = devices
-                    .filter_map(|entry| entry.ok())
-                    .filter_map(|entry| entry.file_name().into_string().ok())
-                    .filter(|name| name.starts_with("ublk"))
-                    .collect();
-                println!("❌ [UBLK_CREATE] Final ublk devices list: {:?}", ublk_devices);
-            }
-            
-            return Err(format!("ublk device {} did not appear after {} seconds", device_path, max_attempts).into());
-        }
-
-        println!("✅ [UBLK_CREATE] Successfully created ublk device: {} -> {}", bdev_name, device_path);
-        Ok(device_path)
+        println!("⚠️ [NVME_DISCONNECT] Device may still be connected after {} attempts", max_attempts);
+        Ok(()) // Don't fail - disconnection command succeeded
     }
     
-    /// Delete ublk device
-    pub async fn delete_ublk_device(
-        &self,
-        ublk_id: u32,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🗑️ [UBLK_DELETE] Deleting ublk device with ID {}", ublk_id);
-        
-        // Use the same SPDK RPC pattern as node_agent.rs
-        let rpc_request = json!({
-            "method": "ublk_stop_disk",
-            "params": {
-                "ublk_id": ublk_id
-            }
-        });
-        
-        // Add timeout protection for the RPC call
-        let timeout_duration = tokio::time::Duration::from_secs(10);
-        let response = match tokio::time::timeout(timeout_duration, self.call_spdk_rpc(&rpc_request)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                println!("⚠️ [UBLK_DELETE] RPC call timed out for ublk device {}", ublk_id);
-                return Err("SPDK RPC call timed out".into());
-            }
-        };
-        
-        // Check for SPDK RPC errors, but ignore "does not exist" type errors
-        if let Some(error) = response.get("error") {
-            let error_str = error.to_string();
-            if error_str.contains("does not exist") || error_str.contains("not found") {
-                println!("ℹ️ [UBLK_DELETE] ublk device {} already deleted or doesn't exist", ublk_id);
-                return Ok(()); // Not an error - device is already gone
-            } else {
-                println!("❌ [UBLK_DELETE] SPDK RPC error for ublk device {}: {}", ublk_id, error);
-                return Err(format!("SPDK RPC error: {}", error).into());
-            }
-        }
-        
-        println!("✅ [UBLK_DELETE] Successfully deleted ublk device with ID {}", ublk_id);
-        Ok(())
-    }
-    
-    /// Generate a unique ublk ID based on volume ID
-    pub fn generate_ublk_id(&self, volume_id: &str) -> u32 {
-        // Simple hash-based ID generation (0-1023 range for ublk)
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::{Hash, Hasher};
-        volume_id.hash(&mut hasher);
-        (hasher.finish() % 1024) as u32
+    /// Generate NQN for volume (replaces ublk ID generation)
+    pub fn generate_nqn(&self, volume_id: &str) -> String {
+        format!("nqn.2023.io.flint:volume-{}", volume_id)
     }
 
 
@@ -905,7 +798,9 @@ impl SpdkCsiDriver {
     }
 
     /// Delete a logical volume for cleanup purposes
-    pub async fn delete_lvol(&self, lvs_name: &str, lvol_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // REMOVED: delete_lvol - unused in simplified architecture
+    #[allow(dead_code)]
+    pub async fn delete_lvol_removed(&self, lvs_name: &str, lvol_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let http_client = HttpClient::new();
         let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_name);
         
@@ -936,62 +831,7 @@ impl SpdkCsiDriver {
 
 
 
-    /// Enhanced ublk device cleanup with logging
-    pub async fn cleanup_ublk_device(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🧹 [UBLK_CLEANUP_DEBUG] Starting ublk device cleanup for ID {}", ublk_id);
-        
-        let device_path = format!("/dev/ublkb{}", ublk_id);
-        let control_path = format!("/dev/ublkc{}", ublk_id);
-        
-        println!("🧹 [UBLK_CLEANUP_DEBUG] Checking device paths:");
-        println!("🧹 [UBLK_CLEANUP_DEBUG]   Block device: {} (exists: {})", device_path, std::path::Path::new(&device_path).exists());
-        println!("🧹 [UBLK_CLEANUP_DEBUG]   Control device: {} (exists: {})", control_path, std::path::Path::new(&control_path).exists());
-        
-        // Try to stop the ublk device via SPDK RPC
-        let cleanup_payload = json!({
-            "method": "ublk_stop_disk",
-            "params": {
-                "ublk_id": ublk_id
-            }
-        });
-        println!("🧹 [UBLK_CLEANUP_DEBUG] SPDK RPC payload: {}", cleanup_payload);
-        
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.call_spdk_rpc(&cleanup_payload)
-        ).await {
-            Ok(Ok(response)) => {
-                println!("✅ [UBLK_CLEANUP_DEBUG] SPDK RPC call successful");
-                println!("🧹 [UBLK_CLEANUP_DEBUG] RPC response: {}", response);
-                
-                if let Some(error) = response.get("error") {
-                    let error_str = error.to_string();
-                    if error_str.contains("not found") || error_str.contains("does not exist") {
-                        println!("ℹ️ [UBLK_CLEANUP_DEBUG] Device was already cleaned up: {}", error_str);
-                    } else {
-                        println!("⚠️ [UBLK_CLEANUP_DEBUG] Cleanup warning: {}", error_str);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                println!("⚠️ [UBLK_CLEANUP_DEBUG] SPDK RPC failed: {}", e);
-            }
-            Err(_) => {
-                println!("⚠️ [UBLK_CLEANUP_DEBUG] SPDK RPC timed out after 10 seconds");
-            }
-        }
-        
-        // Wait a moment for cleanup to complete
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        
-        // Check if devices are actually gone
-        println!("🧹 [UBLK_CLEANUP_DEBUG] Post-cleanup device status:");
-        println!("🧹 [UBLK_CLEANUP_DEBUG]   Block device: {} (exists: {})", device_path, std::path::Path::new(&device_path).exists());
-        println!("🧹 [UBLK_CLEANUP_DEBUG]   Control device: {} (exists: {})", control_path, std::path::Path::new(&control_path).exists());
-        
-        println!("✅ [UBLK_CLEANUP_DEBUG] ublk device cleanup completed for ID {}", ublk_id);
-        Ok(())
-    }
+
 
     /// Call SPDK RPC using the same pattern as node_agent.rs
     async fn call_spdk_rpc(
@@ -1095,7 +935,9 @@ impl SpdkCsiDriver {
      }
 
      /// Create Kubernetes event for missing ublk_drv kernel module
-     async fn create_ublk_kernel_missing_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+     // REMOVED: create_ublk_kernel_missing_event - ublk removed from architecture
+     #[allow(dead_code)]
+     async fn create_ublk_kernel_missing_event_removed(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
          use k8s_openapi::api::core::v1::Event;
          use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
          use kube::api::PostParams;

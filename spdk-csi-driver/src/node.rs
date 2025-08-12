@@ -1,7 +1,7 @@
 // node.rs - CSI Node service implementation with dynamic RAID1 creation via NVMe-oF
 use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+
 use std::path::Path;
 use crate::driver::SpdkCsiDriver;
 use spdk_csi_driver::csi::{
@@ -18,7 +18,7 @@ use tokio::fs;
 use tokio::process::Command;
 
 /// Unified SPDK RPC helper that works with both Unix sockets and HTTP
-async fn call_spdk_rpc(
+pub async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -73,688 +73,27 @@ impl NodeService {
         Self { driver }
     }
 
-    /// Creates a RAID1 bdev dynamically when a multi-replica volume is staged
-    async fn create_raid1_bdev_for_volume(&self, volume: &SpdkVolume) -> Result<String, Status> {
-        if volume.spec.num_replicas <= 1 {
-            return Err(Status::invalid_argument("Cannot create RAID1 for single replica volume"));
-        }
-
-        let raid_name = &volume.spec.volume_id;
-        let mut base_bdevs = Vec::new();
-
-        // Prepare base bdevs for RAID1 creation
-        for replica in &volume.spec.replicas {
-            let base_bdev_name = if replica.node == self.driver.node_id {
-                // Local replica: use the logical volume's UUID as bdev name
-                if let Some(lvol_uuid) = &replica.lvol_uuid {
-                    // Each replica is a separate logical volume with its own UUID
-                    lvol_uuid.clone()
-                } else {
-                    return Err(Status::internal(format!("Local replica missing lvol_uuid")));
-                }
-            } else {
-                // Remote replica: create NVMe-oF target on-demand, then connect
-                if let Some(nqn) = &replica.nqn {
-                    let nvmf_bdev_name = format!("nvmf_{}", replica.raid_member_index);
-                    
-                    // Ensure NVMe-oF target exists on the remote node
-                    self.ensure_nvmeof_target_if_needed(replica, volume).await?;
-                    
-                    // Connect to remote NVMe-oF target and get actual bdev name
-                    match self.connect_nvmeof_target(
-                        &nvmf_bdev_name,
-                        nqn,
-                        replica.ip.as_deref().unwrap_or("unknown"),
-                        replica.port.as_deref().unwrap_or("4420"),
-                        &volume.spec.nvmeof_transport.as_deref().unwrap_or("tcp"),
-                        Some(&replica.node),
-                    ).await {
-                        Ok(actual_name) => {
-                            println!("✅ [RAID_BDEV_RESOLVE] Got actual bdev name for replica {}: {}", 
-                                     replica.raid_member_index, actual_name);
-                            actual_name
-                        }
-                        Err(e) => {
-                            return Err(e);
-                        }
-                    }
-                } else {
-                    return Err(Status::internal(format!("Remote replica missing NQN")));
-                }
-            };
-            
-            base_bdevs.push(base_bdev_name);
-        }
-
-        // Create RAID1 bdev
-        // Convert base_bdevs array to space-separated string as required by SPDK
-        let base_bdevs_str = base_bdevs.join(" ");
-        
-        call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
-            "method": "bdev_raid_create",
-            "params": {
-                "name": raid_name,
-                "raid_level": "1",  // Fixed: RAID level must be string
-                "base_bdevs": base_bdevs_str,  // Fixed: Use space-separated string instead of array
-                "strip_size_kb": 64,
-                "superblock": true
-            }
-        })).await
-        .map_err(|e| Status::internal(format!("SPDK RPC call failed: {}", e)))?;
-
-        println!("Created RAID1 bdev '{}' with base bdevs: {:?}", raid_name, base_bdevs);
-        Ok(raid_name.clone())
-    }
+    // REMOVED: create_raid1_bdev_for_volume - unused method
 
 
 
-    /// Connect to NVMe-oF target with comprehensive logging and metrics
-    /// Create NVMe-oF target on-demand based on specific rules:
-    /// - Single replica volumes: Only when pod runs on different node than replica
-    /// - Multi-replica volumes: Only for remote replica members in RAID bdev
-    async fn ensure_nvmeof_target_if_needed(
-        &self,
-        replica: &Replica,
-        volume: &SpdkVolume,
-    ) -> Result<(), Status> {
-        // Determine if we need an NVMe-oF target
-        let needs_nvmeof_target = if volume.spec.num_replicas == 1 {
-            // Single replica: Only if replica is on different node than this pod
-            replica.node != self.driver.node_id
-        } else {
-            // Multi-replica: Only if this specific replica is on a remote node
-            replica.node != self.driver.node_id
-        };
 
-        if !needs_nvmeof_target {
-            println!("📋 [NVMEOF_ONDEMAND] No NVMe-oF target needed for replica on node {} (pod on node {})", 
-                replica.node, self.driver.node_id);
-            return Ok(());
-        }
 
-        println!("🔧 [NVMEOF_ONDEMAND] Creating NVMe-oF target for remote replica on node {}", replica.node);
 
-        // Get the target node's SPDK RPC URL
-        let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await
-            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", replica.node, e)))?;
 
-        // Create a temporary driver instance for the target node's SPDK
-        let node_driver = SpdkCsiDriver {
-            spdk_rpc_url: rpc_url,
-            nvmeof_transport: self.driver.nvmeof_transport.clone(),
-            nvmeof_target_port: self.driver.nvmeof_target_port,
-            node_id: replica.node.clone(),
-            target_namespace: self.driver.target_namespace.clone(),
-            kube_client: self.driver.kube_client.clone(),
-            spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
-            ublk_target_initialized: Arc::new(Mutex::new(false)),
-        };
+    // REMOVED: connect_nvmeof_target method - unused, NVMe-oF connections handled by controller
 
-        // Get the bdev name and NQN for the target
-        let bdev_name = replica.lvol_uuid.as_ref()
-            .ok_or_else(|| Status::internal("Replica missing lvol_uuid"))?;
-        let nqn = replica.nqn.as_ref()
-            .ok_or_else(|| Status::internal("Replica missing NQN"))?;
-
-        // First check if the NVMe-oF target already exists to avoid unnecessary creation attempts
-        match Self::check_nvmeof_subsystem_exists(&node_driver, nqn).await {
-            Ok(true) => {
-                println!("✅ [NVMEOF_ONDEMAND] NVMe-oF target already exists: {}", nqn);
-                return Ok(());
-            }
-            Ok(false) => {
-                println!("🔧 [NVMEOF_ONDEMAND] NVMe-oF target does not exist, creating: {}", nqn);
-            }
-            Err(e) => {
-                println!("⚠️ [NVMEOF_ONDEMAND] Failed to check subsystem existence, proceeding with creation: {}", e);
-            }
-        }
-
-        // Create the NVMe-oF target on the remote node
-        match node_driver.create_nvmeof_target(bdev_name, nqn).await {
-            Ok(_) => {
-                println!("✅ [NVMEOF_ONDEMAND] Successfully created NVMe-oF target: {} -> {}", bdev_name, nqn);
-                Ok(())
-            }
-            Err(e) => {
-                // Enhanced error handling for different SPDK error messages
-                let error_msg = e.to_string();
-                if error_msg.contains("already exists") || 
-                   error_msg.contains("File exists") ||
-                   error_msg.contains("Subsystem NQN") && error_msg.contains("already exists") {
-                    println!("✅ [NVMEOF_ONDEMAND] NVMe-oF target already exists (idempotent): {}", nqn);
-                    Ok(())
-                } else {
-                    println!("❌ [NVMEOF_ONDEMAND] Failed to create NVMe-oF target: {}", e);
-                    Err(Status::internal(format!("Failed to create NVMe-oF target on {}: {}", replica.node, e)))
-                }
-            }
-        }
-    }
-
-    /// Check if an NVMe-oF subsystem already exists using SPDK RPC
-    async fn check_nvmeof_subsystem_exists(
-        node_driver: &SpdkCsiDriver,
-        nqn: &str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [NVMEOF_CHECK] Checking if subsystem exists: {}", nqn);
-        
-        let rpc_request = json!({
-            "method": "nvmf_get_subsystems"
-        });
-
-        let response = call_spdk_rpc(&node_driver.spdk_rpc_url, &rpc_request).await?;
-
-        // Check for SPDK RPC errors
-        if let Some(error) = response.get("error") {
-            return Err(format!("SPDK RPC error: {}", error).into());
-        }
-
-        // Parse the result array and look for our NQN
-        if let Some(subsystems) = response.get("result").and_then(|r| r.as_array()) {
-            for subsystem in subsystems {
-                if let Some(subsystem_nqn) = subsystem.get("nqn").and_then(|n| n.as_str()) {
-                    if subsystem_nqn == nqn {
-                        println!("✅ [NVMEOF_CHECK] Found existing subsystem: {}", nqn);
-                        return Ok(true);
-                    }
-                }
-            }
-            println!("🔍 [NVMEOF_CHECK] Subsystem not found: {}", nqn);
-            Ok(false)
-        } else {
-            Err("Invalid response format from nvmf_get_subsystems".into())
-        }
-    }
-
-    async fn connect_nvmeof_target(
-        &self,
-        bdev_name: &str,
-        nqn: &str,
-        target_ip: &str,
-        target_port: &str,
-        transport: &str,
-        target_node_name: Option<&str>,
-    ) -> Result<String, Status> {
-        use spdk_csi_driver::nvmeof_utils::*;
-        use std::time::Instant;
-
-        let overall_start = Instant::now();
-        
-        // Create structured logging context
-        let ctx = NvmfContext::new(self.driver.node_id.clone(), "connect")
-            .with_target(target_ip.to_string(), target_port.to_string())
-            .with_nqn(nqn.to_string())
-            .with_bdev(bdev_name.to_string());
-
-        let mut metrics = NvmfMetrics::default();
-
-        println!("{}🔗 Starting NVMe-oF target connection", ctx.log_prefix());
-        println!("{}   Transport: {}", ctx.log_prefix(), transport);
-
-        // Step 1: Test network connectivity with metrics
-        match test_network_connectivity(target_ip, target_port, &ctx).await {
-            Ok(duration) => {
-                metrics.network_test_time_ms = Some(duration.as_millis() as u64);
-            }
-            Err(nvmf_error) => {
-                return Err(Status::internal(nvmf_error.user_message()));
-            }
-        }
-
-        // Step 2: Create SPDK NVMe-oF connection
-        println!("{}🔗 Step 2: Creating SPDK NVMe-oF connection...", ctx.log_prefix());
-        let connection_start = Instant::now();
-        
-        let connect_payload = json!({
-            "method": "bdev_nvme_attach_controller",
-            "params": {
-                "name": bdev_name,
-                "trtype": transport.to_lowercase(),
-                "traddr": target_ip,
-                "trsvcid": target_port,
-                "subnqn": nqn,
-                "adrfam": "ipv4"
-            }
-        });
-
-        let rpc_start = Instant::now();
-        let response = match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
-            Ok(resp) => {
-                metrics.rpc_call_time_ms = Some(rpc_start.elapsed().as_millis() as u64);
-                resp
-            }
-            Err(e) => {
-                let error_string = e.to_string();
-                
-                // Check if this is a listener access denial error 
-                if error_string.contains("does not allow host") && error_string.contains("to connect at this address") {
-                    println!("{}🔐 Connection failed due to missing listener, attempting to add listener...", ctx.log_prefix());
-                    
-                    // Try to add a listener for the specific connection address
-                    match self.add_listener_for_connection(target_node_name, nqn, target_ip, target_port).await {
-                        Ok(_) => {
-                            println!("{}✅ Listener added, retrying connection...", ctx.log_prefix());
-                            
-                            // Retry the connection
-                            match call_spdk_rpc(&self.driver.spdk_rpc_url, &connect_payload).await {
-                                Ok(retry_resp) => {
-                                    metrics.rpc_call_time_ms = Some(rpc_start.elapsed().as_millis() as u64);
-                                    println!("{}✅ Connection successful after listener addition", ctx.log_prefix());
-                                    retry_resp
-                                }
-                                Err(retry_e) => {
-                                    let nvmf_error = NvmfError::from_spdk_error(&retry_e.to_string(), "bdev_nvme_attach_controller");
-                                    nvmf_error.log_detailed(&ctx);
-                                    return Err(Status::internal(format!("Connection failed even after adding listener: {}", nvmf_error.user_message())));
-                                }
-                            }
-                        }
-                        Err(listener_err) => {
-                            println!("{}⚠️ Failed to add listener: {}", ctx.log_prefix(), listener_err);
-                            let nvmf_error = NvmfError::from_spdk_error(&error_string, "bdev_nvme_attach_controller");
-                            nvmf_error.log_detailed(&ctx);
-                            return Err(Status::internal(nvmf_error.user_message()));
-                        }
-                    }
-                } else {
-                    let nvmf_error = NvmfError::from_spdk_error(&error_string, "bdev_nvme_attach_controller");
-                    nvmf_error.log_detailed(&ctx);
-                    return Err(Status::internal(nvmf_error.user_message()));
-                }
-            }
-        };
-
-        // Handle SPDK response and capture actual bdev names created
-        let actual_bdev_names = match handle_spdk_response(response, "bdev_nvme_attach_controller", &ctx).await {
-            Ok(result) => {
-                metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
-                println!("{}✅ SPDK connection established successfully", ctx.log_prefix());
-                println!("{}📋 Raw SPDK response: {}", ctx.log_prefix(), result);
-                
-                // Extract actual bdev names from result array
-                if let Some(bdev_array) = result.as_array() {
-                    let names: Vec<String> = bdev_array.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    
-                    println!("{}📋 Actual bdevs created: {:?}", ctx.log_prefix(), names);
-                    names
-                } else {
-                    println!("{}❌ Unexpected response format from SPDK", ctx.log_prefix());
-                    return Err(Status::internal("SPDK returned unexpected response format"));
-                }
-            }
-            Err(nvmf_error) => {
-                // Handle "already exists" as acceptable (cleanup might have failed)
-                if matches!(nvmf_error, NvmfError::ConnectionExists { .. }) {
-                    println!("{}ℹ️ Connection already exists - querying for existing bdev", ctx.log_prefix());
-                    println!("{}🔍 Expected bdev prefix: {}", ctx.log_prefix(), bdev_name);
-                    println!("{}🔍 Target NQN: {}", ctx.log_prefix(), nqn);
-                    metrics.connection_time_ms = Some(connection_start.elapsed().as_millis() as u64);
-                    
-                    // Query for existing bdev since we couldn't get it from connection response
-                    match self.find_actual_remote_bdev_name(bdev_name, nqn).await {
-                        Ok(existing_name) => {
-                            println!("{}✅ Found existing bdev: {}", ctx.log_prefix(), existing_name);
-                            vec![existing_name]
-                        }
-                        Err(e) => {
-                            println!("{}❌ Failed to find existing bdev: {}", ctx.log_prefix(), e);
-                            return Err(Status::internal(format!("Connection exists but cannot find bdev: {}", e)));
-                        }
-                    }
-                } else {
-                    return Err(Status::internal(nvmf_error.user_message()));
-                }
-            }
-        };
-
-        // Step 3: Verify the bdev was created with metrics
-        println!("{}🔗 Step 3: Verifying remote bdev creation...", ctx.log_prefix());
-        let verification_start = Instant::now();
-        
-        // Allow time for bdev creation
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        
-        // Use the actual bdev name from SPDK response
-        let actual_bdev_name = if !actual_bdev_names.is_empty() {
-            // Use the first bdev name returned by SPDK (typically there's only one for single-namespace volumes)
-            let chosen_name = &actual_bdev_names[0];
-            println!("{}🎯 Using actual bdev name from SPDK response: {}", ctx.log_prefix(), chosen_name);
-            chosen_name.clone()
-        } else {
-            // This shouldn't happen with proper SPDK responses, but handle gracefully
-            println!("{}⚠️ No bdev names in SPDK response, this is unexpected", ctx.log_prefix());
-            return Err(Status::internal("SPDK did not return any bdev names in response"));
-        };
-        
-        // Verify the determined bdev exists
-        match self.verify_remote_bdev_exists(&actual_bdev_name).await {
-            Ok(_) => {
-                metrics.verification_time_ms = Some(verification_start.elapsed().as_millis() as u64);
-                println!("{}✅ Remote bdev {} verified successfully", ctx.log_prefix(), actual_bdev_name);
-            }
-            Err(e) => {
-                let nvmf_error = NvmfError::BdevNotFound {
-                    bdev_name: actual_bdev_name.clone(),
-                    details: e.to_string(),
-                };
-                nvmf_error.log_detailed(&ctx);
-                return Err(Status::internal(nvmf_error.user_message()));
-            }
-        }
-
-        // Log final metrics and connection health
-        metrics.total_time_ms = Some(overall_start.elapsed().as_millis() as u64);
-        metrics.log_summary(&ctx);
-        
-        // Perform connection health check
-        log_connection_health(&ctx, &self.driver.spdk_rpc_url).await;
-
-        println!("{}✅ NVMe-oF target connection complete", ctx.log_prefix());
-        println!("{}🎯 Returning actual bdev name: {}", ctx.log_prefix(), actual_bdev_name);
-        Ok(actual_bdev_name)
-    }
-
-    /// Query SPDK for existing NVMe-oF bdevs that match our expected pattern
-    async fn query_existing_nvmeof_bdevs(&self, expected_prefix: &str, nqn: &str) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::driver::SpdkCsiDriver;
-        println!("🔍 [BDEV_QUERY] Querying existing NVMe-oF bdevs for prefix: {}", expected_prefix);
-        
-        // Get all bdevs from SPDK
-        let query_payload = json!({
-            "method": "bdev_get_bdevs"
-        });
-        
-        let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &query_payload).await?;
-        
-        if let Some(result) = response.get("result") {
-            if let Some(bdevs) = result.as_array() {
-                let mut matching_bdevs = Vec::new();
-                
-                for bdev in bdevs {
-                    if let Some(name) = bdev.get("name").and_then(|n| n.as_str()) {
-                        // Check if this bdev matches our expected pattern or NQN-based UUID
-                        if name.starts_with(expected_prefix) || 
-                           name == &SpdkCsiDriver::generate_namespace_uuid_from_nqn(nqn) ||
-                           (name.starts_with("nvmf_") && self.is_bdev_for_nqn(bdev, nqn)) {
-                            println!("🎯 [BDEV_QUERY] Found matching bdev: {}", name);
-                            matching_bdevs.push(name.to_string());
-                        }
-                    }
-                }
-                
-                println!("📋 [BDEV_QUERY] Found {} matching bdevs", matching_bdevs.len());
-                Ok(matching_bdevs)
-            } else {
-                Err("Invalid bdev_get_bdevs response format".into())
-            }
-        } else {
-            Err("No result in bdev_get_bdevs response".into())
-        }
-    }
+    // REMOVED: query_existing_nvmeof_bdevs - unused method
     
-    /// Check if a bdev belongs to the specified NQN by examining driver name or other properties
-    fn is_bdev_for_nqn(&self, bdev: &serde_json::Value, nqn: &str) -> bool {
-        // Check if this is an NVMe bdev by looking at driver_specific info
-        if let Some(driver_specific) = bdev.get("driver_specific") {
-            if let Some(nvme_info) = driver_specific.get("nvme") {
-                // Check if the bdev's namespace info matches our NQN pattern
-                if let Some(ns_info) = nvme_info.as_array().and_then(|arr| arr.first()) {
-                    if let Some(bdev_nqn) = ns_info.get("nqn").and_then(|n| n.as_str()) {
-                        return bdev_nqn == nqn;
-                    }
-                }
-            }
-        }
-        
-        // Fallback: check if the bdev name pattern suggests it's for this NQN
-        if let Some(name) = bdev.get("name").and_then(|n| n.as_str()) {
-            // Extract PVC ID from NQN and see if it's in the bdev name
-            if let Some(pvc_id) = nqn.split(':').last().and_then(|part| part.split('-').nth(1)) {
-                return name.contains(pvc_id);
-            }
-        }
-        
-        false
-    }
+    // REMOVED: is_bdev_for_nqn - unused method
 
-    /// Verify that a remote bdev exists after NVMe-oF connection and find its actual name
-    async fn verify_remote_bdev_exists(&self, expected_bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [BDEV_REMOTE_VERIFY] Verifying remote bdev: {}", expected_bdev_name);
-        
-        // First try to find the bdev by expected name
-        let verify_payload = json!({
-            "method": "bdev_get_bdevs",
-            "params": {
-                "name": expected_bdev_name
-            }
-        });
-
-        let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &verify_payload).await?;
-        
-        // Check for SPDK RPC errors first
-        if let Some(error) = response.get("error") {
-            return Err(format!("Failed to query bdev {}: {}", expected_bdev_name, error).into());
-        }
-        
-        if let Some(result) = response.get("result") {
-            if let Some(bdev_list) = result.as_array() {
-                if !bdev_list.is_empty() {
-                    // Found by expected name - show details
-                    for bdev in bdev_list {
-                        if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                            let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                            println!("✅ [BDEV_REMOTE_VERIFY] Remote bdev: name={}, blocks={}, block_size={}", 
-                                     name, size, block_size);
-                        }
-                    }
-                    println!("✅ [BDEV_REMOTE_VERIFY] Remote bdev {} verified successfully", expected_bdev_name);
-                    return Ok(());
-                }
-            }
-        }
-        
-        // If not found by expected name, SPDK may have created it with a different name
-        // This happens when bdev_nvme_attach_controller creates bdevs based on namespace UUIDs
-        println!("🔍 [BDEV_REMOTE_VERIFY] Expected bdev name not found, searching for NVMe controller bdevs...");
-        
-        // Get all bdevs and look for recently created NVMe bdevs
-        let all_bdevs_payload = json!({
-            "method": "bdev_get_bdevs",
-            "params": {}
-        });
-        
-        let all_response = call_spdk_rpc(&self.driver.spdk_rpc_url, &all_bdevs_payload).await?;
-        
-        if let Some(result) = all_response.get("result") {
-            if let Some(bdev_list) = result.as_array() {
-                // Look for NVMe bdevs that match typical UUID patterns
-                let mut found_nvme_bdevs = Vec::new();
-                
-                for bdev in bdev_list {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        // Check if this looks like a UUID bdev from NVMe-oF connection
-                        if name.len() == 36 && name.chars().filter(|&c| c == '-').count() == 4 {
-                            // This looks like a UUID - check if it's an NVMe bdev
-                            if let Some(driver_name) = bdev.get("driver_name").and_then(|v| v.as_str()) {
-                                if driver_name == "nvme" {
-                        let size = bdev.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let block_size = bdev.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    println!("🔍 [BDEV_REMOTE_VERIFY] Found NVMe UUID bdev: name={}, blocks={}, block_size={}", 
-                                 name, size, block_size);
-                                    found_nvme_bdevs.push(name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !found_nvme_bdevs.is_empty() {
-                    println!("✅ [BDEV_REMOTE_VERIFY] Found {} NVMe UUID bdev(s), connection successful", found_nvme_bdevs.len());
-                    for bdev_name in &found_nvme_bdevs {
-                        println!("📋 [BDEV_REMOTE_VERIFY] Available NVMe bdev: {}", bdev_name);
-                    }
-                    return Ok(());
-            } else {
-                    println!("❌ [BDEV_REMOTE_VERIFY] No NVMe UUID bdevs found after connection");
-                }
-            }
-        }
-        
-        return Err(format!("Remote bdev '{}' not found after connection", expected_bdev_name).into());
-    }
+    // REMOVED: verify_remote_bdev_exists - unused method
 
 
 
-    /// Find the actual bdev name created by SPDK after NVMe-oF connection
-    async fn find_actual_remote_bdev_name(&self, expected_name: &str, target_nqn: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [BDEV_NAME_RESOLVE] Finding actual bdev name for NVMe-oF connection");
-        println!("🔍 [BDEV_NAME_RESOLVE] Expected: {}", expected_name);
-        println!("🔍 [BDEV_NAME_RESOLVE] Target NQN: {}", target_nqn);
-        
-        // First, try the predictable UUID that the target should have created
-        let predictable_uuid = crate::driver::SpdkCsiDriver::generate_namespace_uuid_from_nqn(target_nqn);
-        println!("🔍 [BDEV_NAME_RESOLVE] Trying predictable UUID: {}", predictable_uuid);
-        
-        // Also try the expected name with "n1" suffix (SPDK appends namespace ID to our prefix)
-        let expected_with_suffix = format!("{}n1", expected_name);
-        println!("🔍 [BDEV_NAME_RESOLVE] Trying expected name with suffix: {}", expected_with_suffix);
-        
-        // Get all bdevs
-        let all_bdevs_payload = json!({
-            "method": "bdev_get_bdevs",
-            "params": {}
-        });
-        
-        let response = call_spdk_rpc(&self.driver.spdk_rpc_url, &all_bdevs_payload).await?;
-        
-        if let Some(result) = response.get("result") {
-            if let Some(bdev_list) = result.as_array() {
-                println!("🔍 [BDEV_NAME_RESOLVE] Available bdevs ({} total):", bdev_list.len());
-                for (i, bdev) in bdev_list.iter().enumerate() {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        let driver = bdev.get("driver_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        println!("🔍 [BDEV_NAME_RESOLVE]   {}: {} (driver: {})", i + 1, name, driver);
-                    }
-                }
-                
-                // First, try to find bdev by predictable UUID
-                for bdev in bdev_list {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        if name == predictable_uuid {
-                            println!("✅ [BDEV_NAME_RESOLVE] Found predictable UUID match: {}", name);
-                            return Ok(name.to_string());
-                        }
-                    }
-                }
-                
-                // Second, try to find bdev by expected name with "n1" suffix
-                for bdev in bdev_list {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        if name == expected_with_suffix {
-                            println!("✅ [BDEV_NAME_RESOLVE] Found expected name with suffix: {}", name);
-                            return Ok(name.to_string());
-                        }
-                    }
-                }
-                
-                // Third, try to find bdev by expected name (without suffix)
-                for bdev in bdev_list {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        if name == expected_name {
-                            println!("✅ [BDEV_NAME_RESOLVE] Found exact match: {}", name);
-                            return Ok(name.to_string());
-                        }
-                    }
-                }
-                
-                // If not found by expected name, look for NVMe bdevs with UUID pattern
-                // These are created by SPDK when attaching NVMe-oF controllers
-                let mut nvme_candidates = Vec::new();
-                
-                for bdev in bdev_list {
-                    if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                        // Check if this is a UUID-style name from NVMe-oF
-                        if name.len() == 36 && name.chars().filter(|&c| c == '-').count() == 4 {
-                            if let Some(driver_name) = bdev.get("driver_name").and_then(|v| v.as_str()) {
-                                if driver_name == "nvme" {
-                                    nvme_candidates.push(name.to_string());
-                                    println!("🔍 [BDEV_NAME_RESOLVE] Found NVMe UUID candidate: {}", name);
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // If we have exactly one NVMe candidate, use it
-                if nvme_candidates.len() == 1 {
-                    let actual_name = &nvme_candidates[0];
-                    println!("✅ [BDEV_NAME_RESOLVE] Using single NVMe UUID bdev: {}", actual_name);
-                    return Ok(actual_name.clone());
-                } else if nvme_candidates.len() > 1 {
-                    // Multiple candidates - this could happen if there are multiple NVMe-oF connections
-                    // For now, we'll use the first one but log a warning
-                    let actual_name = &nvme_candidates[0];
-                    println!("⚠️ [BDEV_NAME_RESOLVE] Multiple NVMe UUID candidates found ({}), using first: {}", 
-                             nvme_candidates.len(), actual_name);
-                    for candidate in &nvme_candidates {
-                        println!("🔍 [BDEV_NAME_RESOLVE] Candidate: {}", candidate);
-                    }
-                    return Ok(actual_name.clone());
-        } else {
-                    println!("❌ [BDEV_NAME_RESOLVE] No suitable NVMe UUID bdevs found");
-                }
-            }
-        }
-        
-        Err(format!("Could not find actual bdev name for expected: {}", expected_name).into())
-    }
+    // REMOVED: find_actual_remote_bdev_name - unused method
 
-    /// Diagnose ublk device creation failures
-    async fn diagnose_ublk_failure(&self, bdev_name: &str, ublk_id: u32) {
-        println!("🔍 [UBLK_DIAGNOSE] Starting ublk failure diagnosis");
-        println!("🔍 [UBLK_DIAGNOSE] Target bdev: {}", bdev_name);
-        println!("🔍 [UBLK_DIAGNOSE] Target ublk ID: {}", ublk_id);
 
-        // Check 1: Verify bdev still exists
-        println!("🔍 [UBLK_DIAGNOSE] Check 1: Verifying bdev exists...");
-        match self.verify_remote_bdev_exists(bdev_name).await {
-            Ok(_) => println!("✅ [UBLK_DIAGNOSE] Bdev exists"),
-            Err(e) => println!("❌ [UBLK_DIAGNOSE] Bdev missing: {}", e),
-        }
-
-        // Check 2: List all current bdevs
-        println!("🔍 [UBLK_DIAGNOSE] Check 2: Listing all available bdevs...");
-        match call_spdk_rpc(&self.driver.spdk_rpc_url, &json!({
-            "method": "bdev_get_bdevs",
-            "params": {}
-        })).await {
-            Ok(response) => {
-                if let Some(bdev_list) = response.as_array() {
-                    println!("🔍 [UBLK_DIAGNOSE] Found {} total bdevs:", bdev_list.len());
-                    for (i, bdev) in bdev_list.iter().enumerate() {
-                        if let Some(name) = bdev.get("name").and_then(|v| v.as_str()) {
-                            println!("🔍 [UBLK_DIAGNOSE]   {}: {}", i + 1, name);
-                        }
-                    }
-                }
-            }
-            Err(e) => println!("❌ [UBLK_DIAGNOSE] Failed to list bdevs: {}", e),
-        }
-
-        // Check 3: Check if ublk ID is already in use
-        println!("🔍 [UBLK_DIAGNOSE] Check 3: Checking ublk device status...");
-        if std::path::Path::new(&format!("/dev/ublkc{}", ublk_id)).exists() {
-            println!("⚠️ [UBLK_DIAGNOSE] ublk device /dev/ublkc{} already exists", ublk_id);
-        } else {
-            println!("ℹ️ [UBLK_DIAGNOSE] ublk device /dev/ublkc{} does not exist (expected)", ublk_id);
-        }
-
-        println!("🔍 [UBLK_DIAGNOSE] Diagnosis complete");
-    }
 
     /// Deletes the RAID1 bdev and disconnects NVMe-oF targets
     async fn cleanup_raid1_bdev(&self, volume: &SpdkVolume) -> Result<(), Status> {
@@ -831,121 +170,165 @@ impl NodeService {
     }
 
 
+    /// Connect to target device using unified storage backend (single disk or RAID disk)
     async fn connect_to_target_device(&self, volume: &SpdkVolume) -> Result<String, Status> {
-        let ublk_id = self.driver.generate_ublk_id(&volume.spec.volume_id);
+        let volume_nqn = self.driver.generate_nqn(&volume.spec.volume_id);
         
-        let target_device = if volume.spec.num_replicas > 1 {
-            // Multi-replica: Create RAID1 bdev and expose via ublk
-            self.create_raid1_bdev_for_volume(volume).await?;
-            let raid_bdev = &volume.spec.volume_id;
-            
-            // Create ublk device for RAID bdev
-            self.driver.create_ublk_device(raid_bdev, ublk_id).await
-                .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
-        } else {
-            // Single replica: Expose lvol via ublk
-            let replica = volume.spec.replicas.first()
-                .ok_or_else(|| Status::internal("No replicas found"))?;
-            
-            if replica.node == self.driver.node_id {
-                // Local replica: Direct ublk exposure
-                if let Some(lvol_uuid) = &replica.lvol_uuid {
-                    // Use the logical volume UUID directly - this matches RAID behavior and SPDK's actual bdev naming
-                    let lvol_bdev = lvol_uuid.clone();
-                    
-                    // Create ublk device for lvol
-                    self.driver.create_ublk_device(&lvol_bdev, ublk_id).await
-                        .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?
-                } else {
-                    return Err(Status::internal("Local replica missing lvol_uuid"));
-                }
-            } else {
-                // Remote replica: Create NVMe-oF target on-demand, then connect
-                let remote_bdev_name = format!("nvmf_remote_{}", volume.spec.volume_id);
-                
-                if let (Some(nqn), Some(ip), Some(port)) = (
-                    &replica.nqn,
-                    &replica.ip, 
-                    &replica.port
-                ) {
-                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Starting NVMe-oF client connection for single replica");
-                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Target: {}:{}", ip, port);
-                    println!("🔗 [NVMEOF_CLIENT_DEBUG] NQN: {}", nqn);
-                    println!("🔗 [NVMEOF_CLIENT_DEBUG] Remote bdev name: {}", remote_bdev_name);
-                    
-                    // Ensure NVMe-oF target exists on the remote node
-                    self.ensure_nvmeof_target_if_needed(replica, volume).await?;
-                    
-                    // Connect to NVMe-oF target and get actual bdev name
-                    let actual_bdev_name = self.connect_nvmeof_target(
-                        &remote_bdev_name,
-                        nqn,
-                        ip,
-                        port,
-                        &self.driver.nvmeof_transport,
-                        Some(&replica.node),
-                    ).await?;
-                    
-                    // Then expose the actual NVMe-oF bdev via ublk with debugging
-                    println!("🔗 [UBLK_CREATE_DEBUG] Creating ublk device for actual remote bdev: {}", actual_bdev_name);
-                    println!("🔗 [UBLK_CREATE_DEBUG] ublk ID: {}", ublk_id);
-                    
-                    match self.driver.create_ublk_device(&actual_bdev_name, ublk_id).await {
-                        Ok(device_path) => {
-                            println!("✅ [UBLK_CREATE_DEBUG] Successfully created ublk device: {}", device_path);
-                            device_path
-                        }
-                        Err(e) => {
-                            println!("❌ [UBLK_CREATE_DEBUG] Failed to create ublk device: {}", e);
-                            println!("🔍 [UBLK_CREATE_DEBUG] Attempting to diagnose the issue...");
-                            
-                            // Add diagnostic information
-                            self.diagnose_ublk_failure(&remote_bdev_name, ublk_id).await;
-                            
-                            return Err(Status::internal(format!("Failed to create ublk device: {}", e)));
-                        }
-                    }
-                } else {
-                    return Err(Status::internal("Remote replica missing connection details"));
-                }
+        // Unified connection logic for both single and multi-replica volumes
+        let target_device = match &volume.spec.storage_backend {
+            StorageBackend::SingleDisk { disk_ref, node_id } => {
+                self.connect_to_single_disk_volume(volume, disk_ref, node_id, &volume_nqn).await?
+            }
+            StorageBackend::RaidDisk { raid_disk_ref, node_id } => {
+                self.connect_to_raid_disk_volume(volume, raid_disk_ref, node_id, &volume_nqn).await?
             }
         };
 
         // Wait for device to appear
         self.wait_for_device(&target_device).await?;
         
-        println!("Connected to target device: {} for volume {}", target_device, volume.spec.volume_id);
+        println!("✅ [UNIFIED_CONNECT] Connected to target device: {} for volume {}", target_device, volume.spec.volume_id);
         Ok(target_device)
     }
+
+    /// Connect to a single disk volume (local or remote)
+    async fn connect_to_single_disk_volume(
+        &self,
+        volume: &SpdkVolume,
+        _disk_ref: &str,
+        storage_node_id: &str,
+        volume_nqn: &str,
+    ) -> Result<String, Status> {
+        if storage_node_id == &self.driver.node_id {
+            // Local single disk: Create NVMe-oF target for the lvol and connect locally
+            if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
+                println!("🔗 [SINGLE_LOCAL] Creating NVMe-oF target for local lvol {}", lvol_uuid);
+                
+                // Create NVMe-oF target for the logical volume
+                self.driver.create_nvmeof_target_with_validation(lvol_uuid, volume_nqn).await
+                    .map_err(|e| Status::internal(format!("Failed to create NVMe-oF target: {}", e)))?;
+                
+                // Connect to the local NVMe-oF target
+                let node_ip = self.driver.get_current_node_ip().await
+                    .map_err(|e| Status::internal(format!("Failed to get node IP: {}", e)))?;
+                
+                let nvme_device = self.driver.connect_nvme_device(
+                    volume_nqn,
+                    &node_ip,
+                    self.driver.nvmeof_target_port,
+                    &self.driver.nvmeof_transport,
+                    &volume.spec.volume_id,
+                ).await.map_err(|e| Status::internal(format!("Failed to connect to local NVMe-oF target: {}", e)))?;
+                
+                println!("✅ [SINGLE_LOCAL] Connected to local single disk: {}", nvme_device.device_path);
+                Ok(nvme_device.device_path)
+            } else {
+                Err(Status::internal("Local single disk volume missing lvol_uuid"))
+            }
+        } else {
+            // Remote single disk: Connect to existing NVMe-oF target on remote node
+            println!("🔗 [SINGLE_REMOTE] Connecting to remote single disk on node {}", storage_node_id);
+            
+            // Get the remote node IP
+            let remote_ip = self.driver.get_node_ip(storage_node_id).await?;
+            
+            // Connect directly to the remote NVMe-oF target
+            let nvme_device = self.driver.connect_nvme_device(
+                volume_nqn,
+                &remote_ip,
+                self.driver.nvmeof_target_port,
+                &self.driver.nvmeof_transport,
+                &volume.spec.volume_id,
+            ).await.map_err(|e| Status::internal(format!("Failed to connect to remote single disk: {}", e)))?;
+            
+            println!("✅ [SINGLE_REMOTE] Connected to remote single disk: {}", nvme_device.device_path);
+            Ok(nvme_device.device_path)
+        }
+    }
+
+    /// Connect to a RAID disk volume (always local to the RAID disk's node)
+    async fn connect_to_raid_disk_volume(
+        &self,
+        volume: &SpdkVolume,
+        _raid_disk_ref: &str,
+        storage_node_id: &str,
+        volume_nqn: &str,
+    ) -> Result<String, Status> {
+        if storage_node_id == &self.driver.node_id {
+            // Local RAID disk: Create NVMe-oF target for the lvol and connect locally
+            if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
+                println!("🔗 [RAID_LOCAL] Creating NVMe-oF target for RAID disk lvol {}", lvol_uuid);
+                
+                // Create NVMe-oF target for the logical volume on RAID disk
+                self.driver.create_nvmeof_target_with_validation(lvol_uuid, volume_nqn).await
+                    .map_err(|e| Status::internal(format!("Failed to create NVMe-oF target for RAID volume: {}", e)))?;
+                
+                // Connect to the local NVMe-oF target
+                let node_ip = self.driver.get_current_node_ip().await
+                    .map_err(|e| Status::internal(format!("Failed to get node IP: {}", e)))?;
+                
+                let nvme_device = self.driver.connect_nvme_device(
+                    volume_nqn,
+                    &node_ip,
+                    self.driver.nvmeof_target_port,
+                    &self.driver.nvmeof_transport,
+                    &volume.spec.volume_id,
+                ).await.map_err(|e| Status::internal(format!("Failed to connect to local RAID NVMe-oF target: {}", e)))?;
+                
+                println!("✅ [RAID_LOCAL] Connected to local RAID disk: {}", nvme_device.device_path);
+                Ok(nvme_device.device_path)
+            } else {
+                Err(Status::internal("Local RAID disk volume missing lvol_uuid"))
+            }
+        } else {
+            // Remote RAID disk: Connect to existing NVMe-oF target on remote node
+            println!("🔗 [RAID_REMOTE] Connecting to remote RAID disk on node {}", storage_node_id);
+            
+            // Get the remote node IP
+            let remote_ip = self.driver.get_node_ip(storage_node_id).await?;
+            
+            // Connect directly to the remote NVMe-oF target
+            let nvme_device = self.driver.connect_nvme_device(
+                volume_nqn,
+                &remote_ip,
+                self.driver.nvmeof_target_port,
+                &self.driver.nvmeof_transport,
+                &volume.spec.volume_id,
+            ).await.map_err(|e| Status::internal(format!("Failed to connect to remote RAID disk: {}", e)))?;
+            
+            println!("✅ [RAID_REMOTE] Connected to remote RAID disk: {}", nvme_device.device_path);
+            Ok(nvme_device.device_path)
+        }
+    }
     
-    /// Clean up ublk devices on unpublish (idempotent with retry)
-    async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
-        let ublk_id = self.driver.generate_ublk_id(volume_id);
+    /// Clean up NVMe connections on unpublish (idempotent with retry)
+    async fn cleanup_nvme_device(&self, volume_id: &str) -> Result<(), Status> {
+        let volume_nqn = self.driver.generate_nqn(volume_id);
         
-        println!("🗑️ [CLEANUP] Deleting ublk device {} for volume {}", ublk_id, volume_id);
+        println!("🔌 [CLEANUP] Disconnecting NVMe device {} for volume {}", volume_nqn, volume_id);
         
-        // Retry deletion up to 3 times for robustness
+        // Retry disconnection up to 3 times for robustness
         for attempt in 1..=3 {
-            match self.driver.delete_ublk_device(ublk_id).await {
+            match self.driver.disconnect_nvme_device(&volume_nqn).await {
                 Ok(_) => {
-                    println!("✅ [CLEANUP] Successfully deleted ublk device {} (attempt {})", ublk_id, attempt);
+                    println!("✅ [CLEANUP] Successfully disconnected NVMe device {} (attempt {})", volume_nqn, attempt);
                     return Ok(());
                 }
                 Err(e) => {
                     let error_str = e.to_string();
                     
                     // If device doesn't exist, that's success (idempotent)
-                    if error_str.contains("does not exist") || error_str.contains("not found") {
-                        println!("ℹ️ [CLEANUP] ublk device {} already deleted", ublk_id);
+                    if error_str.contains("not connected") || error_str.contains("not found") {
+                        println!("ℹ️ [CLEANUP] NVMe device {} already disconnected", volume_nqn);
                         return Ok(());
                     }
                     
                     // For other errors, retry or fail
                     if attempt == 3 {
-                        println!("❌ [CLEANUP] Failed to delete ublk device {} after {} attempts: {}", ublk_id, attempt, error_str);
-                        return Err(Status::internal(format!("Failed to delete ublk device after retries: {}", error_str)));
+                        println!("❌ [CLEANUP] Failed to disconnect NVMe device {} after {} attempts: {}", volume_nqn, attempt, error_str);
+                        return Err(Status::internal(format!("Failed to disconnect NVMe device after retries: {}", error_str)));
                     } else {
-                        println!("⚠️ [CLEANUP] Attempt {} failed for ublk device {}: {}. Retrying...", attempt, ublk_id, error_str);
+                        println!("⚠️ [CLEANUP] Attempt {} failed for NVMe device {}: {}. Retrying...", attempt, volume_nqn, error_str);
                         // Sleep between retries
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
@@ -1120,95 +503,8 @@ impl NodeService {
         Ok(())
     }
 
-    /// Add a listener for the specific connection address to fix listener access control
-    async fn add_listener_for_connection(
-        &self,
-        target_node_name: Option<&str>,
-        subsystem_nqn: &str,
-        target_ip: &str,
-        target_port: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔐 Adding listener to subsystem: {} for connection {}:{} (transport: {})", 
-                 subsystem_nqn, target_ip, target_port, self.driver.nvmeof_transport);
-        
-        // Get the target node's RPC URL
-        let target_rpc_url = if let Some(node_name) = target_node_name {
-            self.driver.get_rpc_url_for_node(node_name).await
-                .map_err(|e| format!("Failed to get RPC URL for node {}: {}", node_name, e))?
-        } else {
-            return Err("Target node name not provided for dynamic listener addition".into());
-        };
-
-        // Determine address family based on transport and IP
-        let adrfam = Self::determine_address_family(&self.driver.nvmeof_transport, target_ip)?;
-
-        let add_listener_payload = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": subsystem_nqn,
-                "listen_address": {
-                    "trtype": self.driver.nvmeof_transport.to_uppercase(),
-                    "traddr": target_ip,  // Use the specific IP that the client is connecting to
-                    "trsvcid": target_port,
-                    "adrfam": adrfam
-                }
-            }
-        });
-        
-        let response = call_spdk_rpc(&target_rpc_url, &add_listener_payload).await
-            .map_err(|e| format!("Failed to call SPDK RPC: {}", e))?;
-        
-        // Check for SPDK RPC errors
-        if let Some(error) = response.get("error") {
-            let error_str = error.to_string();
-            
-            // Handle "already exists" as success
-            if error_str.contains("already exists") || error_str.contains("Listener already exists") {
-                println!("🔐 Listener already exists for this address (acceptable)");
-                return Ok(());
-            } else {
-                return Err(format!("Failed to add listener to subsystem: {}", error_str).into());
-            }
-        }
-        
-        println!("🔐 Successfully added listener to subsystem");
-        Ok(())
-    }
-
-    /// Determine the appropriate address family for NVMe-oF transport
-    fn determine_address_family(transport: &str, target_addr: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        match transport.to_lowercase().as_str() {
-            "tcp" => {
-                // TCP transport: determine IPv4 vs IPv6
-                if target_addr.contains(':') && !target_addr.starts_with('[') {
-                    // Simple IPv6 detection (more sophisticated parsing could be added)
-                    Ok("ipv6".to_string())
-                } else {
-                    Ok("ipv4".to_string())
-                }
-            }
-            "rdma" => {
-                // RDMA transport: could be IB, RoCE (IPv4/IPv6), or iWARP
-                if target_addr.contains(':') && !target_addr.starts_with('[') {
-                    Ok("ipv6".to_string()) // RoCE v2 over IPv6
-                } else if target_addr.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                    Ok("ipv4".to_string()) // RoCE v2 over IPv4 or iWARP
-                } else {
-                    // InfiniBand GID or other IB addressing
-                    Ok("ib".to_string())
-                }
-            }
-            "fc" => {
-                // Fibre Channel
-                Ok("fc".to_string())
-            }
-            _ => {
-                // Default to IPv4 for unknown transports
-                println!("⚠️ Unknown transport '{}', defaulting to IPv4", transport);
-                Ok("ipv4".to_string())
-            }
-        }
-    }
+    // REMOVED: add_listener_for_connection - unused method
+    // REMOVED: determine_address_family - unused method
 }
 
 #[tonic::async_trait]
@@ -1241,26 +537,36 @@ impl Node for NodeService {
         // Update scheduling status
         self.update_volume_scheduling_status(&volume_id, true).await?;
 
-        // Create RAID1 bdev if this is a multi-replica volume
-        if volume.spec.num_replicas > 1 {
-            self.create_raid1_bdev_for_volume(&volume).await?;
-        }
+        // Note: RAID disk creation is now handled at the controller level during volume provisioning
+        // No need to create RAID at node level - we just connect to the pre-created volume
 
-        // Connect to the target device using ublk (instead of NVMe-oF loopback)
+        // Connect to the target device using NVMe connect
         let device_path = self.connect_to_target_device(&volume).await?;
 
-        // Update volume status with ublk device info
-        println!("🔍 [DEBUG] NodeStageVolume: Updating volume status with ublk device info");
-        let ublk_id = self.driver.generate_ublk_id(&volume_id);
-        let ublk_device = UblkDevice {
-            id: ublk_id,
-            device_path: device_path.clone(),
-            created_at: Utc::now().to_rfc3339(),
-            node: self.driver.node_id.clone(),
-        };
-        println!("🔍 [DEBUG] NodeStageVolume: Created ublk_device: {:?}", ublk_device);
+        // Update volume status with NVMe device info
+        println!("🔍 [DEBUG] NodeStageVolume: Updating volume status with NVMe device info");
+        let volume_nqn = self.driver.generate_nqn(&volume_id);
         
-        self.update_volume_ublk_status(&volume_id, Some(ublk_device)).await?;
+        // Extract connection details from the actual device
+        let nvme_device = if let Ok(device) = self.driver.find_existing_nvme_connection(&volume_nqn).await {
+            device
+        } else {
+            // Fallback: create basic device info
+            NvmeClientDevice {
+                device_path: device_path.clone(),
+                nqn: volume_nqn.clone(),
+                transport: self.driver.nvmeof_transport.clone(),
+                target_addr: "localhost".to_string(),
+                target_port: self.driver.nvmeof_target_port,
+                connected_at: Utc::now().to_rfc3339(),
+                node: self.driver.node_id.clone(),
+                controller_id: None,
+            }
+        };
+        
+        println!("🔍 [DEBUG] NodeStageVolume: Created nvme_device: {:?}", nvme_device);
+        
+        self.update_volume_nvme_status(&volume_id, Some(nvme_device)).await?;
         println!("✅ [SUCCESS] NodeStageVolume: Volume status updated successfully");
 
         // For filesystem volumes, format and mount
@@ -1318,10 +624,10 @@ impl Node for NodeService {
             println!("⚠️ [UNSTAGE] Unmount warning (non-fatal): {}", e);
         }
 
-        // Step 2: Always clean up ublk device first (idempotent - works even if CRD is gone)
-        println!("🧹 [UNSTAGE] Cleaning up ublk device for volume: {}", volume_id);
-        if let Err(e) = self.cleanup_ublk_device(&volume_id).await {
-            println!("⚠️ [UNSTAGE] ublk cleanup warning (non-fatal): {}", e);
+        // Step 2: Always clean up NVMe device first (idempotent - works even if CRD is gone)
+        println!("🧹 [UNSTAGE] Cleaning up NVMe device for volume: {}", volume_id);
+        if let Err(e) = self.cleanup_nvme_device(&volume_id).await {
+            println!("⚠️ [UNSTAGE] NVMe cleanup warning (non-fatal): {}", e);
             // Continue with other cleanup - don't fail the unstage operation
         }
 
@@ -1344,10 +650,10 @@ impl Node for NodeService {
                     println!("⚠️ [UNSTAGE] Status update warning (non-fatal): {}", e);
                 }
 
-                // Step 6: Clear ublk device status
-                println!("📝 [UNSTAGE] Step 6: Clearing ublk device status");
-                if let Err(e) = self.update_volume_ublk_status(&volume_id, None).await {
-                    println!("⚠️ [UNSTAGE] ublk status clear warning (non-fatal): {}", e);
+                // Step 6: Clear NVMe device status
+                println!("📝 [UNSTAGE] Step 6: Clearing NVMe device status");
+                if let Err(e) = self.update_volume_nvme_status(&volume_id, None).await {
+                    println!("⚠️ [UNSTAGE] NVMe status clear warning (non-fatal): {}", e);
                 }
             }
             Err(e) => {
@@ -1697,13 +1003,13 @@ impl Node for NodeService {
 // Helper functions for the NodeService
 impl NodeService {
 
-    // Add method to update ublk device status
-    async fn update_volume_ublk_status(
+    // Add method to update NVMe device status  
+    async fn update_volume_nvme_status(
         &self,
         volume_id: &str,
-        ublk_device: Option<UblkDevice>,
+        nvme_device: Option<NvmeClientDevice>,
     ) -> Result<(), Status> {
-        println!("🔍 [DEBUG] Starting update_volume_ublk_status for volume: {}", volume_id);
+        println!("🔍 [DEBUG] Starting update_volume_nvme_status for volume: {}", volume_id);
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         // Get current volume
@@ -1725,8 +1031,8 @@ impl NodeService {
         });
         
         println!("🔍 [DEBUG] Current status state before update: '{}'", status.state);
-        status.ublk_device = ublk_device.clone();
-        println!("🔍 [DEBUG] Updated ublk_device: {:?}", ublk_device);
+        status.nvme_device = nvme_device.clone();
+        println!("🔍 [DEBUG] Updated nvme_device: {:?}", nvme_device);
         
         // Patch the status
         let patch = json!({ "status": status });

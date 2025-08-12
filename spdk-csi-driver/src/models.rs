@@ -7,6 +7,112 @@ use chrono::{DateTime, Utc};
 use uuid;
 
 // ============================================================================
+// SPDK RAID DISK RELATED STRUCTURES  
+// ============================================================================
+
+#[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkRaidDisk", plural = "spdkraiddisks")]
+#[kube(namespaced)]
+#[kube(status = "SpdkRaidDiskStatus")]
+pub struct SpdkRaidDiskSpec {
+    pub raid_disk_id: String,                    // Unique identifier for this RAID disk
+    pub raid_level: String,                      // "1" for RAID1, "0" for RAID0, etc.
+    pub num_member_disks: i32,                   // Number of member disks required
+    pub member_disks: Vec<RaidMemberDisk>,       // List of member disks
+    pub stripe_size_kb: u32,                     // RAID stripe size in KB
+    pub superblock_enabled: bool,                // Whether RAID superblock is enabled
+    pub created_on_node: String,                 // Node where RAID was initially created
+    pub min_capacity_bytes: i64,                 // Minimum usable capacity
+    pub auto_rebuild: bool,                      // Enable automatic rebuild on failure
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct RaidMemberDisk {
+    pub member_index: u32,                       // Position in RAID array (0, 1, 2...)
+    pub disk_ref: String,                        // Reference to SpdkDisk CRD (local or remote)
+    pub node_id: String,                         // Node where this member disk is accessed from
+    
+    // Member disk status
+    pub state: RaidMemberState,                  // online, degraded, failed, rebuilding
+    pub capacity_bytes: i64,                     // Member disk capacity
+    pub connected: bool,                         // Whether member is currently connected
+    pub last_health_check: Option<String>,       // Last health check timestamp
+}
+
+// MemberDiskType enum removed - member disks are now just references to SpdkDisk CRDs
+// The SpdkDisk CRD itself contains the disk type (local or remote)
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct SpdkRaidDiskStatus {
+    pub state: String,                           // creating, online, degraded, failed, rebuilding
+    pub raid_bdev_name: Option<String>,          // SPDK RAID bdev name
+    pub lvs_name: Option<String>,                // LVS created on this RAID disk
+    pub lvs_uuid: Option<String>,                // LVS UUID
+    pub total_capacity_bytes: i64,               // Total RAID capacity
+    pub usable_capacity_bytes: i64,              // Available capacity for volumes
+    pub used_capacity_bytes: i64,                // Capacity used by volumes
+    pub health_status: String,                   // healthy, degraded, failed
+    pub degraded: bool,                          // Whether RAID is in degraded state
+    pub rebuild_progress: Option<f64>,           // Rebuild progress percentage (0.0-100.0)
+    pub active_member_count: u32,                // Number of active members
+    pub failed_member_count: u32,                // Number of failed members
+    pub last_checked: String,                    // Last health check timestamp
+    pub created_at: Option<String>,              // When RAID disk was created
+    pub raid_status: Option<RaidStatus>,         // Detailed RAID status from SPDK
+}
+
+impl SpdkRaidDisk {
+    /// Create a new SpdkRaidDisk with metadata
+    pub fn new_with_metadata(name: &str, spec: SpdkRaidDiskSpec, namespace: &str) -> Self {
+        use kube::api::ObjectMeta;
+        
+        SpdkRaidDisk {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+}
+
+impl SpdkRaidDiskSpec {
+    /// Generate LVS name for this RAID disk
+    /// Format: lvs_raid_{raid_disk_id}
+    pub fn lvs_name(&self) -> String {
+        format!("lvs_raid_{}", self.raid_disk_id)
+    }
+    
+    /// Generate RAID bdev name for SPDK
+    /// Format: raid_{raid_disk_id}
+    pub fn raid_bdev_name(&self) -> String {
+        format!("raid_{}", self.raid_disk_id)
+    }
+    
+    /// Check if this RAID disk can accommodate a volume of given size
+    pub fn can_accommodate_volume(&self, required_bytes: i64, current_status: &SpdkRaidDiskStatus) -> bool {
+        current_status.state == "online" &&
+        !current_status.degraded &&
+        (current_status.usable_capacity_bytes - current_status.used_capacity_bytes) >= required_bytes
+    }
+    
+    /// Get all member disks - they are all just references to SpdkDisk CRDs now
+    /// The actual disk type (local/remote) is determined by looking up the SpdkDisk CRD
+    pub fn get_all_members(&self) -> &Vec<RaidMemberDisk> {
+        &self.member_disks
+    }
+    
+    /// Get member disk references that need to be looked up
+    pub fn get_member_disk_refs(&self) -> Vec<&str> {
+        self.member_disks.iter()
+            .map(|member| member.disk_ref.as_str())
+            .collect()
+    }
+}
+
+// ============================================================================
 // SPDK VOLUME RELATED STRUCTURES
 // ============================================================================
 
@@ -18,15 +124,113 @@ pub struct SpdkVolumeSpec {
     pub volume_id: String,
     pub size_bytes: i64,
     pub num_replicas: i32,
+    
+    // Unified storage backend reference (either single disk or RAID disk)
+    pub storage_backend: StorageBackend,
+    
+    // Logical volume information (same for both single and multi-replica)
+    pub lvol_uuid: Option<String>,              // UUID of the logical volume 
+    pub lvs_name: Option<String>,               // Name of the LVS containing this volume
+    
+    // NVMe-oF configuration (same for both single and multi-replica)
+    pub nvmeof_transport: Option<String>,
+    pub nvmeof_target_port: Option<u16>,
+    
+    // Legacy replica-based architecture (deprecated, for backward compatibility during migration)
     pub replicas: Vec<Replica>,
     pub primary_lvol_uuid: Option<String>,
     pub write_ordering_enabled: bool,
     pub raid_auto_rebuild: bool,
-    pub nvmeof_transport: Option<String>,
-    pub nvmeof_target_port: Option<u16>,
+    
     // Scheduling and optimization fields
     pub scheduling_policy: Option<String>,
     pub preferred_nodes: Option<Vec<String>>,
+}
+
+/// Unified storage backend - can be either a single disk or a RAID disk
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StorageBackend {
+    /// Single replica volume on a single disk
+    SingleDisk {
+        disk_ref: String,                       // Reference to SpdkDisk CRD
+        node_id: String,                        // Node where disk is located
+    },
+    /// Multi-replica volume on a RAID disk  
+    RaidDisk {
+        raid_disk_ref: String,                  // Reference to SpdkRaidDisk CRD
+        node_id: String,                        // Node where RAID disk is created
+    },
+}
+
+impl Default for StorageBackend {
+    fn default() -> Self {
+        StorageBackend::SingleDisk {
+            disk_ref: String::new(),
+            node_id: String::new(),
+        }
+    }
+}
+
+impl StorageBackend {
+    /// Get the node ID where this storage backend is located
+    pub fn node_id(&self) -> &str {
+        match self {
+            StorageBackend::SingleDisk { node_id, .. } => node_id,
+            StorageBackend::RaidDisk { node_id, .. } => node_id,
+        }
+    }
+    
+    /// Get the storage backend reference (either disk_ref or raid_disk_ref)
+    pub fn backend_ref(&self) -> &str {
+        match self {
+            StorageBackend::SingleDisk { disk_ref, .. } => disk_ref,
+            StorageBackend::RaidDisk { raid_disk_ref, .. } => raid_disk_ref,
+        }
+    }
+    
+    /// Check if this is a RAID-based storage backend
+    pub fn is_raid(&self) -> bool {
+        matches!(self, StorageBackend::RaidDisk { .. })
+    }
+    
+    /// Check if this is a single disk storage backend
+    pub fn is_single_disk(&self) -> bool {
+        matches!(self, StorageBackend::SingleDisk { .. })
+    }
+}
+
+impl SpdkVolumeSpec {
+    /// Get the LVS name for this volume based on its storage backend
+    pub fn get_lvs_name(&self) -> String {
+        // If explicitly set, use that
+        if let Some(lvs_name) = &self.lvs_name {
+            return lvs_name.clone();
+        }
+        
+        // Otherwise, generate based on storage backend
+        match &self.storage_backend {
+            StorageBackend::SingleDisk { disk_ref, .. } => {
+                // For single disk, use the disk's LVS name format
+                // This would be generated by SpdkDisk::lvs_name()
+                format!("lvs_{}", disk_ref) // Simplified - in reality we'd look up the actual disk
+            }
+            StorageBackend::RaidDisk { raid_disk_ref, .. } => {
+                // For RAID disk, use the RAID disk's LVS name format
+                format!("lvs_raid_{}", raid_disk_ref)
+            }
+        }
+    }
+    
+    /// Check if this volume is backed by a RAID disk (multi-replica)
+    pub fn is_multi_replica(&self) -> bool {
+        self.num_replicas > 1 || self.storage_backend.is_raid()
+    }
+    
+    /// Check if this volume is backed by a single disk  
+    pub fn is_single_replica(&self) -> bool {
+        self.num_replicas <= 1 && self.storage_backend.is_single_disk()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
@@ -96,8 +300,12 @@ pub struct SpdkVolumeStatus {
     pub raid_status: Option<RaidStatus>,
     pub nvmeof_targets: Vec<NvmeofTarget>,
     
-    // Add ublk device information
+    // Add ublk device information (deprecated - use nvme_device instead)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ublk_device: Option<UblkDevice>,
+    
+    // New NVMe client device information (replaces ublk_device)
+    pub nvme_device: Option<NvmeClientDevice>,
     
     // Existing scheduling and optimization tracking fields
     pub scheduled_node: Option<String>,
@@ -122,6 +330,7 @@ impl Default for SpdkVolumeStatus {
             raid_status: None,
             nvmeof_targets: Vec::new(),
             ublk_device: None,
+            nvme_device: None,
             scheduled_node: None,
             has_local_replica: false,
             scheduling_policy: None,
@@ -133,13 +342,26 @@ impl Default for SpdkVolumeStatus {
     }
 }
 
-// Add new struct for ublk device information
+// Add new struct for ublk device information (legacy - being replaced)
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct UblkDevice {
     pub id: u32,
     pub device_path: String,
     pub created_at: String,
     pub node: String,
+}
+
+// New struct for NVMe client device information (replaces ublk)
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct NvmeClientDevice {
+    pub device_path: String,        // e.g., "/dev/nvme1n1"
+    pub nqn: String,               // NVMe Qualified Name for connection
+    pub transport: String,         // "tcp" or "rdma"
+    pub target_addr: String,       // Target IP address
+    pub target_port: u16,          // Target port
+    pub connected_at: String,      // ISO 8601 timestamp
+    pub node: String,              // Node where device was connected
+    pub controller_id: Option<String>, // NVMe controller ID (e.g., "nvme1")
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
@@ -205,137 +427,163 @@ pub struct RaidRebuildInfo {
 #[kube(namespaced)]
 #[kube(status = "SpdkDiskStatus")]
 pub struct SpdkDiskSpec {
-    // Location-dependent fields (can change when disk moves) - similar to Portworx node attachment
-    pub node_id: String,        // Current node where disk is located
-    pub device_path: String,    // Current device path (e.g., /dev/nvme1n1)
-    pub pcie_addr: String,      // Current PCIe address
+    // Disk type and location
+    pub disk_type: DiskType,                     // Local or Remote
+    pub node_id: String,                         // Node where disk is hosted (for local) or accessed from (for remote)
     
-    // Immutable disk identification (Portworx-style hardware identification)
-    pub disk_id: String,        // Hardware disk ID (/dev/disk/by-id/ path)
-    pub serial_number: String,  // NVMe serial number (primary identifier)
-    pub wwn: Option<String>,    // World Wide Name if available
-    pub model: String,          // Disk model
-    pub vendor: String,         // Disk vendor
+    // NVMe-oF endpoint information (populated by SPDK for local, configured for remote)
+    pub nvmeof_target: NvmeofEndpoint,           // NVMe-oF target information for this disk
     
-    // Flint disk metadata (with cluster safety for NVMe-oF scenarios)  
-    pub cluster_id: Option<String>,      // Kubernetes cluster this disk belongs to (CRITICAL for security)
-    pub disk_uuid: Option<String>,       // Flint internal disk UUID (PRIMARY identifier, stored in blobstore)
-    pub pool_uuid: Option<String>,       // Storage pool UUID
-    pub first_attached_node: Option<String>, // Node that first initialized this disk
-    pub initialized_at: Option<String>,  // When disk joined the cluster
+    // Physical disk fields (only for local disks)
+    pub device_path: Option<String>,             // Local device path (e.g., /dev/nvme1n1) - local only
+    pub pcie_addr: Option<String>,               // PCIe address - local only
+    
+    // Immutable disk identification
+    pub disk_id: String,                         // Unique disk identifier (hardware ID for local, endpoint ID for remote)
+    pub serial_number: Option<String>,           // NVMe serial number (local only)
+    pub wwn: Option<String>,                     // World Wide Name if available
+    pub model: Option<String>,                   // Disk model (local only)
+    pub vendor: Option<String>,                  // Disk vendor (local only)
+    
+    // Flint disk metadata (common for both local and remote)
+    pub cluster_id: Option<String>,              // Kubernetes cluster this disk belongs to (CRITICAL for security)
+    pub disk_uuid: Option<String>,               // Flint internal disk UUID (PRIMARY identifier)
+    pub pool_uuid: Option<String>,               // Storage pool UUID
+    pub first_attached_node: Option<String>,     // Node that first initialized this disk
+    pub initialized_at: Option<String>,          // When disk joined the cluster
     
     // Storage configuration
-    pub size: String,           // Disk size
+    pub size_bytes: i64,                         // Disk size in bytes
     pub blobstore_uuid: Option<String>,
-    pub nvme_controller_id: Option<String>,
     
     // Disk health and status (for failure detection and recovery)
-    pub status: Option<String>,           // online, offline, failed, missing, degraded
-    pub last_seen: Option<String>,        // Last successful discovery timestamp
-    pub health_status: Option<String>,    // healthy, warning, critical
-    pub failure_reason: Option<String>,   // Reason for failure/offline status
+    pub status: Option<String>,                  // online, offline, failed, missing, degraded
+    pub last_seen: Option<String>,               // Last successful discovery timestamp
+    pub health_status: Option<String>,           // healthy, warning, critical
+    pub failure_reason: Option<String>,          // Reason for failure/offline status
+}
+
+/// Disk type - Local physical disk or Remote NVMe-oF disk
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskType {
+    /// Local physical NVMe disk with SPDK-created NVMe-oF target
+    Local,
+    /// Remote disk accessible via NVMe-oF endpoint
+    Remote,
+}
+
+impl Default for DiskType {
+    fn default() -> Self {
+        DiskType::Local
+    }
+}
+
+/// NVMe-oF endpoint information for disk access
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
+pub struct NvmeofEndpoint {
+    pub nqn: String,                             // NVMe Qualified Name
+    pub target_addr: String,                     // Target IP address
+    pub target_port: u16,                        // Target port
+    pub transport: String,                       // Transport protocol (tcp/rdma)
+    pub created_at: Option<String>,              // When target was created (for local disks)
+    pub active: bool,                            // Whether target is currently active
+}
+
+impl Default for NvmeofEndpoint {
+    fn default() -> Self {
+        NvmeofEndpoint {
+            nqn: String::new(),
+            target_addr: String::new(),
+            target_port: 4420,  // Default NVMe-oF port
+            transport: "tcp".to_string(),
+            created_at: None,
+            active: false,
+        }
+    }
 }
 
 impl SpdkDiskSpec {
-    /// Get the LVS name for this disk (legacy method for compatibility)
-    /// Uses cluster metadata if available, falls back to hardware ID
+    /// Get the simplified LVS name for this disk
+    /// Format: lvs_{virtual_uuid} where virtual_uuid is a unique identifier
     pub fn lvs_name(&self) -> String {
-        if let Some(disk_uuid) = &self.disk_uuid {
-            // Use stored disk UUID from cluster metadata (preferred)
-            format!("flint_{}", disk_uuid)
-        } else {
-            // Fallback: generate from hardware serial number (like Portworx does)
-            let safe_serial = self.serial_number
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>();
-            format!("flint_{}", safe_serial)
-        }
+        let virtual_uuid = self.generate_virtual_uuid();
+        format!("lvs_{}", virtual_uuid)
     }
     
-    /// Generate LVS name with embedded disk UUID and cluster ID (OPTIMIZED APPROACH)
-    /// Encodes full disk UUID + shortened cluster ID for perfect disk identification
-    /// Format: lvs_{32_char_disk_uuid}_{8_char_cluster_id} (45 chars total, well under 63 limit)
-    pub fn lvs_name_with_cluster(&self, cluster_id: &str) -> String {
-        match (&self.disk_uuid, &self.cluster_id) {
-            (Some(disk_uuid), Some(_)) => {
-                // Use FULL disk UUID (32 hex chars, no hyphens) for perfect identification
-                let disk_full = disk_uuid.replace("-", "");
-                
-                // Use first 8 hex chars of cluster ID (sufficient for cluster distinction)
-                let cluster_short = cluster_id.replace("-", "")
-                    .chars()
-                    .take(8)
-                    .collect::<String>();
-                    
-                let lvs_name = format!("lvs_{}_{}", disk_full, cluster_short);
-                
-                // Validate length constraint (should be ~45 chars, well under 63)
-                if lvs_name.len() > 63 {
-                    panic!("LVS name exceeds 63 character limit: {} (length: {})", lvs_name, lvs_name.len());
+    /// Generate a virtual UUID for this SPDK disk (local or remote)
+    /// This UUID uniquely identifies the logical storage unit
+    pub fn generate_virtual_uuid(&self) -> String {
+        use sha2::{Sha256, Digest};
+        
+        let identifier_base = if let Some(disk_uuid) = &self.disk_uuid {
+            // Use existing disk UUID if available
+            disk_uuid.clone()
+        } else {
+            // Generate based on disk type
+            match self.disk_type {
+                DiskType::Local => {
+                    // For local disks, use hardware properties
+                    format!("{}-{}-{}-{}", 
+                        self.serial_number.as_deref().unwrap_or("unknown"),
+                        self.model.as_deref().unwrap_or("unknown"),
+                        self.vendor.as_deref().unwrap_or("unknown"),
+                        self.disk_id
+                    )
                 }
-                
-                println!("🔧 [LVS_NAME] Generated: {} (len: {}, disk: full, cluster: 8-char)", 
-                         lvs_name, lvs_name.len());
-                
-                lvs_name
+                DiskType::Remote => {
+                    // For remote disks, use NVMe-oF endpoint info
+                    format!("remote-{}-{}:{}", 
+                        self.nvmeof_target.nqn,
+                        self.nvmeof_target.target_addr,
+                        self.nvmeof_target.target_port
+                    )
+                }
             }
-            _ => {
-                // Fallback for uninitialized disks or missing cluster info
-                self.lvs_name() // Uses existing serial-based naming
+        };
+        
+        // Create a deterministic hash to ensure consistent UUIDs
+        let hash = Sha256::digest(identifier_base.as_bytes());
+        format!("{:x}", hash)[..8].to_string() // Use first 8 chars of hash
+    }
+    
+    /// Check if this is a local disk
+    pub fn is_local(&self) -> bool {
+        self.disk_type == DiskType::Local
+    }
+    
+    /// Check if this is a remote disk
+    pub fn is_remote(&self) -> bool {
+        self.disk_type == DiskType::Remote
+    }
+    
+    /// Get the NVMe-oF connection information for this disk
+    pub fn nvmeof_connection_info(&self) -> &NvmeofEndpoint {
+        &self.nvmeof_target
+    }
+    
+    /// Check if the disk's NVMe-oF target is active and ready
+    pub fn is_nvmeof_target_ready(&self) -> bool {
+        self.nvmeof_target.active && !self.nvmeof_target.nqn.is_empty()
+    }
+    
+    /// Get a human-readable description of this disk
+    pub fn description(&self) -> String {
+        match self.disk_type {
+            DiskType::Local => {
+                format!("Local disk {} ({})", 
+                    self.device_path.as_deref().unwrap_or("unknown"), 
+                    self.model.as_deref().unwrap_or("unknown")
+                )
+            }
+            DiskType::Remote => {
+                format!("Remote disk {}:{} ({})", 
+                    self.nvmeof_target.target_addr, 
+                    self.nvmeof_target.target_port,
+                    self.nvmeof_target.nqn
+                )
             }
         }
-    }
-    
-    /// Parse disk UUID and cluster ID from encoded LVS name (OPTIMIZED)
-    /// Returns (full_disk_uuid, cluster_id_prefix) for perfect disk matching
-    pub fn parse_lvs_name(lvs_name: &str) -> Option<(String, String)> {
-        if !lvs_name.starts_with("lvs_") {
-            return None;
-        }
-        
-        let parts: Vec<&str> = lvs_name[4..].split('_').collect();
-        if parts.len() != 2 || parts[0].len() != 32 || parts[1].len() != 8 {
-            return None;
-        }
-        
-        // Return full disk UUID (32 chars) and cluster prefix (8 chars)
-        let full_disk_uuid = format!("{}-{}-{}-{}-{}", 
-                                     &parts[0][0..8],   // 8 chars
-                                     &parts[0][8..12],  // 4 chars  
-                                     &parts[0][12..16], // 4 chars
-                                     &parts[0][16..20], // 4 chars
-                                     &parts[0][20..32]  // 12 chars
-        );
-        
-        Some((full_disk_uuid, parts[1].to_string()))
-    }
-    
-    /// Check if this disk's UUID matches the full UUID from LVS name (OPTIMIZED)
-    pub fn matches_disk_uuid_full(&self, uuid_from_lvs: &str) -> bool {
-        if let Some(disk_uuid) = &self.disk_uuid {
-            *disk_uuid == uuid_from_lvs
-        } else {
-            false
-        }
-    }
-    
-    /// Check if cluster ID matches the prefix from LVS name
-    pub fn matches_cluster_prefix(&self, cluster_prefix: &str) -> bool {
-        if let Some(cluster_id) = &self.cluster_id {
-            let cluster_short = cluster_id.replace("-", "")
-                .chars()
-                .take(8)
-                .collect::<String>();
-            cluster_short == cluster_prefix
-        } else {
-            false
-        }
-    }
-    
-    /// Generate a hardware-based disk identifier (similar to Portworx disk ID)
-    pub fn generate_hardware_disk_id(&self) -> String {
-        format!("{}-{}", self.vendor, self.serial_number)
     }
     
     /// Generate deterministic disk UUID from immutable hardware properties
@@ -357,14 +605,20 @@ impl SpdkDiskSpec {
     
     /// Update location-dependent fields when disk moves to a different node
     /// Similar to Portworx node attachment updates
-    pub fn update_location(&mut self, node_id: String, device_path: String, pcie_addr: String, nvme_controller_id: Option<String>) {
-        println!("🔄 [DISK_MOVE] Disk {} moving from node {} to node {}", 
-                 self.serial_number, self.node_id, node_id);
-        
-        self.node_id = node_id;
-        self.device_path = device_path;
-        self.pcie_addr = pcie_addr;
-        self.nvme_controller_id = nvme_controller_id;
+    /// Update location for local disks (when they move between nodes)
+    pub fn update_location(&mut self, node_id: String, device_path: String, pcie_addr: String) {
+        if self.disk_type == DiskType::Local {
+            println!("🔄 [DISK_MOVE] Local disk {} moving from node {} to node {}", 
+                     self.serial_number.as_deref().unwrap_or("unknown"), 
+                     self.node_id, 
+                     node_id);
+            
+            self.node_id = node_id;
+            self.device_path = Some(device_path);
+            self.pcie_addr = Some(pcie_addr);
+        } else {
+            println!("⚠️ [DISK_MOVE] Cannot update location for remote disk - not applicable");
+        }
     }
     
     /// Initialize disk for Flint usage with cluster protection

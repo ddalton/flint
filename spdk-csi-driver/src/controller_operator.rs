@@ -455,7 +455,7 @@ async fn update_replica_after_replacement(
     new_spec.replicas[failed_replica_index] = Replica {
         node: replacement_disk.spec.node_id.clone(),
         replica_type: if failed_replica_index == 0 { "primary".to_string() } else { "secondary".to_string() },
-        pcie_addr: Some(replacement_disk.spec.pcie_addr.clone()),
+        pcie_addr: replacement_disk.spec.pcie_addr.clone(),
         disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
         lvol_uuid: Some(lvol_uuid),
         nqn: Some(format!("nqn.2025-05.io.spdk:lvol-{}", new_lvol_bdev.replace('/', "-"))),

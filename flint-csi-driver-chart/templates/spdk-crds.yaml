@@ -187,43 +187,79 @@ spec:
           spec:
             type: object
             required:
-            - device_path
+            - disk_type
             - node_id
-            - size
-            - pcie_addr
+            - nvmeof_target
             - disk_id
-            - serial_number
-            - model
-            - vendor
+            - size_bytes
             properties:
-              # Location-dependent fields (can change when disk moves)
-              device_path:
+              # Core disk type and access method
+              disk_type:
                 type: string
-                description: "Current path to the device (e.g., /dev/nvme1n1)"
+                enum: ["local", "remote"]
+                description: "Type of disk: local physical disk or remote NVMe-oF disk"
               node_id:
                 type: string
-                description: "Current Kubernetes node name where the disk is located"
+                description: "Node where disk is hosted (local) or accessed from (remote)"
+              nvmeof_target:
+                type: object
+                required:
+                - nqn
+                - target_addr
+                - target_port
+                - transport
+                - active
+                properties:
+                  nqn:
+                    type: string
+                    description: "NVMe Qualified Name"
+                  target_addr:
+                    type: string
+                    description: "Target IP address"
+                  target_port:
+                    type: integer
+                    description: "Target port number"
+                  transport:
+                    type: string
+                    description: "Transport protocol (tcp/rdma)"
+                  created_at:
+                    type: string
+                    nullable: true
+                    description: "When target was created (for local disks)"
+                  active:
+                    type: boolean
+                    description: "Whether target is currently active"
+              
+              # Physical disk fields (optional - only for local disks)
+              device_path:
+                type: string
+                nullable: true
+                description: "Local device path (e.g., /dev/nvme1n1) - local disks only"
               pcie_addr:
                 type: string
-                description: "Current PCIe address of the NVMe device (e.g., 0000:00:1f.0)"
+                nullable: true
+                description: "PCIe address (e.g., 0000:00:1f.0) - local disks only"
               
-              # Immutable disk identification (Portworx-style hardware identification)
+              # Immutable disk identification
               disk_id:
                 type: string
-                description: "Hardware disk ID from /dev/disk/by-id/ (e.g., nvme-Samsung_SSD_970_EVO_Plus_1TB_S4EWNX0R123456)"
+                description: "Unique disk identifier (hardware ID for local, endpoint ID for remote)"
               serial_number:
                 type: string
-                description: "NVMe serial number (primary hardware identifier)"
+                nullable: true
+                description: "NVMe serial number (local disks only)"
               wwn:
                 type: string
                 nullable: true
                 description: "World Wide Name if available"
               model:
                 type: string
-                description: "Disk model"
+                nullable: true
+                description: "Disk model (local disks only)"
               vendor:
                 type: string
-                description: "Disk vendor"
+                nullable: true
+                description: "Disk vendor (local disks only)"
               
               # Flint disk metadata (with cluster safety for NVMe-oF scenarios)
               cluster_id:
@@ -247,18 +283,15 @@ spec:
                 nullable: true
                 description: "When disk joined the cluster (ISO 8601)"
               
-              # Other fields
-              size:
-                type: string
-                description: "Size of the disk (e.g., 1000GB)"
+              # Storage configuration
+              size_bytes:
+                type: integer
+                format: int64
+                description: "Disk size in bytes"
               blobstore_uuid:
                 type: string
                 nullable: true
                 description: "UUID of the SPDK blobstore on this disk"
-              nvme_controller_id:
-                type: string
-                nullable: true
-                description: "NVMe controller ID (e.g., nvme1n1)"
               status:
                 type: string
                 nullable: true
@@ -420,4 +453,145 @@ spec:
     plural: spdksnapshots
     singular: spdksnapshot
     kind: SpdkSnapshot
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: spdkraiddisks.flint.csi.storage.io
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  group: flint.csi.storage.io
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required:
+            - raid_disk_id
+            - raid_level
+            - num_member_disks
+            - member_disks
+            - created_on_node
+            - min_capacity_bytes
+            properties:
+              raid_disk_id:
+                type: string
+                description: "Unique identifier for this RAID disk"
+              raid_level:
+                type: string
+                enum: ["raid1"]
+                description: "RAID level (currently only RAID1 supported)"
+              num_member_disks:
+                type: integer
+                minimum: 2
+                description: "Number of member disks in the RAID"
+              member_disks:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - disk_ref
+                  - node_id
+                  - state
+                  - capacity_bytes
+                  - connected
+                  properties:
+                    disk_ref:
+                      type: string
+                      description: "Reference to SpdkDisk CRD"
+                    node_id:
+                      type: string
+                      description: "Node ID where member disk is located"
+                    state:
+                      type: string
+                      enum: ["active", "failed", "rebuilding", "degraded"]
+                      description: "Current state of the member disk"
+                    capacity_bytes:
+                      type: integer
+                      format: int64
+                      description: "Member disk capacity in bytes"
+                    connected:
+                      type: boolean
+                      description: "Whether member disk is currently connected"
+                    last_health_check:
+                      type: string
+                      nullable: true
+                      description: "Last health check timestamp"
+                description: "Array of member disks in the RAID"
+              stripe_size_kb:
+                type: integer
+                default: 64
+                description: "RAID stripe size in KB"
+              superblock_enabled:
+                type: boolean
+                default: true
+                description: "Whether RAID superblock is enabled"
+              created_on_node:
+                type: string
+                description: "Node where RAID disk was created"
+              min_capacity_bytes:
+                type: integer
+                format: int64
+                description: "Minimum capacity of member disks in bytes"
+              auto_rebuild:
+                type: boolean
+                default: true
+                description: "Whether automatic rebuild is enabled"
+          status:
+            type: object
+            properties:
+              state:
+                type: string
+                enum: ["online", "degraded", "failed", "rebuilding"]
+                description: "Overall RAID disk state"
+              active_members:
+                type: integer
+                description: "Number of currently active member disks"
+              total_capacity:
+                type: integer
+                format: int64
+                description: "Total usable capacity in bytes"
+              used_space:
+                type: integer
+                format: int64
+                description: "Used space in bytes"
+              free_space:
+                type: integer
+                format: int64
+                description: "Free space in bytes"
+              blobstore_initialized:
+                type: boolean
+                description: "Whether blobstore is initialized on RAID disk"
+              last_rebuild:
+                type: string
+                nullable: true
+                description: "Last rebuild timestamp"
+    additionalPrinterColumns:
+    - name: State
+      type: string
+      description: Current RAID state
+      jsonPath: .status.state
+    - name: Members
+      type: string
+      description: Active/Total members
+      jsonPath: .status.active_members
+    - name: Capacity
+      type: string
+      description: Total capacity
+      jsonPath: .status.total_capacity
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: spdkraiddisks
+    singular: spdkraiddisk
+    kind: SpdkRaidDisk
 {{- end }} 

@@ -35,28 +35,7 @@ struct SpdkBdevDetails {
 }
 // --- End of New API Response Structs ---
 
-// Volume validation result structures
-#[derive(Debug, Clone)]
-struct SpdkVolumeInfo {
-    name: String,
-    node: String,
-    lvs_name: String,
-    num_blocks: u64,
-    uuid: String,
-}
-
-#[derive(Debug, Clone)]
-struct PhantomVolumeInfo {
-    volume_id: String,
-    expected_node: String,
-    expected_lvol_uuid: String,
-}
-
-#[derive(Debug, Clone)]
-struct VolumeValidationResult {
-    orphaned_spdk_volumes: Vec<SpdkVolumeInfo>,
-    phantom_k8s_volumes: Vec<PhantomVolumeInfo>,
-}
+// Volume validation result structures - REMOVED: unused structs
 
 // SPDK validation status for frontend display
 #[derive(Serialize, Debug, Clone)]
@@ -70,10 +49,7 @@ struct SpdkValidationStatus {
 enum ValidationSeverity {
     #[serde(rename = "info")]
     Info,
-    #[serde(rename = "warning")] 
-    Warning,
-    #[serde(rename = "error")]
-    Error,
+    // REMOVED: Warning and Error variants - unused
 }
 
 // Enhanced dashboard API response types with NVMe-oF instead of vhost
@@ -283,7 +259,7 @@ struct DeleteOrphanedVolumeRequest {
     node: String,
     volume_name: String,  // Can be UUID or alias of the logical volume
     volume_uuid: String,
-    reason: Option<String>, // Optional reason for deletion
+    // REMOVED: reason field - unused
 }
 
 #[derive(Serialize, Debug)]
@@ -1070,7 +1046,7 @@ fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> Da
     DashboardDisk {
         id: disk.metadata.name.clone().unwrap_or_default(),
         node: spec.node_id.clone(),
-        pci_addr: spec.pcie_addr.clone(),
+        pci_addr: spec.pcie_addr.clone().unwrap_or_default(),
         capacity: status.total_capacity,
         capacity_gb: status.total_capacity / (1024 * 1024 * 1024),
         allocated_space: status.used_space,
@@ -1282,57 +1258,7 @@ async fn enhance_with_spdk_metrics(
     Ok(())
 }
 
-/// Apply validation results to dashboard volumes and disks for frontend display
-async fn apply_validation_results_to_dashboard(
-    volumes: &mut [DashboardVolume],
-    disks: &mut [DashboardDisk],
-    validation_result: &VolumeValidationResult,
-) {
-    println!("🔄 [SPDK_VALIDATION] Applying validation results to dashboard data");
-    
-    // Update phantom volumes (K8s exists, SPDK missing)
-    for phantom in &validation_result.phantom_k8s_volumes {
-        for volume in volumes.iter_mut() {
-            if volume.id == phantom.volume_id {
-                volume.spdk_validation_status = SpdkValidationStatus {
-                    has_spdk_backing: false,
-                    validation_message: Some(format!(
-                        "⚠️ Volume exists in Kubernetes but no SPDK backing found on node '{}'", 
-                        phantom.expected_node
-                    )),
-                    validation_severity: ValidationSeverity::Error,
-                };
-                println!("🔴 [SPDK_VALIDATION] Marked volume '{}' as phantom (no SPDK backing)", volume.id);
-                break;
-            }
-        }
-    }
-    
-    // Update disk orphaned volumes (SPDK exists, K8s missing)
-    for disk in disks.iter_mut() {
-        let orphans_on_disk: Vec<OrphanedVolumeInfo> = validation_result.orphaned_spdk_volumes
-            .iter()
-            .filter(|orphan| orphan.node == disk.node)
-            .map(|orphan| OrphanedVolumeInfo {
-                spdk_volume_name: orphan.name.clone(),
-                spdk_volume_uuid: orphan.uuid.clone(),
-                size_blocks: orphan.num_blocks,
-                size_gb: (orphan.num_blocks * 512) as f64 / (1024.0 * 1024.0 * 1024.0), // Assuming 512-byte blocks
-                orphaned_since: chrono::Utc::now().to_rfc3339(),
-            })
-            .collect();
-        
-        if !orphans_on_disk.is_empty() {
-            disk.orphaned_spdk_volumes = orphans_on_disk;
-            println!("🟡 [SPDK_VALIDATION] Added {} orphaned volumes to disk '{}' on node '{}'", 
-                disk.orphaned_spdk_volumes.len(), disk.id, disk.node);
-        }
-    }
-    
-    println!("✅ [SPDK_VALIDATION] Applied validation results: {} phantom volumes, {} orphaned volumes", 
-        validation_result.phantom_k8s_volumes.len(), 
-        validation_result.orphaned_spdk_volumes.len());
-}
+// REMOVED: apply_validation_results_to_dashboard function - unused
 
 /// Get raw SPDK logical volumes from all nodes
 async fn get_raw_spdk_volumes(

@@ -1,5 +1,6 @@
 // controller.rs - Controller service implementation
 use std::sync::Arc;
+// Removed unused imports: HashMap, Mutex
 use crate::driver::SpdkCsiDriver;
 use crate::csi_snapshotter::*;
 use spdk_csi_driver::csi::{
@@ -11,6 +12,7 @@ use kube::{Api, api::{PatchParams, Patch, PostParams, ListParams}};
 use reqwest::Client as HttpClient;
 use serde_json::json;
 use spdk_csi_driver::models::*;
+use crate::node::call_spdk_rpc;
 
 pub struct ControllerService {
     driver: Arc<SpdkCsiDriver>,
@@ -39,7 +41,340 @@ impl ControllerService {
         Ok(count)
     }
 
-    /// Provision volume with specified number of replicas - enhanced with validation
+    // ============================================================================
+    // UNIFIED VOLUME PROVISIONING (Single and Multi-Replica)
+    // ============================================================================
+
+    /// Provision a single replica volume on a single disk
+    async fn provision_single_replica_volume(
+        &self,
+        volume_id: &str,
+        capacity: i64,
+    ) -> Result<(StorageBackend, String, String), Status> {
+        // Find an available single disk
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let available_disks = self.get_available_disks(&disks, capacity).await?;
+        
+        if available_disks.is_empty() {
+            return Err(Status::resource_exhausted("No available disks for single replica volume"));
+        }
+        
+        // Select the best disk (first available)
+        let selected_disk = &available_disks[0];
+        
+        // Create logical volume on the selected disk's LVS
+        let lvol_uuid = self.create_volume_lvol(selected_disk, capacity, volume_id).await
+            .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
+        
+        // Get the LVS name for this disk
+        let lvs_name = selected_disk.spec.lvs_name();
+        
+        // Create storage backend reference
+        let storage_backend = StorageBackend::SingleDisk {
+            disk_ref: selected_disk.metadata.name.clone().unwrap_or_default(),
+            node_id: selected_disk.spec.node_id.clone(),
+        };
+        
+        println!("✅ [SINGLE_VOLUME] Created single replica volume {} on disk {} (node {})", 
+                 volume_id, selected_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), selected_disk.spec.node_id);
+        
+        Ok((storage_backend, lvol_uuid, lvs_name))
+    }
+
+    /// Provision a multi-replica volume on a RAID disk
+    async fn provision_multi_replica_volume(
+        &self,
+        volume_id: &str,
+        capacity: i64,
+        num_replicas: i32,
+    ) -> Result<(StorageBackend, String, String), Status> {
+        // Find or create a suitable RAID disk
+        let raid_disk = self.find_or_create_raid_disk(num_replicas, capacity).await?;
+        
+        // Create logical volume on the RAID disk's LVS
+        let lvol_uuid = self.create_volume_lvol_on_raid(&raid_disk, capacity, volume_id).await?;
+        
+        // Get the LVS name for this RAID disk
+        let lvs_name = raid_disk.spec.lvs_name();
+        
+        // Create storage backend reference
+        let storage_backend = StorageBackend::RaidDisk {
+            raid_disk_ref: raid_disk.metadata.name.clone().unwrap_or_default(),
+            node_id: raid_disk.spec.created_on_node.clone(),
+        };
+        
+        println!("✅ [MULTI_VOLUME] Created multi-replica volume {} on RAID disk {} (node {})", 
+                 volume_id, raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), raid_disk.spec.created_on_node);
+        
+        Ok((storage_backend, lvol_uuid, lvs_name))
+    }
+
+    /// Create logical volume on a RAID disk (same interface as single disk)
+    async fn create_volume_lvol_on_raid(
+        &self,
+        raid_disk: &SpdkRaidDisk,
+        capacity: i64,
+        volume_id: &str,
+    ) -> Result<String, Status> {
+        let target_node = &raid_disk.spec.created_on_node;
+        let node_ip = self.driver.get_node_ip(target_node).await?;
+        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+        let lvs_name = raid_disk.spec.lvs_name();
+
+        // Create logical volume on the RAID disk's LVS (same RPC as single disk)
+        let response = call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_lvol_create",
+            "params": {
+                "lvol_name": volume_id,
+                "size": capacity,
+                "lvs_name": lvs_name
+            }
+        })).await
+        .map_err(|e| Status::internal(format!("Failed to create lvol on RAID disk: {}", e)))?;
+
+        let lvol_uuid = response["uuid"].as_str()
+            .ok_or_else(|| Status::internal("SPDK response missing lvol UUID"))?
+            .to_string();
+
+        println!("✅ [RAID_LVOL] Created lvol {} (UUID: {}) on RAID disk LVS {}", volume_id, lvol_uuid, lvs_name);
+        Ok(lvol_uuid)
+    }
+
+    // ============================================================================
+    // RAID DISK MANAGEMENT (Only for Multi-Replica)
+    // ============================================================================
+
+    /// Find or create a suitable RAID disk for multi-replica volume
+    async fn find_or_create_raid_disk(
+        &self,
+        num_replicas: i32,
+        required_capacity: i64,
+    ) -> Result<SpdkRaidDisk, Status> {
+        // First, try to find an existing RAID disk that can accommodate the volume
+        if let Ok(existing_raid) = self.find_suitable_raid_disk(num_replicas, required_capacity).await {
+            return Ok(existing_raid);
+        }
+
+        // If no suitable RAID disk exists, create a new one
+        self.create_new_raid_disk(num_replicas, required_capacity).await
+    }
+
+    /// Find an existing RAID disk that can accommodate a volume of given size
+    async fn find_suitable_raid_disk(
+        &self,
+        num_replicas: i32,
+        required_capacity: i64,
+    ) -> Result<SpdkRaidDisk, Status> {
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let raid_disk_list = raid_disks.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list SpdkRaidDisks: {}", e)))?;
+
+        for raid_disk in raid_disk_list.items {
+            // Check if this RAID disk matches our requirements
+            if raid_disk.spec.num_member_disks == num_replicas &&
+               raid_disk.spec.raid_level == "1" && // Support RAID1 for now
+               raid_disk.status.as_ref().map_or(false, |status| {
+                   raid_disk.spec.can_accommodate_volume(required_capacity, status)
+               }) {
+                return Ok(raid_disk);
+            }
+        }
+
+        Err(Status::not_found("No suitable RAID disk found"))
+    }
+
+    /// Create a new RAID disk from available member disks
+    async fn create_new_raid_disk(
+        &self,
+        num_replicas: i32,
+        required_capacity: i64,
+    ) -> Result<SpdkRaidDisk, Status> {
+        // Find available disks for creating RAID
+        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let available_disks = self.get_available_disks(&disks, required_capacity).await?;
+
+        // Validate we have enough disks
+        if available_disks.len() < num_replicas as usize {
+            return Err(Status::resource_exhausted(format!(
+                "Not enough available disks: need {}, found {}",
+                num_replicas, available_disks.len()
+            )));
+        }
+
+        // Select disks with node separation for fault tolerance
+        let selected_disks = self.select_disks_with_node_separation(available_disks, num_replicas as usize)?;
+        
+        // Create RAID disk ID
+        let raid_disk_id = uuid::Uuid::new_v4().to_string();
+        
+        // Create member disk specifications - just references to SpdkDisk CRDs
+        let mut member_disks = Vec::new();
+        for (index, disk) in selected_disks.iter().enumerate() {
+            let member_disk = RaidMemberDisk {
+                member_index: index as u32,
+                disk_ref: disk.metadata.name.clone().unwrap_or_default(),
+                node_id: disk.spec.node_id.clone(),
+                state: RaidMemberState::Online,
+                capacity_bytes: disk.status.as_ref().map(|s| s.total_capacity).unwrap_or(0),
+                connected: true,
+                last_health_check: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            member_disks.push(member_disk);
+        }
+
+        // Create SpdkRaidDisk CRD
+        let raid_disk_spec = SpdkRaidDiskSpec {
+            raid_disk_id: raid_disk_id.clone(),
+            raid_level: "1".to_string(), // RAID1 for now
+            num_member_disks: num_replicas,
+            member_disks,
+            stripe_size_kb: 64,
+            superblock_enabled: true,
+            created_on_node: selected_disks[0].spec.node_id.clone(), // Create on first node
+            min_capacity_bytes: required_capacity,
+            auto_rebuild: true,
+        };
+
+        let raid_disk = SpdkRaidDisk::new_with_metadata(
+            &raid_disk_id,
+            raid_disk_spec,
+            &self.driver.target_namespace,
+        );
+
+        // Create the RAID disk CRD
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let created_raid_disk = raid_disks.create(&PostParams::default(), &raid_disk).await
+            .map_err(|e| Status::internal(format!("Failed to create SpdkRaidDisk CRD: {}", e)))?;
+
+        println!("✅ [RAID_CREATE] Created RAID disk: {}", raid_disk_id);
+        
+        // Create the actual RAID bdev on the target node
+        self.create_raid_bdev_on_node(&created_raid_disk).await?;
+        
+        // Create LVS on the RAID disk
+        self.create_lvs_on_raid_disk(&created_raid_disk).await?;
+
+        Ok(created_raid_disk)
+    }
+
+    /// Create the actual RAID bdev on the specified node using SPDK RPC
+    async fn create_raid_bdev_on_node(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
+        let target_node = &raid_disk.spec.created_on_node;
+        let node_ip = self.driver.get_node_ip(target_node).await?;
+        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+
+        // Connect to remote NVMe-oF member disks first (if any)
+        for member in raid_disk.spec.get_all_members() {
+            // Get the referenced SpdkDisk to check if it's remote
+            let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+            let disk = disks.get(&member.disk_ref).await
+                .map_err(|e| Status::internal(format!("Failed to get member disk {}: {}", member.disk_ref, e)))?;
+            
+            if disk.spec.is_remote() {
+                // Connect to remote NVMe-oF endpoint
+                let endpoint = &disk.spec.nvmeof_target;
+                self.driver.connect_nvme_device(
+                    &endpoint.nqn, 
+                    &endpoint.target_addr, 
+                    endpoint.target_port, 
+                    &endpoint.transport, 
+                    &format!("member_{}", member.member_index)
+                ).await
+                .map_err(|e| Status::internal(format!("Failed to connect to remote member disk: {}", e)))?;
+            }
+        }
+
+        // Collect base bdev names for RAID creation
+        let mut base_bdevs = Vec::new();
+        for member in &raid_disk.spec.member_disks {
+            // Get the referenced SpdkDisk to determine its type and LVS name
+            let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+            let disk = disks.get(&member.disk_ref).await
+                .map_err(|e| Status::internal(format!("Failed to get SpdkDisk {}: {}", member.disk_ref, e)))?;
+            
+            // For both local and remote disks, we use the LVS name as the base bdev
+            // The LVS is either on the local disk or exposed via NVMe-oF from remote disk
+            let bdev_name = disk.spec.lvs_name();
+            base_bdevs.push(bdev_name);
+        }
+
+        let base_bdevs_str = base_bdevs.join(" ");
+        let raid_bdev_name = raid_disk.spec.raid_bdev_name();
+
+        // Create RAID bdev using SPDK RPC
+        call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_raid_create",
+            "params": {
+                "name": raid_bdev_name,
+                "raid_level": raid_disk.spec.raid_level,
+                "base_bdevs": base_bdevs_str,
+                "strip_size_kb": raid_disk.spec.stripe_size_kb,
+                "superblock": raid_disk.spec.superblock_enabled
+            }
+        })).await
+        .map_err(|e| Status::internal(format!("Failed to create RAID bdev: {}", e)))?;
+
+        println!("✅ [RAID_BDEV] Created RAID bdev '{}' on node {}", raid_bdev_name, target_node);
+        Ok(())
+    }
+
+    /// Create LVS on the RAID disk
+    async fn create_lvs_on_raid_disk(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
+        let target_node = &raid_disk.spec.created_on_node;
+        let node_ip = self.driver.get_node_ip(target_node).await?;
+        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+
+        let raid_bdev_name = raid_disk.spec.raid_bdev_name();
+        let lvs_name = raid_disk.spec.lvs_name();
+
+        // Create LVS on the RAID bdev
+        call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_lvol_create_lvstore",
+            "params": {
+                "bdev_name": raid_bdev_name,
+                "lvs_name": lvs_name
+            }
+        })).await
+        .map_err(|e| Status::internal(format!("Failed to create LVS on RAID disk: {}", e)))?;
+
+        println!("✅ [LVS_RAID] Created LVS '{}' on RAID disk {}", lvs_name, raid_disk.spec.raid_disk_id);
+
+        // Update RAID disk status with LVS information
+        self.update_raid_disk_status(raid_disk, &lvs_name).await?;
+
+        Ok(())
+    }
+
+    /// Update RAID disk status after successful LVS creation
+    async fn update_raid_disk_status(&self, raid_disk: &SpdkRaidDisk, lvs_name: &str) -> Result<(), Status> {
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        let mut status = raid_disk.status.clone().unwrap_or_default();
+        status.state = "online".to_string();
+        status.raid_bdev_name = Some(raid_disk.spec.raid_bdev_name());
+        status.lvs_name = Some(lvs_name.to_string());
+        status.health_status = "healthy".to_string();
+        status.degraded = false;
+        status.active_member_count = raid_disk.spec.num_member_disks as u32;
+        status.failed_member_count = 0;
+        status.last_checked = chrono::Utc::now().to_rfc3339();
+        status.created_at = Some(chrono::Utc::now().to_rfc3339());
+
+        let patch = json!({
+            "status": status
+        });
+
+        raid_disks.patch_status(
+            &raid_disk.metadata.name.as_ref().unwrap(),
+            &PatchParams::default(),
+            &Patch::Merge(patch)
+        ).await
+        .map_err(|e| Status::internal(format!("Failed to update RAID disk status: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Provision volume with specified number of replicas - unified for single and multi-replica
     async fn provision_volume(
         &self,
         volume_id: &str,
@@ -49,25 +384,32 @@ impl ControllerService {
         // Validate inputs
         self.validate_volume_request(volume_id, capacity, num_replicas).await?;
         
-        let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        let available_disks = self.get_available_disks(&disks, capacity).await?;
+        // Unified storage backend selection and logical volume creation
+        let (storage_backend, lvol_uuid, lvs_name) = if num_replicas > 1 {
+            // Multi-replica: Use or create RAID disk, then create logical volume on it
+            self.provision_multi_replica_volume(volume_id, capacity, num_replicas).await?
+        } else {
+            // Single replica: Use single disk, create logical volume on it  
+            self.provision_single_replica_volume(volume_id, capacity).await?
+        };
 
-        // Enhanced validation with better error messages
-        self.validate_disk_availability(&available_disks, capacity, num_replicas).await?;
-
-        let selected_disks = self.select_disks_with_node_separation(available_disks, num_replicas as usize)?;
-        let replicas = self.create_replicas(&selected_disks, capacity, volume_id).await?;
-
+        // Create unified SpdkVolume spec (same structure for both single and multi-replica)
         let spdk_volume = SpdkVolume::new_with_metadata(
             volume_id,
             SpdkVolumeSpec {
                 volume_id: volume_id.to_string(),
                 size_bytes: capacity,
                 num_replicas,
-                replicas: replicas.clone(),
-                raid_auto_rebuild: num_replicas > 1,
+                storage_backend,
+                lvol_uuid: Some(lvol_uuid),
+                lvs_name: Some(lvs_name),
                 nvmeof_transport: Some(self.driver.nvmeof_transport.clone()),
                 nvmeof_target_port: Some(self.driver.nvmeof_target_port),
+                // Legacy fields for backward compatibility (empty for new volumes)
+                replicas: Vec::new(),
+                primary_lvol_uuid: None,
+                write_ordering_enabled: false,
+                raid_auto_rebuild: num_replicas > 1,
                 ..Default::default()
             },
             &self.driver.target_namespace,
@@ -81,7 +423,7 @@ impl ControllerService {
         println!("   Volume ID: {}", spdk_volume.spec.volume_id);
         println!("   Namespace: {}", self.driver.target_namespace);
         println!("   Size: {} bytes", spdk_volume.spec.size_bytes);
-        println!("   Replicas count: {}", spdk_volume.spec.replicas.len());
+        println!("   Storage Backend: {:?}", spdk_volume.spec.storage_backend);
         
         // Serialize to JSON for debugging
         match serde_json::to_string_pretty(&spdk_volume) {
@@ -117,8 +459,7 @@ impl ControllerService {
                             // Update our return value to the existing volume
                             let compatible_volume = existing_volume;
                             
-                            // Still update disk statuses for consistency
-                            self.update_disk_statuses(&disks, &selected_disks, capacity, 1).await?;
+                            // Note: Disk status updates are handled during volume provisioning
                             return Ok(compatible_volume);
                         } else {
                             println!("❌ [CRD_DEBUG] Existing SpdkVolume is incompatible:");
@@ -157,7 +498,7 @@ impl ControllerService {
         }
 
         // Update disk statuses
-        self.update_disk_statuses(&disks, &selected_disks, capacity, 1).await?;
+        // Note: Disk status updates are handled during storage backend provisioning
 
         Ok(spdk_volume)
     }
@@ -229,66 +570,7 @@ impl ControllerService {
         Ok(())
     }
 
-    /// Validate disk availability and capacity
-    async fn validate_disk_availability(
-        &self,
-        available_disks: &[SpdkDisk],
-        capacity: i64,
-        num_replicas: i32,
-    ) -> Result<(), Status> {
-        if available_disks.is_empty() {
-            return Err(Status::resource_exhausted(
-                "No healthy disks available for volume provisioning"
-            ));
-        }
-
-        if available_disks.len() < num_replicas as usize {
-            return Err(Status::resource_exhausted(
-                format!(
-                    "Insufficient healthy disks: need {}, found {} available", 
-                    num_replicas, 
-                    available_disks.len()
-                )
-            ));
-        }
-
-        // Check if any disk has sufficient capacity
-        let disks_with_capacity = available_disks.iter()
-            .filter(|disk| {
-                disk.status.as_ref().map_or(false, |status| status.free_space >= capacity)
-            })
-            .count();
-
-        if disks_with_capacity < num_replicas as usize {
-            return Err(Status::resource_exhausted(
-                format!(
-                    "Insufficient disk capacity: need {} disks with {}GB each, found {} disks with sufficient space",
-                    num_replicas,
-                    capacity / (1024 * 1024 * 1024),
-                    disks_with_capacity
-                )
-            ));
-        }
-
-        // For multi-replica, validate node distribution is possible
-        if num_replicas > 1 {
-            let unique_nodes: std::collections::HashSet<_> = available_disks.iter()
-                .map(|disk| &disk.spec.node_id)
-                .collect();
-
-            if unique_nodes.len() < num_replicas as usize {
-                return Err(Status::resource_exhausted(
-                    format!(
-                        "Cannot achieve node separation: need {} nodes, found {} nodes with available disks",
-                        num_replicas,
-                        unique_nodes.len()
-                    )
-                ));
-            }
-        }
-
-        Ok(())
-    }
+    // REMOVED: validate_disk_availability - unused in simplified architecture
 
     /// Enhanced disk selection with better node separation logic
     fn select_disks_with_node_separation(
@@ -348,43 +630,7 @@ impl ControllerService {
             .collect())
     }
 
-    async fn create_replicas(&self, disks: &[SpdkDisk], capacity: i64, volume_id: &str) -> Result<Vec<Replica>, Status> {
-        let mut replicas = Vec::new();
-
-        for (i, disk) in disks.iter().enumerate() {
-            let lvol_uuid = self.create_volume_lvol(disk, capacity, volume_id).await
-                .map_err(|e| Status::internal(format!("Failed to create lvol: {}", e)))?;
-
-            let node_ip = self.driver.get_node_ip(&disk.spec.node_id).await?;
-            let nqn = format!("nqn.2025-05.io.spdk:volume-{}-replica-{}", volume_id, i);
-            
-            // NOTE: NVMe-oF targets are now created on-demand during node staging
-            // based on specific rules:
-            // - Single replica volumes: Only when pod runs on different node than replica
-            // - Multi-replica volumes: Only for remote replica members in RAID bdev
-            println!("✅ [REPLICA_CREATE] Created logical volume replica on node {}: {}", disk.spec.node_id, lvol_uuid);
-            println!("📋 [REPLICA_CREATE] NVMe-oF target will be created on-demand during pod staging if needed");
-
-            let replica = Replica {
-                node: disk.spec.node_id.clone(),
-                replica_type: if i == 0 { "primary".to_string() } else { "secondary".to_string() },
-                pcie_addr: Some(disk.spec.pcie_addr.clone()),
-                disk_ref: disk.metadata.name.clone().unwrap_or_default(),
-                lvol_uuid: Some(lvol_uuid),
-                nqn: Some(nqn),
-                ip: Some(node_ip),
-                port: Some(self.driver.nvmeof_target_port.to_string()),
-                raid_member_index: i,
-                health_status: ReplicaHealth::Healthy,
-                raid_member_state: RaidMemberState::Online,
-                ..Default::default()
-            };
-
-            replicas.push(replica);
-        }
-
-        Ok(replicas)
-    }
+    // REMOVED: create_replicas - replaced by unified RAID disk provisioning
 
     async fn create_volume_lvol(
         &self,
@@ -667,20 +913,7 @@ impl ControllerService {
         ].into_iter().collect()
     }
 
-    /// Get the actual LVS name from the SpdkDisk CRD status
-    async fn get_actual_lvs_name(&self, disk_ref: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        
-        let disk = spdk_disks.get(disk_ref).await?;
-        
-        if let Some(status) = &disk.status {
-            if let Some(lvs_name) = &status.lvs_name {
-                return Ok(lvs_name.clone());
-            }
-        }
-        
-        Err(format!("No LVS name found in status for disk {}", disk_ref).into())
-    }
+    // REMOVED: get_actual_lvs_name - LVS names are now deterministic with lvs_uuid format
 }
 
 #[tonic::async_trait]
