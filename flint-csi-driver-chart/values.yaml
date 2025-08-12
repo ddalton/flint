@@ -188,16 +188,18 @@ nodeResources:
       hugepages-2Mi: "1Gi"
     # CPU pinning configuration for optimal performance
     # Pin SPDK to a specific CPU core to minimize involuntary context switches
+    # Uses SPDK's native --cpumask parameter for proper reactor configuration
     # 
     # Recommended values:
     #   1: Pin to CPU core 1 (default, avoids core 0 which handles interrupts)
     #   2, 3, etc.: Pin to specific core if you have >2 CPU cores
     #   -1: Disable CPU pinning (not recommended for production)
     #
-    # Benefits of CPU pinning:
-    #   - Eliminates involuntary context switches
+    # Benefits of SPDK native CPU pinning:
+    #   - Eliminates involuntary context switches (should see 0 involuntary switches)
     #   - Reduces latency and improves consistent performance
     #   - Better cache locality for SPDK reactor threads
+    #   - Proper DPDK EAL core assignment
     cpuCore: 1
   
   # CSI Driver Container - Lightweight CSI protocol handler
