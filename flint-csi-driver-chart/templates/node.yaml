@@ -46,7 +46,7 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" }}
+            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" "schedulingPolicy" "disableRtThrottling" }}
             {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: hugepages
@@ -160,7 +160,7 @@ spec:
                 - SYS_ADMIN
                 - SYS_RAWIO
           resources:
-            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" }}
+            {{- $resources := omit .Values.nodeResources.spdkTarget "cpuCore" "schedulingPolicy" "disableRtThrottling" }}
             {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: hugepages
