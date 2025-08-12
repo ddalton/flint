@@ -386,9 +386,12 @@ async fn get_rpc_url_for_node(
     client: &Client,
     node_name: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // If operator runs in the same Pod and targets the local node, prefer localhost
+    let local_node = std::env::var("NODE_ID").unwrap_or_default();
+    // Operator is not a DaemonSet; always use HTTP to reach the node-agent sidecar
+
     let pods_api: Api<Pod> = Api::all(client.clone());
     let lp = ListParams::default().labels("app=flint-csi-node");
-
     for pod in pods_api.list(&lp).await? {
         if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
             if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {

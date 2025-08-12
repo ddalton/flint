@@ -117,8 +117,7 @@ impl ControllerService {
         volume_id: &str,
     ) -> Result<String, Status> {
         let target_node = &raid_disk.spec.created_on_node;
-        let node_ip = self.driver.get_node_ip(target_node).await?;
-        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
         let lvs_name = raid_disk.spec.lvs_name();
 
         // Create logical volume on the RAID disk's LVS (same RPC as single disk)
@@ -260,8 +259,7 @@ impl ControllerService {
     /// Create the actual RAID bdev on the specified node using SPDK RPC
     async fn create_raid_bdev_on_node(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
         let target_node = &raid_disk.spec.created_on_node;
-        let node_ip = self.driver.get_node_ip(target_node).await?;
-        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
 
         // Connect to ALL member disks via NVMe-oF (both local and remote)
         // RAID bdev members MUST be NVMe-oF bdevs regardless of disk location
@@ -346,8 +344,7 @@ impl ControllerService {
     /// Create LVS on the RAID disk
     async fn create_lvs_on_raid_disk(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
         let target_node = &raid_disk.spec.created_on_node;
-        let node_ip = self.driver.get_node_ip(target_node).await?;
-        let spdk_rpc_url = format!("http://{}:9009", node_ip);
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
 
         let raid_bdev_name = raid_disk.spec.raid_bdev_name();
         let lvs_name = raid_disk.spec.lvs_name();

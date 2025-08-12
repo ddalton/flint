@@ -27,8 +27,13 @@ pub struct SpdkCsiDriver {
 impl SpdkCsiDriver {
     /// Gets the SPDK RPC URL for a specific node by finding the 'node_agent' pod
     pub async fn get_rpc_url_for_node(&self, node_name: &str) -> Result<String, Status> {
-        let mut cache = self.spdk_node_urls.lock().await;
+        // If this driver runs in the same Pod as node-agent, prefer localhost
+        if node_name == self.node_id {
+            // Always prefer unix socket for the local node
+            return Ok(std::env::var("SPDK_RPC_URL").unwrap_or_else(|_| "unix:///var/tmp/spdk.sock".to_string()));
+        }
 
+        let mut cache = self.spdk_node_urls.lock().await;
         if let Some(url) = cache.get(node_name) {
             return Ok(url.clone());
         }
@@ -36,22 +41,28 @@ impl SpdkCsiDriver {
         println!("Discovering flint-csi-node pod for node '{}'...", node_name);
         let pods_api: Api<Pod> = Api::all(self.kube_client.clone());
         let lp = kube::api::ListParams::default().labels("app=flint-csi-node");
-
-        let pods = pods_api.list(&lp).await
+        let pods = pods_api
+            .list(&lp)
+            .await
             .map_err(|e| Status::internal(format!("Failed to list flint-csi-node pods: {}", e)))?;
 
         for pod in pods {
             let pod_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref());
             let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref());
-
             if let (Some(p_node), Some(p_ip)) = (pod_node, pod_ip) {
+                // For remote nodes, we still cache an HTTP proxy endpoint in case consumers need it.
+                // But callers should prefer the local unix socket when node matches.
                 let url = format!("http://{}:8081/api/spdk/rpc", p_ip);
                 cache.insert(p_node.to_string(), url);
             }
         }
 
-        cache.get(node_name).cloned()
-            .ok_or_else(|| Status::not_found(format!("Could not find flint-csi-node pod on node '{}'", node_name)))
+        cache.get(node_name).cloned().ok_or_else(|| {
+            Status::not_found(format!(
+                "Could not resolve SPDK RPC endpoint for node '{}'",
+                node_name
+            ))
+        })
     }
 
     /// Get node IP address from Kubernetes API

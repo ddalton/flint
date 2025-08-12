@@ -95,10 +95,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Detect the namespace for custom resources
     let target_namespace = get_current_namespace().await?;
     
+    // Use Unix domain socket for SPDK RPC by default
+    let default_spdk_rpc = "unix:///var/tmp/spdk.sock".to_string();
+
     let driver = Arc::new(SpdkCsiDriver {
         node_id: node_id.clone(),
         kube_client,
-        spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or("unix:///var/tmp/spdk.sock".to_string()),
+        spdk_rpc_url: std::env::var("SPDK_RPC_URL").unwrap_or(default_spdk_rpc),
         spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
