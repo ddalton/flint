@@ -211,6 +211,12 @@ nodeResources:
     # Warning: "realtime" requires careful system tuning to avoid blocking other processes
     # Recommended: Start with "high", upgrade to "realtime" if needed
     schedulingPolicy: "high"
+    
+    # Advanced: Disable RT throttling for absolute zero context switches
+    # Only use with "realtime" scheduling policy
+    # WARNING: Can cause system unresponsiveness if misconfigured
+    # Requires: Careful monitoring and isolated CPU cores
+    disableRtThrottling: false
   
   # CSI Driver Container - Lightweight CSI protocol handler
   flintCsiDriver:

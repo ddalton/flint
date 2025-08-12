@@ -136,6 +136,13 @@ SPDK_SCHED_POLICY=${SPDK_SCHED_POLICY:-realtime}\n\
 \n\
 if [ "$SPDK_SCHED_POLICY" = "realtime" ]; then\n\
     echo "Using FIFO real-time scheduling (priority 50) to eliminate context switches"\n\
+    \n\
+    # Optional: Disable RT throttling for zero context switches (requires privileged container)\n\
+    if [ "${SPDK_DISABLE_RT_THROTTLE:-false}" = "true" ]; then\n\
+        echo "Disabling RT throttling for absolute zero context switches (WARNING: Advanced feature)"\n\
+        echo -1 > /proc/sys/kernel/sched_rt_runtime_us 2>/dev/null || echo "Failed to disable RT throttling - need privileged container"\n\
+    fi\n\
+    \n\
     exec chrt -f 50 /usr/local/bin/spdk_tgt \\\n\
         -r /var/tmp/spdk.sock \\\n\
         -L all \\\n\

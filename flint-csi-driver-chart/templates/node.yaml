@@ -35,6 +35,10 @@ spec:
             {{- end }}
             - name: SPDK_SCHED_POLICY
               value: "{{ .Values.nodeResources.spdkTarget.schedulingPolicy | default "high" }}"
+            {{- if and (eq (.Values.nodeResources.spdkTarget.schedulingPolicy | default "high") "realtime") (.Values.nodeResources.spdkTarget.disableRtThrottling) }}
+            - name: SPDK_DISABLE_RT_THROTTLE
+              value: "true"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
@@ -145,6 +149,10 @@ spec:
             {{- end }}
             - name: SPDK_SCHED_POLICY
               value: "{{ .Values.nodeResources.spdkTarget.schedulingPolicy | default "high" }}"
+            {{- if and (eq (.Values.nodeResources.spdkTarget.schedulingPolicy | default "high") "realtime") (.Values.nodeResources.spdkTarget.disableRtThrottling) }}
+            - name: SPDK_DISABLE_RT_THROTTLE
+              value: "true"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
