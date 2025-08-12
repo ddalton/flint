@@ -201,6 +201,16 @@ nodeResources:
     #   - Better cache locality for SPDK reactor threads
     #   - Proper DPDK EAL core assignment
     cpuCore: 1
+    
+    # Scheduling policy to eliminate involuntary context switches
+    # Options:
+    #   "realtime": Use FIFO real-time scheduling (priority 50) - ELIMINATES context switches
+    #   "high": Use high priority normal scheduling (nice -10) - REDUCES context switches  
+    #   "default": Use default CFS scheduling - ALLOWS context switches
+    # 
+    # Warning: "realtime" requires careful system tuning to avoid blocking other processes
+    # Recommended: Start with "high", upgrade to "realtime" if needed
+    schedulingPolicy: "high"
   
   # CSI Driver Container - Lightweight CSI protocol handler
   flintCsiDriver:

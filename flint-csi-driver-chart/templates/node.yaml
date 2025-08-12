@@ -33,6 +33,8 @@ spec:
             - name: SPDK_CPU_CORE
               value: "{{ .Values.nodeResources.spdkTarget.cpuCore | default 1 }}"
             {{- end }}
+            - name: SPDK_SCHED_POLICY
+              value: "{{ .Values.nodeResources.spdkTarget.schedulingPolicy | default "high" }}"
           securityContext:
             privileged: true
             capabilities:
@@ -141,6 +143,8 @@ spec:
             - name: SPDK_CPU_CORE
               value: "{{ .Values.nodeResources.spdkTarget.cpuCore | default 1 }}"
             {{- end }}
+            - name: SPDK_SCHED_POLICY
+              value: "{{ .Values.nodeResources.spdkTarget.schedulingPolicy | default "high" }}"
           securityContext:
             privileged: true
             capabilities:
