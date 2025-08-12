@@ -1377,7 +1377,13 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                     }
                 }
                 
-                    println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_crd_name);
+                    // ADDED: Create raw disk NVMe-oF target for potential RAID membership
+                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
+                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
+                    // Don't fail the entire initialization if raw target creation fails
+                }
+                    
+                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_crd_name);
                     return Ok(());
                 } else {
                     println!("🔍 [SPDK_INIT] No existing LVS found on bdev '{}', will create new one: {}", bdev_name, lvs_name);
@@ -1455,6 +1461,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                     },
                                 }
                 
+                // ADDED: Create raw disk NVMe-oF target for potential RAID membership
+                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
+                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
+                    // Don't fail the entire initialization if raw target creation fails
+                }
+                
                 println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_crd_name);
                             } else {
                                 let error_msg = format!("File exists error but our LVS '{}' not found", lvs_name);
@@ -1513,6 +1525,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
                                     },
                                 }
                 
+                // ADDED: Create raw disk NVMe-oF target for potential RAID membership
+                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
+                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
+                    // Don't fail the entire initialization if raw target creation fails
+                }
+                
                 println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_crd_name);
                             } else {
                                 let error_msg = format!("Operation not permitted but our LVS '{}' not found - bdev might be claimed by different LVS", lvs_name);
@@ -1558,6 +1576,12 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
             }
             
             println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_crd_name);
+            
+            // ADDED: Create raw disk NVMe-oF target for potential RAID membership
+            if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
+                println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
+                // Don't fail the entire initialization if raw target creation fails
+            }
             }
         }
         Err(e) => {
@@ -1567,6 +1591,121 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> R
         }
     }
     
+    Ok(())
+}
+
+/// Create a raw disk NVMe-oF target for potential RAID membership
+/// This exposes the raw disk (not LVS) via NVMe-oF so it can be used as a RAID member
+async fn create_raw_disk_nvmeof_target(
+    agent: &NodeAgent, 
+    disk: &SpdkDisk, 
+    bdev_name: &str
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let disk_crd_name = disk.metadata.name.as_ref().unwrap();
+    
+    // Generate raw disk NQN for this disk
+    let raw_disk_nqn = disk.spec.get_raw_disk_nqn();
+    
+    println!("🔧 [RAW_DISK_TARGET] Creating raw disk NVMe-oF target for: {}", disk_crd_name);
+    println!("🔧 [RAW_DISK_TARGET] NQN: {}, Bdev: {}", raw_disk_nqn, bdev_name);
+    
+    // Create NVMe-oF target using SPDK RPC directly
+    let subsystem_payload = json!({
+        "method": "nvmf_create_subsystem",
+        "params": {
+            "nqn": raw_disk_nqn,
+            "allow_any_host": true,
+            "serial_number": format!("FLINT-RAW-{}", disk.spec.generate_virtual_uuid()),
+            "model_number": "Flint Raw Disk"
+        }
+    });
+    
+    match call_spdk_rpc(&agent.spdk_rpc_url, &subsystem_payload).await {
+        Ok(_) => println!("✅ [RAW_DISK_TARGET] Created NVMe-oF subsystem: {}", raw_disk_nqn),
+        Err(e) => {
+            if e.to_string().contains("already exists") {
+                println!("ℹ️ [RAW_DISK_TARGET] NVMe-oF subsystem already exists: {}", raw_disk_nqn);
+            } else {
+                println!("❌ [RAW_DISK_TARGET] Failed to create subsystem: {}", e);
+                return Err(e);
+            }
+        }
+    }
+    
+    // Add namespace for the raw disk
+    let namespace_payload = json!({
+        "method": "nvmf_subsystem_add_ns",
+        "params": {
+            "nqn": raw_disk_nqn,
+            "namespace": {
+                "nsid": 1,
+                "bdev_name": bdev_name
+            }
+        }
+    });
+    
+    match call_spdk_rpc(&agent.spdk_rpc_url, &namespace_payload).await {
+        Ok(_) => println!("✅ [RAW_DISK_TARGET] Added namespace for raw disk: {}", bdev_name),
+        Err(e) => {
+            if e.to_string().contains("already exists") {
+                println!("ℹ️ [RAW_DISK_TARGET] Namespace already exists for raw disk: {}", bdev_name);
+            } else {
+                println!("❌ [RAW_DISK_TARGET] Failed to add namespace: {}", e);
+                return Err(e);
+            }
+        }
+    }
+    
+    // Add listener for TCP transport
+    let node_ip = agent.get_current_node_ip().await?;
+    let listener_payload = json!({
+        "method": "nvmf_subsystem_add_listener",
+        "params": {
+            "nqn": raw_disk_nqn,
+            "listen_address": {
+                "trtype": "TCP",
+                "traddr": node_ip,
+                "trsvcid": "4420"
+            }
+        }
+    });
+    
+    match call_spdk_rpc(&agent.spdk_rpc_url, &listener_payload).await {
+        Ok(_) => println!("✅ [RAW_DISK_TARGET] Added TCP listener for raw disk: {}:4420", node_ip),
+        Err(e) => {
+            if e.to_string().contains("already exists") {
+                println!("ℹ️ [RAW_DISK_TARGET] TCP listener already exists for raw disk");
+            } else {
+                println!("❌ [RAW_DISK_TARGET] Failed to add listener: {}", e);
+                return Err(e);
+            }
+        }
+    }
+    
+    // Update the SpdkDisk CRD with raw disk NVMe-oF endpoint information
+    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
+    let patch = json!({
+        "spec": {
+            "nvmeof_target": {
+                "nqn": raw_disk_nqn,
+                "target_addr": node_ip,
+                "target_port": 4420,
+                "transport": "tcp",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "active": true
+            }
+        }
+    });
+    
+    match spdk_disks.patch(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
+        Ok(_) => println!("✅ [RAW_DISK_TARGET] Updated SpdkDisk CRD with raw disk NVMe-oF endpoint"),
+        Err(e) => {
+            println!("⚠️ [RAW_DISK_TARGET] Failed to update SpdkDisk CRD: {}", e);
+            // Don't fail the function - raw target is created successfully
+        }
+    }
+    
+    println!("🎉 [RAW_DISK_TARGET] Raw disk NVMe-oF target created successfully for: {}", disk_crd_name);
     Ok(())
 }
 
@@ -1875,6 +2014,33 @@ async fn update_disk_blobstore_status(
 
 // Disk setup implementation methods for NodeAgent
 impl NodeAgent {
+    /// Get current node IP address
+    pub async fn get_current_node_ip(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::Node as k8sNode;
+        
+        let nodes_api: Api<k8sNode> = Api::all(self.kube_client.clone());
+        
+        let node = nodes_api.get(&self.node_name).await
+            .map_err(|e| format!("Node {} not found: {}", self.node_name, e))?;
+
+        if let Some(status) = &node.status {
+            if let Some(addresses) = &status.addresses {
+                // Prefer InternalIP for NVMe-oF connections
+                for address in addresses {
+                    if address.type_ == "InternalIP" {
+                        return Ok(address.address.clone());
+                    }
+                }
+                // Fallback to any address
+                if let Some(addr) = addresses.first() {
+                    return Ok(addr.address.clone());
+                }
+            }
+        }
+
+        Err(format!("No IP address found for node {}", self.node_name).into())
+    }
+
     /// Generate stable CRD name based on PCI address (immutable hardware identity)
     /// Example: 0000:00:1f.0 → flnt-2-pci-0000-00-1f-0
     fn disk_crd_name(&self, pci_addr: &str) -> String {

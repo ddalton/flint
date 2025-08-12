@@ -586,6 +586,47 @@ impl SpdkDiskSpec {
         }
     }
     
+    /// Get the NVMe-oF bdev name for RAID member usage
+    /// RAID members MUST be NVMe-oF bdevs, whether local or remote
+    pub fn get_raid_member_bdev_name(&self) -> String {
+        match self.disk_type {
+            DiskType::Local => {
+                // For local disks, the RAID member should use the NVMe-oF bdev name
+                // This is the bdev name created after "nvme connect" to the local raw disk target
+                // Format: nvme{X}n1 where X is dynamically assigned by NVMe subsystem
+                format!("nvme_local_{}", self.generate_virtual_uuid())
+            }
+            DiskType::Remote => {
+                // For remote disks, use the NVMe-oF bdev name after connection
+                // This is the bdev name created after "nvme connect" to the remote target
+                // Format: nvme{X}n1 where X is dynamically assigned by NVMe subsystem
+                format!("nvme_remote_{}", self.generate_virtual_uuid())
+            }
+        }
+    }
+    
+    /// Get the raw disk NQN for exposing the disk directly via NVMe-oF (for RAID members)
+    /// This creates an NQN for the raw disk, not for volumes on the disk
+    pub fn get_raw_disk_nqn(&self) -> String {
+        match self.disk_type {
+            DiskType::Local => {
+                // For local disks, create an NQN that exposes the raw disk
+                format!("nqn.2023.io.flint:raw-disk-{}", self.generate_virtual_uuid())
+            }
+            DiskType::Remote => {
+                // For remote disks, return the existing NQN since it's already raw
+                self.nvmeof_target.nqn.clone()
+            }
+        }
+    }
+    
+    /// Check if this disk should be used for RAID membership (meaning it should expose raw bdev)
+    pub fn is_raid_member_candidate(&self) -> bool {
+        // Disks that already have volumes (LVS) should not be used for RAID membership
+        // This is a policy decision - RAID members should be dedicated raw disks
+        true // For now, allow any disk to be a RAID member
+    }
+
     /// Generate deterministic disk UUID from immutable hardware properties
     pub fn generate_disk_uuid(serial: &str, model: &str, vendor: &str, device_id: &str) -> String {
         use sha2::{Sha256, Digest};

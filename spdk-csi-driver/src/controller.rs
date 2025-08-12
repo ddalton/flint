@@ -263,39 +263,64 @@ impl ControllerService {
         let node_ip = self.driver.get_node_ip(target_node).await?;
         let spdk_rpc_url = format!("http://{}:9009", node_ip);
 
-        // Connect to remote NVMe-oF member disks first (if any)
+        // Connect to ALL member disks via NVMe-oF (both local and remote)
+        // RAID bdev members MUST be NVMe-oF bdevs regardless of disk location
         for member in raid_disk.spec.get_all_members() {
-            // Get the referenced SpdkDisk to check if it's remote
+            // Get the referenced SpdkDisk 
             let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
             let disk = disks.get(&member.disk_ref).await
                 .map_err(|e| Status::internal(format!("Failed to get member disk {}: {}", member.disk_ref, e)))?;
             
-            if disk.spec.is_remote() {
-                // Connect to remote NVMe-oF endpoint
-                let endpoint = &disk.spec.nvmeof_target;
-                self.driver.connect_nvme_device(
-                    &endpoint.nqn, 
-                    &endpoint.target_addr, 
-                    endpoint.target_port, 
-                    &endpoint.transport, 
-                    &format!("member_{}", member.member_index)
-                ).await
-                .map_err(|e| Status::internal(format!("Failed to connect to remote member disk: {}", e)))?;
+            // ALL disks (local and remote) must be connected via NVMe-oF for RAID membership
+            let endpoint = &disk.spec.nvmeof_target;
+            if endpoint.nqn.is_empty() || !endpoint.active {
+                return Err(Status::internal(format!(
+                    "Disk {} does not have an active NVMe-oF target. All RAID members must expose raw disk via NVMe-oF", 
+                    member.disk_ref
+                )));
             }
+            
+            println!("🔗 [RAID_MEMBER] Connecting to NVMe-oF target: {} (type: {:?})", 
+                     endpoint.nqn, disk.spec.disk_type);
+            
+            self.driver.connect_nvme_device(
+                &endpoint.nqn, 
+                &endpoint.target_addr, 
+                endpoint.target_port, 
+                &endpoint.transport, 
+                &format!("member_{}", member.member_index)
+            ).await
+            .map_err(|e| Status::internal(format!("Failed to connect to member disk {}: {}", member.disk_ref, e)))?;
+            
+            println!("✅ [RAID_MEMBER] Connected to {} disk via NVMe-oF: {}", 
+                     if disk.spec.is_local() { "local" } else { "remote" }, endpoint.nqn);
         }
 
-        // Collect base bdev names for RAID creation
+        // Collect NVMe-oF bdev names for RAID creation after connections are established
         let mut base_bdevs = Vec::new();
         for member in &raid_disk.spec.member_disks {
-            // Get the referenced SpdkDisk to determine its type and LVS name
+            // Get the referenced SpdkDisk 
             let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
             let disk = disks.get(&member.disk_ref).await
                 .map_err(|e| Status::internal(format!("Failed to get SpdkDisk {}: {}", member.disk_ref, e)))?;
             
-            // For both local and remote disks, we use the LVS name as the base bdev
-            // The LVS is either on the local disk or exposed via NVMe-oF from remote disk
-            let bdev_name = disk.spec.lvs_name();
-            base_bdevs.push(bdev_name);
+            // Find the actual NVMe device created by the nvme connect operation
+            let endpoint = &disk.spec.nvmeof_target;
+            let nvme_device = self.driver.find_existing_nvme_connection(&endpoint.nqn).await
+                .map_err(|e| Status::internal(format!("Failed to find NVMe connection for {}: {}", endpoint.nqn, e)))?;
+            
+            // Use the actual NVMe device path as bdev name for RAID
+            // Extract bdev name from device path (/dev/nvme1n1 -> nvme1n1)
+            let bdev_name = if let Some(device_name) = nvme_device.device_path.strip_prefix("/dev/") {
+                device_name.to_string()
+            } else {
+                nvme_device.device_path.clone()
+            };
+            
+            base_bdevs.push(bdev_name.clone());
+            
+            println!("🔧 [RAID_MEMBER] Using NVMe-oF bdev '{}' from disk '{}' (NQN: {}, type: {:?})", 
+                     bdev_name, member.disk_ref, endpoint.nqn, disk.spec.disk_type);
         }
 
         let base_bdevs_str = base_bdevs.join(" ");
