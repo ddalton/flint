@@ -762,12 +762,20 @@ struct CreateRaidDiskRequest {
 
 async fn create_raid_disk(req: CreateRaidDiskRequest, state: AppState) -> Result<impl Reply, Rejection> {
     let api: Api<SpdkRaidDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-    let member_disks: Vec<spdk_csi_driver::models::RaidMemberDisk> = req.members.into_iter().enumerate().map(|(i, name)| {
+    let member_disks: Vec<spdk_csi_driver::models::RaidMemberDisk> = req.members.into_iter().enumerate().map(|(i, member_name)| {
         spdk_csi_driver::models::RaidMemberDisk {
-            slot: i as u32,
-            name,
-            endpoint: spdk_csi_driver::models::NvmeofEndpoint::default(),
-            is_configured: false,
+            member_index: i as u32,
+            node_id: req.created_on_node.clone(), // Node where this RAID is being created
+            hardware_id: Some(member_name.clone()),
+            serial_number: None, // Will be populated when actual disk is identified
+            wwn: None,
+            model: None,
+            vendor: None,
+            nvmeof_endpoint: spdk_csi_driver::models::NvmeofEndpoint::default(),
+            state: spdk_csi_driver::models::RaidMemberState::Online,
+            capacity_bytes: 0, // Will be populated when actual disk is connected
+            connected: false,
+            last_health_check: None,
         }
     }).collect();
 
@@ -1002,7 +1010,10 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
                         name: m.name.clone(),
                         state: m.state.clone(),
                         uuid: m.uuid.clone(),
+                        is_configured: m.is_configured,
                         node: m.node.clone(),
+                        disk_ref: None, // Not applicable for RAID bdevs
+                        health_status: "Unknown".to_string(), // Will be populated from actual status
                     }).collect::<Vec<_>>()
                 }).unwrap_or_default();
                 dashboard_raid_disks.push(DashboardRaidDisk {
@@ -2132,6 +2143,7 @@ async fn get_dashboard_data(state: AppState) -> Result<impl warp::Reply, warp::R
             raw_volumes: vec![],
             disks: vec![],
             nodes: vec![],
+            raid_disks: vec![],
         };
         Ok(warp::reply::json(&empty_data))
     }
