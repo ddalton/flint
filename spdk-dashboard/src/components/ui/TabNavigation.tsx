@@ -1,5 +1,5 @@
 import React from 'react';
-import { Monitor, Database, HardDrive, Server, Settings, Camera, Cloud } from 'lucide-react';
+import { Monitor, Database, HardDrive, Server, Settings, Camera } from 'lucide-react';
 
 interface Tab {
   id: string;
@@ -15,10 +15,9 @@ interface TabNavigationProps {
 const tabs: Tab[] = [
   { id: 'overview', name: 'Overview', icon: Monitor },
   { id: 'volumes', name: 'Volumes', icon: Database },
-  { id: 'disks', name: 'Disks', icon: HardDrive },
+  { id: 'disks', name: 'RAID', icon: HardDrive },
   { id: 'snapshots', name: 'Snapshots', icon: Camera }, // New snapshots tab
   { id: 'disk-setup', name: 'Disk Setup', icon: Settings },
-  { id: 'remote-storage', name: 'Remote Storage', icon: Cloud },
   { id: 'nodes', name: 'Nodes', icon: Server }
 ];
 

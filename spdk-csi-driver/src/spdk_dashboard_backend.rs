@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
 use kube::{Client, Api, api::ListParams};
-use spdk_csi_driver::models::{NvmeofDisk, NvmeofDiskSpec, NvmeofDiskStatus};
+use spdk_csi_driver::models::{NvmeofDisk, NvmeofDiskSpec, NvmeofDiskStatus, SpdkRaidDisk, SpdkRaidDiskStatus};
 use chrono::{Utc, DateTime};
 use std::env;
 use spdk_csi_driver::*;
@@ -153,6 +153,15 @@ struct NvmfTarget {
 }
 
 #[derive(Serialize, Debug, Clone)]
+struct NvmeofEndpointInfo {
+    nqn: String,
+    target_addr: String,
+    target_port: u16,
+    transport: String,
+    active: bool,
+}
+
+#[derive(Serialize, Debug, Clone)]
 struct DashboardDisk {
     id: String,
     node: String,
@@ -174,6 +183,28 @@ struct DashboardDisk {
     provisioned_volumes: Vec<ProvisionedVolume>,
     // Orphaned SPDK volumes on this disk
     orphaned_spdk_volumes: Vec<OrphanedVolumeInfo>,
+    // Disk origin
+    is_remote: bool,
+    // Optional NVMe-oF endpoint for this disk (local or remote)
+    nvmeof_endpoint: Option<NvmeofEndpointInfo>,
+}
+
+// Duplicate struct removed (consolidated above)
+
+#[derive(Serialize, Debug, Clone)]
+struct DashboardRaidDisk {
+    id: String,
+    node: String,
+    raid_level: String,
+    state: String,
+    lvs_name: Option<String>,
+    lvs_uuid: Option<String>,
+    total_capacity_gb: i64,
+    usable_capacity_gb: i64,
+    used_capacity_gb: i64,
+    degraded: bool,
+    rebuild_progress: Option<f64>,
+    members: Vec<DashboardRaidMember>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -217,6 +248,7 @@ struct DashboardData {
     raw_volumes: Vec<RawSpdkVolume>,      // Unmanaged SPDK volumes (orphaned/leftover)
     disks: Vec<DashboardDisk>,
     nodes: Vec<String>,
+    raid_disks: Vec<DashboardRaidDisk>,   // RAID disks managed by SPDK instances
 }
 
 #[derive(Clone)]
@@ -584,6 +616,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(trigger_refresh)
         )
         .or(
+            // POST /api/raiddisks - create a RAID disk from member NvmeofDisk refs
+            warp::path("raiddisks")
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(create_raid_disk)
+        )
+        .or(
             warp::path("nodes")
                 .and(warp::path::param::<String>())
                 .and(warp::path("metrics"))
@@ -599,16 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(get_node_raid_status)
         )
-        .or(
-            // Disk setup APIs - proxy to node-agents
-            warp::path("nodes")
-                .and(warp::path::param::<String>())
-                .and(warp::path("disks"))
-                .and(warp::path("uninitialized"))
-                .and(warp::get())
-                .and(state_filter.clone())
-                .and_then(get_node_uninitialized_disks)
-        )
+        // Uninitialized disks endpoint removed to avoid triggering discovery from dashboard-backend
         .or(
             warp::path("nodes")
                 .and(warp::path::param::<String>())
@@ -639,24 +670,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(initialize_node_disks)
         )
-        .or(
-            warp::path("nodes")
-                .and(warp::path::param::<String>())
-                .and(warp::path("disks"))
-                .and(warp::path("status"))
-                .and(warp::get())
-                .and(state_filter.clone())
-                .and_then(get_node_disk_status)
-        )
-        .or(
-            // Get all nodes disk info for setup page
-            warp::path("disks")
-                .and(warp::path("setup"))
-                .and(warp::path("nodes"))
-                .and(warp::get())
-                .and(state_filter.clone())
-                .and_then(get_all_nodes_disk_setup)
-        )
+        // Per-node disk status and aggregated setup endpoints removed
         .or(
             warp::path("snapshots")
                 .and(warp::get())
@@ -735,6 +749,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // === NvmeofDisk management endpoints ===
+#[derive(Deserialize, Clone)]
+struct CreateRaidDiskRequest {
+    name: String,
+    raid_level: String,            // "1", "0", etc.
+    members: Vec<String>,          // member NvmeofDisk names (local NVMe-oF endpoints)
+    stripe_size_kb: Option<u32>,
+    superblock_enabled: Option<bool>,
+    auto_rebuild: Option<bool>,
+    created_on_node: String,
+}
+
+async fn create_raid_disk(req: CreateRaidDiskRequest, state: AppState) -> Result<impl Reply, Rejection> {
+    let api: Api<SpdkRaidDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let member_disks: Vec<spdk_csi_driver::models::RaidMemberDisk> = req.members.into_iter().enumerate().map(|(i, name)| {
+        spdk_csi_driver::models::RaidMemberDisk {
+            slot: i as u32,
+            name,
+            endpoint: spdk_csi_driver::models::NvmeofEndpoint::default(),
+            is_configured: false,
+        }
+    }).collect();
+
+    let spec = spdk_csi_driver::models::SpdkRaidDiskSpec {
+        raid_disk_id: req.name.clone(),
+        raid_level: req.raid_level,
+        num_member_disks: member_disks.len() as i32,
+        member_disks,
+        stripe_size_kb: req.stripe_size_kb.unwrap_or(1024),
+        superblock_enabled: req.superblock_enabled.unwrap_or(true),
+        created_on_node: req.created_on_node,
+        min_capacity_bytes: 0,
+        auto_rebuild: req.auto_rebuild.unwrap_or(true),
+    };
+
+    let mut raiddisk = SpdkRaidDisk::new_with_metadata(&req.name, spec, &state.target_namespace);
+    raiddisk.status = Some(SpdkRaidDiskStatus::default());
+
+    match api.create(&Default::default(), &raiddisk).await {
+        Ok(obj) => Ok(warp::reply::json(&json!({"status":"ok","name": obj.metadata.name })) ),
+        Err(e) => {
+            eprintln!("SpdkRaidDisk create failed: {}", e);
+            Err(warp::reject())
+        }
+    }
+}
 
 #[derive(Deserialize, Clone)]
 struct NvmeofDiskCreateRequest {
@@ -907,6 +966,7 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
     
     let mut dashboard_volumes = Vec::new();
     let mut dashboard_disks = Vec::new();
+    let mut dashboard_raid_disks = Vec::new();
     let mut nodes = std::collections::HashSet::new();
     
     println!("🔧 [DASHBOARD_REFRESH] Converting {} volumes to dashboard format...", volumes_list.items.len());
@@ -931,6 +991,39 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         dashboard_disks.push(dashboard_disk);
     }
     
+    // List RAID disks CRDs for unified disk view
+    let raiddisks_api: Api<SpdkRaidDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    if let Ok(raid_list) = raiddisks_api.list(&ListParams::default()).await {
+        for rd in raid_list.items {
+            if let Some(status) = rd.status.clone() {
+                let members = status.raid_status.as_ref().map(|rs| {
+                    rs.base_bdevs_list.iter().map(|m| DashboardRaidMember {
+                        slot: m.slot,
+                        name: m.name.clone(),
+                        state: m.state.clone(),
+                        uuid: m.uuid.clone(),
+                        node: m.node.clone(),
+                    }).collect::<Vec<_>>()
+                }).unwrap_or_default();
+                dashboard_raid_disks.push(DashboardRaidDisk {
+                    id: rd.spec.raid_disk_id.clone(),
+                    node: rd.spec.created_on_node.clone(),
+                    raid_level: rd.spec.raid_level.clone(),
+                    state: status.state.clone(),
+                    lvs_name: status.lvs_name.clone(),
+                    lvs_uuid: status.lvs_uuid.clone(),
+                    total_capacity_gb: status.total_capacity_bytes / (1024*1024*1024),
+                    usable_capacity_gb: status.usable_capacity_bytes / (1024*1024*1024),
+                    used_capacity_gb: status.used_capacity_bytes / (1024*1024*1024),
+                    degraded: status.degraded,
+                    rebuild_progress: status.rebuild_progress,
+                    members,
+                });
+                nodes.insert(rd.spec.created_on_node.clone());
+            }
+        }
+    }
+
     println!("🚀 [DASHBOARD_REFRESH] Enhancing with SPDK metrics...");
     match enhance_with_spdk_metrics(&mut dashboard_volumes, &mut dashboard_disks, state).await {
         Ok(_) => println!("✅ [DASHBOARD_REFRESH] SPDK metrics enhancement completed successfully"),
@@ -976,6 +1069,7 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         raw_volumes: raw_spdk_volumes,
         disks: dashboard_disks,
         nodes: nodes.into_iter().collect(),
+        raid_disks: dashboard_raid_disks,
     };
     
     *state.cache.write().await = Some(dashboard_data);
@@ -1183,6 +1277,14 @@ fn convert_nvmeofdisk_to_dashboard(disk: &NvmeofDisk) -> DashboardDisk {
         brought_online: disk.status.as_ref().map(|s| s.last_checked.clone()).unwrap_or_default(),
         provisioned_volumes: vec![],
         orphaned_spdk_volumes: vec![],
+        is_remote: disk.spec.is_remote,
+        nvmeof_endpoint: Some(NvmeofEndpointInfo {
+            nqn: disk.spec.nvmeof_endpoint.nqn.clone(),
+            target_addr: disk.spec.nvmeof_endpoint.target_addr.clone(),
+            target_port: disk.spec.nvmeof_endpoint.target_port,
+            transport: disk.spec.nvmeof_endpoint.transport.clone(),
+            active: disk.status.as_ref().map(|s| s.endpoint_validated).unwrap_or(false),
+        }),
     }
 }
 
@@ -2645,48 +2747,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl warp::Reply, warp::R
 }
 
 // Disk setup proxy handlers - forward requests to node-agents
-async fn get_node_uninitialized_disks(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let spdk_nodes = state.spdk_nodes.read().await;
-    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
-        let http_client = HttpClient::new();
-        
-        match http_client
-            .get(&format!("{}/api/disks/uninitialized", node_agent_url))
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => Ok(warp::reply::json(&data)),
-                        Err(_) => Ok(warp::reply::json(&json!({
-                            "success": false,
-                            "error": "Failed to parse node-agent response",
-                            "node": node
-                        })))
-                    }
-                } else {
-                    Ok(warp::reply::json(&json!({
-                        "success": false,
-                        "error": format!("Node-agent returned status: {}", response.status()),
-                        "node": node
-                    })))
-                }
-            }
-            Err(e) => Ok(warp::reply::json(&json!({
-                "success": false,
-                "error": format!("Failed to connect to node-agent: {}", e),
-                "node": node
-            })))
-        }
-    } else {
-        Ok(warp::reply::json(&json!({
-            "success": false,
-            "error": "Node-agent not found",
-            "node": node
-        })))
-    }
-}
+// Note: Uninitialized disks discovery endpoint removed to avoid triggering discovery from the dashboard backend
 
 async fn setup_node_disks(node: String, request: serde_json::Value, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
     let spdk_nodes = state.spdk_nodes.read().await;
@@ -2802,94 +2863,9 @@ async fn initialize_node_disks(node: String, request: serde_json::Value, state: 
     }
 }
 
-async fn get_node_disk_status(node: String, state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let spdk_nodes = state.spdk_nodes.read().await;
-    if let Some(node_agent_url) = get_node_agent_url(&spdk_nodes, &node) {
-        let http_client = HttpClient::new();
-        
-        match http_client
-            .get(&format!("{}/api/disks/status", node_agent_url))
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => Ok(warp::reply::json(&data)),
-                        Err(_) => Ok(warp::reply::json(&json!({
-                            "success": false,
-                            "error": "Failed to parse node-agent response",
-                            "node": node
-                        })))
-                    }
-                } else {
-                    Ok(warp::reply::json(&json!({
-                        "success": false,
-                        "error": format!("Node-agent returned status: {}", response.status()),
-                        "node": node
-                    })))
-                }
-            }
-            Err(e) => Ok(warp::reply::json(&json!({
-                "success": false,
-                "error": format!("Failed to connect to node-agent: {}", e),
-                "node": node
-            })))
-        }
-    } else {
-        Ok(warp::reply::json(&json!({
-            "success": false,
-            "error": "Node-agent not found",
-            "node": node
-        })))
-    }
-}
+// Note: Node disk status proxy removed; backend should not query per-node disk status directly
 
-async fn get_all_nodes_disk_setup(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    let spdk_nodes = state.spdk_nodes.read().await;
-    let http_client = HttpClient::new();
-    let mut all_nodes_data = json!({});
-    
-    for (node_name, _node_agent_url) in spdk_nodes.iter() {
-        let node_agent_base = get_node_agent_url(&spdk_nodes, node_name).unwrap_or_default();
-        
-        // Get uninitialized disks for this node
-        match http_client
-            .get(&format!("{}/api/disks/uninitialized", node_agent_base))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<serde_json::Value>().await {
-                    Ok(data) => {
-                        all_nodes_data[node_name] = data;
-                    }
-                    Err(_) => {
-                        all_nodes_data[node_name] = json!({
-                            "success": false,
-                            "error": "Failed to parse response",
-                            "node": node_name,
-                            "disks": []
-                        });
-                    }
-                }
-            }
-            _ => {
-                all_nodes_data[node_name] = json!({
-                    "success": false,
-                    "error": "Failed to connect to node-agent",
-                    "node": node_name,
-                    "disks": []
-                });
-            }
-        }
-    }
-    
-    Ok(warp::reply::json(&json!({
-        "success": true,
-        "nodes": all_nodes_data
-    })))
-}
+// Note: Aggregated disk setup proxy removed to avoid triggering discovery across nodes
 
 // Helper function to get node-agent URL from SPDK RPC URL
 fn get_node_agent_url(spdk_nodes: &HashMap<String, String>, node: &str) -> Option<String> {

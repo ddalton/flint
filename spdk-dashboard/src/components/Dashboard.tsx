@@ -12,7 +12,6 @@ import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
 import { DiskSetupTab } from './setup/DiskSetupTab';
 import { EnhancedSnapshotsTab } from './snapshots/EnhancedSnapshotsTab';
-import RemoteStorageTab from './storage/RemoteStorageTab';
 
 interface DashboardProps {
   data: DashboardData;
@@ -226,10 +225,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
           />
         );
 
-      case 'disks':
+      case 'disks': {
+        // Show only RAID disks; map RAID disk data into disk table shape minimally or reuse component in setup tab
+        const raidBackedDisks = data.disks.filter(d => d.blobstore_initialized);
         return (
           <DisksTable 
-            disks={data.disks}
+            disks={raidBackedDisks}
             volumes={data.volumes}
             stats={stats}
             volumeFilter={volumeFilter}
@@ -237,14 +238,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             onDiskClick={handleDiskClick}
             onClearVolumeReplicaFilter={handleClearVolumeReplicaFilter}
             onDiskVolumeFilter={handleDiskClick}
+            showOnlyTable={true}
           />
         );
+      }
 
       case 'disk-setup':
         return <DiskSetupTab />;
 
-      case 'remote-storage':
-        return <RemoteStorageTab />;
+      // Remote storage tab removed; remote NVMe-oF now appears in Disk Setup and Disks panes
 
       case 'nodes':
         return (

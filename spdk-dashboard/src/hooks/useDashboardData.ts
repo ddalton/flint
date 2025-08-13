@@ -162,6 +162,7 @@ export interface Disk {
   provisioned_volumes: ProvisionedVolume[];
   // Orphaned SPDK volumes on this disk
   orphaned_spdk_volumes: OrphanedVolumeInfo[];
+  is_remote?: boolean;
 }
 
 export interface ProvisionedVolume {
@@ -191,6 +192,29 @@ export interface RawSpdkVolume {
   is_managed: boolean;
 }
 
+export interface RaidMember {
+  slot: number;
+  name: string;
+  state: string;
+  uuid?: string;
+  node?: string;
+}
+
+export interface RaidDisk {
+  id: string;
+  node: string;
+  raid_level: string;
+  state: string;
+  lvs_name?: string;
+  lvs_uuid?: string;
+  total_capacity_gb: number;
+  usable_capacity_gb: number;
+  used_capacity_gb: number;
+  degraded: boolean;
+  rebuild_progress?: number;
+  members: RaidMember[];
+}
+
 export interface PvcInfo {
   pvc_name: string;
   pvc_namespace: string;
@@ -206,6 +230,7 @@ export interface DashboardData {
   raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
+  raid_disks?: RaidDisk[];
 }
 
 export interface DashboardStats {
@@ -681,7 +706,8 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     volumes: [],
     raw_volumes: [],
     disks: [],
-    nodes: []
+    nodes: [],
+    raid_disks: []
   });
   const [loading, setLoading] = useState(true);
   const [usingMockData, setUsingMockData] = useState(false);
@@ -730,17 +756,14 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
       // Try to fetch from API, fall back to mock data
       try {
         const response = await fetch('/api/dashboard');
-        const contentType = response.headers.get("content-type");
-        if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
+        if (response.ok) {
+          // Be tolerant of missing/incorrect content-type; try to parse JSON anyway
           const dashboardData = await response.json();
-          // Transform backend data to match frontend interface if needed
           const transformedData = transformBackendData(dashboardData);
           setData(transformedData);
         } else {
-          // Fallback if the response is not ok or not JSON
-          throw new Error(response.ok ? 'Received non-JSON response' : `HTTP error! status: ${response.status}`);
-         }
-
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
       } catch (apiError) {
         console.warn('API not available, using mock data:', apiError);
         // Use mock data for development/demo
@@ -798,6 +821,7 @@ const transformBackendData = (backendData: any): DashboardData => {
       blobstore_initialized: disk.blobstore_initialized
     })) || [],
     nodes: backendData.nodes || []
+      ,raid_disks: backendData.raid_disks || []
   };
 };
 
@@ -1215,65 +1239,37 @@ export const useDiskSetup = () => {
         }
       ];
 
-      try {
-        const response = await fetch(`/api/nodes/${nodeName}/disks/uninitialized`);
-        if (response.ok) {
-          const data = await response.json();
-          if (data.success && data.disks) {
-            // Enhance disk data with SpdkDisk CRD information
-            const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
-              const enhancedDisk = { ...disk, nodeName };
-              
-              // Find corresponding SpdkDisk CRD data using precise matching
-              const spdkDisk = dashboardData.disks.find(d => 
-                d.pci_addr === disk.pci_address ||
-                d.id.includes(disk.pci_address.replace(':', '-')) ||
-                (d.node === nodeName && d.id.includes(disk.device_name))
-              );
-              
-              if (spdkDisk) {
-                // Enhanced status logic with validation:
-                // Check if blobstore_initialized status is consistent with actual functionality
-                // A truly initialized blobstore should have capacity or be ready for use
-                const hasValidBlobstore = spdkDisk.blobstore_initialized && 
-                  (spdkDisk.capacity > 0 || spdkDisk.free_space > 0);
-                
-                enhancedDisk.spdk_ready = hasValidBlobstore;
-                enhancedDisk.driver_ready = disk.spdk_ready; // Original driver compatibility  
-                enhancedDisk.blobstore_initialized = hasValidBlobstore;
-                
-                console.log(`Enhanced disk ${disk.device_name}: driver_ready=${disk.spdk_ready}, blobstore_initialized=${hasValidBlobstore}, final_spdk_ready=${enhancedDisk.spdk_ready}, CRD_id=${spdkDisk.id}`);
-              } else {
-                console.log(`No SpdkDisk CRD found for ${disk.device_name}, using original spdk_ready=${disk.spdk_ready}`);
-                enhancedDisk.driver_ready = disk.spdk_ready;
-                enhancedDisk.blobstore_initialized = false;
-              }
-              
-              return enhancedDisk;
-            });
-            
-            setNodeData(prev => ({
-              ...prev,
-              [nodeName]: {
-                node: nodeName,
-                disks: enhancedDisks,
-                loading: false,
-                last_updated: new Date().toISOString()
-              }
-            }));
-            return;
-          }
-        }
-      } catch (apiError) {
-        console.warn(`Disk setup API not available for ${nodeName}, using mock data:`, apiError);
-      }
+      // Discovery calls disabled: reflect only current CRD-backed disks for this node (no discovery)
+      const crdBackedDisks: UnimplementedDisk[] = dashboardData.disks
+        .filter(d => d.node === nodeName)
+        .map(d => ({
+          pci_address: d.pci_addr || '',
+          device_name: d.id,
+          vendor_id: '',
+          device_id: '',
+          subsystem_vendor_id: '',
+          subsystem_device_id: '',
+          numa_node: undefined,
+          driver: d.blobstore_initialized ? 'vfio-pci' : 'nvme',
+          size_bytes: d.capacity,
+          model: d.model,
+          serial: '',
+          namespace_id: undefined,
+          mounted_partitions: [],
+          filesystem_type: undefined,
+          is_system_disk: false,
+          spdk_ready: d.blobstore_initialized,
+          discovered_at: new Date().toISOString(),
+          nodeName,
+          driver_ready: d.blobstore_initialized,
+          blobstore_initialized: d.blobstore_initialized,
+        }));
 
-      // Fallback to mock data
       setNodeData(prev => ({
         ...prev,
         [nodeName]: {
           node: nodeName,
-          disks: mockDisks,
+          disks: crdBackedDisks,
           loading: false,
           last_updated: new Date().toISOString()
         }

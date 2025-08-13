@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { 
+import {
   X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
-  Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
+  Server, Database, CheckCircle, Activity, AlertTriangle, Trash2, Plus, Shield, Cloud,
+  Zap, Link, AlertCircle, Unlock
 } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 
@@ -18,6 +19,9 @@ interface DisksTableProps {
   onDiskClick?: (diskId: string) => void;
   onClearVolumeReplicaFilter?: () => void;
   onDiskVolumeFilter?: (diskId: string) => void;
+  embedInSetup?: boolean; // when true, render NVMe-oF pane for Disk Setup (no pane switcher)
+  showOnlyTable?: boolean; // when true, show only the table without any headers or actions (for RAID tab)
+  statusCardType?: 'nvmeof' | 'raid' | 'default'; // controls which status cards to show
 }
 
 type DiskHealthFilter = 'all' | 'healthy' | 'unhealthy';
@@ -25,6 +29,8 @@ type DiskLVSFilter = 'all' | 'initialized' | 'uninitialized';
 type DiskUtilizationFilter = 'all' | 'low' | 'medium' | 'high' | 'full';
 type DiskSortField = 'id' | 'node' | 'capacity' | 'utilization' | 'free_space' | 'read_iops' | 'write_iops' | 'volumes';
 type DiskSortOrder = 'asc' | 'desc';
+
+type Pane = 'nvmeof' | 'raid';
 
 export const DisksTable: React.FC<DisksTableProps> = ({ 
   disks, 
@@ -34,8 +40,31 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   volumeReplicaFilter,
   onDiskClick,
   onClearVolumeReplicaFilter,
-  onDiskVolumeFilter
+  onDiskVolumeFilter,
+  embedInSetup = false,
+  showOnlyTable = false,
+  statusCardType = 'default'
 }) => {
+  const [activePane, setActivePane] = useState<Pane>('nvmeof');
+  const [selectedDiskIds, setSelectedDiskIds] = useState<Set<string>>(new Set());
+  const [showCreateRaid, setShowCreateRaid] = useState(false);
+  const [raidName, setRaidName] = useState('');
+  const [raidLevel, setRaidLevel] = useState('1');
+  
+  // Add Remote NVMe-oF state
+  const [showAddRemoteNVMeoF, setShowAddRemoteNVMeoF] = useState(false);
+  const [remoteNVMeoFForm, setRemoteNVMeoFForm] = useState({
+    name: '',
+    nqn: '',
+    transport: 'tcp',
+    address: '',
+    port: '4420',
+    nsid: '',
+    authMethod: 'none',
+    username: '',
+    password: ''
+  });
+  const [raidNode, setRaidNode] = useState('');
   // Disk-specific filters
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
@@ -46,6 +75,15 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   const [sortField, setSortField] = useState<DiskSortField>('id');
   const [sortOrder, setSortOrder] = useState<DiskSortOrder>('asc');
   const [showFilters, setShowFilters] = useState(false);
+  
+  // NVMe-oF specific filters
+  const [nvmeofTransportFilter, setNvmeofTransportFilter] = useState<'all' | 'tcp' | 'rdma' | 'fc'>('all');
+  const [nvmeofLocationFilter, setNvmeofLocationFilter] = useState<'all' | 'local' | 'remote'>('all');
+  const [nvmeofDriverFilter, setNvmeofDriverFilter] = useState<'all' | 'bound' | 'unbound'>('all');
+  
+  // RAID specific filters
+  const [raidLevelFilter, setRaidLevelFilter] = useState<'all' | '0' | '1'>('all');
+  const [raidStatusFilter, setRaidStatusFilter] = useState<'all' | 'healthy' | 'degraded' | 'failed'>('all');
 
   // Delete orphaned volume state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -152,6 +190,48 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       });
     }
 
+    // Apply NVMe-oF specific filters (when in nvmeof context)
+    if (statusCardType === 'nvmeof') {
+      if (nvmeofLocationFilter !== 'all') {
+        result = result.filter(disk => 
+          nvmeofLocationFilter === 'remote' ? disk.is_remote : !disk.is_remote
+        );
+      }
+      
+      if (nvmeofDriverFilter !== 'all') {
+        result = result.filter(disk => 
+          nvmeofDriverFilter === 'bound' ? disk.nvme_driver_bound : !disk.nvme_driver_bound
+        );
+      }
+      
+      if (nvmeofTransportFilter !== 'all') {
+        result = result.filter(disk => 
+          disk.nvmeof_endpoint?.transport === nvmeofTransportFilter
+        );
+      }
+    }
+
+    // Apply RAID specific filters (when in raid context)
+    if (statusCardType === 'raid') {
+      if (raidLevelFilter !== 'all') {
+        // Assuming raid level is stored in disk metadata - adjust as needed
+        result = result.filter(disk => 
+          disk.raid_level === raidLevelFilter
+        );
+      }
+      
+      if (raidStatusFilter !== 'all') {
+        result = result.filter(disk => {
+          switch (raidStatusFilter) {
+            case 'healthy': return disk.healthy && disk.blobstore_initialized;
+            case 'degraded': return disk.healthy && !disk.blobstore_initialized;
+            case 'failed': return !disk.healthy;
+            default: return true;
+          }
+        });
+      }
+    }
+
     // Apply capacity range filter
     if (capacityRange.min || capacityRange.max) {
       result = result.filter(disk => {
@@ -216,7 +296,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     return result;
   }, [
     disks, volumes, volumeFilter, volumeReplicaFilter, searchTerm, selectedNodes,
-    healthFilter, lvsFilter, utilizationFilter, capacityRange, sortField, sortOrder
+    healthFilter, lvsFilter, utilizationFilter, capacityRange, sortField, sortOrder,
+    statusCardType, nvmeofTransportFilter, nvmeofLocationFilter, nvmeofDriverFilter,
+    raidLevelFilter, raidStatusFilter
   ]);
 
   const handleSort = (field: DiskSortField) => {
@@ -247,6 +329,19 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     if (lvsFilter !== 'all') count++;
     if (utilizationFilter !== 'all') count++;
     if (capacityRange.min || capacityRange.max) count++;
+    
+    // Add context-specific filters
+    if (statusCardType === 'nvmeof') {
+      if (nvmeofTransportFilter !== 'all') count++;
+      if (nvmeofLocationFilter !== 'all') count++;
+      if (nvmeofDriverFilter !== 'all') count++;
+    }
+    
+    if (statusCardType === 'raid') {
+      if (raidLevelFilter !== 'all') count++;
+      if (raidStatusFilter !== 'all') count++;
+    }
+    
     return count;
   };
 
@@ -328,6 +423,50 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
   return (
     <div>
+      {/* Header / Actions - only show when not in showOnlyTable mode */}
+      {!showOnlyTable && (
+        <div className="mb-4 flex items-center justify-between">
+          {!embedInSetup && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-600">View:</span>
+              <div className="inline-flex rounded-md border border-gray-300 overflow-hidden">
+                <button
+                  onClick={() => setActivePane('nvmeof')}
+                  className={`px-3 py-1 text-sm ${activePane === 'nvmeof' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+                >
+                  NVMe-oF Disks
+                </button>
+                <button
+                  onClick={() => setActivePane('raid')}
+                  className={`px-3 py-1 text-sm ${activePane === 'raid' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}`}
+                >
+                  RAID Disks
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            {(statusCardType === 'nvmeof' || statusCardType === 'default') && (
+              <button
+                onClick={() => setShowAddRemoteNVMeoF(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-gradient-to-r from-indigo-500 to-purple-600 text-white border-0 rounded-lg shadow-lg hover:shadow-xl hover:from-indigo-600 hover:to-purple-700 transform hover:scale-105 transition-all duration-200 font-medium"
+                title="Add remote NVMe-oF disk"
+              >
+                <Cloud className="w-4 h-4" /> Add Remote NVMe-oF
+              </button>
+            )}
+            {(statusCardType === 'raid' || statusCardType === 'default') && (
+              <button
+                onClick={() => setShowCreateRaid(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg shadow-lg hover:shadow-xl hover:bg-blue-700 transform hover:scale-105 transition-all duration-200 font-medium"
+                title="Create RAID disk from selected NVMe-oF local disks"
+              >
+                <Plus className="w-4 h-4" /> Create RAID Disk
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {/* Volume-based filters (existing) */}
       {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
@@ -440,7 +579,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 </div>
               </div>
 
-              {/* Health Filter */}
+              {/* Common Filters for all types */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Health Status</label>
                 <select
@@ -454,35 +593,113 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 </select>
               </div>
 
-              {/* LVS Status Filter */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">LVS Status</label>
-                <select
-                  value={lvsFilter}
-                  onChange={(e) => setLVSFilter(e.target.value as DiskLVSFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="all">All Disks</option>
-                  <option value="initialized">Initialized Only</option>
-                  <option value="uninitialized">Uninitialized Only</option>
-                </select>
-              </div>
+              {/* Context-specific filters */}
+              {statusCardType === 'nvmeof' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Location</label>
+                    <select
+                      value={nvmeofLocationFilter}
+                      onChange={(e) => setNvmeofLocationFilter(e.target.value as 'all' | 'local' | 'remote')}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Locations</option>
+                      <option value="local">Local Disks</option>
+                      <option value="remote">Remote Disks</option>
+                    </select>
+                  </div>
 
-              {/* Utilization Filter */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Utilization</label>
-                <select
-                  value={utilizationFilter}
-                  onChange={(e) => setUtilizationFilter(e.target.value as DiskUtilizationFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="all">All Levels</option>
-                  <option value="low">Low (&lt; 25%)</option>
-                  <option value="medium">Medium (25-75%)</option>
-                  <option value="high">High (75-95%)</option>
-                  <option value="full">Nearly Full (&gt; 95%)</option>
-                </select>
-              </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Driver Status</label>
+                    <select
+                      value={nvmeofDriverFilter}
+                      onChange={(e) => setNvmeofDriverFilter(e.target.value as 'all' | 'bound' | 'unbound')}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Drivers</option>
+                      <option value="bound">Driver Bound</option>
+                      <option value="unbound">Driver Unbound</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
+                    <select
+                      value={nvmeofTransportFilter}
+                      onChange={(e) => setNvmeofTransportFilter(e.target.value as 'all' | 'tcp' | 'rdma' | 'fc')}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Transports</option>
+                      <option value="tcp">TCP</option>
+                      <option value="rdma">RDMA</option>
+                      <option value="fc">Fibre Channel</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {statusCardType === 'raid' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">RAID Level</label>
+                    <select
+                      value={raidLevelFilter}
+                      onChange={(e) => setRaidLevelFilter(e.target.value as 'all' | '0' | '1')}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All RAID Levels</option>
+                      <option value="0">RAID-0 (Stripe)</option>
+                      <option value="1">RAID-1 (Mirror)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">RAID Status</label>
+                    <select
+                      value={raidStatusFilter}
+                      onChange={(e) => setRaidStatusFilter(e.target.value as 'all' | 'healthy' | 'degraded' | 'failed')}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="healthy">Healthy</option>
+                      <option value="degraded">Degraded</option>
+                      <option value="failed">Failed</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {statusCardType === 'default' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">LVS Status</label>
+                    <select
+                      value={lvsFilter}
+                      onChange={(e) => setLVSFilter(e.target.value as DiskLVSFilter)}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Disks</option>
+                      <option value="initialized">Initialized Only</option>
+                      <option value="uninitialized">Uninitialized Only</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Utilization</label>
+                    <select
+                      value={utilizationFilter}
+                      onChange={(e) => setUtilizationFilter(e.target.value as DiskUtilizationFilter)}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="all">All Levels</option>
+                      <option value="low">Low (&lt; 25%)</option>
+                      <option value="medium">Medium (25-75%)</option>
+                      <option value="high">High (75-95%)</option>
+                      <option value="full">Nearly Full (&gt; 95%)</option>
+                    </select>
+                  </div>
+                </>
+              )}
 
               {/* Capacity Range */}
               <div className="md:col-span-2">
@@ -510,67 +727,152 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         )}
       </div>
 
-      {/* Results Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-        <div className="bg-gray-50 rounded-lg p-4">
-          <div className="flex items-center">
-            <HardDrive className="w-8 h-8 text-blue-600 mr-3" />
-            <div>
-              <h3 className="text-lg font-semibold">
-                {activeFilterCount > 0 || volumeFilter || volumeReplicaFilter ? 'Filtered Disks' : 'Total Disks'}
-              </h3>
-              <p className="text-3xl font-bold text-blue-600">
-                {filteredDisks.length}
-                {(activeFilterCount > 0 || volumeFilter || volumeReplicaFilter) && (
-                  <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
-                )}
-              </p>
-            </div>
-          </div>
+      {/* Status Cards - conditional based on pane type */}
+      {!showOnlyTable && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          {statusCardType === 'nvmeof' && (
+            <>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Unlock className="w-6 h-6 text-green-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Free</h3>
+                    <p className="text-xl font-bold text-green-600">
+                      {filteredDisks.filter(d => !d.is_system_disk && !d.blobstore_initialized).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Zap className="w-6 h-6 text-blue-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Driver Bound</h3>
+                    <p className="text-xl font-bold text-blue-600">
+                      {filteredDisks.filter(d => d.nvme_driver_bound).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <AlertCircle className="w-6 h-6 text-orange-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Needs Unmount</h3>
+                    <p className="text-xl font-bold text-orange-600">
+                      {filteredDisks.filter(d => d.mounted).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Cloud className="w-6 h-6 text-purple-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Remote</h3>
+                    <p className="text-xl font-bold text-purple-600">
+                      {filteredDisks.filter(d => d.is_remote).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+          {statusCardType === 'raid' && (
+            <>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Unlock className="w-6 h-6 text-green-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Free</h3>
+                    <p className="text-xl font-bold text-green-600">
+                      {filteredDisks.filter(d => !d.blobstore_initialized).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Database className="w-6 h-6 text-indigo-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">LVS Ready</h3>
+                    <p className="text-xl font-bold text-indigo-600">
+                      {filteredDisks.filter(d => d.blobstore_initialized).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+          {statusCardType === 'default' && (
+            <>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <HardDrive className="w-6 h-6 text-blue-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">
+                      {activeFilterCount > 0 || volumeFilter || volumeReplicaFilter ? 'Filtered Disks' : 'Total Disks'}
+                    </h3>
+                    <p className="text-xl font-bold text-blue-600">
+                      {filteredDisks.length}
+                      {(activeFilterCount > 0 || volumeFilter || volumeReplicaFilter) && (
+                        <span className="text-sm text-gray-500">/{stats.totalDisks}</span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <CheckCircle className="w-6 h-6 text-green-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Healthy Disks</h3>
+                    <p className="text-xl font-bold text-green-600">
+                      {filteredDisks.filter(d => d.healthy).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Database className="w-6 h-6 text-indigo-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">LVS Initialized</h3>
+                    <p className="text-xl font-bold text-indigo-600">
+                      {filteredDisks.filter(d => d.blobstore_initialized).length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center">
+                  <Activity className="w-6 h-6 text-purple-600 mr-2" />
+                  <div>
+                    <h3 className="text-sm font-semibold">Avg Utilization</h3>
+                    <p className="text-xl font-bold text-purple-600">
+                      {filteredDisks.length > 0 ? 
+                        Math.round(filteredDisks.reduce((sum, disk) => 
+                          sum + (disk.allocated_space / disk.capacity_gb) * 100, 0
+                        ) / filteredDisks.length) : 0}%
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
-        <div className="bg-gray-50 rounded-lg p-4">
-          <div className="flex items-center">
-            <CheckCircle className="w-8 h-8 text-green-600 mr-3" />
-            <div>
-              <h3 className="text-lg font-semibold">Healthy Disks</h3>
-              <p className="text-3xl font-bold text-green-600">
-                {filteredDisks.filter(d => d.healthy).length}
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-gray-50 rounded-lg p-4">
-          <div className="flex items-center">
-            <Database className="w-8 h-8 text-indigo-600 mr-3" />
-            <div>
-              <h3 className="text-lg font-semibold">LVS Initialized</h3>
-              <p className="text-3xl font-bold text-indigo-600">
-                {filteredDisks.filter(d => d.blobstore_initialized).length}
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-gray-50 rounded-lg p-4">
-          <div className="flex items-center">
-            <Activity className="w-8 h-8 text-purple-600 mr-3" />
-            <div>
-              <h3 className="text-lg font-semibold">Avg Utilization</h3>
-              <p className="text-3xl font-bold text-purple-600">
-                {filteredDisks.length > 0 ? 
-                  Math.round(filteredDisks.reduce((sum, disk) => 
-                    sum + (disk.allocated_space / disk.capacity_gb) * 100, 0
-                  ) / filteredDisks.length) : 0}%
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+      )}
       
       {/* Disks Table */}
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
+              {!showOnlyTable && (
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Select
+                </th>
+              )}
               <th 
                 className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 onClick={() => handleSort('id')}
@@ -589,7 +891,29 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                   <SortIcon field="node" />
                 </div>
               </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+              
+              {/* Contextual columns based on disk type */}
+              {statusCardType === 'nvmeof' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transport</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
+                </>
+              )}
+              
+              {statusCardType === 'raid' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">RAID Level</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Members</th>
+                </>
+              )}
+              
+              {statusCardType === 'default' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+                </>
+              )}
+              
               <th 
                 className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 onClick={() => handleSort('capacity')}
@@ -618,31 +942,71 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 </div>
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LVS Initialized</th>
-              <th 
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('read_iops')}
-              >
-                <div className="flex items-center gap-1">
-                  Performance
-                  <SortIcon field="read_iops" />
-                </div>
-              </th>
-              <th 
-                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                onClick={() => handleSort('volumes')}
-              >
-                <div className="flex items-center gap-1">
-                  Volumes
-                  <SortIcon field="volumes" />
-                </div>
-              </th>
+              
+              {/* Context-specific rightmost columns */}
+              {statusCardType === 'nvmeof' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">RAID Membership</th>
+                  <th 
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('read_iops')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Performance
+                      <SortIcon field="read_iops" />
+                    </div>
+                  </th>
+                </>
+              )}
+              
+              {statusCardType === 'raid' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LVS Status</th>
+                  <th 
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('volumes')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Volumes
+                      <SortIcon field="volumes" />
+                    </div>
+                  </th>
+                </>
+              )}
+              
+              {statusCardType === 'default' && (
+                <>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LVS Initialized</th>
+                  <th 
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('read_iops')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Performance
+                      <SortIcon field="read_iops" />
+                    </div>
+                  </th>
+                  <th 
+                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                    onClick={() => handleSort('volumes')}
+                  >
+                    <div className="flex items-center gap-1">
+                      Volumes
+                      <SortIcon field="volumes" />
+                    </div>
+                  </th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {filteredDisks.length === 0 ? (
               <tr>
-                <td colSpan={10} className="px-6 py-8 text-center text-gray-500">
+                <td colSpan={
+                  showOnlyTable ? 
+                    (statusCardType === 'nvmeof' ? 9 : statusCardType === 'raid' ? 9 : 10) : 
+                    (statusCardType === 'nvmeof' ? 10 : statusCardType === 'raid' ? 10 : 11)
+                } className="px-6 py-8 text-center text-gray-500">
                   {volumeReplicaFilter && targetVolume
                     ? `No disks contain replicas for volume "${targetVolume.name}".`
                     : volumeFilter && volumeFilter !== 'all' 
@@ -688,8 +1052,24 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
                 const utilization = Math.round((disk.allocated_space / disk.capacity_gb) * 100);
 
+                const isDisabledForRaidSelection = disk.is_remote || disk.is_system_disk;
+                const selected = selectedDiskIds.has(disk.id);
                 return (
                   <tr key={disk.id} className="hover:bg-gray-50">
+                    {!showOnlyTable && (
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        <input
+                          type="checkbox"
+                          disabled={activePane !== 'raid' || isDisabledForRaidSelection}
+                          checked={selected}
+                          onChange={(e) => {
+                            const next = new Set(selectedDiskIds);
+                            if (e.target.checked) next.add(disk.id); else next.delete(disk.id);
+                            setSelectedDiskIds(next);
+                          }}
+                        />
+                      </td>
+                    )}
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                       <button
                         onClick={() => {
@@ -710,7 +1090,46 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         {disk.node}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
+                    
+                    {/* Contextual columns based on disk type */}
+                    {statusCardType === 'nvmeof' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {disk.nvmeof_endpoint?.transport || 'Local'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            disk.is_remote ? 'bg-purple-100 text-purple-800' : 'bg-green-100 text-green-800'
+                          }`}>
+                            {disk.is_remote ? 'Remote' : 'Local'}
+                          </span>
+                        </td>
+                      </>
+                    )}
+                    
+                    {statusCardType === 'raid' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            disk.raid_level === '0' ? 'bg-blue-100 text-blue-800' : 
+                            disk.raid_level === '1' ? 'bg-green-100 text-green-800' : 
+                            'bg-gray-100 text-gray-800'
+                          }`}>
+                            {disk.raid_level ? `RAID-${disk.raid_level}` : 'Unknown'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {disk.raid_members?.length || 0} members
+                        </td>
+                      </>
+                    )}
+                    
+                    {statusCardType === 'default' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
+                      </>
+                    )}
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -736,102 +1155,174 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         {disk.healthy ? 'Healthy' : 'Unhealthy'}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
-                      }`}>
-                        {disk.blobstore_initialized ? 'Yes' : 'No'}
-                      </span>
-                      {disk.blobstore_initialized && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          <div className="flex items-center gap-1">
-                            <span>{disk.lvol_count} logical volumes</span>
-                            {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
-                              <span 
-                                className="text-orange-500 flex items-center gap-1" 
-                                title={`${disk.orphaned_spdk_volumes.length} orphaned SPDK volume${disk.orphaned_spdk_volumes.length !== 1 ? 's' : ''} (${disk.orphaned_spdk_volumes.reduce((total, orphan) => total + orphan.size_gb, 0).toFixed(1)}GB)`}
-                              >
-                                <AlertTriangle className="w-3 h-3" />
-                                <span className="text-xs">+{disk.orphaned_spdk_volumes.length} orphaned</span>
-                              </span>
-                            )}
+                    
+                    {/* Context-specific rightmost columns */}
+                    {statusCardType === 'nvmeof' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {disk.raid_membership ? (
+                            <button
+                              onClick={() => onDiskClick?.(disk.raid_membership.raid_disk_id)}
+                              className="text-blue-600 hover:text-blue-800 hover:underline"
+                            >
+                              {disk.raid_membership.raid_disk_name}
+                            </button>
+                          ) : (
+                            <span className="text-gray-400">Not in RAID</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-green-600">R:</span>
+                              <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-blue-600">W:</span>
+                              <span className="text-xs">{disk.write_iops.toLocaleString()} IOPS</span>
+                            </div>
+                            <div className="text-xs text-gray-400">
+                              {disk.read_latency}μs / {disk.write_latency}μs
+                            </div>
                           </div>
-                          
-                          {/* Show individual orphaned volumes with delete buttons */}
-                          {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
-                            <div className="mt-2 space-y-1">
-                              {disk.orphaned_spdk_volumes.map((orphan, idx) => (
-                                <div key={idx} className="flex items-center justify-between bg-orange-50 rounded px-2 py-1">
-                                  <div className="flex-1">
-                                    <div className="text-xs font-medium text-orange-800">{orphan.spdk_volume_name}</div>
-                                    <div className="text-xs text-orange-600">{orphan.size_gb.toFixed(2)}GB • Orphaned</div>
-                                  </div>
-                                  <button
-                                    onClick={() => handleDeleteOrphanedVolume(orphan, disk.node)}
-                                    className="ml-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded p-1"
-                                    title={`Delete orphaned volume ${orphan.spdk_volume_name}`}
+                        </td>
+                      </>
+                    )}
+                    
+                    {statusCardType === 'raid' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+                          }`}>
+                            {disk.blobstore_initialized ? 'Ready' : 'Not Ready'}
+                          </span>
+                          {disk.blobstore_initialized && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              <div className="flex items-center gap-1">
+                                <span>{disk.lvol_count} logical volumes</span>
+                                {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
+                                  <span 
+                                    className="text-orange-500 flex items-center gap-1" 
+                                    title={`${disk.orphaned_spdk_volumes.length} orphaned SPDK volume${disk.orphaned_spdk_volumes.length !== 1 ? 's' : ''}`}
                                   >
-                                    <Trash2 className="w-3 h-3" />
-                                  </button>
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span className="text-xs">+{disk.orphaned_spdk_volumes.length} orphaned</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <button
+                            onClick={() => onDiskClick?.(disk.id)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
+                          >
+                            {displayVolumes.length} volume{displayVolumes.length !== 1 ? 's' : ''}
+                            {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
+                             displayVolumes.length !== disk.provisioned_volumes.length && (
+                              <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
+                            )}
+                          </button>
+                          {displayVolumes.length > 0 && (
+                            <div className="mt-1 space-y-1">
+                              {displayVolumes.slice(0, 2).map((vol, idx) => (
+                                <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
+                                  <div className={`w-2 h-2 rounded-full ${
+                                    vol.status === 'healthy' ? 'bg-green-500' :
+                                    vol.status === 'rebuilding' ? 'bg-orange-500' :
+                                    'bg-red-500'
+                                  }`}></div>
+                                  <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
+                                  <span className="text-gray-400">({vol.size}GB)</span>
                                 </div>
                               ))}
+                              {displayVolumes.length > 2 && (
+                                <div className="text-xs text-gray-400">
+                                  +{displayVolumes.length - 2} more...
+                                </div>
+                              )}
                             </div>
                           )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-green-600">R:</span>
-                          <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-blue-600">W:</span>
-                          <span className="text-xs">{disk.write_iops.toLocaleString()} IOPS</span>
-                        </div>
-                        <div className="text-xs text-gray-400">
-                          {disk.read_latency}μs / {disk.write_latency}μs
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => onDiskClick?.(disk.id)}
-                        className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
-                      >
-                        {displayVolumes.length} volume{displayVolumes.length !== 1 ? 's' : ''}
-                        {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
-                         displayVolumes.length !== disk.provisioned_volumes.length && (
-                          <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
-                        )}
-                        {volumeReplicaFilter && targetVolume && (
-                          <span className="block text-xs text-green-600 mt-1">
-                            {targetVolume.name} replicas
+                        </td>
+                      </>
+                    )}
+                    
+                    {statusCardType === 'default' && (
+                      <>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+                          }`}>
+                            {disk.blobstore_initialized ? 'Yes' : 'No'}
                           </span>
-                        )}
-                      </button>
-                      {displayVolumes.length > 0 && (
-                        <div className="mt-1 space-y-1">
-                          {displayVolumes.slice(0, 2).map((vol, idx) => (
-                            <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
-                              <div className={`w-2 h-2 rounded-full ${
-                                vol.status === 'healthy' ? 'bg-green-500' :
-                                vol.status === 'rebuilding' ? 'bg-orange-500' :
-                                'bg-red-500'
-                              }`}></div>
-                              <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
-                              <span className="text-gray-400">({vol.size}GB)</span>
-                            </div>
-                          ))}
-                          {displayVolumes.length > 2 && (
-                            <div className="text-xs text-gray-400">
-                              +{displayVolumes.length - 2} more...
+                          {disk.blobstore_initialized && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              <div className="flex items-center gap-1">
+                                <span>{disk.lvol_count} logical volumes</span>
+                                {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
+                                  <span 
+                                    className="text-orange-500 flex items-center gap-1" 
+                                    title={`${disk.orphaned_spdk_volumes.length} orphaned SPDK volume${disk.orphaned_spdk_volumes.length !== 1 ? 's' : ''}`}
+                                  >
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span className="text-xs">+{disk.orphaned_spdk_volumes.length} orphaned</span>
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           )}
-                        </div>
-                      )}
-                    </td>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-green-600">R:</span>
+                              <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-blue-600">W:</span>
+                              <span className="text-xs">{disk.write_iops.toLocaleString()} IOPS</span>
+                            </div>
+                            <div className="text-xs text-gray-400">
+                              {disk.read_latency}μs / {disk.write_latency}μs
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <button
+                            onClick={() => onDiskClick?.(disk.id)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
+                          >
+                            {displayVolumes.length} volume{displayVolumes.length !== 1 ? 's' : ''}
+                            {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
+                             displayVolumes.length !== disk.provisioned_volumes.length && (
+                              <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
+                            )}
+                          </button>
+                          {displayVolumes.length > 0 && (
+                            <div className="mt-1 space-y-1">
+                              {displayVolumes.slice(0, 2).map((vol, idx) => (
+                                <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
+                                  <div className={`w-2 h-2 rounded-full ${
+                                    vol.status === 'healthy' ? 'bg-green-500' :
+                                    vol.status === 'rebuilding' ? 'bg-orange-500' :
+                                    'bg-red-500'
+                                  }`}></div>
+                                  <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
+                                  <span className="text-gray-400">({vol.size}GB)</span>
+                                </div>
+                              ))}
+                              {displayVolumes.length > 2 && (
+                                <div className="text-xs text-gray-400">
+                                  +{displayVolumes.length - 2} more...
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </>
+                    )}
                   </tr>
                 );
               })
@@ -839,6 +1330,234 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Create RAID Modal */}
+      {showCreateRaid && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-lg">
+            <h3 className="text-lg font-semibold mb-4">Create RAID Disk</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  value={raidName}
+                  onChange={(e) => setRaidName(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-2"
+                  placeholder="raid-001"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">RAID Level</label>
+                  <select
+                    value={raidLevel}
+                    onChange={(e) => setRaidLevel(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2"
+                  >
+                    <option value="0">RAID-0 (Stripe)</option>
+                    <option value="1">RAID-1 (Mirror)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Node</label>
+                  <input
+                    value={raidNode}
+                    onChange={(e) => setRaidNode(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2"
+                    placeholder="worker-node-1"
+                  />
+                </div>
+              </div>
+              <div className="text-sm text-gray-600">
+                Members selected: <span className="font-semibold">{selectedDiskIds.size}</span>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setShowCreateRaid(false)} className="px-3 py-1 text-sm rounded border">Cancel</button>
+              <button
+                onClick={async () => {
+                  const members = Array.from(selectedDiskIds);
+                  const payload = { name: raidName, raid_level: raidLevel, members, created_on_node: raidNode };
+                  const resp = await fetch('/api/raiddisks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                  if (resp.ok) {
+                    setShowCreateRaid(false);
+                    setSelectedDiskIds(new Set());
+                  } else {
+                    alert('Failed to create RAID disk');
+                  }
+                }}
+                disabled={selectedDiskIds.size < (raidLevel === '1' ? 2 : 1) || !raidName || !raidNode}
+                className="px-3 py-1 text-sm bg-blue-600 text-white rounded disabled:opacity-50"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Remote NVMe-oF Modal */}
+      {showAddRemoteNVMeoF && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-2xl">
+            <h3 className="text-lg font-semibold mb-4">Add Remote NVMe-oF Target</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  value={remoteNVMeoFForm.name}
+                  onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Storage array name"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">NQN (NVMe Qualified Name)</label>
+                <input
+                  type="text"
+                  value={remoteNVMeoFForm.nqn}
+                  onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, nqn: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="nqn.2023.io.storage:target1"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Transport</label>
+                <select
+                  value={remoteNVMeoFForm.transport}
+                  onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, transport: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="tcp">TCP</option>
+                  <option value="rdma">RDMA</option>
+                  <option value="fc">Fibre Channel</option>
+                </select>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <input
+                    type="text"
+                    value={remoteNVMeoFForm.address}
+                    onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, address: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="192.168.1.100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Port</label>
+                  <input
+                    type="text"
+                    value={remoteNVMeoFForm.port}
+                    onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, port: e.target.value }))}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="4420"
+                  />
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Namespace ID</label>
+                <input
+                  type="text"
+                  value={remoteNVMeoFForm.nsid}
+                  onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, nsid: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="1"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Authentication</label>
+                <select
+                  value={remoteNVMeoFForm.authMethod}
+                  onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, authMethod: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="none">None</option>
+                  <option value="dhchap">DH-CHAP (NVMe Authentication)</option>
+                </select>
+              </div>
+              
+              {remoteNVMeoFForm.authMethod === 'dhchap' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                    <input
+                      type="text"
+                      value={remoteNVMeoFForm.username}
+                      onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, username: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="nvme_user"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                    <input
+                      type="password"
+                      value={remoteNVMeoFForm.password}
+                      onChange={(e) => setRemoteNVMeoFForm(prev => ({ ...prev, password: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="••••••••"
+                    />
+                  </div>
+                </div>
+              )}
+              
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <div className="text-blue-600">ℹ</div>
+                  <div className="text-sm text-blue-800">
+                    <p className="font-medium mb-1">About NVMe-oF Targets</p>
+                    <p>Connect to a remote NVMe storage device over the network using NVMe over Fabrics. This will create a new nvmeof disk resource that can be used for RAID creation.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowAddRemoteNVMeoF(false);
+                  setRemoteNVMeoFForm({ 
+                    name: '', nqn: '', transport: 'tcp', address: '', port: '4420', nsid: '',
+                    authMethod: 'none', username: '', password: ''
+                  });
+                }}
+                className="px-4 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  // TODO: Implement the actual API call to create NVMe-oF target
+                  console.log('Creating NVMe-oF target:', remoteNVMeoFForm);
+                  // For now, just close the modal
+                  setShowAddRemoteNVMeoF(false);
+                  setRemoteNVMeoFForm({ 
+                    name: '', nqn: '', transport: 'tcp', address: '', port: '4420', nsid: '',
+                    authMethod: 'none', username: '', password: ''
+                  });
+                }}
+                disabled={
+                  !remoteNVMeoFForm.name || 
+                  !remoteNVMeoFForm.nqn || 
+                  !remoteNVMeoFForm.address || 
+                  !remoteNVMeoFForm.nsid ||
+                  (remoteNVMeoFForm.authMethod === 'dhchap' && (!remoteNVMeoFForm.username || !remoteNVMeoFForm.password))
+                }
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+              >
+                Add Target
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Additional Filter Summary */}
       {filteredDisks.length > 0 && activeFilterCount > 0 && (

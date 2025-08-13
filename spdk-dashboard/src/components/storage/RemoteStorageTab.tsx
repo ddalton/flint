@@ -1,22 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Plus, 
-  Trash2, 
-  Edit3, 
-  Save, 
-  X, 
-  Wifi, 
-  WifiOff, 
-  CheckCircle, 
-  AlertTriangle,
-  HardDrive,
-  Network,
-  RefreshCw,
-  Eye,
-  EyeOff,
-  Search,
-  Loader2
-} from 'lucide-react';
+// Deprecated component retained temporarily (no longer used in UI) – consider removal later
 import { useOperations } from '../../contexts/OperationsContext';
 
 // Types for remote storage targets
