@@ -170,22 +170,100 @@ impl NodeService {
     }
 
 
-    /// Connect to target device using unified storage backend (single disk or RAID disk)
+    /// Connect to target device using ublk (supports both local and remote access)
     async fn connect_to_target_device(&self, volume: &SpdkVolume) -> Result<String, Status> {
-        let volume_nqn = self.driver.generate_nqn(&volume.spec.volume_id);
+        println!("🔗 [UBLK_CONNECT] Connecting to volume {} using ublk", volume.spec.volume_id);
         
-        // Unified connection logic for RAID-backed volumes
-        let target_device = match &volume.spec.storage_backend {
-            StorageBackend::RaidDisk { raid_disk_ref, node_id } => {
-                self.connect_to_raid_disk_volume(volume, raid_disk_ref, node_id, &volume_nqn).await?
+        // Determine the bdev name for ublk device creation
+        let bdev_name = match &volume.spec.storage_backend {
+            StorageBackend::RaidDisk { raid_disk_ref: _, node_id } => {
+                if node_id == &self.driver.node_id {
+                    // Local RAID disk: Use lvol UUID directly
+                    if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
+                        format!("{}", lvol_uuid)
+                    } else {
+                        return Err(Status::internal(format!("Local volume {} has no lvol_uuid", volume.spec.volume_id)));
+                    }
+                } else {
+                    // Remote RAID disk: First create NVMe-oF bdev connection, then ublk on top
+                    self.create_remote_nvmeof_bdev_connection(volume, node_id).await?
+                }
             }
         };
+
+        // Create ublk device on top of the bdev (local lvol or remote NVMe-oF bdev)
+        let target_device = self.create_ublk_device_for_bdev(&volume.spec.volume_id, &bdev_name).await?;
 
         // Wait for device to appear
         self.wait_for_device(&target_device).await?;
         
-        println!("✅ [UNIFIED_CONNECT] Connected to target device: {} for volume {}", target_device, volume.spec.volume_id);
+        println!("✅ [UBLK_CONNECT] Connected to ublk device: {} for volume {}", target_device, volume.spec.volume_id);
         Ok(target_device)
+    }
+    
+    /// Create remote NVMe-oF bdev connection for ublk access
+    async fn create_remote_nvmeof_bdev_connection(&self, volume: &SpdkVolume, remote_node_id: &str) -> Result<String, Status> {
+        println!("🔗 [REMOTE_NVMEOF] Creating NVMe-oF bdev connection to remote node {}", remote_node_id);
+        
+        // Generate NQN for the remote volume
+        let volume_nqn = self.driver.generate_nqn(&volume.spec.volume_id);
+        
+        // Get remote node IP
+        let remote_ip = self.driver.get_node_ip(remote_node_id).await
+            .map_err(|e| Status::internal(format!("Failed to get remote node IP: {}", e)))?;
+        
+        // Create local NVMe-oF bdev that connects to remote target
+        let nvmeof_bdev_name = format!("nvmeof_{}", volume.spec.volume_id);
+        
+        let http_client = reqwest::Client::new();
+        let rpc_request = serde_json::json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": nvmeof_bdev_name,
+                "trtype": self.driver.nvmeof_transport.to_uppercase(),
+                "traddr": remote_ip,
+                "trsvcid": self.driver.nvmeof_target_port.to_string(),
+                "adrfam": "IPv4",
+                "subnqn": volume_nqn
+            }
+        });
+        
+        println!("🔧 [REMOTE_NVMEOF] Attaching NVMe-oF controller: {} -> {}:{}", volume_nqn, remote_ip, self.driver.nvmeof_target_port);
+        
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&rpc_request)
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("SPDK RPC request failed: {}", e)))?;
+        
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Status::internal(format!("Failed to attach NVMe-oF controller: {}", error_text)));
+        }
+        
+        let response_json: serde_json::Value = response.json().await
+            .map_err(|e| Status::internal(format!("Failed to parse SPDK response: {}", e)))?;
+        
+        if let Some(error) = response_json.get("error") {
+            return Err(Status::internal(format!("SPDK RPC error: {}", error)));
+        }
+        
+        println!("✅ [REMOTE_NVMEOF] Successfully created NVMe-oF bdev: {}", nvmeof_bdev_name);
+        Ok(nvmeof_bdev_name)
+    }
+    
+    /// Create ublk device for any bdev (local lvol or remote NVMe-oF bdev)
+    async fn create_ublk_device_for_bdev(&self, volume_id: &str, bdev_name: &str) -> Result<String, Status> {
+        println!("🔧 [UBLK_CREATE] Creating ublk device for bdev {} (volume {})", bdev_name, volume_id);
+        
+        let ublk_device = self.driver
+            .ublk_start_disk(bdev_name, volume_id, "localhost", 0)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?;
+        
+        println!("✅ [UBLK_CREATE] Successfully created ublk device: {} -> {}", bdev_name, ublk_device.device_path);
+        Ok(ublk_device.device_path)
     }
 
     /// Connect to a single disk volume (local or remote)
@@ -246,39 +324,85 @@ impl NodeService {
         }
     }
     
-    /// Clean up NVMe connections on unpublish (idempotent with retry)
-    async fn cleanup_nvme_device(&self, volume_id: &str) -> Result<(), Status> {
-        let volume_nqn = self.driver.generate_nqn(volume_id);
+    /// Clean up ublk device and associated NVMe-oF bdev on unpublish (idempotent with retry)
+    async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
+        println!("🔌 [CLEANUP] Stopping ublk device and cleaning up bdevs for volume {}", volume_id);
         
-        println!("🔌 [CLEANUP] Disconnecting NVMe device {} for volume {}", volume_nqn, volume_id);
-        
-        // Retry disconnection up to 3 times for robustness
+        // Step 1: Stop ublk device first
         for attempt in 1..=3 {
-            match self.driver.disconnect_nvme_device(&volume_nqn).await {
+            match self.driver.ublk_stop_disk(volume_id).await {
                 Ok(_) => {
-                    println!("✅ [CLEANUP] Successfully disconnected NVMe device {} (attempt {})", volume_nqn, attempt);
-                    return Ok(());
+                    println!("✅ [CLEANUP] Successfully stopped ublk device for volume {} (attempt {})", volume_id, attempt);
+                    break;
                 }
                 Err(e) => {
                     let error_str = e.to_string();
                     
                     // If device doesn't exist, that's success (idempotent)
-                    if error_str.contains("not connected") || error_str.contains("not found") {
-                        println!("ℹ️ [CLEANUP] NVMe device {} already disconnected", volume_nqn);
-                        return Ok(());
+                    if error_str.contains("not found") || error_str.contains("does not exist") {
+                        println!("ℹ️ [CLEANUP] ublk device for volume {} already stopped", volume_id);
+                        break;
                     }
                     
                     // For other errors, retry or fail
                     if attempt == 3 {
-                        println!("❌ [CLEANUP] Failed to disconnect NVMe device {} after {} attempts: {}", volume_nqn, attempt, error_str);
-                        return Err(Status::internal(format!("Failed to disconnect NVMe device after retries: {}", error_str)));
+                        println!("❌ [CLEANUP] Failed to stop ublk device for volume {} after {} attempts: {}", volume_id, attempt, error_str);
+                        return Err(Status::internal(format!("Failed to stop ublk device after retries: {}", error_str)));
                     } else {
-                        println!("⚠️ [CLEANUP] Attempt {} failed for NVMe device {}: {}. Retrying...", attempt, volume_nqn, error_str);
+                        println!("⚠️ [CLEANUP] Attempt {} failed for ublk device {}: {}. Retrying...", attempt, volume_id, error_str);
                         // Sleep between retries
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                 }
             }
+        }
+        
+        // Step 2: Clean up NVMe-oF bdev if it exists (for remote volumes)
+        self.cleanup_nvmeof_bdev(volume_id).await?;
+        
+        Ok(())
+    }
+    
+    /// Clean up NVMe-oF bdev connection (for remote volume access)
+    async fn cleanup_nvmeof_bdev(&self, volume_id: &str) -> Result<(), Status> {
+        let nvmeof_bdev_name = format!("nvmeof_{}", volume_id);
+        
+        println!("🧹 [CLEANUP] Cleaning up NVMe-oF bdev: {}", nvmeof_bdev_name);
+        
+        let http_client = reqwest::Client::new();
+        let rpc_request = serde_json::json!({
+            "method": "bdev_nvme_detach_controller",
+            "params": {
+                "name": nvmeof_bdev_name
+            }
+        });
+        
+        let response = http_client
+            .post(&self.driver.spdk_rpc_url)
+            .json(&rpc_request)
+            .send()
+            .await
+            .map_err(|e| Status::internal(format!("SPDK RPC request failed: {}", e)))?;
+        
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            // Ignore "not found" errors - bdev may not exist for local volumes
+            if !error_text.contains("not found") && !error_text.contains("does not exist") {
+                println!("⚠️ [CLEANUP] Warning: Failed to detach NVMe-oF bdev {}: {}", nvmeof_bdev_name, error_text);
+            } else {
+                println!("ℹ️ [CLEANUP] NVMe-oF bdev {} not found (likely local volume)", nvmeof_bdev_name);
+            }
+            return Ok(());
+        }
+        
+        let response_json: serde_json::Value = response.json().await
+            .map_err(|e| Status::internal(format!("Failed to parse SPDK response: {}", e)))?;
+        
+        if let Some(error) = response_json.get("error") {
+            // Log but don't fail - this is cleanup
+            println!("⚠️ [CLEANUP] Warning: SPDK RPC error detaching NVMe-oF bdev {}: {}", nvmeof_bdev_name, error);
+        } else {
+            println!("✅ [CLEANUP] Successfully detached NVMe-oF bdev: {}", nvmeof_bdev_name);
         }
         
         Ok(())
@@ -488,30 +612,20 @@ impl Node for NodeService {
         // Connect to the target device using NVMe connect
         let device_path = self.connect_to_target_device(&volume).await?;
 
-        // Update volume status with NVMe device info
-        println!("🔍 [DEBUG] NodeStageVolume: Updating volume status with NVMe device info");
-        let volume_nqn = self.driver.generate_nqn(&volume_id);
+        // Update volume status with ublk device info
+        println!("🔍 [DEBUG] NodeStageVolume: Updating volume status with ublk device info");
         
-        // Extract connection details from the actual device
-        let nvme_device = if let Ok(device) = self.driver.find_existing_nvme_connection(&volume_nqn).await {
+        // Extract ublk device information
+        let ublk_device = if let Ok(device) = self.driver.find_existing_ublk_device(&volume_id).await {
             device
         } else {
-            // Fallback: create basic device info
-            NvmeClientDevice {
-                device_path: device_path.clone(),
-                nqn: volume_nqn.clone(),
-                transport: self.driver.nvmeof_transport.clone(),
-                target_addr: "localhost".to_string(),
-                target_port: self.driver.nvmeof_target_port,
-                connected_at: Utc::now().to_rfc3339(),
-                node: self.driver.node_id.clone(),
-                controller_id: None,
-            }
+            // Fallback: this shouldn't happen if we just created the device
+            return Err(Status::internal(format!("ublk device not found after creation for volume {}", volume_id)));
         };
         
-        println!("🔍 [DEBUG] NodeStageVolume: Created nvme_device: {:?}", nvme_device);
+        println!("🔍 [DEBUG] NodeStageVolume: Created ublk_device: {:?}", ublk_device);
         
-        self.update_volume_nvme_status(&volume_id, Some(nvme_device)).await?;
+        self.update_volume_ublk_status(&volume_id, Some(ublk_device)).await?;
         println!("✅ [SUCCESS] NodeStageVolume: Volume status updated successfully");
 
         // For filesystem volumes, format and mount
@@ -569,10 +683,10 @@ impl Node for NodeService {
             println!("⚠️ [UNSTAGE] Unmount warning (non-fatal): {}", e);
         }
 
-        // Step 2: Always clean up NVMe device first (idempotent - works even if CRD is gone)
-        println!("🧹 [UNSTAGE] Cleaning up NVMe device for volume: {}", volume_id);
-        if let Err(e) = self.cleanup_nvme_device(&volume_id).await {
-            println!("⚠️ [UNSTAGE] NVMe cleanup warning (non-fatal): {}", e);
+        // Step 2: Always clean up ublk device first (idempotent - works even if CRD is gone)
+        println!("🧹 [UNSTAGE] Cleaning up ublk device for volume: {}", volume_id);
+        if let Err(e) = self.cleanup_ublk_device(&volume_id).await {
+            println!("⚠️ [UNSTAGE] ublk cleanup warning (non-fatal): {}", e);
             // Continue with other cleanup - don't fail the unstage operation
         }
 
@@ -595,10 +709,10 @@ impl Node for NodeService {
                     println!("⚠️ [UNSTAGE] Status update warning (non-fatal): {}", e);
                 }
 
-                // Step 6: Clear NVMe device status
-                println!("📝 [UNSTAGE] Step 6: Clearing NVMe device status");
-                if let Err(e) = self.update_volume_nvme_status(&volume_id, None).await {
-                    println!("⚠️ [UNSTAGE] NVMe status clear warning (non-fatal): {}", e);
+                // Step 6: Clear ublk device status
+                println!("📝 [UNSTAGE] Step 6: Clearing ublk device status");
+                if let Err(e) = self.update_volume_ublk_status(&volume_id, None).await {
+                    println!("⚠️ [UNSTAGE] ublk status clear warning (non-fatal): {}", e);
                 }
             }
             Err(e) => {
@@ -1002,6 +1116,70 @@ impl NodeService {
                     }
                     _ => {
                         println!("❌ [ERROR] Other kubernetes error type: {:?}", e);
+                    }
+                }
+                
+                Err(Status::internal(format!("Failed to update volume status: {}", e)))
+            }
+        }
+    }
+    
+    /// Update volume status with ublk device information
+    async fn update_volume_ublk_status(
+        &self,
+        volume_id: &str,
+        ublk_device: Option<UblkDevice>,
+    ) -> Result<(), Status> {
+        println!("🔍 [DEBUG] Starting update_volume_ublk_status for volume: {}", volume_id);
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        // Get current volume
+        println!("🔍 [DEBUG] Getting volume {} from namespace: {}", volume_id, self.driver.target_namespace);
+        let volume = volumes_api.get(volume_id).await
+            .map_err(|e| {
+                println!("❌ [ERROR] Failed to get volume {}: {:?}", volume_id, e);
+                Status::not_found(format!("Volume {} not found: {}", volume_id, e))
+            })?;
+        
+        println!("🔍 [DEBUG] Successfully retrieved volume, current status: {:?}", volume.status);
+        
+        // Update status
+        let mut status = volume.status.unwrap_or_else(|| {
+            println!("🔍 [DEBUG] No existing status, creating default with state='creating'");
+            let mut default_status = SpdkVolumeStatus::default();
+            default_status.state = "creating".to_string(); // Set valid state instead of empty string
+            default_status
+        });
+        
+        println!("🔍 [DEBUG] Current status state before update: '{}'", status.state);
+        status.ublk_device = ublk_device.clone();
+        println!("🔍 [DEBUG] Updated ublk_device: {:?}", ublk_device);
+        
+        // Patch the status
+        let patch = json!({ "status": status });
+        println!("🔍 [DEBUG] Attempting to patch status with: {}", serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "serialization failed".to_string()));
+        
+        match volumes_api.patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch)).await {
+            Ok(updated_volume) => {
+                println!("✅ [SUCCESS] Successfully updated volume status for {}", volume_id);
+                println!("🔍 [DEBUG] Updated volume status: {:?}", updated_volume.status);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [ERROR] Failed to patch volume status for {}: {:?}", volume_id, e);
+                println!("❌ [ERROR] Error details: {}", e);
+                
+                // e is already a kube::Error, so we can examine it directly
+                match &e {
+                    kube::Error::Api(api_err) => {
+                        println!("❌ [ERROR] Kubernetes API error - code: {}, message: {}", api_err.code, api_err.message);
+                        println!("❌ [ERROR] API error reason: {}", api_err.reason);
+                    }
+                    kube::Error::Service(service_err) => {
+                        println!("❌ [ERROR] Kubernetes service error: {:?}", service_err);
+                    }
+                    _ => {
+                        println!("❌ [ERROR] Other Kubernetes error: {:?}", e);
                     }
                 }
                 

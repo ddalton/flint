@@ -399,8 +399,19 @@ impl Default for SpdkVolumeStatus {
 pub struct UblkDevice {
     pub id: u32,
     pub device_path: String,
+    pub volume_id: String,
+    pub bdev_name: String,
+    pub queue_depth: u32,
+    pub block_size: u32,
     pub created_at: String,
-    pub node: String,
+}
+
+// Helper struct for ublk device information
+#[derive(Debug, Clone)]
+pub struct UblkDeviceInfo {
+    pub bdev_name: String,
+    pub queue_depth: u32,
+    pub block_size: u32,
 }
 
 // New struct for NVMe client device information (replaces ublk)
