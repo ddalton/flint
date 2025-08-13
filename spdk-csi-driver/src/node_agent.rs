@@ -98,8 +98,29 @@ pub struct UnimplementedDisk {
     pub discovered_at: String,
 }
 
-/// Discover local NVMe disks, ensure SPDK bdevs and NVMe-oF exports exist, and publish/repair NvmeofDisk CRs
-async fn discover_and_publish_nvmeof_disks(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Intelligent NVMe-oF export management - avoids conflicts with RAID usage
+async fn manage_nvmeof_exports_intelligently(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use spdk_csi_driver::nvmeof_export_manager::NvmeofExportManager;
+    
+    println!("🔄 [EXPORT_MANAGER] Starting intelligent NVMe-oF export management");
+    
+    let export_manager = NvmeofExportManager::new(
+        agent.spdk_rpc_url.clone(),
+        agent.node_name.clone(),
+    );
+    
+    // Reconcile exports - remove conflicts and add missing exports
+    export_manager.reconcile_exports().await?;
+    
+    // Also handle NvmeofDisk CRDs for backward compatibility
+    discover_and_publish_nvmeof_disks_legacy(agent).await?;
+    
+    println!("✅ [EXPORT_MANAGER] Intelligent export management completed");
+    Ok(())
+}
+
+/// Legacy function for NvmeofDisk CRD management (kept for compatibility)
+async fn discover_and_publish_nvmeof_disks_legacy(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
 
     // Query SPDK for bdevs; identify local NVMe devices
@@ -128,11 +149,12 @@ async fn discover_and_publish_nvmeof_disks(agent: &NodeAgent) -> Result<(), Box<
         // Read sysfs identifiers if present
         let sys_ids = read_sysfs_identifiers(name).await;
 
-        // Ensure NVMe-oF endpoint exists: create subsystem and add listener/namespace if missing
-        // Generate stable NQN from node + bdev name
+        // NVMe-oF export management is now handled by NvmeofExportManager
+        // Generate stable NQN from node + bdev name for CRD purposes
         let nqn = format!("nqn.2025-05.io.flint:raw-{}-{}", agent.node_name, name);
 
-        // best-effort create subsystem
+        // NOTE: No longer creating exports here - handled by export manager to avoid conflicts
+        /*
         let _ = reqwest::Client::new()
             .post(&agent.spdk_rpc_url)
             .json(&json!({
@@ -174,6 +196,7 @@ async fn discover_and_publish_nvmeof_disks(agent: &NodeAgent) -> Result<(), Box<
                 }
             }))
             .send().await;
+        */
 
         // Upsert NvmeofDisk CR for this local disk
         let disk_name = format!("nvmeof-{}-{}", agent.node_name, name);
@@ -188,8 +211,8 @@ async fn discover_and_publish_nvmeof_disks(agent: &NodeAgent) -> Result<(), Box<
             size_bytes,
             nvmeof_endpoint: NvmeofEndpoint {
                 nqn: nqn.clone(),
-                target_addr: traddr.to_string(),
-                target_port: trsvcid.parse().unwrap_or(4420),
+                target_addr: "127.0.0.1".to_string(), // hostNetwork: caller can override in future
+                target_port: 4420,
                 transport: "tcp".to_string(),
                 created_at: Some(Utc::now().to_rfc3339()),
                 active: true,
@@ -466,8 +489,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     wait_for_spdk_ready(&agent).await?;
     
     // 🚀 NEW: Discover local NVMe disks, ensure SPDK bdev exists, and create/update NvmeofDisk CRs
-    if let Err(e) = discover_and_publish_nvmeof_disks(&agent).await {
-        println!("⚠️ [STARTUP] NvmeofDisk discovery failed: {}", e);
+    // 🚀 NEW: Intelligent NVMe-oF export management (avoids RAID conflicts)
+    if let Err(e) = manage_nvmeof_exports_intelligently(&agent).await {
+        println!("⚠️ [STARTUP] NVMe-oF export management failed: {}", e);
     }
     
     // Start HTTP API server for disk setup operations
@@ -489,6 +513,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             reconcile_agent.node_name,
             reconcile_agent.spdk_rpc_url,
         ).await;
+    });
+    
+    // Start periodic NVMe-oF export reconciliation
+    let export_reconcile_agent = agent.clone();
+    tokio::spawn(async move {
+        use spdk_csi_driver::nvmeof_export_manager::NvmeofExportManager;
+        
+        // Wait a bit more to ensure SPDK config reconciliation is established
+        tokio::time::sleep(tokio::time::Duration::from_secs(45)).await;
+        println!("🔄 [EXPORT_RECONCILE] Starting periodic NVMe-oF export reconciliation");
+        
+        let export_manager = NvmeofExportManager::new(
+            export_reconcile_agent.spdk_rpc_url,
+            export_reconcile_agent.node_name,
+        );
+        
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+        
+        loop {
+            interval.tick().await;
+            
+            if let Err(e) = export_manager.reconcile_exports().await {
+                println!("⚠️ [EXPORT_RECONCILE] Failed to reconcile NVMe-oF exports: {}", e);
+            } else {
+                println!("✅ [EXPORT_RECONCILE] NVMe-oF export reconciliation completed");
+            }
+        }
     });
     
     // Start disk discovery loop

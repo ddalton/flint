@@ -185,6 +185,17 @@ async fn apply_spdk_config_via_rpc(
         
         let base_bdevs: Vec<String> = raid.members.iter().map(|m| m.bdev_name.clone()).collect();
         
+        // Clean up conflicting NVMe-oF exports before RAID creation
+        use spdk_csi_driver::nvmeof_export_manager::NvmeofExportManager;
+        let export_manager = NvmeofExportManager::new(
+            driver.spdk_rpc_url.clone(),
+            driver.node_id.clone(),
+        );
+        
+        if let Err(e) = export_manager.cleanup_conflicting_exports(&base_bdevs).await {
+            println!("⚠️ [CONFIG] Failed to cleanup exports for RAID {}: {}", raid.name, e);
+        }
+        
         let rpc_request = serde_json::json!({
             "method": "bdev_raid_create",
             "params": {
