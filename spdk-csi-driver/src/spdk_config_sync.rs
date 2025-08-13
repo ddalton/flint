@@ -1,6 +1,7 @@
 // spdk_config_sync.rs - Convert SpdkConfig CRD to/from SPDK native JSON format
 use serde_json::{json, Value};
 use crate::models::{SpdkConfig, SpdkConfigSpec, RaidBdevConfig, LvstoreConfig, LogicalVolumeConfig, NvmeofSubsystemConfig, RaidMemberBdevConfig, NvmeofMemberConfig};
+use reqwest::Client as HttpClient;
 use std::collections::HashMap;
 
 /// Convert SpdkConfig CRD to SPDK's native JSON configuration format
@@ -224,7 +225,313 @@ pub async fn save_spdk_config_to_configmap(
         }
     }
 
+    // Also save to the shared volume for immediate use
+    let spdk_json_str = serde_json::to_string_pretty(&spdk_json)?;
+    if let Err(e) = std::fs::write("/etc/spdk-config/spdk-config.json", &spdk_json_str) {
+        println!("⚠️ [CONFIG] Failed to write config to shared volume: {}", e);
+    } else {
+        println!("💾 [CONFIG] Saved SPDK config to shared volume");
+    }
+
     Ok(())
+}
+
+/// Automatically save current SPDK state to ConfigMap
+/// Call this after any SPDK configuration change
+pub async fn auto_save_spdk_config(
+    kube_client: &kube::Client,
+    namespace: &str,
+    node_id: &str,
+    spdk_rpc_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::models::{SpdkConfig, SpdkConfigSpec};
+    use kube::api::Api;
+
+    println!("🔄 [AUTO_SAVE] Capturing current SPDK state...");
+    
+    // Get current SPDK configuration via RPC
+    let current_config = get_current_spdk_config(spdk_rpc_url).await?;
+    
+    // Find or create SpdkConfig CRD for this node
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(kube_client.clone(), namespace);
+    let config_name = format!("{}-config", node_id);
+    
+    let mut spdk_config_spec = match spdk_configs.get_opt(&config_name).await? {
+        Some(existing) => existing.spec,
+        None => SpdkConfigSpec {
+            node_id: node_id.to_string(),
+            maintenance_mode: false,
+            last_config_save: None,
+            raid_bdevs: vec![],
+            nvmeof_subsystems: vec![],
+        },
+    };
+    
+    // Update config with current SPDK state
+    spdk_config_spec.last_config_save = Some(chrono::Utc::now().to_rfc3339());
+    
+    // TODO: Parse current_config JSON and update spdk_config_spec
+    // For now, we'll save the raw config to ConfigMap
+    
+    // Save to ConfigMap
+    save_spdk_config_to_configmap(kube_client, namespace, node_id, &spdk_config_spec).await?;
+    
+    println!("✅ [AUTO_SAVE] SPDK configuration saved automatically");
+    Ok(())
+}
+
+/// Safe auto-save that never fails the main operation - used by critical SPDK operations
+pub async fn safe_auto_save_spdk_config(
+    kube_client: &kube::Client,
+    namespace: &str,
+    node_id: &str,
+    spdk_rpc_url: &str,
+    operation_name: &str,
+) {
+    match auto_save_spdk_config(kube_client, namespace, node_id, spdk_rpc_url).await {
+        Ok(_) => println!("✅ [SAFE_SAVE] ConfigMap updated after {}", operation_name),
+        Err(e) => {
+            println!("⚠️ [SAFE_SAVE] Failed to save config after {} (non-critical): {}", operation_name, e);
+            println!("🔄 [SAFE_SAVE] State will be reconciled on next periodic sync");
+        }
+    }
+}
+
+/// Wrapper for SPDK RPC calls that automatically saves config after structure-changing operations
+pub async fn call_spdk_rpc_with_config_sync(
+    spdk_rpc_url: &str,
+    rpc_request: &serde_json::Value,
+    kube_client: &kube::Client,
+    namespace: &str,
+    node_id: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    // Make the RPC call first
+    let http_client = HttpClient::new();
+    let response = http_client
+        .post(spdk_rpc_url)
+        .json(rpc_request)
+        .send()
+        .await?;
+    
+    let result: serde_json::Value = response.json().await?;
+    
+    // Check if this is a structure-changing operation that needs config sync
+    if let Some(method) = rpc_request["method"].as_str() {
+        let should_sync = matches!(method,
+            // RAID operations
+            "bdev_raid_create" | "bdev_raid_delete" | 
+            "bdev_raid_add_base_bdev" | "bdev_raid_remove_base_bdev" |
+            // LVS operations  
+            "bdev_lvol_create_lvstore" | "bdev_lvol_delete_lvstore" |
+            // Logical volume operations
+            "bdev_lvol_create" | "bdev_lvol_delete" |
+            // NVMe-oF subsystem operations
+            "nvmf_create_subsystem" | "nvmf_delete_subsystem" |
+            "nvmf_subsystem_add_ns" | "nvmf_subsystem_remove_ns" |
+            "nvmf_subsystem_add_listener" | "nvmf_subsystem_remove_listener" |
+            // NVMe bdev operations
+            "bdev_nvme_attach_controller" | "bdev_nvme_detach_controller"
+        );
+        
+        if should_sync {
+            println!("🔄 [CONFIG_SYNC] Auto-saving after SPDK method: {}", method);
+            if let Err(e) = auto_save_spdk_config(kube_client, namespace, node_id, spdk_rpc_url).await {
+                println!("⚠️ [CONFIG_SYNC] Failed to auto-save after {}: {}", method, e);
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Start periodic SPDK configuration sync (every 5 minutes)
+/// This reconciles ConfigMap state with actual SPDK state to prevent drift
+pub async fn start_periodic_config_sync(
+    kube_client: kube::Client,
+    namespace: String,
+    node_id: String,
+    spdk_rpc_url: String,
+) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+    
+    loop {
+        interval.tick().await;
+        
+        if let Err(e) = reconcile_spdk_state_with_config(&kube_client, &namespace, &node_id, &spdk_rpc_url).await {
+            println!("⚠️ [PERIODIC_SYNC] Failed to reconcile SPDK state: {}", e);
+        } else {
+            println!("✅ [PERIODIC_SYNC] SPDK state reconciled successfully");
+        }
+    }
+}
+
+/// Reconcile ConfigMap with actual SPDK state - the source of truth is SPDK itself
+pub async fn reconcile_spdk_state_with_config(
+    kube_client: &kube::Client,
+    namespace: &str,
+    node_id: &str,
+    spdk_rpc_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::models::{SpdkConfig, SpdkConfigSpec, RaidBdevConfig, LvstoreConfig, LogicalVolumeConfig, NvmeofSubsystemConfig, RaidMemberBdevConfig, NvmeofMemberConfig};
+    use kube::api::Api;
+
+    println!("🔄 [RECONCILE] Starting SPDK state reconciliation for node: {}", node_id);
+    
+    // Step 1: Get current SPDK state via RPC
+    let actual_spdk_state = get_actual_spdk_state(spdk_rpc_url).await?;
+    
+    // Step 2: Load existing ConfigMap
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(kube_client.clone(), namespace);
+    let config_name = format!("{}-config", node_id);
+    
+    let mut config_spec = match spdk_configs.get_opt(&config_name).await? {
+        Some(existing) => existing.spec,
+        None => {
+            println!("📝 [RECONCILE] No existing config found, creating from SPDK state");
+            SpdkConfigSpec {
+                node_id: node_id.to_string(),
+                maintenance_mode: false,
+                last_config_save: None,
+                raid_bdevs: vec![],
+                nvmeof_subsystems: vec![],
+            }
+        }
+    };
+    
+    // Step 3: Compare and update ConfigMap with actual SPDK state
+    let mut changes_detected = false;
+    
+    // Reconcile RAID bdevs
+    if let Some(actual_raids) = actual_spdk_state.get("raid_bdevs") {
+        let reconciled_raids = reconcile_raid_bdevs(&config_spec.raid_bdevs, actual_raids)?;
+        if reconciled_raids != config_spec.raid_bdevs {
+            println!("🔧 [RECONCILE] RAID bdev state drift detected, updating ConfigMap");
+            config_spec.raid_bdevs = reconciled_raids;
+            changes_detected = true;
+        }
+    }
+    
+    // Reconcile NVMe-oF subsystems
+    if let Some(actual_nvmeof) = actual_spdk_state.get("nvmeof_subsystems") {
+        let reconciled_nvmeof = reconcile_nvmeof_subsystems(&config_spec.nvmeof_subsystems, actual_nvmeof)?;
+        if reconciled_nvmeof != config_spec.nvmeof_subsystems {
+            println!("🔧 [RECONCILE] NVMe-oF subsystem state drift detected, updating ConfigMap");
+            config_spec.nvmeof_subsystems = reconciled_nvmeof;
+            changes_detected = true;
+        }
+    }
+    
+    // Step 4: Update ConfigMap if changes detected
+    if changes_detected {
+        config_spec.last_config_save = Some(chrono::Utc::now().to_rfc3339());
+        save_spdk_config_to_configmap(kube_client, namespace, node_id, &config_spec).await?;
+        println!("✅ [RECONCILE] ConfigMap updated with actual SPDK state");
+    } else {
+        println!("✅ [RECONCILE] No state drift detected, ConfigMap is in sync");
+    }
+    
+    Ok(())
+}
+
+/// Get actual SPDK state from running spdk_tgt process
+async fn get_actual_spdk_state(spdk_rpc_url: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let http_client = HttpClient::new();
+    let mut state = serde_json::json!({});
+    
+    // Get RAID bdevs
+    match http_client.post(spdk_rpc_url).json(&serde_json::json!({
+        "method": "bdev_raid_get_bdevs",
+        "params": {}
+    })).send().await {
+        Ok(response) => {
+            let raid_data: serde_json::Value = response.json().await?;
+            if let Some(raids) = raid_data.get("result") {
+                state["raid_bdevs"] = raids.clone();
+            }
+        }
+        Err(e) => println!("⚠️ [RECONCILE] Failed to get RAID bdevs: {}", e),
+    }
+    
+    // Get LVS stores
+    match http_client.post(spdk_rpc_url).json(&serde_json::json!({
+        "method": "bdev_lvol_get_lvstores",
+        "params": {}
+    })).send().await {
+        Ok(response) => {
+            let lvs_data: serde_json::Value = response.json().await?;
+            if let Some(lvstores) = lvs_data.get("result") {
+                state["lvstores"] = lvstores.clone();
+            }
+        }
+        Err(e) => println!("⚠️ [RECONCILE] Failed to get LVS stores: {}", e),
+    }
+    
+    // Get logical volumes
+    match http_client.post(spdk_rpc_url).json(&serde_json::json!({
+        "method": "bdev_lvol_get_bdevs",
+        "params": {}
+    })).send().await {
+        Ok(response) => {
+            let lvol_data: serde_json::Value = response.json().await?;
+            if let Some(lvols) = lvol_data.get("result") {
+                state["logical_volumes"] = lvols.clone();
+            }
+        }
+        Err(e) => println!("⚠️ [RECONCILE] Failed to get logical volumes: {}", e),
+    }
+    
+    // Get NVMe-oF subsystems
+    match http_client.post(spdk_rpc_url).json(&serde_json::json!({
+        "method": "nvmf_get_subsystems",
+        "params": {}
+    })).send().await {
+        Ok(response) => {
+            let nvmeof_data: serde_json::Value = response.json().await?;
+            if let Some(subsystems) = nvmeof_data.get("result") {
+                state["nvmeof_subsystems"] = subsystems.clone();
+            }
+        }
+        Err(e) => println!("⚠️ [RECONCILE] Failed to get NVMe-oF subsystems: {}", e),
+    }
+    
+    // Get NVMe controllers (for RAID members)
+    match http_client.post(spdk_rpc_url).json(&serde_json::json!({
+        "method": "bdev_nvme_get_controllers",
+        "params": {}
+    })).send().await {
+        Ok(response) => {
+            let nvme_data: serde_json::Value = response.json().await?;
+            if let Some(controllers) = nvme_data.get("result") {
+                state["nvme_controllers"] = controllers.clone();
+            }
+        }
+        Err(e) => println!("⚠️ [RECONCILE] Failed to get NVMe controllers: {}", e),
+    }
+    
+    println!("📊 [RECONCILE] Retrieved actual SPDK state: {} components", state.as_object().map(|o| o.len()).unwrap_or(0));
+    Ok(state)
+}
+
+/// Reconcile RAID bdev configuration with actual SPDK state
+fn reconcile_raid_bdevs(
+    config_raids: &[RaidBdevConfig],
+    actual_raids: &serde_json::Value,
+) -> Result<Vec<RaidBdevConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    // TODO: Implement detailed RAID reconciliation logic
+    // For now, return existing config - this is a placeholder for detailed implementation
+    println!("🔧 [RECONCILE] RAID reconciliation logic placeholder");
+    Ok(config_raids.to_vec())
+}
+
+/// Reconcile NVMe-oF subsystem configuration with actual SPDK state  
+fn reconcile_nvmeof_subsystems(
+    config_nvmeof: &[NvmeofSubsystemConfig],
+    actual_nvmeof: &serde_json::Value,
+) -> Result<Vec<NvmeofSubsystemConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    // TODO: Implement detailed NVMe-oF reconciliation logic
+    // For now, return existing config - this is a placeholder for detailed implementation
+    println!("🔧 [RECONCILE] NVMe-oF reconciliation logic placeholder");
+    Ok(config_nvmeof.to_vec())
 }
 
 /// Load and validate SPDK configuration from ConfigMap

@@ -106,7 +106,19 @@ impl NodeService {
         })).await;
 
         match result {
-            Ok(_) => println!("Successfully deleted RAID1 bdev: {}", raid_name),
+            Ok(_) => {
+                println!("Successfully deleted RAID1 bdev: {}", raid_name);
+                
+                // Auto-save SPDK configuration after RAID bdev deletion
+                if let Err(e) = spdk_csi_driver::spdk_config_sync::auto_save_spdk_config(
+                    &self.driver.kube_client,
+                    &self.driver.target_namespace,
+                    &self.driver.node_id,
+                    &self.driver.spdk_rpc_url,
+                ).await {
+                    println!("⚠️ [CONFIG_SYNC] Failed to auto-save SPDK config after RAID bdev deletion: {}", e);
+                }
+            }
             Err(e) => eprintln!("Warning: Failed to delete RAID1 bdev {}: {}", raid_name, e),
         }
 

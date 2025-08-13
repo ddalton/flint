@@ -807,7 +807,7 @@ pub struct SpdkConfigSpec {
     pub nvmeof_subsystems: Vec<NvmeofSubsystemConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct RaidBdevConfig {
     /// RAID bdev name (e.g., "raid_disk_1")
     pub name: String,
@@ -827,7 +827,7 @@ pub struct RaidBdevConfig {
     pub lvstore: LvstoreConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct RaidMemberBdevConfig {
     /// Local bdev name for this RAID member
     pub bdev_name: String,
@@ -841,7 +841,7 @@ pub struct RaidMemberBdevConfig {
     pub nvmeof_config: Option<NvmeofMemberConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct NvmeofMemberConfig {
     /// Target node providing the raw disk
     pub target_node_id: String,
@@ -856,7 +856,7 @@ pub struct NvmeofMemberConfig {
     pub state: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct LvstoreConfig {
     /// LVS name (e.g., "lvs_raid_disk_1")
     pub name: String,
@@ -874,7 +874,7 @@ pub struct LvstoreConfig {
     pub logical_volumes: Vec<LogicalVolumeConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct LogicalVolumeConfig {
     /// Logical volume name (e.g., "vol-abc123")
     pub name: String,
@@ -914,7 +914,7 @@ pub struct LogicalVolumeConfig {
     pub allocated_bytes: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct NvmeofSubsystemConfig {
     /// NQN for the subsystem (e.g., "nqn.2023.io.flint:volume-vol-123")
     pub nqn: String,

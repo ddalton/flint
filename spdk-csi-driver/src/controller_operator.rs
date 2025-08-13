@@ -425,6 +425,17 @@ async fn replace_raid_member_with_spdk(
     // SPDK automatically starts rebuild when a replacement member is added
     // No manual rebuild initiation needed
 
+    // Auto-save SPDK configuration after RAID member replacement
+    let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string());
+    if let Err(e) = spdk_csi_driver::spdk_config_sync::auto_save_spdk_config(
+        &ctx.client,
+        &ctx.target_namespace,
+        &node_id,
+        &ctx.spdk_rpc_url,
+    ).await {
+        println!("⚠️ [CONFIG_SYNC] Failed to auto-save SPDK config after RAID member replacement: {}", e);
+    }
+
     Ok(())
 }
 

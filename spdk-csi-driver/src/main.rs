@@ -381,6 +381,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
         
+        // Start periodic SPDK state reconciliation for state drift prevention
+        let reconcile_driver = driver.clone();
+        tokio::spawn(async move {
+            // Wait a bit longer before starting reconciliation to ensure SPDK is fully initialized
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            println!("🔄 [RECONCILE] Starting periodic SPDK state reconciliation");
+            
+            spdk_csi_driver::spdk_config_sync::start_periodic_config_sync(
+                reconcile_driver.kube_client.clone(),
+                reconcile_driver.target_namespace.clone(),
+                reconcile_driver.node_id.clone(),
+                reconcile_driver.spdk_rpc_url.clone(),
+            ).await;
+        });
+        
         router = router.add_service(NodeServer::new(node_service));
     }
     
