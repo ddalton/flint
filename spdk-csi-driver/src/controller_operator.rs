@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let volume_id = &spdk_volume.spec.volume_id;
     let mut status = spdk_volume.status.clone().unwrap_or_default();
     let mut status_update_needed = false;
@@ -180,7 +180,7 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                     // Handle failed replicas if rebuild is enabled
                     if ctx.rebuild_enabled {
                         for &failed_index in &failed_replicas {
-                            if let Err(e) = handle_failed_replica(&spdk_volume, &ctx, failed_index, &spdk_disks).await {
+                    if let Err(e) = handle_failed_replica(&spdk_volume, &ctx, failed_index).await {
                                 eprintln!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
                                 status.state = "failed".to_string();
                             }
@@ -285,25 +285,36 @@ async fn get_raid_status(
     Ok(None)
 }
 
+async fn raid_disk_for_volume(ctx: &Context, volume_id: &str) -> Result<SpdkRaidDisk, ControllerError> {
+    let raids: Api<SpdkRaidDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let list = raids.list(&ListParams::default()).await.map_err(|e| ControllerError{ message: e.to_string() })?;
+    list.items.into_iter().find(|r| {
+        r.status.as_ref()
+            .and_then(|s| s.raid_bdev_name.as_ref())
+            .map(|name| name == volume_id)
+            .unwrap_or(false)
+    }).ok_or_else(|| ControllerError{ message: format!("RAID disk for volume {} not found", volume_id) })
+}
+
 async fn handle_failed_replica(
     spdk_volume: &SpdkVolume,
     ctx: &Context,
     failed_replica_index: usize,
-    spdk_disks: &Api<SpdkDisk>,
 ) -> Result<(), ControllerError> {
     let volume_id = &spdk_volume.spec.volume_id;
     
     // Find a suitable replacement disk
     let replacement_disk = find_replacement_disk(
+        ctx,
         spdk_volume,
         failed_replica_index,
-        spdk_disks,
     ).await?;
 
     // Create new lvol on replacement disk
+    // Create lvol on the same RAID disk (we assume replacement endpoint feeds into the RAID)
     let new_lvol_bdev = create_replacement_lvol(
         ctx,
-        &replacement_disk,
+        &raid_disk_for_volume(ctx, volume_id).await?,
         spdk_volume.spec.size_bytes,
         volume_id,
     ).await?;
@@ -313,7 +324,7 @@ async fn handle_failed_replica(
         ctx,
         volume_id,
         failed_replica_index,
-        &new_lvol_bdev,
+        &replacement_disk.spec.nvmeof_endpoint,
     ).await?;
 
     // Update the SpdkVolume CRD with new replica information
@@ -335,7 +346,7 @@ async fn replace_raid_member_with_spdk(
     ctx: &Context,
     volume_id: &str,
     failed_member_slot: usize,
-    new_bdev_name: &str,
+    new_member_endpoint: &NvmeofEndpoint,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let http_client = HttpClient::new();
 
@@ -349,6 +360,41 @@ async fn replace_raid_member_with_spdk(
         .find(|member| member.slot == failed_member_slot as u32)
         .map(|member| &member.name)
         .ok_or(format!("Failed member at slot {} not found", failed_member_slot))?;
+
+    // Ensure NVMe-oF client bdev is connected on the host node for the new member
+    let _ = http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": format!("nvmf_member_{}", failed_member_slot),
+                "trtype": new_member_endpoint.transport.to_uppercase(),
+                "traddr": new_member_endpoint.target_addr,
+                "trsvcid": new_member_endpoint.target_port.to_string(),
+                "subnqn": new_member_endpoint.nqn
+            }
+        }))
+        .send()
+        .await?;
+
+    // Discover a new NVMe bdev name to use as base bdev
+    let bdevs_resp = http_client
+        .post(&ctx.spdk_rpc_url)
+        .json(&json!({"method":"bdev_get_bdevs","params":{}}))
+        .send()
+        .await?;
+    let bdevs_json: serde_json::Value = bdevs_resp.json().await?;
+    let mut new_bdev_name: Option<String> = None;
+    if let Some(list) = bdevs_json.get("result").and_then(|r| r.as_array()) {
+        for b in list {
+            if let Some(prod) = b.get("product_name").and_then(|v| v.as_str()) {
+                if prod.to_lowercase().contains("nvme") {
+                    new_bdev_name = b.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+            }
+        }
+    }
+    let new_bdev_name = new_bdev_name.ok_or("Failed to determine NVMe-oF bdev name for new member")?;
 
     // Remove failed member with correct base bdev name
     http_client
@@ -405,15 +451,15 @@ async fn get_rpc_url_for_node(
 
 async fn create_replacement_lvol(
     ctx: &Context,
-    replacement_disk: &SpdkDisk,
+    replacement_disk: &SpdkRaidDisk,
     size_bytes: i64,
     volume_id: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let http_client = HttpClient::new();
-    let lvs_name = format!("lvs_{}", replacement_disk.metadata.name.as_ref().unwrap());
+    let lvs_name = replacement_disk.spec.lvs_name();
     let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
 
-    let target_node_name = &replacement_disk.spec.node_id;
+    let target_node_name = &replacement_disk.spec.created_on_node;
     let rpc_url = get_rpc_url_for_node(&ctx.client, target_node_name).await?;
     
     println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
@@ -448,7 +494,7 @@ async fn update_replica_after_replacement(
     ctx: &Context,
     spdk_volume: &SpdkVolume,
     failed_replica_index: usize,
-    replacement_disk: SpdkDisk,
+    replacement_disk: NvmeofDisk,
     new_lvol_bdev: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let volume_id = &spdk_volume.spec.volume_id;
@@ -456,9 +502,9 @@ async fn update_replica_after_replacement(
     
     let mut new_spec = spdk_volume.spec.clone();
     new_spec.replicas[failed_replica_index] = Replica {
-        node: replacement_disk.spec.node_id.clone(),
+        node: replacement_disk.spec.node_id.clone().unwrap_or_default(),
         replica_type: if failed_replica_index == 0 { "primary".to_string() } else { "secondary".to_string() },
-        pcie_addr: replacement_disk.spec.pcie_addr.clone(),
+        pcie_addr: None,
         disk_ref: replacement_disk.metadata.name.clone().unwrap_or_default(),
         lvol_uuid: Some(lvol_uuid),
         nqn: Some(format!("nqn.2025-05.io.spdk:lvol-{}", new_lvol_bdev.replace('/', "-"))),
@@ -479,13 +525,10 @@ async fn update_replica_after_replacement(
         .await?;
 
     // Update disk status
-    let disks: Api<SpdkDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let disks: Api<NvmeofDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let disk_name = replacement_disk.metadata.name.clone().unwrap_or_default();
     let mut disk_status = replacement_disk.status.unwrap_or_default();
-    
-    disk_status.free_space -= spdk_volume.spec.size_bytes;
-    disk_status.used_space += spdk_volume.spec.size_bytes;
-    disk_status.lvol_count += 1;
+    disk_status.available_bytes = disk_status.available_bytes.saturating_sub(spdk_volume.spec.size_bytes);
     
     disks
         .patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(json!({
@@ -522,10 +565,10 @@ async fn get_lvol_uuid(
 }
 
 async fn find_replacement_disk(
+    ctx: &Context,
     spdk_volume: &SpdkVolume,
     failed_replica_index: usize,
-    spdk_disks: &Api<SpdkDisk>,
-) -> Result<SpdkDisk, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<NvmeofDisk, Box<dyn std::error::Error + Send + Sync>> {
     let required_capacity = spdk_volume.spec.size_bytes;
     let used_nodes: Vec<String> = spdk_volume.spec.replicas
         .iter()
@@ -533,26 +576,19 @@ async fn find_replacement_disk(
         .filter(|(i, _)| *i != failed_replica_index)
         .map(|(_, r)| r.node.clone())
         .collect();
-    
-    let available_disks = spdk_disks.list(&ListParams::default()).await?
+
+    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let available = nvmeof_api.list(&ListParams::default()).await?
         .items
         .into_iter()
         .filter(|d| {
-            if let Some(status) = &d.status {
-                status.healthy 
-                    && status.blobstore_initialized 
-                    && status.free_space >= required_capacity 
-                    && !used_nodes.contains(&d.spec.node_id)
-            } else {
-                false
-            }
+            let on_distinct_node = d.spec.node_id.as_deref().map(|n| !used_nodes.contains(&n.to_string())).unwrap_or(true);
+            d.status.as_ref().map_or(false, |s| s.healthy && s.available_bytes >= required_capacity) && on_distinct_node
         })
         .collect::<Vec<_>>();
-    
-    available_disks
-        .into_iter()
-        .max_by_key(|d| d.status.as_ref().unwrap().free_space)
-        .ok_or_else(|| "No suitable replacement disk found".into())
+
+    available.into_iter().max_by_key(|d| d.status.as_ref().map(|s| s.available_bytes).unwrap_or(0))
+        .ok_or_else(|| "No suitable replacement NvmeofDisk found".into())
 }
 
 async fn update_nvmeof_targets_status(

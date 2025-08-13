@@ -174,11 +174,8 @@ impl NodeService {
     async fn connect_to_target_device(&self, volume: &SpdkVolume) -> Result<String, Status> {
         let volume_nqn = self.driver.generate_nqn(&volume.spec.volume_id);
         
-        // Unified connection logic for both single and multi-replica volumes
+        // Unified connection logic for RAID-backed volumes
         let target_device = match &volume.spec.storage_backend {
-            StorageBackend::SingleDisk { disk_ref, node_id } => {
-                self.connect_to_single_disk_volume(volume, disk_ref, node_id, &volume_nqn).await?
-            }
             StorageBackend::RaidDisk { raid_disk_ref, node_id } => {
                 self.connect_to_raid_disk_volume(volume, raid_disk_ref, node_id, &volume_nqn).await?
             }
@@ -192,59 +189,7 @@ impl NodeService {
     }
 
     /// Connect to a single disk volume (local or remote)
-    async fn connect_to_single_disk_volume(
-        &self,
-        volume: &SpdkVolume,
-        _disk_ref: &str,
-        storage_node_id: &str,
-        volume_nqn: &str,
-    ) -> Result<String, Status> {
-        if storage_node_id == &self.driver.node_id {
-            // Local single disk: Create NVMe-oF target for the lvol and connect locally
-            if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
-                println!("🔗 [SINGLE_LOCAL] Creating NVMe-oF target for local lvol {}", lvol_uuid);
-                
-                // Create NVMe-oF target for the logical volume
-                self.driver.create_nvmeof_target_with_validation(lvol_uuid, volume_nqn).await
-                    .map_err(|e| Status::internal(format!("Failed to create NVMe-oF target: {}", e)))?;
-                
-                // Connect to the local NVMe-oF target
-                let node_ip = self.driver.get_current_node_ip().await
-                    .map_err(|e| Status::internal(format!("Failed to get node IP: {}", e)))?;
-                
-                let nvme_device = self.driver.connect_nvme_device(
-                    volume_nqn,
-                    &node_ip,
-                    self.driver.nvmeof_target_port,
-                    &self.driver.nvmeof_transport,
-                    &volume.spec.volume_id,
-                ).await.map_err(|e| Status::internal(format!("Failed to connect to local NVMe-oF target: {}", e)))?;
-                
-                println!("✅ [SINGLE_LOCAL] Connected to local single disk: {}", nvme_device.device_path);
-                Ok(nvme_device.device_path)
-            } else {
-                Err(Status::internal("Local single disk volume missing lvol_uuid"))
-            }
-        } else {
-            // Remote single disk: Connect to existing NVMe-oF target on remote node
-            println!("🔗 [SINGLE_REMOTE] Connecting to remote single disk on node {}", storage_node_id);
-            
-            // Get the remote node IP
-            let remote_ip = self.driver.get_node_ip(storage_node_id).await?;
-            
-            // Connect directly to the remote NVMe-oF target
-            let nvme_device = self.driver.connect_nvme_device(
-                volume_nqn,
-                &remote_ip,
-                self.driver.nvmeof_target_port,
-                &self.driver.nvmeof_transport,
-                &volume.spec.volume_id,
-            ).await.map_err(|e| Status::internal(format!("Failed to connect to remote single disk: {}", e)))?;
-            
-            println!("✅ [SINGLE_REMOTE] Connected to remote single disk: {}", nvme_device.device_path);
-            Ok(nvme_device.device_path)
-        }
-    }
+    // Removed single-disk connect path in favor of unified RAID-based flow
 
     /// Connect to a RAID disk volume (always local to the RAID disk's node)
     async fn connect_to_raid_disk_volume(
@@ -973,20 +918,18 @@ impl Node for NodeService {
         // Get available capacity from local disks
         let mut max_volumes_per_node = 0i64;
         
-        // Query local SPDK disks to determine maximum volumes
-        let disks_api: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        // Query local NvmeofDisk inventory to determine maximum volumes
+        let disks_api: Api<NvmeofDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         if let Ok(disk_list) = disks_api.list(&kube::api::ListParams::default()).await {
             let local_disks: Vec<_> = disk_list.items.iter()
-                .filter(|disk| disk.spec.node_id == self.driver.node_id)
+                .filter(|disk| disk.spec.node_id.as_deref() == Some(&self.driver.node_id))
                 .collect();
-            
-            // Estimate max volumes based on disk capacity and typical volume sizes
+
             let total_capacity: i64 = local_disks.iter()
                 .filter_map(|disk| disk.status.as_ref())
-                .map(|status| status.free_space)
+                .map(|status| status.available_bytes)
                 .sum();
-            
-            // Assume 10GB average volume size for estimation
+
             max_volumes_per_node = total_capacity / (10 * 1024 * 1024 * 1024);
         }
 

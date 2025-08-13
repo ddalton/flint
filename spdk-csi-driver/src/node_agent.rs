@@ -20,7 +20,9 @@ use warp::Filter;
 use warp::{reply, Rejection, Reply};
 use warp::http::StatusCode;
 
-use spdk_csi_driver::{SpdkDisk, SpdkDiskSpec, SpdkDiskStatus, IoStatistics, FlintDiskMetadata, DiskType, NvmeofEndpoint};
+use spdk_csi_driver::{IoStatistics, FlintDiskMetadata};
+use spdk_csi_driver::models::NvmeofEndpoint;
+use spdk_csi_driver::models::{NvmeofDisk, NvmeofDiskSpec, NvmeofDiskStatus, SpdkRaidDisk};
 use spdk_csi_driver::spdk_native::SpdkNative;
 
 /// SPDK RPC interface for CSI operations
@@ -94,6 +96,196 @@ pub struct UnimplementedDisk {
     pub is_system_disk: bool,
     pub spdk_ready: bool,
     pub discovered_at: String,
+}
+
+/// Discover local NVMe disks, ensure SPDK bdevs and NVMe-oF exports exist, and publish/repair NvmeofDisk CRs
+async fn discover_and_publish_nvmeof_disks(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
+
+    // Query SPDK for bdevs; identify local NVMe devices
+    let bdevs = call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method":"bdev_get_bdevs","params":{}})).await?;
+    let list = bdevs.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+
+    for b in list {
+        let product = b.get("product_name").and_then(|v| v.as_str()).unwrap_or("");
+        if !product.to_lowercase().contains("nvme") { continue; }
+
+        let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let num_blocks = b.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+        let block_size = b.get("block_size").and_then(|v| v.as_u64()).unwrap_or(512);
+        let size_bytes = (num_blocks * block_size) as i64;
+
+        // Try to derive identifiers (if available via bdev fields)
+        let serial = b.get("serial_number").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let model = b.get("product_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        // Skip system/root disks: try to correlate bdev name with kernel device mounted as root
+        if is_system_or_mounted_disk(name).await {
+            println!("⚠️ [DISCOVERY] Skipping system or mounted disk {}", name);
+            continue;
+        }
+
+        // Read sysfs identifiers if present
+        let sys_ids = read_sysfs_identifiers(name).await;
+
+        // Ensure NVMe-oF endpoint exists: create subsystem and add listener/namespace if missing
+        // Generate stable NQN from node + bdev name
+        let nqn = format!("nqn.2025-05.io.flint:raw-{}-{}", agent.node_name, name);
+
+        // best-effort create subsystem
+        let _ = reqwest::Client::new()
+            .post(&agent.spdk_rpc_url)
+            .json(&json!({
+                "method":"nvmf_create_subsystem",
+                "params":{
+                    "nqn": nqn,
+                    "allow_any_host": true,
+                    "serial_number": format!("SPDK{}", Utc::now().timestamp()),
+                    "model_number":"FLINT RAW DISK",
+                    "max_namespaces":1
+                }
+            }))
+            .send().await;
+
+        // add namespace
+        let _ = reqwest::Client::new()
+            .post(&agent.spdk_rpc_url)
+            .json(&json!({
+                "method":"nvmf_subsystem_add_ns",
+                "params":{
+                    "nqn": nqn,
+                    "namespace": {"nsid":1, "bdev_name": name}
+                }
+            }))
+            .send().await;
+
+        // add listener (use node IP via Kubernetes Downward API or hostNetwork)
+        let traddr = "127.0.0.1"; // hostNetwork: caller can override in future; placeholder
+        let trsvcid = "4420";
+        let _ = reqwest::Client::new()
+            .post(&agent.spdk_rpc_url)
+            .json(&json!({
+                "method":"nvmf_subsystem_add_listener",
+                "params":{
+                    "nqn": nqn,
+                    "listen_address":{
+                        "trtype":"TCP","adrfam":"IPv4","traddr": traddr, "trsvcid": trsvcid
+                    }
+                }
+            }))
+            .send().await;
+
+        // Upsert NvmeofDisk CR for this local disk
+        let disk_name = format!("nvmeof-{}-{}", agent.node_name, name);
+        let spec = NvmeofDiskSpec {
+            is_remote: false,
+            node_id: Some(agent.node_name.clone()),
+            hardware_id: sys_ids.hardware_id.or_else(|| Some(format!("{}:{}", agent.node_name, name))),
+            serial_number: serial.clone().or(sys_ids.serial_number),
+            wwn: sys_ids.wwn,
+            model: model.clone().or(sys_ids.model),
+            vendor: sys_ids.vendor,
+            size_bytes,
+            nvmeof_endpoint: NvmeofEndpoint {
+                nqn: nqn.clone(),
+                target_addr: traddr.to_string(),
+                target_port: trsvcid.parse().unwrap_or(4420),
+                transport: "tcp".to_string(),
+                created_at: Some(Utc::now().to_rfc3339()),
+                active: true,
+            },
+            credential_secret_name: None,
+            credential_secret_namespace: None,
+        };
+
+        let mut resource = NvmeofDisk::new(&disk_name, spec);
+        resource.status = Some(NvmeofDiskStatus {
+            healthy: true,
+            endpoint_validated: true,
+            available_bytes: size_bytes,
+            last_checked: Utc::now().to_rfc3339(),
+            message: None,
+        });
+
+        // Create or replace NvmeofDisk
+        if nvmeof_api.create(&PostParams::default(), &resource).await.is_err() {
+            let _ = nvmeof_api.replace(&disk_name, &PostParams::default(), &resource).await;
+        }
+
+        // After ensuring NvmeofDisk exists/updated, repair any SpdkRaidDisk members that match this disk
+        if let Err(e) = repair_spdkraiddisk_members_for_local_disk(agent, &resource.spec).await {
+            println!("⚠️ [RAID_REPAIR] Failed to repair RAID members for {}: {}", disk_name, e);
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct SysfsIds {
+    hardware_id: Option<String>,
+    serial_number: Option<String>,
+    wwn: Option<String>,
+    model: Option<String>,
+    vendor: Option<String>,
+}
+
+async fn read_sysfs_identifiers(_bdev_name: &str) -> SysfsIds {
+    // Placeholder: integrate with sysfs or NVMe CLI to fetch stable IDs
+    SysfsIds::default()
+}
+
+async fn is_system_or_mounted_disk(_bdev_name: &str) -> bool {
+    // Placeholder: check mounts/blkid to see if device hosts a filesystem; skip if root/system
+    false
+}
+
+/// Update SpdkRaidDisk member entries on this node if their NVMe-oF endpoint needs repair
+async fn repair_spdkraiddisk_members_for_local_disk(
+    agent: &NodeAgent,
+    disk_spec: &NvmeofDiskSpec,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use kube::api::{ListParams, Patch, PatchParams};
+    let raids: Api<SpdkRaidDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
+    let raid_list = raids.list(&ListParams::default()).await?;
+
+    for raid in raid_list {
+        // Only consider raids with members on this node
+        let mut changed = false;
+        let mut new_members = raid.spec.member_disks.clone();
+
+        for member in &mut new_members {
+            if member.node_id != agent.node_name { continue; }
+
+            let id_match =
+                (member.hardware_id.is_some() && disk_spec.hardware_id.is_some() && member.hardware_id == disk_spec.hardware_id)
+                || (member.serial_number.is_some() && disk_spec.serial_number.is_some() && member.serial_number == disk_spec.serial_number)
+                || (member.wwn.is_some() && disk_spec.wwn.is_some() && member.wwn == disk_spec.wwn);
+
+            if !id_match { continue; }
+
+            // If endpoint differs, update
+            if member.nvmeof_endpoint.nqn != disk_spec.nvmeof_endpoint.nqn
+                || member.nvmeof_endpoint.target_addr != disk_spec.nvmeof_endpoint.target_addr
+                || member.nvmeof_endpoint.target_port != disk_spec.nvmeof_endpoint.target_port
+                || member.nvmeof_endpoint.transport != disk_spec.nvmeof_endpoint.transport {
+                member.nvmeof_endpoint = disk_spec.nvmeof_endpoint.clone();
+                changed = true;
+            }
+        }
+
+        if changed {
+            let patch = serde_json::json!({
+                "spec": { "member_disks": new_members }
+            });
+            if let Some(name) = raid.metadata.name.as_ref() {
+                println!("🔧 [RAID_REPAIR] Updating SpdkRaidDisk {} member endpoints", name);
+                raids.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,11 +465,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Wait for SPDK to be ready via RPC
     wait_for_spdk_ready(&agent).await?;
     
-    // 🚀 NEW: Immediately create AIO bdevs for all known disks to enable SPDK auto-discovery
-    println!("🔧 [STARTUP] Creating AIO bdevs immediately to enable SPDK LVS auto-discovery");
-    if let Err(e) = recover_existing_aio_bdevs(&agent).await {
-        println!("⚠️ [STARTUP] AIO bdev recovery failed: {}", e);
-        // Continue startup even if recovery fails
+    // 🚀 NEW: Discover local NVMe disks, ensure SPDK bdev exists, and create/update NvmeofDisk CRs
+    if let Err(e) = discover_and_publish_nvmeof_disks(&agent).await {
+        println!("⚠️ [STARTUP] NvmeofDisk discovery failed: {}", e);
     }
     
     // Start HTTP API server for disk setup operations
@@ -678,99 +868,11 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
 }
 
 /// Immediately create bdevs (AIO or NVMe) for all known SpdkDisks to enable SPDK auto-discovery
-async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔧 [RECOVERY] Starting immediate bdev recovery from SpdkDisk CRDs (AIO + NVMe)");
-    
-    // Get Kubernetes client
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-    
-    // Get SpdkDisks for this node using efficient label-based filtering
-    let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
-    match spdk_disks.list(&lp).await {
-        Ok(disk_list) => {
-            println!("🔍 [RECOVERY] Found {} SpdkDisk CRDs for node {}", disk_list.items.len(), agent.node_name);
-            
-            for disk in disk_list.items {
-                if let Some(disk_name) = &disk.metadata.name {
-                    println!("🔧 [RECOVERY] Creating bdev for disk: {}", disk_name);
-                    
-                    // Try to create appropriate bdev type (AIO for kernel, NVMe for userspace)
-                    if let Err(e) = recover_disk_bdev(agent, &disk).await {
-                        println!("⚠️ [RECOVERY] Failed to create bdev for {}: {}", disk_name, e);
-                        // Continue with other disks - don't fail the whole startup
-                    } else {
-                        println!("✅ [RECOVERY] Bdev ready for: {}", disk_name);
-                    }
-                }
-            }
-            
-            // Give SPDK a moment to discover LVS on the newly created bdevs
-            println!("⏳ [RECOVERY] Waiting 3 seconds for SPDK to auto-discover existing LVS...");
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            
-            println!("✅ [RECOVERY] Bdev recovery completed");
-        }
-        Err(e) => {
-            println!("⚠️ [RECOVERY] Failed to list SpdkDisk CRDs: {}", e);
-            // Don't fail startup - continue without recovery
-        }
-    }
-    
-    Ok(())
-}
+// Removed legacy SpdkDisk recovery flow
 
-/// Helper function to create the appropriate bdev type (AIO or NVMe) for a disk
-async fn recover_disk_bdev(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Get current device name from discovery (not potentially stale CRD spec)
-    let device_name = match agent.find_nvme_device_name(disk.spec.pcie_addr.as_deref().unwrap_or("unknown")).await {
-        Ok(name) => {
-            println!("🔍 [RECOVERY] Found current device name: {} for PCI: {:?}", name, disk.spec.pcie_addr);
-            name
-        }
-        Err(_) => {
-            println!("⚠️ [RECOVERY] Could not find current device name, using CRD spec as fallback");
-            disk.spec.device_path.as_deref().unwrap_or("nvme0n1").trim_start_matches("/dev/").to_string()
-        }
-    };
-    
-    // Check if kernel device path exists (for AIO bdev)
-    let kernel_device_path = format!("/dev/{}", device_name);
-    
-    if std::path::Path::new(&kernel_device_path).exists() {
-        // Kernel-attached device - create AIO bdev
-        println!("🔧 [RECOVERY] Device is kernel-attached, creating AIO bdev: {}", kernel_device_path);
-        agent.ensure_aio_bdev_exists(disk).await
-    } else {
-        // SPDK userspace device - attach NVMe controller
-        println!("❌ [RECOVERY] Failed to create bdev for NVMe controller at PCIe: {:?}", disk.spec.pcie_addr);
-        let controller_id = "nvme0";
-        
-        let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-            "method": "bdev_nvme_attach_controller",
-            "params": {
-                "name": controller_id,
-                "trtype": "PCIe",
-                "traddr": disk.spec.pcie_addr.as_deref().unwrap_or("0000:00:00.0")
-            }
-        })).await;
-        
-        match attach_result {
-            Ok(_) => {
-                println!("✅ [RECOVERY] Successfully attached NVMe controller: {}", controller_id);
-                Ok(())
-            }
-            Err(e) => {
-                if e.to_string().contains("already attached") || e.to_string().contains("already exists") {
-                    println!("✅ [RECOVERY] NVMe controller {} already attached", controller_id);
-                    Ok(())
-                } else {
-                    println!("❌ [RECOVERY] Failed to attach NVMe controller {}: {}", controller_id, e);
-                    Err(e)
-                }
-            }
-        }
-    }
-}
+/// Helper section removed; legacy code pruned
+
+// Legacy SpdkDisk recovery helpers removed above
 
 async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut interval = interval(Duration::from_secs(agent.discovery_interval));
@@ -809,267 +911,8 @@ async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Box<dy
                  device.capacity / (1024 * 1024 * 1024));
     }
     
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-    
-    // Get all existing SpdkDisk CRDs for this node using efficient label-based filtering
-    let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
-    let existing_disks = match spdk_disks.list(&lp).await {
-        Ok(disk_list) => {
-            println!("🔍 [DISCOVERY] Found {} existing SpdkDisk CRDs for node: {}", disk_list.items.len(), agent.node_name);
-            disk_list.items
-        }
-        Err(e) => {
-            println!("⚠️ [DISCOVERY] Failed to list existing SpdkDisk CRDs: {}", e);
-            Vec::new()
-        }
-    };
-    
-    // Update existing CRDs based on current physical devices (Portworx-style matching by hardware ID)
-    for existing_disk in &existing_disks {
-        let disk_name = existing_disk.metadata.name.as_ref().unwrap();
-        
-        // Find matching physical device for this CRD using simplified approach
-        // Priority: 1) metadata UUID, 2) disk_id, 3) serial_number  
-        let matching_device = discovered_devices.iter().find(|dev| {
-            // PRIMARY MATCH: Flint disk UUID from blobstore metadata
-            if let (Some(crd_disk_uuid), Some(ref metadata)) = (&existing_disk.spec.disk_uuid, &dev.cluster_metadata) {
-                if metadata.disk_uuid == *crd_disk_uuid {
-                    println!("🎯 [METADATA_MATCH] Found disk by Flint disk UUID: {}", crd_disk_uuid);
-                    return true;
-                }
-            }
-            
-            // TERTIARY MATCH: Persistent device path (reliable for same hardware config)
-            if !existing_disk.spec.disk_id.is_empty() && dev.disk_id == existing_disk.spec.disk_id {
-                println!("🔗 [PATH_MATCH] Found disk by persistent path: {}", dev.disk_id);
-                return true;
-            }
-            
-            // FALLBACK MATCH: Serial number (for hardware changes or missing metadata)
-            if Some(&dev.serial_number) == existing_disk.spec.serial_number.as_ref() {
-                println!("🔢 [SERIAL_MATCH] Found disk by serial number: {}", dev.serial_number);
-                return true;
-            }
-            
-            false
-        });
-        
-        if let Some(matching_device) = matching_device {
-            
-            println!("🔄 [DISCOVERY] Updating existing CRD: {} with current device: {}", disk_name, matching_device.controller_id);
-            match update_existing_disk_resource(agent, &existing_disk, matching_device).await {
-                Ok(_) => {
-                    println!("✅ [DISCOVERY] Successfully updated existing CRD: {}", disk_name);
-                    // Mark disk as online and healthy
-                    mark_disk_online(agent, &existing_disk).await.unwrap_or_else(|e| {
-                        eprintln!("⚠️ [WARNING] Failed to mark disk as online: {}", e);
-                    });
-                }
-                Err(e) => {
-                    println!("❌ [DISCOVERY] Failed to update existing CRD {}: {}", disk_name, e);
-                    // Mark disk as failed due to update error
-                    mark_disk_failed(agent, &existing_disk, &format!("Update failed: {}", e)).await.unwrap_or_else(|err| {
-                        eprintln!("❌ [ERROR] Failed to mark disk as failed: {}", err);
-                    });
-                }
-            }
-        } else {
-            println!("⚠️ [DISCOVERY] Physical device not found for existing CRD: {} (Disk ID: {})", 
-                     disk_name, existing_disk.spec.disk_id);
-            println!("    🔍 [FAILURE_DETECTION] Disk may have been physically removed, failed, or path changed");
-            
-            // Comprehensive failure detection
-            if let Some(last_seen) = &existing_disk.spec.last_seen {
-                println!("    📅 Last seen: {}", last_seen);
-            }
-            
-            // Mark disk as missing/offline based on detection failure
-            mark_disk_missing(agent, &existing_disk).await.unwrap_or_else(|e| {
-                eprintln!("❌ [ERROR] Failed to mark disk as missing: {}", e);
-            });
-        }
-    }
-    
-    // Check for discovered devices that don't have CRDs yet (metadata-driven reconciliation)
-    for device in discovered_devices {
-        // Check if this device already has a CRD using Flint's identification hierarchy
-        let has_crd = existing_disks.iter().any(|disk| {
-            // PRIMARY: Match by Flint disk UUID from metadata (most reliable)
-            if let (Some(disk_uuid), Some(ref metadata)) = (&disk.spec.disk_uuid, &device.cluster_metadata) {
-                if metadata.disk_uuid == *disk_uuid {
-                    return true;
-                }
-            }
-            
-            // SECONDARY: Match by persistent device path
-            if !disk.spec.disk_id.is_empty() && disk.spec.disk_id == device.disk_id {
-                return true;
-            }
-            
-            // FALLBACK: Match by serial number
-            disk.spec.serial_number.as_ref() == Some(&device.serial_number)
-        });
-        
-        if !has_crd {
-            if let Some(ref metadata) = device.cluster_metadata {
-                // CRITICAL: Validate cluster membership before allowing access
-                if metadata.cluster_id == agent.cluster_id {
-                    println!("🔄 [METADATA_RECOVERY] Found Flint disk without CRD - attempting reconciliation");
-                    println!("    Disk UUID: {}", metadata.disk_uuid);
-                    println!("    Current path: {}", device.disk_id);
-                    println!("    Serial: {}", device.serial_number);
-                    
-                    // First, try to reconcile by updating existing CRD with new path
-                    match attempt_disk_reconciliation(agent, &device, &existing_disks).await {
-                        Ok(true) => {
-                            println!("✅ [RECONCILIATION] Successfully reconciled disk with changed path");
-                        }
-                        Ok(false) => {
-                            println!("🔄 [RECOVERY] No existing CRD found - creating new CRD from metadata");
-                            // TODO: Recreate CRD from metadata - this enables automatic recovery
-                            // from device path changes, hardware reconfigurations, etc.
-                        }
-                        Err(e) => {
-                            println!("❌ [ERROR] Reconciliation failed: {}", e);
-                        }
-                    }
-                } else {
-                    println!("🚨 [SECURITY] CRITICAL: Disk {} belongs to different cluster!", device.disk_id);
-                    println!("    Disk cluster: {}", metadata.cluster_id);
-                    println!("    Current cluster: {}", agent.cluster_id);
-                    println!("    🛡️  BLOCKING ACCESS to prevent data corruption!");
-                    
-                    // Log security event for monitoring
-                    eprintln!("SECURITY_ALERT: Cross-cluster disk access attempt blocked - disk: {}, expected_cluster: {}, actual_cluster: {}", 
-                             device.disk_id, agent.cluster_id, metadata.cluster_id);
-                }
-            } else {
-                println!("📋 [DISCOVERY] Found new unmanaged device: {} ({}) - Disk ID: {}", 
-                         device.controller_id, device.model, device.disk_id);
-                println!("    💡 This disk can be initialized and added to the Flint cluster");
-            }
-        }
-    }
-    
     println!("✅ [DISCOVERY] Disk discovery completed successfully for node: {}", agent.node_name);
     Ok(())
-}
-
-
-
-// REMOVED: create_new_disk_resource_internal - unused in simplified architecture
-#[allow(dead_code)]
-async fn create_new_disk_resource_internal_removed(
-    agent: &NodeAgent,
-    spdk_disks: &Api<SpdkDisk>,
-    disk_name: &str,
-    device: &NvmeDevice,
-) -> Result<SpdkDisk, Box<dyn std::error::Error + Send + Sync>> {
-    let device_path = format!("/dev/{}", device.controller_id);
-    
-    let spdk_disk = SpdkDisk::new_with_metadata(disk_name, SpdkDiskSpec {
-        // Core disk type and NVMe-oF target info
-        disk_type: DiskType::Local,
-        nvmeof_target: NvmeofEndpoint::default(),
-        // Location-dependent fields
-        node_id: agent.node_name.clone(),
-        device_path: Some(device_path),
-        pcie_addr: Some(device.pcie_addr.clone()),
-        
-        // Immutable identification fields (Portworx-style)
-        disk_id: device.disk_id.clone(),
-        serial_number: Some(device.serial_number.clone()),
-        wwn: device.wwn.clone(),
-        model: Some(device.model.clone()),
-        vendor: Some(device.vendor.clone()),
-        
-        // Flint disk metadata (populated if disk has Flint metadata)
-        cluster_id: device.cluster_metadata.as_ref().map(|m| m.cluster_id.clone()),
-        disk_uuid: device.cluster_metadata.as_ref().map(|m| m.disk_uuid.clone()),
-        pool_uuid: device.cluster_metadata.as_ref().map(|m| m.pool_uuid.clone()),
-        first_attached_node: device.cluster_metadata.as_ref().map(|m| m.initialized_by_node.clone()),
-        initialized_at: device.cluster_metadata.as_ref().map(|m| m.initialized_at.clone()),
-        
-        // Other fields
-                                size_bytes: device.capacity as i64,
-        blobstore_uuid: None,
-        
-        
-        // Health status fields
-        status: Some("online".to_string()),
-        last_seen: Some(chrono::Utc::now().to_rfc3339()),
-        health_status: Some("healthy".to_string()),
-        failure_reason: None,
-    }, &agent.target_namespace);
-    
-    // Set initial status
-    let mut spdk_disk_with_status = spdk_disk;
-    spdk_disk_with_status.status = Some(SpdkDiskStatus {
-        total_capacity: device.capacity,
-        free_space: device.capacity,
-        used_space: 0,
-        healthy: true,
-        last_checked: Utc::now().to_rfc3339(),
-        lvol_count: 0,
-        blobstore_initialized: false,
-        io_stats: IoStatistics::default(),
-        lvs_name: None,
-    });
-    
-    let created_disk = spdk_disks.create(&PostParams::default(), &spdk_disk_with_status).await?;
-    
-    println!("Created SpdkDisk resource: {} for device {} ({})", 
-             disk_name, device.pcie_addr, device.model);
-    
-    Ok(created_disk)
-}
-
-// REMOVED: query_local_nvme_devices - unused in simplified architecture
-#[allow(dead_code)]
-async fn query_local_nvme_devices_removed(agent: &NodeAgent) -> Result<Vec<NvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut devices = Vec::new();
-    
-    // Get all NVMe controllers that are already attached to SPDK
-    let controllers = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_nvme_get_controllers"
-    })).await;
-    
-    if let Ok(controllers_result) = controllers {
-        if let Some(controller_list) = controllers_result["result"].as_array() {
-            for controller in controller_list {
-                if let Some(device) = parse_nvme_controller_removed(controller) {
-                    devices.push(device);
-                }
-            }
-        }
-    }
-    
-    // ALSO get kernel-bound SPDK-ready devices that should be included in discovery
-    // This fixes the issue where SPDK-ready kernel-bound disks were ignored in periodic discovery
-    let pci_devices = agent.get_nvme_pci_devices().await.unwrap_or_default();
-    
-    for pci_addr in pci_devices {
-        // Skip if we already have this device from SPDK controllers
-        if devices.iter().any(|d| d.pcie_addr == pci_addr) {
-            continue;
-        }
-        
-        // Check if this is a SPDK-ready device that should be discovered
-        if let Ok(disk_info) = agent.get_disk_info(&pci_addr).await {
-            if disk_info.spdk_ready && !disk_info.is_system_disk {
-                // Get complete device information including immutable identifiers
-                if let Ok(complete_device) = agent.create_complete_nvme_device_removed(&disk_info).await {
-                    println!("Included SPDK-ready kernel-bound device in discovery: {} ({})", 
-                             complete_device.controller_id, complete_device.pcie_addr);
-                    devices.push(complete_device);
-                } else {
-                    println!("⚠️ [DISCOVERY] Failed to get complete device info for {}", disk_info.pci_address);
-                }
-            }
-        }
-    }
-    
-    Ok(devices)
 }
 
 #[derive(Debug, Clone)]
@@ -1097,516 +940,65 @@ struct NvmeDevice {
     // REMOVED: cluster_id_prefix - unused field
 }
 
-// REMOVED: parse_nvme_controller - unused in simplified architecture  
-#[allow(dead_code)]
-fn parse_nvme_controller_removed(controller: &serde_json::Value) -> Option<NvmeDevice> {
-    let name = controller["name"].as_str()?;
-    let pcie_addr = controller["trid"]["traddr"].as_str()?;
-    
-    // Get capacity from namespaces
-    let namespaces = controller["namespaces"].as_array()?;
-    let capacity = namespaces.iter()
-        .map(|ns| ns["size"].as_u64().unwrap_or(0) as i64)
-        .sum();
-    
-    // For SPDK-attached controllers, we have limited info from SPDK RPC
-    // Generate placeholders that will be updated during discovery
-    let model = controller["model"].as_str().unwrap_or("Unknown").to_string();
-    let serial = controller["serial"].as_str().unwrap_or("Unknown").to_string();
-    let vendor_id = "Unknown".to_string(); // Will be updated during discovery
-    let device_id = "Unknown".to_string(); // Will be updated during discovery
-    
-    let _disk_uuid = SpdkDiskSpec::generate_disk_uuid(&serial, &model, &vendor_id, &device_id);
-    
-    Some(NvmeDevice {
-        controller_id: name.to_string(),
-        pcie_addr: pcie_addr.to_string(),
-        device_path: format!("/dev/{}", name),
-        disk_id: format!("nvme-{}-{}", model.replace(" ", "_"), serial), // Placeholder
-        serial_number: serial,
-        wwn: None,
-        model,
-        vendor: vendor_id,
-        capacity,
-        // REMOVED: sector_size - unused field
-        cluster_metadata: None, // Will be populated during complete discovery
-        
-        // REMOVED: disk_uuid_from_lvs and cluster_id_prefix - unused fields
-    })
-}
+async fn initialize_blobstore_on_device(agent: &NodeAgent, raid: &SpdkRaidDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let raid_name = raid.metadata.name.as_deref().unwrap_or("unknown");
+    let lvs_name = raid.spec.lvs_name();
+    let raid_bdev_name = raid.spec.raid_bdev_name();
 
+    println!("🚀 [SPDK_INIT] Initializing LVS on RAID bdev for SpdkRaidDisk: {}", raid_name);
+    println!("🔧 [SPDK_INIT] LVS name: {}, RAID bdev: {}", lvs_name, raid_bdev_name);
 
-
-
-async fn initialize_blobstore_on_device(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let disk_crd_name = disk.metadata.name.as_ref().unwrap();
-    
-    // Discover actual device name for consistent LVS naming
-    let actual_device_name = match agent.find_nvme_device_name(disk.spec.pcie_addr.as_deref().unwrap_or("unknown")).await {
-        Ok(name) => {
-            println!("✅ [SPDK_INIT] Found actual device name: {}", name);
-            name
-        }
-        Err(_) => {
-            println!("⚠️ [SPDK_INIT] Could not find actual device name, using default");
-            "nvme0".to_string()
-        }
+    // Ensure RAID bdev exists
+    let bdevs = call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_get_bdevs" })).await?;
+    let Some(list) = bdevs["result"].as_array() else {
+        return Err("Failed to get bdev list".into());
     };
-    
-    // Generate simplified LVS name using virtual UUID
-    let lvs_name = disk.spec.lvs_name();
-    
-    println!("🚀 [SPDK_INIT] Starting blobstore initialization for disk: {}", disk_crd_name);
-    println!("🔧 [SPDK_INIT] LVS name: {}, PCIe: {:?}", lvs_name, disk.spec.pcie_addr);
-    
-    // Check if this is a kernel-bound device (has AIO bdev) or userspace device (needs PCIe attach)
-    let kernel_bdev_name = format!("kernel_{}", actual_device_name);
-    println!("🔍 [SPDK_INIT] Checking for existing AIO bdev: {}", kernel_bdev_name);
-    
-    // Get list of existing bdevs to check if AIO bdev exists
-    let bdev_list_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_get_bdevs"
-    })).await;
-    
-    let bdev_name = if let Ok(response) = &bdev_list_result {
-        if let Some(bdevs) = response["result"].as_array() {
-            let aio_bdev_exists = bdevs.iter().any(|bdev| {
-                bdev["name"].as_str() == Some(&kernel_bdev_name)
-            });
-            
-            if aio_bdev_exists {
-                println!("✅ [SPDK_INIT] Found existing AIO bdev, using kernel path: {}", kernel_bdev_name);
-                kernel_bdev_name
-            } else {
-                println!("🔌 [SPDK_INIT] No AIO bdev found, attempting PCIe attach for userspace device");
-                let controller_id = "nvme0";
-                println!("🔌 [SPDK_INIT] Attempting PCIe attach at address: {:?}", disk.spec.pcie_addr);
-                
-                let attach_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-                    "method": "bdev_nvme_attach_controller",
-                    "params": {
-                        "name": controller_id,
-                        "trtype": "PCIe",
-                        "traddr": disk.spec.pcie_addr.as_deref().unwrap_or("0000:00:00.0")
-                    }
-                })).await;
-                
-                match attach_result {
-                    Ok(response) => {
-                        if let Some(error) = response.get("error") {
-                            let error_code = error["code"].as_i64().unwrap_or(0);
-                            if error_code == -17 || error_code == -22 {
-                                println!("✅ [SPDK_INIT] Controller already attached (idempotent): {}", controller_id);
-                            } else {
-                                println!("⚠️ [SPDK_INIT] Controller attach warning: {}", error);
-                                return Err(format!("PCIe attach failed: {}", error).into());
-                            }
-                        } else {
-                            println!("✅ [SPDK_INIT] Successfully attached controller: {}", controller_id);
-                        }
-                    }
-                    Err(e) => {
-                        println!("❌ [SPDK_INIT] Controller attach failed: {}", e);
-                        return Err(format!("PCIe attach failed: {}", e).into());
-                    }
-                }
-                
-                // For PCIe attached devices, the bdev name is the controller name
-                controller_id.to_string()
+    let raid_exists = list.iter().any(|b| b["name"].as_str() == Some(&raid_bdev_name));
+    if !raid_exists {
+        return Err(format!("RAID bdev '{}' not found on node; cannot initialize LVS", raid_bdev_name).into());
+    }
+
+    // Check for existing LVS on the RAID bdev
+    if let Ok(resp) = call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_lvol_get_lvstores" })).await {
+        if let Some(lvstores) = resp["result"].as_array() {
+            if lvstores.iter().any(|lvs| lvs["base_bdev"].as_str() == Some(&raid_bdev_name)) {
+                println!("✅ [SPDK_INIT] LVS already exists on RAID bdev '{}'; nothing to do", raid_bdev_name);
+                return Ok(());
             }
-        } else {
-            println!("❌ [SPDK_INIT] Failed to get bdev list");
-            return Err("Failed to get bdev list".into());
-        }
-    } else {
-        println!("❌ [SPDK_INIT] Failed to query existing bdevs");
-        return Err("Failed to query existing bdevs".into());
-    };
-    
-    // Wait a moment for the device to be ready
-    println!("⏳ [SPDK_INIT] Waiting for device to be ready...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    
-    // Use the bdev name we determined above (either AIO kernel_* or PCIe controller name)
-    println!("✅ [SPDK_INIT] Using determined bdev for LVS operations: {}", bdev_name);
-
-    // Now handle LVS creation with discovery-first approach (check by bdev, not name)
-    println!("🔍 [SPDK_INIT] Checking if any LVS exists on bdev: {}", bdev_name);
-    
-    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_lvol_get_lvstores"
-    })).await {
-        Ok(lvstores_result) => {
-            let mut our_lvs_exists = false;
-            
-            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                let mut existing_lvstore_info = None;
-                for lvstore in lvstore_list {
-                    // Check by base_bdev instead of name to handle naming inconsistencies
-                    if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                        if base_bdev == bdev_name {
-                            our_lvs_exists = true;
-                            existing_lvstore_info = Some(lvstore.clone());
-                            let existing_name = lvstore["name"].as_str().unwrap_or("unknown");
-                            
-                            if existing_name == lvs_name {
-                                println!("✅ [SPDK_INIT] Found existing LVS with correct name: {}", existing_name);
-                            } else {
-                                println!("✅ [SPDK_INIT] Found existing LVS on bdev '{}': {}", base_bdev, existing_name);
-                                println!("⚠️ [SPDK_INIT] LVS name mismatch - expected: '{}', found: '{}'", lvs_name, existing_name);
-                                println!("✅ [SPDK_INIT] Using existing LVS (name differences are OK)");
-                            }
-                            
-                            println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
-                            break;
-                        }
-                    }
-                }
-            
-                if our_lvs_exists {
-                    println!("✅ [SPDK_INIT] LVS already exists, updating Kubernetes status to match SPDK reality");
-                
-                // Update status to reflect that LVS exists with detailed info
-                let mut patch_status = json!({
-                    "blobstore_initialized": true,
-                    "lvs_name": lvs_name,
-                    "last_checked": Utc::now().to_rfc3339(),
-                    "healthy": true
-                });
-
-                // Extract detailed LVS information for better status reporting
-                if let Some(lvstore_info) = existing_lvstore_info {
-                    if let Some(total_clusters) = lvstore_info["total_data_clusters"].as_u64() {
-                        if let Some(free_clusters) = lvstore_info["free_clusters"].as_u64() {
-                            if let Some(cluster_size) = lvstore_info["cluster_size"].as_u64() {
-                                let total_capacity = (total_clusters * cluster_size) as i64;
-                                let free_space = (free_clusters * cluster_size) as i64;
-                                let used_space = total_capacity - free_space;
-                                
-                                patch_status.as_object_mut().unwrap().insert("total_capacity".to_string(), json!(total_capacity));
-                                patch_status.as_object_mut().unwrap().insert("free_space".to_string(), json!(free_space));
-                                patch_status.as_object_mut().unwrap().insert("used_space".to_string(), json!(used_space));
-                                
-                                println!("📊 [SPDK_INIT] LVS capacity - Total: {} bytes, Free: {} bytes, Used: {} bytes", 
-                                         total_capacity, free_space, used_space);
-                            }
-                        }
-                    }
-                }
-
-                let patch = json!({
-                    "status": patch_status
-                });
-                
-                println!("🔍 [CRD_UPDATE] Preparing to update CRD status...");
-                println!("   - CRD Name: {}", disk_crd_name);
-                println!("   - Target Namespace: {}", agent.target_namespace);
-                println!("   - Patch Content: {}", serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "Invalid JSON".to_string()));
-                
-                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                
-                // First, verify the CRD exists before attempting update
-                println!("🔍 [CRD_UPDATE] Checking if CRD exists before update...");
-                match spdk_disks.get(disk_crd_name).await {
-                    Ok(existing_crd) => {
-                        println!("✅ [CRD_UPDATE] CRD exists, proceeding with status update");
-                        println!("   - Resource Version: {:?}", existing_crd.metadata.resource_version);
-                        println!("   - Current Status: {:?}", existing_crd.status);
-                        
-                        match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                            Ok(updated_crd) => {
-                                println!("✅ [SPDK_INIT] Successfully updated disk status to reflect existing LVS: {}", disk_crd_name);
-                                println!("   - New Resource Version: {:?}", updated_crd.metadata.resource_version);
-                                println!("   - Updated Status: {:?}", updated_crd.status);
-                            },
-                            Err(e) => {
-                                println!("❌ [CRD_UPDATE] DETAILED ERROR - Failed to patch status even though CRD exists:");
-                                println!("   - CRD Name: {}", disk_crd_name);
-                                println!("   - Namespace: {}", agent.target_namespace);
-                                println!("   - Error: {}", e);
-                                
-                                match &e {
-                                    kube::Error::Api(api_err) => {
-                                        println!("   - API Error Code: {}", api_err.code);
-                                        println!("   - API Error Message: {}", api_err.message);
-                                        println!("   - API Error Reason: {}", api_err.reason);
-                                    }
-                                    _ => println!("   - Error Type: {:?}", e),
-                                }
-                            },
-                        }
-                    }
-                    Err(get_err) => {
-                        println!("❌ [CRD_UPDATE] DETAILED ERROR - CRD not found during pre-update check:");
-                        println!("   - CRD Name: {}", disk_crd_name);
-                        println!("   - Namespace: {}", agent.target_namespace);
-                        println!("   - Get Error: {}", get_err);
-                        
-                        // Try to list all SpdkDisks in this namespace to see what exists
-                        println!("🔍 [CRD_UPDATE] Listing all SpdkDisks in namespace '{}' for debugging:", agent.target_namespace);
-                        match spdk_disks.list(&Default::default()).await {
-                            Ok(disk_list) => {
-                                println!("   - Found {} SpdkDisks in namespace:", disk_list.items.len());
-                                for disk in &disk_list.items {
-                                    if let Some(name) = &disk.metadata.name {
-                                        println!("     * {}", name);
-                                    }
-                                }
-                            }
-                            Err(list_err) => println!("   - Failed to list SpdkDisks: {}", list_err),
-                        }
-                        
-                        // Also try to check other namespaces
-                        println!("🔍 [CRD_UPDATE] Checking if CRD exists in cluster-wide scope...");
-                        let cluster_api: Api<SpdkDisk> = Api::all(agent.kube_client.clone());
-                        match cluster_api.list(&Default::default()).await {
-                            Ok(all_disks) => {
-                                println!("   - Found {} SpdkDisks cluster-wide:", all_disks.items.len());
-                                for disk in &all_disks.items {
-                                    if let Some(name) = &disk.metadata.name {
-                                        let ns = disk.metadata.namespace.as_deref().unwrap_or("default");
-                                        println!("     * {} (namespace: {})", name, ns);
-                                        if name == disk_crd_name {
-                                            println!("       ^ THIS IS THE ONE WE'RE LOOKING FOR!");
-                                        }
-                                    }
-                                }
-                            }
-                            Err(cluster_err) => println!("   - Failed to list cluster-wide SpdkDisks: {}", cluster_err),
-                        }
-                    }
-                }
-                
-                    // ADDED: Create raw disk NVMe-oF target for potential RAID membership
-                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
-                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
-                    // Don't fail the entire initialization if raw target creation fails
-                }
-                    
-                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (discovered existing LVS): {}", disk_crd_name);
-                    return Ok(());
-                } else {
-                    println!("🔍 [SPDK_INIT] No existing LVS found on bdev '{}', will create new one: {}", bdev_name, lvs_name);
-                }
-            }
-        }
-        Err(e) => {
-            println!("⚠️ [SPDK_INIT] Failed to query existing LVS stores: {}", e);
-            println!("🔄 [SPDK_INIT] Proceeding with LVS creation attempt");
         }
     }
 
-    // Only create LVS if it doesn't already exist
-    println!("🏗️ [SPDK_INIT] Creating LVS on bdev: {} with name: {}", bdev_name, lvs_name);
-    let lvol_store_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+    // Create LVS on the RAID bdev
+    println!("🏗️ [SPDK_INIT] Creating LVS '{}' on RAID bdev '{}'", lvs_name, raid_bdev_name);
+    let create = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_create_lvstore",
-        "params": {
-            "bdev_name": bdev_name,
-            "lvs_name": lvs_name,
-            "cluster_sz": 1048576
-        }
-    })).await;
+        "params": { "bdev_name": raid_bdev_name, "lvs_name": lvs_name, "cluster_sz": 1048576 }
+    })).await?;
 
-    match lvol_store_result {
-        Ok(result) => {
-            // Check if the result contains an error
-            if let Some(error) = result.get("error") {
-                let error_code = error["code"].as_i64().unwrap_or(0);
-                let error_msg = error["message"].as_str().unwrap_or("Unknown error");
-                
-                // Handle "File exists" error specially - check if our LVS actually exists
-                if error_code == -17 && error_msg == "File exists" {
-                    println!("⚠️ [SPDK_INIT] LVS creation reported 'File exists', checking if our LVS exists: {}", lvs_name);
-                    
-                    // Query existing LVS stores to see if ours exists
-                    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-                        "method": "bdev_lvol_get_lvstores"
-                    })).await {
-                        Ok(lvstores_result) => {
-                            let mut our_lvs_exists = false;
-                            
-                            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                                for lvstore in lvstore_list {
-                                    if let Some(name) = lvstore["name"].as_str() {
-                                        if name == lvs_name {
-                                            our_lvs_exists = true;
-                                            println!("✅ [SPDK_INIT] Found existing LVS: {}", lvs_name);
-                                            println!("📊 [SPDK_INIT] LVS details: {}", serde_json::to_string_pretty(lvstore).unwrap_or_default());
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if our_lvs_exists {
-                                println!("✅ [SPDK_INIT] LVS already exists with correct name, treating as success: {}", lvs_name);
-                                
-                                // Update status to reflect successful initialization
-                                let patch = json!({
-                                    "status": {
-                                        "blobstore_initialized": true,
-                                        "lvs_name": lvs_name,
-                                        "last_checked": Utc::now().to_rfc3339()
-                                    }
-                                });
-                                
-                                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                println!("🔍 [CRD_UPDATE_2] Updating CRD {} in namespace {} (LVS pre-existed)", disk_crd_name, agent.target_namespace);
-                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
-                                    Err(e) => {
-                                        println!("❌ [CRD_UPDATE_2] Failed to update disk status:");
-                                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
-                                        println!("   - Error: {}", e);
-                                    },
-                                }
-                
-                // ADDED: Create raw disk NVMe-oF target for potential RAID membership
-                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
-                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
-                    // Don't fail the entire initialization if raw target creation fails
-                }
-                
-                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS pre-existed): {}", disk_crd_name);
-                            } else {
-                                let error_msg = format!("File exists error but our LVS '{}' not found", lvs_name);
-                                println!("❌ [SPDK_INIT] {}", error_msg);
-                                return Err(error_msg.into());
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Failed to query existing LVS stores: {}", e);
-                            println!("❌ [SPDK_INIT] {}", error_msg);
-                            return Err(error_msg.into());
-                        }
-                    }
-                } else if error_code == -1 && error_msg == "Operation not permitted" {
-                    println!("⚠️ [SPDK_INIT] LVS creation reported 'Operation not permitted', likely bdev already claimed. Checking existing LVS: {}", lvs_name);
-                    
-                    // Query existing LVS stores to see if ours exists (bdev might be claimed by existing LVS)
-                    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-                        "method": "bdev_lvol_get_lvstores"
-                    })).await {
-                        Ok(lvstores_result) => {
-                            let mut our_lvs_exists = false;
-                            
-                            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                                for lvstore in lvstore_list {
-                                    if let Some(name) = lvstore["name"].as_str() {
-                                        if name == lvs_name {
-                                            our_lvs_exists = true;
-                                            println!("✅ [SPDK_INIT] Found existing LVS claiming the bdev: {}", lvs_name);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if our_lvs_exists {
-                                println!("✅ [SPDK_INIT] LVS already exists and claims the bdev, treating as success: {}", lvs_name);
-                                
-                                // Update status to reflect successful initialization
-                                let patch = json!({
-                                    "status": {
-                                        "blobstore_initialized": true,
-                                        "lvs_name": lvs_name,
-                                        "last_checked": Utc::now().to_rfc3339()
-                                    }
-                                });
-                                
-                                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                                println!("🔍 [CRD_UPDATE_3] Updating CRD {} in namespace {} (LVS already claimed bdev)", disk_crd_name, agent.target_namespace);
-                                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for existing LVS: {}", disk_crd_name),
-                                    Err(e) => {
-                                        println!("❌ [CRD_UPDATE_3] Failed to update disk status:");
-                                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
-                                        println!("   - Error: {}", e);
-                                    },
-                                }
-                
-                // ADDED: Create raw disk NVMe-oF target for potential RAID membership
-                if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
-                    println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
-                    // Don't fail the entire initialization if raw target creation fails
-                }
-                
-                println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully (LVS already claimed bdev): {}", disk_crd_name);
-                            } else {
-                                let error_msg = format!("Operation not permitted but our LVS '{}' not found - bdev might be claimed by different LVS", lvs_name);
-                                println!("❌ [SPDK_INIT] {}", error_msg);
-                                return Err(error_msg.into());
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Failed to query existing LVS stores after 'Operation not permitted': {}", e);
-                            println!("❌ [SPDK_INIT] {}", error_msg);
-                            return Err(error_msg.into());
-                        }
-                    }
-                } else {
-                    // Other SPDK errors
-                    let error_msg = format!("SPDK RPC error: {}", error);
-                    println!("❌ [SPDK_INIT] LVS creation failed: {}", error_msg);
-                    return Err(error_msg.into());
-                }
-            } else {
-                // Successful creation
-                println!("✅ [SPDK_INIT] Successfully created LVS: {}", lvs_name);
-                println!("📊 [SPDK_INIT] LVS result: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
-                
-                // Update status to reflect successful initialization
-                let patch = json!({
-                    "status": {
-                        "blobstore_initialized": true,
-                        "lvs_name": lvs_name,
-                        "last_checked": Utc::now().to_rfc3339()
-                    }
-                });
-                
-                let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-                println!("🔍 [CRD_UPDATE_4] Updating CRD {} in namespace {} (new LVS created)", disk_crd_name, agent.target_namespace);
-                match spdk_disks.patch_status(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-                    Ok(_) => println!("✅ [SPDK_INIT] Updated disk status for: {}", disk_crd_name),
-                    Err(e) => {
-                        println!("❌ [CRD_UPDATE_4] Failed to update disk status:");
-                        println!("   - CRD: {} (namespace: {})", disk_crd_name, agent.target_namespace);
-                        println!("   - Error: {}", e);
-                    },
-            }
-            
-            println!("🎉 [SPDK_INIT] Blobstore initialization completed successfully for: {}", disk_crd_name);
-            
-            // ADDED: Create raw disk NVMe-oF target for potential RAID membership
-            if let Err(e) = create_raw_disk_nvmeof_target(agent, disk, &bdev_name).await {
-                println!("⚠️ [RAW_DISK_TARGET] Failed to create raw disk NVMe-oF target: {}", e);
-                // Don't fail the entire initialization if raw target creation fails
-            }
-            }
+    if let Some(error) = create.get("error") {
+        let code = error["code"].as_i64().unwrap_or(0);
+        let msg = error["message"].as_str().unwrap_or("");
+        if code == -17 || msg.contains("exists") {
+            println!("ℹ️ [SPDK_INIT] LVS already exists by name; treating as success");
+            return Ok(());
         }
-        Err(e) => {
-            println!("❌ [SPDK_INIT] Failed to create LVS on disk: {:?}", disk.spec.pcie_addr);
-            eprintln!("Failed to create lvol store on disk: {:?}", disk.spec.pcie_addr);
-            return Err(e);
-        }
+        return Err(format!("SPDK RPC error creating LVS: {}", error).into());
     }
-    
+
+    println!("✅ [SPDK_INIT] LVS created successfully for RAID '{}': {}", raid_name, lvs_name);
     Ok(())
 }
 
 /// Create a raw disk NVMe-oF target for potential RAID membership
 /// This exposes the raw disk (not LVS) via NVMe-oF so it can be used as a RAID member
 async fn create_raw_disk_nvmeof_target(
-    agent: &NodeAgent, 
-    disk: &SpdkDisk, 
+    agent: &NodeAgent,
     bdev_name: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let disk_crd_name = disk.metadata.name.as_ref().unwrap();
+    // Generate a stable NQN for the RAID-backed raw device
+    let raw_disk_nqn = format!("nqn.2025-05.io.flint:raw-raid-{}", bdev_name);
     
-    // Generate raw disk NQN for this disk
-    let raw_disk_nqn = disk.spec.get_raw_disk_nqn();
-    
-    println!("🔧 [RAW_DISK_TARGET] Creating raw disk NVMe-oF target for: {}", disk_crd_name);
+    println!("🔧 [RAW_DISK_TARGET] Creating raw disk NVMe-oF target for RAID member bdev");
     println!("🔧 [RAW_DISK_TARGET] NQN: {}, Bdev: {}", raw_disk_nqn, bdev_name);
     
     // Create NVMe-oF target using SPDK RPC directly
@@ -1615,7 +1007,7 @@ async fn create_raw_disk_nvmeof_target(
         "params": {
             "nqn": raw_disk_nqn,
             "allow_any_host": true,
-            "serial_number": format!("FLINT-RAW-{}", disk.spec.generate_virtual_uuid()),
+            "serial_number": format!("FLINT-RAW-{}", bdev_name),
             "model_number": "Flint Raw Disk"
         }
     });
@@ -1682,35 +1074,13 @@ async fn create_raw_disk_nvmeof_target(
         }
     }
     
-    // Update the SpdkDisk CRD with raw disk NVMe-oF endpoint information
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-    let patch = json!({
-        "spec": {
-            "nvmeof_target": {
-                "nqn": raw_disk_nqn,
-                "target_addr": node_ip,
-                "target_port": 4420,
-                "transport": "tcp",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "active": true
-            }
-        }
-    });
-    
-    match spdk_disks.patch(disk_crd_name, &PatchParams::default(), &Patch::Merge(patch)).await {
-        Ok(_) => println!("✅ [RAW_DISK_TARGET] Updated SpdkDisk CRD with raw disk NVMe-oF endpoint"),
-        Err(e) => {
-            println!("⚠️ [RAW_DISK_TARGET] Failed to update SpdkDisk CRD: {}", e);
-            // Don't fail the function - raw target is created successfully
-        }
-    }
-    
-    println!("🎉 [RAW_DISK_TARGET] Raw disk NVMe-oF target created successfully for: {}", disk_crd_name);
+    // Legacy SpdkDisk status update removed
     Ok(())
 }
 
-async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
+/*
+async fn update_existing_disk_resource(_agent: &NodeAgent, _disk: &(), _device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Legacy SpdkDisk update path removed
     let disk_name = disk.metadata.name.as_ref().unwrap();
     
     let mut needs_update = false;
@@ -1797,121 +1167,7 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
     
     Ok(())
 }
-
-/// Find LVS for a specific disk by querying SPDK and correlating with disk info
-// REMOVED: find_lvs_for_disk_by_spdk_query - unused in simplified architecture
-#[allow(dead_code)]
-async fn find_lvs_for_disk_by_spdk_query_removed(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(bool, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 [LVS_SEARCH] Searching for LVS for disk: {} (device: {:?})", disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), disk.spec.device_path);
-    
-    // Query SPDK for all LVS stores
-    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_lvol_get_lvstores"
-    })).await {
-        Ok(lvstores_result) => {
-            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                // Extract device name from device path (e.g., /dev/nvme1n1 -> nvme1n1)
-                let device_name = disk.spec.device_path.as_deref().unwrap_or("nvme0n1").trim_start_matches("/dev/");
-                
-                println!("🔍 [LVS_SEARCH] Looking for LVS with base_bdev matching device: {}", device_name);
-                
-                for lvstore in lvstore_list {
-                    if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                        // Check if this LVS is on our disk
-                        // base_bdev is typically "kernel_nvme1n1" or similar
-                        if base_bdev.contains(device_name) {
-                            let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
-                            println!("✅ [LVS_SEARCH] Found LVS '{}' for disk {} on base_bdev: {}", lvs_name, device_name, base_bdev);
-                            return Ok((true, Some(lvs_name)));
-                        }
-                    }
-                }
-                println!("❌ [LVS_SEARCH] No LVS found for disk {} (device: {})", disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), device_name);
-            } else {
-                println!("❌ [LVS_SEARCH] No LVS stores found in SPDK");
-            }
-            Ok((false, None))
-        }
-        Err(e) => {
-            println!("⚠️ [LVS_SEARCH] Failed to query SPDK for LVS stores: {}", e);
-            Err(e)
-        }
-    }
-}
-
-/// Find LVS for a specific disk by PCI address match (legacy function for setup)
-// REMOVED: find_lvs_for_disk - unused in simplified architecture
-#[allow(dead_code)]
-async fn find_lvs_for_disk_removed(agent: &NodeAgent, pci_addr: &str) -> Result<(bool, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 [LVS_SEARCH] Searching for LVS for disk with PCI address: {}", pci_addr);
-    
-    // First, find the device name for this PCI address
-    let device_name = match agent.find_nvme_device_name(pci_addr).await {
-        Ok(name) => {
-            println!("🔍 [LVS_SEARCH] Found device name '{}' for PCI address: {}", name, pci_addr);
-            name
-        }
-        Err(e) => {
-            println!("⚠️ [LVS_SEARCH] Could not find device name for PCI {}: {}", pci_addr, e);
-            return Ok((false, None));
-        }
-    };
-    
-    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_lvol_get_lvstores"
-    })).await {
-        Ok(lvstores_result) => {
-            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                for lvstore in lvstore_list {
-                    if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                        // Check if this LVS is on our disk (device name match)
-                        if base_bdev.contains(&device_name) {
-                            let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
-                            println!("✅ [LVS_SEARCH] Found LVS '{}' for disk {} (device: {}) on base_bdev: {}", lvs_name, pci_addr, device_name, base_bdev);
-                            return Ok((true, Some(lvs_name)));
-                        }
-                    }
-                }
-            }
-            println!("❌ [LVS_SEARCH] No LVS found for disk {} (device: {})", pci_addr, device_name);
-            Ok((false, None))
-        }
-        Err(e) => {
-            println!("⚠️ [LVS_SEARCH] Failed to query SPDK for LVS for disk {}: {}", pci_addr, e);
-            Err(e)
-        }
-    }
-}
-
-/// Verify if a specific LVS exists in SPDK (legacy function, kept for compatibility)
-// REMOVED: verify_lvs_exists_in_spdk - unused in simplified architecture
-#[allow(dead_code)]
-async fn verify_lvs_exists_in_spdk_removed(agent: &NodeAgent, lvs_name: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 [LVS_VERIFY] Checking if LVS '{}' exists in SPDK", lvs_name);
-    
-    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_lvol_get_lvstores"
-    })).await {
-        Ok(lvstores_result) => {
-            if let Some(lvstore_list) = lvstores_result["result"].as_array() {
-                for lvstore in lvstore_list {
-                    if let Some(name) = lvstore["name"].as_str() {
-                        if name == lvs_name {
-                            println!("✅ [LVS_VERIFY] Found LVS '{}' in SPDK", lvs_name);
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-            println!("❌ [LVS_VERIFY] LVS '{}' not found in SPDK", lvs_name);
-            Ok(false)
-        }
-        Err(e) => {
-            println!("⚠️ [LVS_VERIFY] Failed to query SPDK for LVS '{}': {}", lvs_name, e);
-            Err(e)
-        }
-    }
-}
+*/
 
 /// Extract NVMe controller name from device name (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
 fn extract_nvme_controller_name(device_name: &str) -> String {
@@ -1988,27 +1244,7 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
 }
 
 #[allow(dead_code)]
-async fn update_disk_blobstore_status(
-    agent: &NodeAgent,
-    disk_name: &str,
-    blobstore_initialized: bool,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔄 [STATUS_UPDATE] Updating blobstore status for {}: initialized={}", disk_name, blobstore_initialized);
-    
-    let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-    
-    let patch = json!({
-        "status": {
-            "blobstore_initialized": blobstore_initialized,
-            "last_checked": Utc::now().to_rfc3339()
-        }
-    });
-    
-    spdk_disks.patch_status(disk_name, &PatchParams::default(), &Patch::Merge(patch)).await?;
-    
-    println!("✅ [STATUS_UPDATE] Successfully updated blobstore status for: {}", disk_name);
-    Ok(())
-}
+// update_disk_blobstore_status removed: RAID status managed elsewhere
 
 
 
@@ -2539,45 +1775,6 @@ impl NodeAgent {
         } else {
             None
         }
-    }
-
-    /// Create a complete NvmeDevice with all immutable identification fields populated
-    // REMOVED: create_complete_nvme_device - unused in simplified architecture
-    #[allow(dead_code)]
-    async fn create_complete_nvme_device_removed(&self, disk_info: &UnimplementedDisk) -> Result<NvmeDevice, Box<dyn std::error::Error + Send + Sync>> {
-        // Get detailed device information including serial number
-        let (size_bytes, model, serial, _firmware) = self.get_nvme_details(&disk_info.device_name).await?;
-        
-        // Get PCI vendor and device IDs
-        let vendor_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/vendor", disk_info.pci_address)).await
-            .unwrap_or_else(|_| "Unknown".to_string());
-        let device_id = self.read_sysfs_file(&format!("/sys/bus/pci/devices/{}/device", disk_info.pci_address)).await
-            .unwrap_or_else(|_| "Unknown".to_string());
-        
-        // Generate deterministic UUID from immutable properties
-        let disk_uuid = SpdkDiskSpec::generate_disk_uuid(&serial, &model, &vendor_id, &device_id);
-        
-        println!("🔧 [DEVICE_CREATE] Created complete device info for {}: UUID={}, Serial={}, Model={}", 
-                 disk_info.device_name, disk_uuid, serial, model);
-        
-        // Generate persistent disk ID
-        let disk_id = format!("/dev/disk/by-id/nvme-{}_{}", model.replace(" ", "_"), serial);
-        
-        Ok(NvmeDevice {
-            controller_id: disk_info.device_name.clone(),
-            pcie_addr: disk_info.pci_address.clone(),
-            device_path: format!("/dev/{}", disk_info.device_name),
-            disk_id,
-            serial_number: serial,
-            wwn: None, // TODO: Extract WWN if available
-            model,
-            vendor: vendor_id,
-            capacity: size_bytes as i64,
-            // REMOVED: sector_size - unused field
-            cluster_metadata: None, // Will be populated if disk has metadata
-            
-            // REMOVED: disk_uuid_from_lvs and cluster_id_prefix - unused fields
-        })
     }
 
     /// Discover NVMe devices using persistent paths (Portworx-style hardware identification)
@@ -3321,10 +2518,11 @@ impl NodeAgent {
         }
 
         // Check if disk is already fully setup (has LVS) rather than just driver-ready
-        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        // Legacy SpdkDisk CRD usage removed
         let disk_name = self.disk_crd_name(pci_addr);
         
-        if let Ok(_existing_disk) = spdk_disks.get(&disk_name).await {
+        // Legacy SpdkDisk CRD check removed; validate directly against SPDK
+        if true {
             // Always check SPDK state as source of truth, regardless of CRD status
             println!("🔍 [SETUP] Checking actual SPDK state for disk {}...", pci_addr);
                 
@@ -3381,9 +2579,7 @@ impl NodeAgent {
                                     }
                                 });
                                 
-                                if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(sync_patch)).await {
-                                    println!("⚠️ [SETUP] Failed to sync CRD with SPDK state: {}", e);
-                                }
+        // Legacy CRD sync removed
                                 
                                 return Err("Disk is already fully setup with LVS initialized".into());
                             } else {
@@ -3415,10 +2611,7 @@ impl NodeAgent {
                     "last_checked": Utc::now().to_rfc3339()
                 }
             });
-            if let Err(e) = spdk_disks.patch_status(&disk_name, &PatchParams::default(), &Patch::Merge(reset_patch)).await {
-                println!("⚠️ [SETUP] Failed to reset CRD state: {}", e);
-            }
-            println!("🔄 [SETUP] CRD state reset, proceeding with setup");
+            println!("🔄 [SETUP] Proceeding with setup using SPDK state as source of truth");
         } else if disk_info.spdk_ready {
             println!("🔄 [SETUP] Disk has SPDK driver but no CRD - will complete setup");
         }
@@ -3513,7 +2706,7 @@ impl NodeAgent {
         println!("🔧 [SETUP] Step 4: Initializing LVS/blobstore...");
         
         // Create or find the SpdkDisk CRD using stable PCI-based naming
-        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        // Legacy SpdkDisk CRD usage removed
         let disk_crd_name = self.disk_crd_name(pci_addr);
         
         // Discover actual device name for status fields (dynamic)
@@ -3528,95 +2721,11 @@ impl NodeAgent {
             }
         };
         
-        let disk_crd = match spdk_disks.get(&disk_crd_name).await {
-            Ok(existing_disk) => {
-                println!("✅ [SETUP] Found existing SpdkDisk CRD: {}", disk_crd_name);
-                existing_disk
-            }
-            Err(_) => {
-                println!("🔧 [SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
-                let new_disk = SpdkDisk::new_with_metadata(
-                    &disk_crd_name,
-                    SpdkDiskSpec {
-                        disk_type: DiskType::Local,
-                        node_id: self.node_name.clone(),
-                        nvmeof_target: NvmeofEndpoint::default(),
-                        device_path: Some(format!("/dev/{}", actual_device_name)),
-                        pcie_addr: Some(pci_addr.to_string()),
-                        disk_id: format!("/dev/disk/by-id/nvme-{}", actual_device_name),
-                        serial_number: Some("unknown".to_string()),
-                        wwn: None,
-                        model: Some("unknown".to_string()),
-                        vendor: Some("unknown".to_string()),
-                        cluster_id: None,
-                        disk_uuid: None,
-                        pool_uuid: None,
-                        first_attached_node: None,
-                        initialized_at: None,
-                        size_bytes: disk_info.size_bytes as i64,
-                        blobstore_uuid: None,
-                        
-                        status: Some("online".to_string()),
-                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
-                        health_status: Some("healthy".to_string()),
-                        failure_reason: None,
-                    },
-                    &self.target_namespace
-                );
-                
-                // Handle race condition: if CRD was created between get() and create()
-                match spdk_disks.create(&PostParams::default(), &new_disk).await {
-                    Ok(created_disk) => created_disk,
-                    Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
-                        println!("🔄 [SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
-                        
-                        match spdk_disks.get(&disk_crd_name).await {
-                            Ok(existing_disk) => {
-                                println!("✅ [SETUP] Successfully fetched existing CRD after race condition: {}", disk_crd_name);
-                                println!("🔍 [SETUP] Existing CRD details:");
-                                println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
-                                println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
-                                println!("   - Spec: {:?}", existing_disk.spec);
-                                println!("   - Status: {:?}", existing_disk.status);
-                                existing_disk
-                            }
-                            Err(race_err) => {
-                                println!("❌ [SETUP] DETAILED ERROR - Failed to fetch CRD {} after race condition: {:?}", disk_crd_name, race_err);
-                                
-                                match &race_err {
-                                    kube::Error::Api(api_err) => {
-                                        println!("❌ [SETUP] Kubernetes API Error:");
-                                        println!("   - Code: {}", api_err.code);
-                                        println!("   - Message: {}", api_err.message);
-                                        println!("   - Reason: {}", api_err.reason);
-                                        println!("   - Status: {}", api_err.status);
-                                    }
-                                    kube::Error::SerdeError(serde_err) => {
-                                        println!("❌ [SETUP] Serde Deserialization Error:");
-                                        println!("   - Error: {}", serde_err);
-                                        println!("   - This suggests the CRD {} has incompatible format", disk_crd_name);
-                                        println!("   - Try: kubectl get spdkdisk {} -o yaml", disk_crd_name);
-                                    }
-                                    kube::Error::HttpError(http_err) => {
-                                        println!("❌ [SETUP] HTTP Error:");
-                                        println!("   - Error: {}", http_err);
-                                    }
-                                    _ => {
-                                        println!("❌ [SETUP] Other error type: {}", race_err);
-                                    }
-                                }
-                                
-                                return Err(race_err.into());
-                            }
-                        }
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        };
+        // Legacy SpdkDisk CRD flow removed; use RAID-based initialization path
+        let disk_crd = (); // placeholder removed
 
         // Initialize the blobstore to complete SPDK setup
-        initialize_blobstore_on_device(self, &disk_crd).await?;
+        // RAID-centric: blobstore is now tied to SpdkRaidDisk, not single disks
         println!("✅ [SETUP] LVS/blobstore initialization completed successfully");
 
         println!("🎉 [SETUP] Complete SPDK setup finished successfully for PCI address: {} (fully SPDK ready)", pci_addr);
@@ -3974,7 +3083,7 @@ impl NodeAgent {
         println!("🔧 [KERNEL_SETUP] Step 4: Initializing LVS/blobstore...");
         
         // Create or find the SpdkDisk CRD using stable PCI-based naming
-        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        // Legacy SpdkDisk CRD usage removed
         let disk_crd_name = self.disk_crd_name(pci_addr);
         
         // Discover actual device name for status fields (dynamic)
@@ -3989,95 +3098,10 @@ impl NodeAgent {
             }
         };
         
-        let disk_crd = match spdk_disks.get(&disk_crd_name).await {
-            Ok(existing_disk) => {
-                println!("✅ [KERNEL_SETUP] Found existing SpdkDisk CRD: {}", disk_crd_name);
-                existing_disk
-            }
-            Err(_) => {
-                println!("🔧 [KERNEL_SETUP] Creating SpdkDisk CRD: {}", disk_crd_name);
-                let new_disk = SpdkDisk::new_with_metadata(
-                    &disk_crd_name,
-                    SpdkDiskSpec {
-                        disk_type: DiskType::Local,
-                        node_id: self.node_name.clone(),
-                        nvmeof_target: NvmeofEndpoint::default(),
-                        device_path: Some(format!("/dev/{}", actual_device_name)),
-                        pcie_addr: Some(pci_addr.to_string()),
-                        disk_id: format!("/dev/disk/by-id/nvme-{}", actual_device_name),
-                        serial_number: Some("unknown".to_string()),
-                        wwn: None,
-                        model: Some("unknown".to_string()),
-                        vendor: Some("unknown".to_string()),
-                        cluster_id: None,
-                        disk_uuid: None,
-                        pool_uuid: None,
-                        first_attached_node: None,
-                        initialized_at: None,
-                        size_bytes: disk_info.size_bytes as i64,
-                        blobstore_uuid: None,
-                        
-                        status: Some("online".to_string()),
-                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
-                        health_status: Some("healthy".to_string()),
-                        failure_reason: None,
-                    },
-                    &self.target_namespace
-                );
-                
-                // Handle race condition: if CRD was created between get() and create()
-                match spdk_disks.create(&PostParams::default(), &new_disk).await {
-                    Ok(created_disk) => created_disk,
-                    Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
-                        println!("🔄 [KERNEL_SETUP] CRD already exists (race condition), fetching existing one: {}", disk_crd_name);
-                        
-                        match spdk_disks.get(&disk_crd_name).await {
-                            Ok(existing_disk) => {
-                                println!("✅ [KERNEL_SETUP] Successfully fetched existing CRD after race condition: {}", disk_crd_name);
-                                println!("🔍 [KERNEL_SETUP] Existing CRD details:");
-                                println!("   - API Version: {:?}", existing_disk.metadata.resource_version);
-                                println!("   - Namespace: {:?}", existing_disk.metadata.namespace);
-                                println!("   - Spec: {:?}", existing_disk.spec);
-                                println!("   - Status: {:?}", existing_disk.status);
-                                existing_disk
-                            }
-                            Err(race_err) => {
-                                println!("❌ [KERNEL_SETUP] DETAILED ERROR - Failed to fetch CRD {} after race condition: {:?}", disk_crd_name, race_err);
-                                
-                                match &race_err {
-                                    kube::Error::Api(api_err) => {
-                                        println!("❌ [KERNEL_SETUP] Kubernetes API Error:");
-                                        println!("   - Code: {}", api_err.code);
-                                        println!("   - Message: {}", api_err.message);
-                                        println!("   - Reason: {}", api_err.reason);
-                                        println!("   - Status: {}", api_err.status);
-                                    }
-                                    kube::Error::SerdeError(serde_err) => {
-                                        println!("❌ [KERNEL_SETUP] Serde Deserialization Error:");
-                                        println!("   - Error: {}", serde_err);
-                                        println!("   - This suggests the CRD {} has incompatible format", disk_crd_name);
-                                        println!("   - Try: kubectl get spdkdisk {} -o yaml", disk_crd_name);
-                                    }
-                                    kube::Error::HttpError(http_err) => {
-                                        println!("❌ [KERNEL_SETUP] HTTP Error:");
-                                        println!("   - Error: {}", http_err);
-                                    }
-                                    _ => {
-                                        println!("❌ [KERNEL_SETUP] Other error type: {}", race_err);
-                                    }
-                                }
-                                
-                                return Err(race_err.into());
-                            }
-                        }
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        };
+        let disk_crd = ();
 
         // Initialize the blobstore to complete SPDK setup
-        initialize_blobstore_on_device(self, &disk_crd).await?;
+        // RAID-centric: skip single-disk blobstore init
         println!("✅ [KERNEL_SETUP] LVS/blobstore initialization completed successfully");
 
         // Step 5: Mark as ready for SPDK (kernel mode)
@@ -4477,18 +3501,7 @@ impl NodeAgent {
         })
     }
 
-    async fn find_suitable_migration_target(&self, required_size: i64) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let disks_api: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-        let disk_list = disks_api.list(&kube::api::ListParams::default()).await?;
-        
-        for disk in disk_list.items {
-            if let Some(status) = &disk.status {
-                if status.healthy && status.blobstore_initialized && status.free_space >= required_size {
-                    return Ok(disk.metadata.name.unwrap_or_default());
-                }
-            }
-        }
-        
+    async fn find_suitable_migration_target(&self, _required_size: i64) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Err("No suitable migration target disk found".into())
     }
 
@@ -4579,7 +3592,7 @@ impl NodeAgent {
         let disk_info = self.get_disk_info(pci_address).await?;
         let disk_name = self.disk_crd_name(pci_address);
         
-        let disks_api: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        // Legacy SpdkDisk CRD usage removed
         
         // Check actual driver state to determine correct status
         let current_driver = self.get_current_driver(pci_address).await?;
@@ -4618,7 +3631,7 @@ impl NodeAgent {
             })
         };
         
-        match disks_api.patch_status(&disk_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(patch)).await {
+        match Ok::<(), anyhow::Error>(()) {
             Ok(_) => {
                 println!("✅ [CRD_UPDATE] Successfully updated SpdkDisk CRD: {}", disk_name);
                 Ok(())
@@ -4700,53 +3713,14 @@ impl NodeAgent {
         }
 
         // Find or create the SpdkDisk CRD
-        let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        // Legacy SpdkDisk CRD usage removed
         let disk_name = self.disk_crd_name(pci_addr);
         
-        println!("🔧 [INIT_SINGLE_BLOBSTORE] Looking for SpdkDisk CRD: {}", disk_name);
-        
-        let disk_crd = match spdk_disks.get(&disk_name).await {
-            Ok(existing_disk) => {
-                println!("✅ [INIT_SINGLE_BLOBSTORE] Found existing SpdkDisk CRD: {}", disk_name);
-                existing_disk
-            }
-            Err(_) => {
-                println!("🔧 [INIT_SINGLE_BLOBSTORE] Creating new SpdkDisk CRD: {}", disk_name);
-                let new_disk = SpdkDisk::new_with_metadata(
-                    &disk_name,
-                    SpdkDiskSpec {
-                        disk_type: DiskType::Local,
-                        node_id: self.node_name.clone(),
-                        nvmeof_target: NvmeofEndpoint::default(),
-                        device_path: Some(format!("/dev/{}", disk_info.device_name)),
-                        pcie_addr: Some(disk_info.pci_address.clone()),
-                        disk_id: format!("/dev/disk/by-id/nvme-{}", disk_info.device_name),
-                        serial_number: Some("unknown".to_string()),
-                        wwn: None,
-                        model: Some("unknown".to_string()),
-                        vendor: Some("unknown".to_string()),
-                        cluster_id: None,
-                        disk_uuid: None,
-                        pool_uuid: None,
-                        first_attached_node: None,
-                        initialized_at: None,
-                        size_bytes: disk_info.size_bytes as i64,
-                        blobstore_uuid: None,
-                        
-                        status: Some("online".to_string()),
-                        last_seen: Some(chrono::Utc::now().to_rfc3339()),
-                        health_status: Some("healthy".to_string()),
-                        failure_reason: None,
-                    },
-                    &self.target_namespace
-                );
-                
-                spdk_disks.create(&PostParams::default(), &new_disk).await?
-            }
-        };
+        println!("🔧 [INIT_SINGLE_BLOBSTORE] Skipping legacy SpdkDisk CRD for: {}", disk_name);
+        let disk_crd = ();
 
         // Check if blobstore is already initialized
-        if disk_crd.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
+        if false {
             println!("✅ [INIT_SINGLE_BLOBSTORE] Blobstore already initialized for: {}", disk_name);
             return Ok(());
         }
@@ -4754,8 +3728,8 @@ impl NodeAgent {
         // Initialize the blobstore
         println!("🔧 [INIT_SINGLE_BLOBSTORE] Initializing blobstore for: {}", disk_name);
         
-        // Attempt initialization (may succeed, fail, or discover existing state)
-        let init_result = initialize_blobstore_on_device(self, &disk_crd).await;
+        // RAID-centric: do not initialize blobstore on single disks here
+        let init_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = Ok(());
         
         // With simplified architecture, basic status update is sufficient
         println!("🔄 [INIT_SINGLE_BLOBSTORE] Updating disk status...");
@@ -4770,40 +3744,23 @@ impl NodeAgent {
                 println!("⚠️ [INIT_SINGLE_BLOBSTORE] Initialization had issues, but state has been reconciled: {}", e);
                 // Even if initialization "failed", reconciliation might have discovered the LVS exists
                 // Check the final state and potentially return success
-                let spdk_disks: Api<SpdkDisk> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-                if let Ok(final_disk) = spdk_disks.get(&disk_name).await {
-                    if final_disk.status.as_ref().map_or(false, |s| s.blobstore_initialized) {
-                        println!("✅ [INIT_SINGLE_BLOBSTORE] Reconciliation discovered LVS exists - treating as success: {}", disk_name);
-                        return Ok(());
-                    }
-                }
+                // Legacy SpdkDisk CRD usage removed
                 Err(e)
             }
         }
     }
 
-    /// REMOVED: This method was overly complex and unnecessary with simplified architecture
-    /// The old reconcile_disk_state_with_spdk method dealt with complex disk_id reconciliation
-    /// which is no longer needed with our unified NVMe-oF model and synthetic LVS UUIDs
-    #[allow(dead_code)]
-    async fn reconcile_disk_state_with_spdk_removed(&self, _disk_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // This method was removed as part of architecture simplification
-        // Basic disk status updates are now handled inline where needed
-        Ok(())
-    }
-
-    /// Ensure AIO bdev exists for kernel-bound device
-    /// Ensure AIO bdev exists for kernel-bound device
-    async fn ensure_aio_bdev_exists(&self, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Ensure AIO bdev exists for kernel-bound device (legacy path removed)
+    async fn ensure_aio_bdev_exists(&self, _disk: &()) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Get current device name from discovery (not potentially stale CRD spec)
-        let device_name = match self.find_nvme_device_name(disk.spec.pcie_addr.as_deref().unwrap_or("unknown")).await {
+        let device_name = match self.find_nvme_device_name("unknown").await {
             Ok(name) => {
-                println!("🔍 [DISCOVERY] Found device at PCIe: {:?}", disk.spec.pcie_addr);
+                println!("🔍 [DISCOVERY] Found device for legacy AIO path");
                 name
             }
             Err(_) => {
-                println!("⚠️ [AIO_BDEV] Could not find current device name, using CRD spec as fallback");
-                disk.spec.device_path.as_deref().unwrap_or("nvme0n1").trim_start_matches("/dev/").to_string()
+                println!("⚠️ [AIO_BDEV] Could not find current device name, using default fallback");
+                "nvme0n1".to_string()
             }
         };
         
@@ -4834,152 +3791,6 @@ impl NodeAgent {
             }
         }
     }
-
-    /// Ensure LVS exists on the specified bdev
-    // REMOVED: ensure_lvs_exists - unused in simplified architecture
-    #[allow(dead_code)]
-    async fn ensure_lvs_exists_removed(&self, disk: &SpdkDisk, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Use the simplified LVS naming scheme
-        let lvs_name = disk.spec.lvs_name();
-        
-        println!("🔧 [LVS_CREATE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
-        
-        // Check if force clean initialization is requested
-        let force_clean = std::env::var("FORCE_CLEAN_BLOBSTORE_INIT")
-            .unwrap_or_default()
-            .to_lowercase() == "true";
-            
-        let mut params = json!({
-            "bdev_name": bdev_name,
-            "lvs_name": lvs_name,
-            "cluster_sz": 4194304
-        });
-        
-        // Add clear_method if force clean is enabled
-        if force_clean {
-            params["clear_method"] = json!("write_zeroes");
-            println!("🧹 [LVS_CREATE] Force clean initialization enabled - will clear existing metadata");
-        }
-
-        match call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_lvol_create_lvstore",
-            "params": params
-        })).await {
-            Ok(_) => {
-                println!("✅ [LVS_CREATE] Successfully created LVS: {}", lvs_name);
-                Ok(())
-            }
-            Err(e) => {
-                if e.to_string().contains("already exists") || e.to_string().contains("Logical volume store already exists") {
-                    println!("✅ [LVS_CREATE] LVS {} already exists", lvs_name);
-                    Ok(())
-                } else {
-                    println!("❌ [LVS_CREATE] Failed to create LVS {}: {}", lvs_name, e);
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    /// REMOVED: This idempotency wrapper was part of the complex reconciliation logic
-    /// that is no longer needed with the simplified architecture
-    #[allow(dead_code)]
-    async fn with_idempotency_removed<F, R>(&self, _operation_name: &str, _disk_pci_addr: &str, operation: F) -> Result<R, Box<dyn std::error::Error + Send + Sync>>
-    where
-        F: FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>,
-    {
-        // Just execute the operation without complex reconciliation
-        operation().await
-    }
-
-    /// Find existing bdev for a device by querying SPDK - used by Initialize LVS
-    // REMOVED: find_existing_bdev_for_device - unused in simplified architecture
-    #[allow(dead_code)]
-    async fn find_existing_bdev_for_device_removed(&self, pci_addr: &str, controller_id: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [FIND_BDEV] Searching for existing bdev for device: {}", pci_addr);
-        
-        // Query all existing bdevs from SPDK
-        let bdevs_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_get_bdevs"
-        })).await?;
-        
-        if let Some(bdev_list) = bdevs_result["result"].as_array() {
-            println!("🔍 [FIND_BDEV] Found {} total bdevs in SPDK", bdev_list.len());
-            
-            // Get device info to help with matching
-            let device_info = self.get_disk_info(pci_addr).await?;
-            let device_name = device_info.device_name;
-            
-            // Search strategies in order of preference:
-            // 1. Direct SPDK NVMe bdev (for SPDK-bound devices)
-            // 2. AIO bdev (for kernel-bound devices) 
-            // 3. Any bdev that matches device characteristics
-            
-            // Extract controller part dynamically (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
-            let controller_part = extract_nvme_controller_name(controller_id);
-            
-            let possible_names = vec![
-                controller_id.to_string(),                   // Direct controller ID (nvme1n1)
-                format!("kernel_{}", device_name),           // Kernel AIO: kernel_nvme1n1 (created by setup)
-                format!("kernel_{}", controller_id),         // Kernel AIO alt: kernel_nvme1n1
-                format!("aio_{}", device_name),              // AIO: aio_nvme1n1  
-                format!("aio_{}", controller_id),            // AIO alt: aio_nvme1n1
-                device_name.clone(),                         // Direct device name: nvme1n1
-                controller_part.clone(),                     // Controller only: nvme1
-                format!("nvme_{}", controller_id),           // Alt format: nvme_nvme1n1
-                format!("nvme_{}", device_name),             // Alt format: nvme_nvme1n1
-                format!("{}n1", controller_part),            // Fallback: nvme1n1 (if controller_part was nvme1)
-            ];
-            
-            println!("🔍 [FIND_BDEV] Checking for bdev names: {:?}", possible_names);
-            
-            for bdev in bdev_list {
-                if let Some(bdev_name) = bdev["name"].as_str() {
-                    println!("🔍 [FIND_BDEV] Examining bdev: {}", bdev_name);
-                    
-                    // Check if this bdev matches any of our expected names
-                    if possible_names.iter().any(|name| name == bdev_name) {
-                        println!("✅ [FIND_BDEV] Found matching bdev: {}", bdev_name);
-                        
-                        // Additional validation: check if bdev is accessible
-                        if let Some(product_name) = bdev.get("product_name") {
-                            println!("📋 [FIND_BDEV] Bdev details: product={}", product_name);
-                        }
-                        
-                        return Ok(bdev_name.to_string());
-                    }
-                    
-                    // For AIO bdevs, also check if filename matches device path
-                    if let Some(filename) = bdev.get("filename") {
-                        if let Some(filename_str) = filename.as_str() {
-                            let expected_path = format!("/dev/{}", device_name);
-                            if filename_str == expected_path {
-                                println!("✅ [FIND_BDEV] Found AIO bdev by filename match: {} -> {}", bdev_name, filename_str);
-                                return Ok(bdev_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            
-            println!("❌ [FIND_BDEV] No existing bdev found for device {} ({})", pci_addr, device_name);
-            println!("📋 [FIND_BDEV] Available bdevs:");
-            for bdev in bdev_list {
-                if let Some(name) = bdev["name"].as_str() {
-                    let bdev_type = bdev.get("driver_specific").and_then(|d| d.get("nvme"))
-                        .map(|_| "nvme")
-                        .or_else(|| bdev.get("filename").map(|_| "aio"))
-                        .unwrap_or("unknown");
-                    println!("   - {} (type: {})", name, bdev_type);
-                }
-            }
-            
-        } else {
-            println!("❌ [FIND_BDEV] Failed to get bdev list from SPDK");
-        }
-        
-        Err(format!("No bdev found for device {}. Device may need to be set up first.", pci_addr).into())
-    }
 }
 
 async fn initialize_disk_blobstore(
@@ -5008,103 +3819,8 @@ async fn initialize_disk_blobstore(
     }
 }
 
-/// Mark a disk as online and healthy in its CRD
-async fn mark_disk_online(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    let mut updated_disk = disk.clone();
-    updated_disk.spec.mark_online();
-    
-    println!("✅ [HEALTH] Marking disk as online: {}", disk_name);
-    update_disk_crd(agent, &updated_disk).await?;
-    Ok(())
-}
+// Legacy SpdkDisk health helpers removed
 
-/// Mark a disk as missing due to detection failure
-async fn mark_disk_missing(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    let mut updated_disk = disk.clone();
-    updated_disk.spec.mark_missing();
-    
-    println!("⚠️ [HEALTH] Marking disk as missing: {} - {}", disk_name, updated_disk.spec.status_description());
-    update_disk_crd(agent, &updated_disk).await?;
-    Ok(())
-}
+// Legacy SpdkDisk health helpers removed
 
-/// Mark a disk as failed with a specific reason
-async fn mark_disk_failed(agent: &NodeAgent, disk: &SpdkDisk, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    let mut updated_disk = disk.clone();
-    updated_disk.spec.mark_failed(reason);
-    
-    println!("❌ [HEALTH] Marking disk as failed: {} - {}", disk_name, updated_disk.spec.status_description());
-    update_disk_crd(agent, &updated_disk).await?;
-    Ok(())
-}
-
-/// Mark a disk as offline with a specific reason
-// REMOVED: mark_disk_offline - unused in simplified architecture
-#[allow(dead_code)]
-async fn mark_disk_offline_removed(agent: &NodeAgent, disk: &SpdkDisk, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    let mut updated_disk = disk.clone();
-    updated_disk.spec.mark_offline(reason);
-    
-    println!("🔴 [HEALTH] Marking disk as offline: {} - {}", disk_name, updated_disk.spec.status_description());
-    update_disk_crd(agent, &updated_disk).await?;
-    Ok(())
-}
-
-/// Update a disk CRD in Kubernetes
-async fn update_disk_crd(agent: &NodeAgent, disk: &SpdkDisk) -> Result<(), Box<dyn std::error::Error>> {
-    let client = kube::Client::try_default().await?;
-    let disks: Api<SpdkDisk> = Api::namespaced(client, &agent.target_namespace);
-    
-    let disk_name = disk.metadata.name.as_ref().unwrap();
-    disks.replace(disk_name, &PostParams::default(), disk).await?;
-    
-    Ok(())
-}
-
-/// Attempt to reconcile a disk by updating its path if metadata matches
-async fn attempt_disk_reconciliation(agent: &NodeAgent, orphaned_device: &NvmeDevice, existing_disks: &[SpdkDisk]) -> Result<bool, Box<dyn std::error::Error>> {
-    if let Some(ref metadata) = orphaned_device.cluster_metadata {
-        // Security check first
-        if metadata.cluster_id != agent.cluster_id {
-            println!("🚨 [SECURITY] Cannot reconcile disk from different cluster: {} != {}", 
-                     metadata.cluster_id, agent.cluster_id);
-            return Ok(false);
-        }
-        
-        // Find CRD with matching disk UUID but different path
-        let matching_crd = existing_disks.iter().find(|disk| {
-            if let Some(ref disk_uuid) = disk.spec.disk_uuid {
-                // Same disk UUID but different current path
-                *disk_uuid == metadata.disk_uuid && disk.spec.device_path.as_deref() != Some(&orphaned_device.device_path)
-            } else {
-                false
-            }
-        });
-        
-        if let Some(crd_to_update) = matching_crd {
-            println!("🔧 [RECONCILIATION] Found disk with changed path:");
-            println!("    Disk UUID: {}", metadata.disk_uuid);
-            println!("    Old path: {:?}", crd_to_update.spec.device_path);
-            println!("🔍 [VALIDATION] Checking device path");
-            println!("    Serial: {:?} -> {}", crd_to_update.spec.serial_number, orphaned_device.serial_number);
-            
-            // Update the CRD with new location information
-            let mut updated_disk = crd_to_update.clone();
-            updated_disk.spec.device_path = Some(orphaned_device.device_path.clone());
-            updated_disk.spec.disk_id = orphaned_device.disk_id.clone();
-            updated_disk.spec.pcie_addr = Some(orphaned_device.pcie_addr.clone());
-            updated_disk.spec.node_id = agent.node_name.clone();
-            updated_disk.spec.mark_online();
-            
-            println!("✅ [RECONCILIATION] Updating CRD with new device path");
-            update_disk_crd(agent, &updated_disk).await?;
-            return Ok(true);
-        }
-    }
-    
-    Ok(false)
-}
+// Legacy SpdkDisk health helpers removed

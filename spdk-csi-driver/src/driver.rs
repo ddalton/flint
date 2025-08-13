@@ -810,35 +810,7 @@ impl SpdkCsiDriver {
 
     /// Delete a logical volume for cleanup purposes
     // REMOVED: delete_lvol - unused in simplified architecture
-    #[allow(dead_code)]
-    pub async fn delete_lvol_removed(&self, lvs_name: &str, lvol_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let http_client = HttpClient::new();
-        let lvol_bdev_name = format!("{}/{}", lvs_name, lvol_name);
-        
-        println!("🗑️ [LVOL_DELETE] Deleting logical volume: {}", lvol_bdev_name);
-        
-        let delete_response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&json!({
-                "method": "bdev_lvol_delete",
-                "params": {
-                    "name": lvol_bdev_name
-                }
-            }))
-            .send()
-            .await?;
-
-        if !delete_response.status().is_success() {
-            let error_text = delete_response.text().await?;
-            // Don't fail if volume doesn't exist
-            if !error_text.contains("does not exist") && !error_text.contains("not found") {
-                return Err(format!("Failed to delete logical volume {}: {}", lvol_bdev_name, error_text).into());
-            }
-        }
-
-        println!("✅ [LVOL_DELETE] Successfully deleted logical volume: {}", lvol_bdev_name);
-        Ok(())
-    }
+    // removed: delete_lvol_removed (unused)
 
 
 
@@ -945,49 +917,6 @@ impl SpdkCsiDriver {
          }
      }
 
-     /// Create Kubernetes event for missing ublk_drv kernel module
-     // REMOVED: create_ublk_kernel_missing_event - ublk removed from architecture
-     #[allow(dead_code)]
-     async fn create_ublk_kernel_missing_event_removed(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-         use k8s_openapi::api::core::v1::Event;
-         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-         use kube::api::PostParams;
-         use chrono::Utc;
-
-         let events_api: kube::Api<Event> = kube::Api::namespaced(self.kube_client.clone(), &self.target_namespace);
-         
-         let event = Event {
-             metadata: ObjectMeta {
-                 generate_name: Some("ublk-kernel-missing-".to_string()),
-                 namespace: Some(self.target_namespace.clone()),
-                 ..Default::default()
-             },
-             involved_object: k8s_openapi::api::core::v1::ObjectReference {
-                 api_version: Some("apps/v1".to_string()),
-                 kind: Some("DaemonSet".to_string()),
-                 name: Some("flint-csi-node".to_string()),
-                 namespace: Some(self.target_namespace.clone()),
-                 ..Default::default()
-             },
-             message: Some(format!(
-                 "ublk_drv kernel module not available on node {}. All volumes using ublk backend will fail to mount. Solution: Install ublk kernel module with 'modprobe ublk_drv'", 
-                 self.node_id
-             )),
-             reason: Some("UblkKernelModuleMissing".to_string()),
-             type_: Some("Warning".to_string()),
-             action: Some("CheckKernelConfiguration".to_string()),
-             first_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now())),
-             last_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(Utc::now())),
-             count: Some(1),
-             source: Some(k8s_openapi::api::core::v1::EventSource {
-                 component: Some("flint-csi-driver".to_string()),
-                 host: Some(self.node_id.clone()),
-             }),
-             ..Default::default()
-         };
-
-         events_api.create(&PostParams::default(), &event).await?;
-         println!("✅ [K8S_EVENT] Created ublk kernel missing event");
-         Ok(())
-     }
+     // Create Kubernetes event for missing ublk_drv kernel module (removed)
+    // removed: create_ublk_kernel_missing_event_removed
 }

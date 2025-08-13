@@ -6,10 +6,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
 use kube::{Client, Api, api::ListParams};
+use spdk_csi_driver::models::{NvmeofDisk, NvmeofDiskSpec, NvmeofDiskStatus};
 use chrono::{Utc, DateTime};
 use std::env;
 use spdk_csi_driver::*;
 use k8s_openapi::api::core::v1::Pod;  
+// duplicate import removed
 
 // --- Start of New API Response Structs ---
 #[derive(Serialize, Debug, Clone)]
@@ -536,6 +538,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_volume_spdk_details)
         )
         .or(
+            // POST /api/nvmeofdisks (create or update a remote NvmeofDisk)
+            warp::path("nvmeofdisks")
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(create_or_update_nvmeofdisk)
+        )
+        .or(
+            // PUT /api/nvmeofdisks/{name}
+            warp::path("nvmeofdisks")
+                .and(warp::path::param::<String>())
+                .and(warp::put())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(update_nvmeofdisk)
+        )
+        .or(
             warp::path("volumes")
                 .and(warp::path::param::<String>())
                 .and(warp::get())
@@ -678,6 +697,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(delete_raw_spdk_volume)
         )
         .or(
+            // POST /api/nvmeofdisks (create or update a remote NvmeofDisk)
+            warp::path("nvmeofdisks")
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(create_or_update_nvmeofdisk)
+        )
+        .or(
+            // PUT /api/nvmeofdisks/{name}
+            warp::path("nvmeofdisks")
+                .and(warp::path::param::<String>())
+                .and(warp::put())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(update_nvmeofdisk)
+        )
+        .or(
             // DELETE /api/volumes/orphaned - Delete orphaned SPDK logical volumes (legacy endpoint)
             warp::path("volumes")
                 .and(warp::path("orphaned"))
@@ -696,6 +732,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     
     Ok(())
+}
+
+// === NvmeofDisk management endpoints ===
+
+#[derive(Deserialize, Clone)]
+struct NvmeofDiskCreateRequest {
+    name: String,
+    is_remote: bool,
+    node_id: Option<String>,
+    size_bytes: i64,
+    nqn: String,
+    target_addr: String,
+    target_port: u16,
+    transport: String,
+    credential_secret_name: Option<String>,
+    credential_secret_namespace: Option<String>,
+    model: Option<String>,
+    vendor: Option<String>,
+    serial_number: Option<String>,
+    hardware_id: Option<String>,
+}
+
+async fn create_or_update_nvmeofdisk(req: NvmeofDiskCreateRequest, state: AppState) -> Result<impl Reply, Rejection> {
+    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let spec = NvmeofDiskSpec {
+        is_remote: req.is_remote,
+        node_id: req.node_id.clone(),
+        hardware_id: req.hardware_id.clone(),
+        serial_number: req.serial_number.clone(),
+        wwn: None,
+        model: req.model.clone(),
+        vendor: req.vendor.clone(),
+        size_bytes: req.size_bytes,
+        nvmeof_endpoint: spdk_csi_driver::models::NvmeofEndpoint {
+            nqn: req.nqn.clone(),
+            target_addr: req.target_addr.clone(),
+            target_port: req.target_port,
+            transport: req.transport.clone(),
+            created_at: Some(Utc::now().to_rfc3339()),
+            active: true,
+        },
+        credential_secret_name: req.credential_secret_name.clone(),
+        credential_secret_namespace: req.credential_secret_namespace.clone(),
+    };
+
+    let mut resource = NvmeofDisk::new(&req.name, spec);
+    resource.status = Some(NvmeofDiskStatus {
+        healthy: true,
+        endpoint_validated: true,
+        available_bytes: req.size_bytes,
+        last_checked: Utc::now().to_rfc3339(),
+        message: Some("Created via dashboard backend".to_string()),
+    });
+
+    let pp = kube::api::PostParams::default();
+    let patch_params = kube::api::PatchParams::apply("dashboard");
+    let patch = kube::api::Patch::Apply(&resource);
+
+    match api.patch(&req.name, &patch_params, &patch).await {
+        Ok(obj) => Ok(warp::reply::json(&json!({"status":"ok","name": obj.metadata.name})) ),
+        Err(e) => {
+            eprintln!("NvmeofDisk create/update failed: {}", e);
+            Err(warp::reject())
+        }
+    }
+}
+
+#[derive(Deserialize, Clone)]
+struct NvmeofDiskUpdateRequest {
+    size_bytes: Option<i64>,
+    nqn: Option<String>,
+    target_addr: Option<String>,
+    target_port: Option<u16>,
+    transport: Option<String>,
+    healthy: Option<bool>,
+}
+
+async fn update_nvmeofdisk(name: String, req: NvmeofDiskUpdateRequest, state: AppState) -> Result<impl Reply, Rejection> {
+    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+
+    let current = api.get(&name).await.map_err(|_| warp::reject())?;
+    let mut spec = current.spec.clone();
+    if let Some(sz) = req.size_bytes { spec.size_bytes = sz; }
+    if let Some(nqn) = req.nqn { spec.nvmeof_endpoint.nqn = nqn; }
+    if let Some(addr) = req.target_addr { spec.nvmeof_endpoint.target_addr = addr; }
+    if let Some(port) = req.target_port { spec.nvmeof_endpoint.target_port = port; }
+    if let Some(tr) = req.transport { spec.nvmeof_endpoint.transport = tr; }
+
+    let mut status = current.status.unwrap_or_default();
+    if let Some(h) = req.healthy { status.healthy = h; }
+    status.last_checked = Utc::now().to_rfc3339();
+
+    let patch = json!({
+        "spec": spec,
+        "status": status,
+    });
+
+    match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await {
+        Ok(obj) => Ok(warp::reply::json(&json!({"status":"ok","name": obj.metadata.name})) ),
+        Err(e) => {
+            eprintln!("NvmeofDisk update failed: {}", e);
+            Err(warp::reject())
+        }
+    }
 }
 
 /// Discovers SPDK nodes by finding running node_agent pods via the Kubernetes API.
@@ -753,7 +893,7 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         }
     };
     
-    let disks_api: Api<SpdkDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let disks_api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let disks_list = match disks_api.list(&ListParams::default()).await {
         Ok(list) => {
             println!("✅ [DASHBOARD_REFRESH] Successfully listed {} disks", list.items.len());
@@ -780,14 +920,13 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         dashboard_volumes.push(dashboard_volume);
     }
     
-    println!("🔧 [DASHBOARD_REFRESH] Converting {} disks to dashboard format...", disks_list.items.len());
+    println!("🔧 [DASHBOARD_REFRESH] Converting {} nvmeof disks to dashboard format...", disks_list.items.len());
     for (i, disk) in disks_list.items.iter().enumerate() {
-        // Track the node for this disk
-        nodes.insert(disk.spec.node_id.clone());
-        
-        // Convert disk to dashboard format
-        let dashboard_disk = convert_disk_to_dashboard(disk, &dashboard_volumes);
-        println!("✅ [DASHBOARD_REFRESH] Disk {}/{}: {} converted successfully", 
+        if let Some(node_id) = disk.spec.node_id.as_ref() {
+            nodes.insert(node_id.clone());
+        }
+        let dashboard_disk = convert_nvmeofdisk_to_dashboard(disk);
+        println!("✅ [DASHBOARD_REFRESH] NvmeofDisk {}/{}: {} converted successfully", 
             i + 1, disks_list.items.len(), disk.metadata.name.as_ref().unwrap_or(&"unnamed".to_string()));
         dashboard_disks.push(dashboard_disk);
     }
@@ -1018,52 +1157,32 @@ fn estimate_rebuild_time(rebuild: &RaidRebuildInfo) -> Option<String> {
     }
 }
 
-fn convert_disk_to_dashboard(disk: &SpdkDisk, volumes: &[DashboardVolume]) -> DashboardDisk {
-    let default_status = SpdkDiskStatus::default();
-    let status = disk.status.as_ref().unwrap_or(&default_status);
-    let spec = &disk.spec;
-    
-    let provisioned_volumes: Vec<ProvisionedVolume> = volumes.iter()
-        .filter_map(|vol| {
-            for replica in &vol.replica_statuses {
-                if replica.node == spec.node_id {
-                    return Some(ProvisionedVolume {
-                        volume_name: vol.name.clone(),
-                        volume_id: vol.id.clone(),
-                        size: vol.size.trim_end_matches("GB").parse().unwrap_or(0),
-                        provisioned_at: Utc::now().to_rfc3339(),
-                        replica_type: format!("{} replica ({})", 
-                            if replica.is_local { "Local" } else { "Remote" },
-                            "NVMe-oF"),
-                        status: replica.status.clone(),
-                    });
-                }
-            }
-            None
-        })
-        .collect();
-    
+fn convert_nvmeofdisk_to_dashboard(disk: &NvmeofDisk) -> DashboardDisk {
+    let capacity = disk.spec.size_bytes;
+    let capacity_gb = capacity / (1024 * 1024 * 1024);
+    let free = disk.status.as_ref().map(|s| s.available_bytes).unwrap_or(0);
+    let free_gb = free / (1024 * 1024 * 1024);
+    let node = disk.spec.node_id.clone().unwrap_or("remote".to_string());
     DashboardDisk {
         id: disk.metadata.name.clone().unwrap_or_default(),
-        node: spec.node_id.clone(),
-        pci_addr: spec.pcie_addr.clone().unwrap_or_default(),
-        capacity: status.total_capacity,
-        capacity_gb: status.total_capacity / (1024 * 1024 * 1024),
-        allocated_space: status.used_space,
-        free_space: status.free_space,
-        free_space_display: format!("{}GB", status.free_space / (1024 * 1024 * 1024)),
-        healthy: status.healthy,
-        blobstore_initialized: status.blobstore_initialized,
-        lvol_count: status.lvol_count,
-        model: format!("NVMe Disk"),
-        read_iops: status.io_stats.read_iops,
-        write_iops: status.io_stats.write_iops,
-        read_latency: status.io_stats.read_latency_us,
-        write_latency: status.io_stats.write_latency_us,
-        brought_online: status.last_checked.clone(),
-        provisioned_volumes,
-        // Default empty - will be populated by validation process
-        orphaned_spdk_volumes: Vec::new(),
+        node,
+        pci_addr: "".to_string(),
+        capacity,
+        capacity_gb,
+        allocated_space: capacity - free,
+        free_space: free,
+        free_space_display: format!("{}GB", free_gb),
+        healthy: disk.status.as_ref().map(|s| s.healthy).unwrap_or(false),
+        blobstore_initialized: false,
+        lvol_count: 0,
+        model: disk.spec.model.clone().unwrap_or_default(),
+        read_iops: 0,
+        write_iops: 0,
+        read_latency: 0,
+        write_latency: 0,
+        brought_online: disk.status.as_ref().map(|s| s.last_checked.clone()).unwrap_or_default(),
+        provisioned_volumes: vec![],
+        orphaned_spdk_volumes: vec![],
     }
 }
 
