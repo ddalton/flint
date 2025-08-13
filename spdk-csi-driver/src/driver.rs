@@ -1145,7 +1145,7 @@ impl SpdkCsiDriver {
 
 
     /// Call SPDK RPC using the same pattern as node_agent.rs
-    async fn call_spdk_rpc(
+    pub async fn call_spdk_rpc(
         &self,
         rpc_request: &serde_json::Value,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {

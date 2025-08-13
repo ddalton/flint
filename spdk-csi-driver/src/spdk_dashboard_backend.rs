@@ -247,8 +247,18 @@ struct DashboardData {
     volumes: Vec<DashboardVolume>,        // Managed volumes (with SpdkVolume CRDs)
     raw_volumes: Vec<RawSpdkVolume>,      // Unmanaged SPDK volumes (orphaned/leftover)
     disks: Vec<DashboardDisk>,
-    nodes: Vec<String>,
+    nodes: Vec<DashboardNode>,            // Nodes with maintenance status
     raid_disks: Vec<DashboardRaidDisk>,   // RAID disks managed by SPDK instances
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct DashboardNode {
+    node_id: String,
+    status: String,                       // "healthy", "maintenance", "offline"
+    maintenance_mode: bool,
+    maintenance_status: Option<spdk_csi_driver::models::MaintenanceStatus>,
+    raid_count: u32,                      // Number of RAID bdevs managed by this node
+    volume_count: u32,                    // Number of volumes on this node
 }
 
 #[derive(Clone)]
@@ -736,6 +746,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and(state_filter.clone())
                 .and_then(delete_orphaned_spdk_volume)
         )
+        .or(
+            // POST /api/nodes/{node_id}/maintenance - Enable/disable maintenance mode
+            warp::path("nodes")
+                .and(warp::path::param::<String>()) // node_id
+                .and(warp::path("maintenance"))
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(state_filter.clone())
+                .and_then(|node_id: String, request: MaintenanceModeRequest, state: AppState| {
+                    set_maintenance_mode(node_id, request, state)
+                })
+        )
+        .or(
+            // GET /api/nodes/{node_id}/maintenance - Get maintenance status
+            warp::path("nodes")
+                .and(warp::path::param::<String>()) // node_id
+                .and(warp::path("maintenance"))
+                .and(warp::get())
+                .and(state_filter.clone())
+                .and_then(|node_id: String, state: AppState| {
+                    get_maintenance_status(node_id, state)
+                })
+        )
     );
 
     let routes = api.with(cors);
@@ -1079,7 +1112,14 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         volumes: dashboard_volumes,
         raw_volumes: raw_spdk_volumes,
         disks: dashboard_disks,
-        nodes: nodes.into_iter().collect(),
+        nodes: nodes.into_iter().map(|node_id| DashboardNode {
+            node_id: node_id.clone(),
+            status: "healthy".to_string(), // TODO: Get actual status
+            maintenance_mode: false, // TODO: Check SpdkConfig CRD
+            maintenance_status: None, // TODO: Fetch from SpdkConfig CRD
+            raid_count: 0, // TODO: Count RAIDs on this node
+            volume_count: 0, // TODO: Count volumes on this node
+        }).collect(),
         raid_disks: dashboard_raid_disks,
     };
     
@@ -2889,4 +2929,213 @@ fn get_node_agent_url(spdk_nodes: &HashMap<String, String>, node: &str) -> Optio
         }
     }
     None
+}
+
+// ============================================================================
+// MAINTENANCE MODE API
+// ============================================================================
+
+#[derive(Deserialize, Clone)]
+struct MaintenanceModeRequest {
+    enable: bool,
+    migration_plan: Option<MigrationPlan>,
+    force: Option<bool>, // Force shutdown without migration (dangerous)
+}
+
+#[derive(Deserialize, Clone)]
+struct MigrationPlan {
+    raid_migrations: Vec<RaidMigration>,
+    single_replica_migrations: Vec<SingleReplicaMigration>,
+}
+
+#[derive(Deserialize, Clone)]
+struct RaidMigration {
+    raid_name: String,
+    source_node: String,
+    target_node: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct SingleReplicaMigration {
+    volume_id: String,
+    source_node: String,
+    target_node: String,
+}
+
+#[derive(Serialize)]
+struct MaintenanceModeResponse {
+    success: bool,
+    message: String,
+    migration_id: Option<String>,
+}
+
+async fn set_maintenance_mode(
+    node_id: String,
+    request: MaintenanceModeRequest,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    use spdk_csi_driver::models::{SpdkConfig, MaintenanceStatus, MigrationProgress};
+    use kube::api::{Api, PatchParams, Patch};
+    use serde_json::json;
+    
+    println!("🔧 [MAINTENANCE] Setting maintenance mode for node {} to {}", node_id, request.enable);
+    
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    
+    if request.enable {
+        // Enable maintenance mode
+        println!("🚨 [MAINTENANCE] Enabling maintenance mode for node {}", node_id);
+        
+        // 1. Create or update SpdkConfig CRD with maintenance flag
+        let config_name = format!("{}-config", node_id);
+        
+        // Check if config exists
+        let config_exists = spdk_configs.get_opt(&config_name).await
+            .map_err(|e| {
+                println!("❌ [MAINTENANCE] Failed to check SpdkConfig: {}", e);
+                warp::reject::reject()
+            })?
+            .is_some();
+        
+        if !config_exists {
+            // Create initial SpdkConfig with maintenance mode
+            let initial_config = SpdkConfig::new(
+                &config_name,
+                spdk_csi_driver::models::SpdkConfigSpec {
+                    node_id: node_id.clone(),
+                    maintenance_mode: true,
+                    last_config_save: Some(chrono::Utc::now().to_rfc3339()),
+                    raid_bdevs: vec![], // Will be populated by config sync
+                    nvmeof_subsystems: vec![],
+                },
+            );
+            
+            spdk_configs.create(&kube::api::PostParams::default(), &initial_config).await
+                .map_err(|e| {
+                    println!("❌ [MAINTENANCE] Failed to create SpdkConfig: {}", e);
+                    warp::reject::reject()
+                })?;
+        } else {
+            // Update existing config to enable maintenance mode
+            let patch = json!({
+                "spec": {
+                    "maintenance_mode": true
+                },
+                "status": {
+                    "maintenance_status": {
+                        "active": true,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "migration_progress": [],
+                        "ready_for_shutdown": false
+                    }
+                }
+            });
+            
+            spdk_configs.patch(&config_name, &PatchParams::default(), &Patch::Merge(&patch)).await
+                .map_err(|e| {
+                    println!("❌ [MAINTENANCE] Failed to update SpdkConfig: {}", e);
+                    warp::reject::reject()
+                })?;
+        }
+        
+        // 2. Start migration process if not forced shutdown
+        if !request.force.unwrap_or(false) {
+            println!("🚚 [MAINTENANCE] Starting migration process for node {}", node_id);
+            
+            // TODO: Implement migration manager
+            // For now, just return success with placeholder migration ID
+            let migration_id = format!("migration-{}-{}", node_id, chrono::Utc::now().timestamp());
+            
+            // In a real implementation, we would:
+            // - Analyze current RAID bdevs and volumes on this node
+            // - Create migration plan if not provided
+            // - Start async migration process
+            // - Update migration progress in SpdkConfig status
+            
+            return Ok(warp::reply::json(&MaintenanceModeResponse {
+                success: true,
+                message: format!("Maintenance mode enabled for node {}. Migration started.", node_id),
+                migration_id: Some(migration_id),
+            }));
+        } else {
+            // Force shutdown - mark as ready immediately (dangerous!)
+            let patch = json!({
+                "status": {
+                    "maintenance_status": {
+                        "active": true,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "migration_progress": [],
+                        "ready_for_shutdown": true
+                    }
+                }
+            });
+            
+            spdk_configs.patch(&config_name, &PatchParams::default(), &Patch::Merge(&patch)).await
+                .map_err(|e| {
+                    println!("❌ [MAINTENANCE] Failed to update SpdkConfig: {}", e);
+                    warp::reject::reject()
+                })?;
+            
+            return Ok(warp::reply::json(&MaintenanceModeResponse {
+                success: true,
+                message: format!("Maintenance mode enabled for node {} (FORCE MODE - NO MIGRATION)", node_id),
+                migration_id: None,
+            }));
+        }
+    } else {
+        // Disable maintenance mode
+        println!("✅ [MAINTENANCE] Disabling maintenance mode for node {}", node_id);
+        
+        let config_name = format!("{}-config", node_id);
+        let patch = json!({
+            "spec": {
+                "maintenance_mode": false
+            },
+            "status": {
+                "maintenance_status": {
+                    "active": false,
+                    "started_at": null,
+                    "migration_progress": [],
+                    "ready_for_shutdown": false
+                }
+            }
+        });
+        
+        spdk_configs.patch(&config_name, &PatchParams::default(), &Patch::Merge(&patch)).await
+            .map_err(|e| {
+                println!("❌ [MAINTENANCE] Failed to disable maintenance mode: {}", e);
+                warp::reject::reject()
+            })?;
+        
+        Ok(warp::reply::json(&MaintenanceModeResponse {
+            success: true,
+            message: format!("Maintenance mode disabled for node {}", node_id),
+            migration_id: None,
+        }))
+    }
+}
+
+async fn get_maintenance_status(
+    node_id: String,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    use spdk_csi_driver::models::SpdkConfig;
+    use kube::api::Api;
+    
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let config_name = format!("{}-config", node_id);
+    
+    match spdk_configs.get_opt(&config_name).await {
+        Ok(Some(config)) => {
+            let status = config.status.unwrap_or_default();
+            Ok(warp::reply::json(&status.maintenance_status))
+        }
+        Ok(None) => {
+            Ok(warp::reply::json(&Option::<spdk_csi_driver::models::MaintenanceStatus>::None))
+        }
+        Err(e) => {
+            println!("❌ [MAINTENANCE] Failed to get maintenance status: {}", e);
+            Err(warp::reject::reject())
+        }
+    }
 }

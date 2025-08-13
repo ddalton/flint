@@ -107,16 +107,24 @@ rm -f /var/tmp/spdk.sock\n\
 \n\
 # Create SPDK configuration file\n\
 echo "Creating SPDK configuration file..."\n\
-echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
+\n\
+# Try to load config from ConfigMap (mounted by Kubernetes)\n\
+SPDK_CONFIG_FILE="/etc/spdk-config/spdk-config.json"\n\
+if [ -f "$SPDK_CONFIG_FILE" ]; then\n\
+    echo "Loading SPDK configuration from ConfigMap: $SPDK_CONFIG_FILE"\n\
+    cp "$SPDK_CONFIG_FILE" /tmp/spdk_config.json\n\
+    echo "SPDK config loaded from ConfigMap: $(head -n 3 /tmp/spdk_config.json)..."\n\
+else\n\
+    echo "No ConfigMap found, creating empty SPDK configuration"\n\
+    echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
+    echo "Note: Configuration will be applied via RPC after startup"\n\
+fi\n\
 \n\
 # Verify config file was created\n\
 if [ ! -f /tmp/spdk_config.json ]; then\n\
     echo "ERROR: Failed to create SPDK configuration file"\n\
     exit 1\n\
 fi\n\
-\n\
-echo "SPDK config created: $(cat /tmp/spdk_config.json)"\n\
-echo "Note: NVMe-oF transports will be initialized by node-agent after startup"\n\
 echo "Starting SPDK target daemon as PID 1 for proper signal handling..."\n\
 \n\
 # Use exec to replace this shell with spdk_tgt as PID 1\n\

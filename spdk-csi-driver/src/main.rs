@@ -17,6 +17,9 @@ use node::NodeService;
 use identity::IdentityService;
 use driver::SpdkCsiDriver;
 
+// Import config sync functionality
+use spdk_csi_driver::spdk_config_sync;
+
 // Use the CSI protobuf types from lib.rs instead of duplicating them
 // This avoids the tonic::include_proto! macro issue
 
@@ -72,6 +75,239 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
     // Fallback to default if running outside cluster
     println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
     Ok("flint-system".to_string())
+}
+
+/// Initialize SPDK from SpdkConfig CRD at startup
+async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use spdk_csi_driver::models::SpdkConfig;
+    use kube::api::Api;
+
+    println!("🔄 [STARTUP] Initializing SPDK from SpdkConfig CRD...");
+    
+    // Wait a bit for SPDK to be ready
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
+    let config_name = format!("{}-config", driver.node_id);
+    
+    // Try to load existing SpdkConfig
+    match spdk_configs.get_opt(&config_name).await? {
+        Some(config) => {
+            println!("✅ [STARTUP] Found SpdkConfig CRD: {}", config_name);
+            
+            // Skip if in maintenance mode
+            if config.spec.maintenance_mode {
+                println!("⚠️ [STARTUP] Node is in maintenance mode - skipping SPDK initialization");
+                return Ok(());
+            }
+            
+            // Convert to SPDK JSON and save to ConfigMap for spdk_tgt startup
+            spdk_config_sync::save_spdk_config_to_configmap(
+                &driver.kube_client,
+                &driver.target_namespace,
+                &driver.node_id,
+                &config.spec,
+            ).await?;
+            
+            // Apply the configuration to running SPDK via RPC
+            apply_spdk_config_via_rpc(&driver, &config.spec).await?;
+            
+            // Sync status back
+            spdk_config_sync::sync_spdk_state_to_crd(
+                &driver.spdk_rpc_url,
+                &driver.kube_client,
+                &driver.target_namespace,
+                &driver.node_id,
+            ).await?;
+            
+            println!("✅ [STARTUP] SPDK initialized successfully from SpdkConfig");
+        }
+        None => {
+            println!("ℹ️ [STARTUP] No SpdkConfig found for node {} - SPDK will start with empty config", driver.node_id);
+            
+            // Create empty ConfigMap for SPDK startup
+            let empty_config = spdk_csi_driver::models::SpdkConfigSpec {
+                node_id: driver.node_id.clone(),
+                maintenance_mode: false,
+                last_config_save: Some(chrono::Utc::now().to_rfc3339()),
+                raid_bdevs: vec![],
+                nvmeof_subsystems: vec![],
+            };
+            
+            spdk_config_sync::save_spdk_config_to_configmap(
+                &driver.kube_client,
+                &driver.target_namespace,
+                &driver.node_id,
+                &empty_config,
+            ).await?;
+        }
+    }
+    
+    Ok(())
+}
+
+/// Apply SpdkConfig to running SPDK via RPC calls
+async fn apply_spdk_config_via_rpc(
+    driver: &SpdkCsiDriver,
+    config: &spdk_csi_driver::models::SpdkConfigSpec,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [CONFIG] Applying SpdkConfig to running SPDK...");
+    
+    // 1. Create NVMe-oF connections for RAID members
+    for raid in &config.raid_bdevs {
+        for member in &raid.members {
+            if member.member_type == "nvmeof" {
+                if let Some(nvmeof_config) = &member.nvmeof_config {
+                    println!("🔗 [CONFIG] Creating NVMe-oF connection: {}", member.bdev_name);
+                    
+                    let rpc_request = serde_json::json!({
+                        "method": "bdev_nvme_attach_controller",
+                        "params": {
+                            "name": member.bdev_name,
+                            "trtype": nvmeof_config.transport,
+                            "traddr": nvmeof_config.target_addr,
+                            "trsvcid": nvmeof_config.target_port.to_string(),
+                            "subnqn": nvmeof_config.nqn
+                        }
+                    });
+                    
+                    if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                        println!("⚠️ [CONFIG] Failed to create NVMe-oF connection {}: {}", member.bdev_name, e);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 2. Create RAID bdevs
+    for raid in &config.raid_bdevs {
+        println!("🛡️ [CONFIG] Creating RAID bdev: {}", raid.name);
+        
+        let base_bdevs: Vec<String> = raid.members.iter().map(|m| m.bdev_name.clone()).collect();
+        
+        let rpc_request = serde_json::json!({
+            "method": "bdev_raid_create",
+            "params": {
+                "name": raid.name,
+                "raid_level": raid.raid_level,
+                "base_bdevs": base_bdevs,
+                "superblock": raid.superblock_enabled,
+                "strip_size_kb": raid.stripe_size_kb
+            }
+        });
+        
+        if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+            println!("⚠️ [CONFIG] Failed to create RAID bdev {}: {}", raid.name, e);
+        }
+        
+        // 3. Create/Import LVS on RAID bdev
+        if !raid.lvstore.name.is_empty() {
+            println!("💾 [CONFIG] Creating LVS: {}", raid.lvstore.name);
+            
+            let rpc_request = serde_json::json!({
+                "method": "bdev_lvol_create_lvstore",
+                "params": {
+                    "bdev_name": raid.name,
+                    "lvs_name": raid.lvstore.name,
+                    "cluster_sz": raid.lvstore.cluster_size
+                }
+            });
+            
+            if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                println!("⚠️ [CONFIG] Failed to create LVS {} (may already exist): {}", raid.lvstore.name, e);
+            }
+            
+            // 4. Create logical volumes
+            for lvol in &raid.lvstore.logical_volumes {
+                println!("📁 [CONFIG] Creating logical volume: {}", lvol.name);
+                
+                let rpc_request = serde_json::json!({
+                    "method": "bdev_lvol_create",
+                    "params": {
+                        "lvol_name": lvol.name,
+                        "size": lvol.size_bytes,
+                        "lvs_name": raid.lvstore.name,
+                        "thin_provision": lvol.thin_provision
+                    }
+                });
+                
+                if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                    println!("⚠️ [CONFIG] Failed to create logical volume {}: {}", lvol.name, e);
+                }
+            }
+        }
+    }
+    
+    // 5. Create NVMe-oF subsystems (volume exports)
+    if !config.nvmeof_subsystems.is_empty() {
+        println!("🌐 [CONFIG] Creating NVMe-oF transport...");
+        
+        let rpc_request = serde_json::json!({
+            "method": "nvmf_create_transport",
+            "params": {
+                "trtype": "TCP"
+            }
+        });
+        
+        if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+            println!("ℹ️ [CONFIG] NVMe-oF transport creation failed (may already exist): {}", e);
+        }
+        
+        for subsystem in &config.nvmeof_subsystems {
+            println!("🌐 [CONFIG] Creating NVMe-oF subsystem: {}", subsystem.nqn);
+            
+            // Create subsystem
+            let rpc_request = serde_json::json!({
+                "method": "nvmf_create_subsystem",
+                "params": {
+                    "nqn": subsystem.nqn,
+                    "allow_any_host": subsystem.allow_any_host,
+                    "serial_number": format!("SPDK{}", subsystem.lvol_uuid.replace("-", "")[..8].to_uppercase())
+                }
+            });
+            
+            if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                println!("⚠️ [CONFIG] Failed to create NVMe-oF subsystem {}: {}", subsystem.nqn, e);
+                continue;
+            }
+            
+            // Add namespace
+            let rpc_request = serde_json::json!({
+                "method": "nvmf_subsystem_add_ns",
+                "params": {
+                    "nqn": subsystem.nqn,
+                    "namespace": {
+                        "nsid": subsystem.namespace_id,
+                        "bdev_name": subsystem.lvol_uuid
+                    }
+                }
+            });
+            
+            if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                println!("⚠️ [CONFIG] Failed to add namespace to {}: {}", subsystem.nqn, e);
+            }
+            
+            // Add listener
+            let rpc_request = serde_json::json!({
+                "method": "nvmf_subsystem_add_listener",
+                "params": {
+                    "nqn": subsystem.nqn,
+                    "listen_address": {
+                        "trtype": subsystem.transport.to_uppercase(),
+                        "traddr": subsystem.listen_address,
+                        "trsvcid": subsystem.listen_port.to_string()
+                    }
+                }
+            });
+            
+            if let Err(e) = driver.call_spdk_rpc(&rpc_request).await {
+                println!("⚠️ [CONFIG] Failed to add listener to {}: {}", subsystem.nqn, e);
+            }
+        }
+    }
+    
+    println!("✅ [CONFIG] SpdkConfig applied to SPDK successfully");
+    Ok(())
 }
 
 #[tokio::main]
@@ -136,6 +372,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     if mode == "node" || mode == "all" {
         println!("Starting in Node mode...");
+        
+        // Initialize SPDK configuration from SpdkConfig CRD
+        let config_driver = driver.clone();
+        tokio::spawn(async move {
+            if let Err(e) = initialize_spdk_from_config(config_driver).await {
+                eprintln!("❌ [STARTUP] Failed to initialize SPDK from config: {}", e);
+            }
+        });
+        
         router = router.add_service(NodeServer::new(node_service));
     }
     

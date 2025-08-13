@@ -779,3 +779,217 @@ impl SpdkSnapshot {
 }
 
 // Removed legacy SpdkDisk constructor
+
+// ============================================================================
+// SPDK CONFIGURATION CRD (FOR PERSISTENCE AND MAINTENANCE MODE)
+// ============================================================================
+
+#[derive(CustomResource, Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+#[kube(group = "flint.csi.storage.io", version = "v1", kind = "SpdkConfig", plural = "spdkconfigs")]
+#[kube(namespaced)]
+#[kube(status = "SpdkConfigStatus")]
+pub struct SpdkConfigSpec {
+    /// Node ID that this configuration belongs to
+    pub node_id: String,
+    
+    /// Whether this node is in maintenance mode
+    pub maintenance_mode: bool,
+    
+    /// Timestamp when config was last saved from SPDK
+    pub last_config_save: Option<String>,
+    
+    /// RAID bdev configurations managed by this node
+    /// Each RAID has exactly one LVS with multiple logical volumes
+    pub raid_bdevs: Vec<RaidBdevConfig>,
+    
+    /// NVMe-oF subsystems (volume exports) managed by this node
+    /// These reference logical volumes within RAID bdev LVS structures
+    pub nvmeof_subsystems: Vec<NvmeofSubsystemConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct RaidBdevConfig {
+    /// RAID bdev name (e.g., "raid_disk_1")
+    pub name: String,
+    /// RAID level ("1", "0", "5", etc.)
+    pub raid_level: String,
+    /// Whether RAID superblock is enabled for persistence
+    pub superblock_enabled: bool,
+    /// Stripe size in KB
+    pub stripe_size_kb: u32,
+    
+    /// RAID member configurations (both local and remote NVMe-oF)
+    /// These become the base_bdevs for the RAID
+    pub members: Vec<RaidMemberBdevConfig>,
+    
+    /// Single Logical Volume Store on this RAID bdev (1:1 mapping)
+    /// This is where all volumes for this RAID are carved out
+    pub lvstore: LvstoreConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct RaidMemberBdevConfig {
+    /// Local bdev name for this RAID member
+    pub bdev_name: String,
+    /// Member type: "local" or "nvmeof"
+    pub member_type: String,
+    
+    /// For local members: PCI address or device path
+    pub local_device: Option<String>,
+    
+    /// For NVMe-oF members: connection configuration
+    pub nvmeof_config: Option<NvmeofMemberConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct NvmeofMemberConfig {
+    /// Target node providing the raw disk
+    pub target_node_id: String,
+    /// NVMe-oF connection details
+    pub nqn: String,
+    pub transport: String,
+    pub target_addr: String,
+    pub target_port: u16,
+    /// Creation timestamp
+    pub created_at: Option<String>,
+    /// Connection state: "connected", "disconnected", "failed"
+    pub state: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct LvstoreConfig {
+    /// LVS name (e.g., "lvs_raid_disk_1")
+    pub name: String,
+    /// LVS UUID (persistent identifier)
+    pub uuid: String,
+    /// Cluster size for thin provisioning
+    pub cluster_size: u64,
+    /// Total data clusters available
+    pub total_data_clusters: u64,
+    /// Free data clusters available
+    pub free_clusters: u64,
+    /// Block size (typically 4096)
+    pub block_size: u64,
+    /// Logical volumes created in this LVS
+    pub logical_volumes: Vec<LogicalVolumeConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct LogicalVolumeConfig {
+    /// Logical volume name (e.g., "vol-abc123")
+    pub name: String,
+    /// LVOL UUID (unique identifier for this logical volume)
+    pub uuid: String,
+    /// Size in bytes
+    pub size_bytes: i64,
+    /// Size in clusters (for SPDK internal management)
+    pub size_clusters: u64,
+    /// Whether this is a thin-provisioned volume
+    pub thin_provision: bool,
+    /// Associated SpdkVolume CRD name (if managed by CSI)
+    pub volume_crd_ref: Option<String>,
+    /// Creation timestamp
+    pub created_at: Option<String>,
+    /// Custom metadata for this volume
+    pub metadata: std::collections::HashMap<String, String>,
+    
+    // Volume state and health information
+    /// Current state: "online", "degraded", "failed"
+    pub state: String,
+    /// Health status: "healthy", "warning", "critical"
+    pub health_status: String,
+    /// Last health check timestamp
+    pub last_health_check: Option<String>,
+    
+    // Performance and usage statistics
+    /// Read operations count
+    pub read_ops: u64,
+    /// Write operations count  
+    pub write_ops: u64,
+    /// Total bytes read
+    pub read_bytes: u64,
+    /// Total bytes written
+    pub write_bytes: u64,
+    /// Current allocated size (for thin provisioning)
+    pub allocated_bytes: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct NvmeofSubsystemConfig {
+    /// NQN for the subsystem (e.g., "nqn.2023.io.flint:volume-vol-123")
+    pub nqn: String,
+    /// RAID bdev name containing the logical volume
+    pub raid_bdev_name: String,
+    /// Logical volume UUID exposed by this subsystem
+    pub lvol_uuid: String,
+    /// Logical volume name (for human reference)
+    pub lvol_name: String,
+    /// Namespace ID within the subsystem (typically 1)
+    pub namespace_id: u32,
+    /// Whether to allow any host to connect
+    pub allow_any_host: bool,
+    /// Specific hosts allowed (if allow_any_host is false)
+    pub allowed_hosts: Vec<String>,
+    /// Transport type ("tcp", "rdma")
+    pub transport: String,
+    /// Listen address for this subsystem
+    pub listen_address: String,
+    /// Listen port for this subsystem
+    pub listen_port: u16,
+    /// Associated SpdkVolume CRD (if managed by CSI)
+    pub volume_crd_ref: Option<String>,
+    /// Creation timestamp
+    pub created_at: Option<String>,
+    /// Current state: "active", "inactive", "error"
+    pub state: String,
+    
+    // Connection statistics
+    /// Number of currently connected hosts
+    pub connected_hosts: u32,
+    /// Total connection count since creation
+    pub total_connections: u64,
+    /// Last connection timestamp
+    pub last_connection: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct SpdkConfigStatus {
+    /// Whether the configuration has been successfully applied to SPDK
+    pub config_applied: bool,
+    /// Last time configuration was synchronized
+    pub last_sync: Option<String>,
+    /// SPDK version running on this node
+    pub spdk_version: Option<String>,
+    /// Any errors encountered during config application
+    pub errors: Vec<String>,
+    /// Maintenance mode status
+    pub maintenance_status: Option<MaintenanceStatus>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct MaintenanceStatus {
+    /// Whether maintenance mode is active
+    pub active: bool,
+    /// When maintenance mode was entered
+    pub started_at: Option<String>,
+    /// Migration progress
+    pub migration_progress: Vec<MigrationProgress>,
+    /// Whether node is ready for shutdown
+    pub ready_for_shutdown: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]
+pub struct MigrationProgress {
+    /// Type of migration (raid, single_replica)
+    pub migration_type: String,
+    /// Source identifier (RAID name, volume ID)
+    pub source_id: String,
+    /// Target node
+    pub target_node: String,
+    /// Progress percentage (0-100)
+    pub progress_percent: f64,
+    /// Current status (planning, executing, completed, failed)
+    pub status: String,
+    /// Error message if failed
+    pub error_message: Option<String>,
+}

@@ -1,6 +1,22 @@
 import React, { useState } from 'react';
-import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
+import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Settings, AlertTriangle, CheckCircle } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+
+interface MaintenanceStatus {
+  active: boolean;
+  started_at?: string;
+  migration_progress: MigrationProgress[];
+  ready_for_shutdown: boolean;
+}
+
+interface MigrationProgress {
+  migration_type: string;
+  source_id: string;
+  target_node: string;
+  progress_percent: number;
+  status: string;
+  error_message?: string;
+}
 
 interface NodeDetailViewProps {
   node: string;
@@ -14,6 +30,7 @@ interface NodeDetailViewProps {
   filteredVolumes?: Volume[];
   onDiskVolumeFilter?: (diskId: string) => void;
   onShowMetrics: () => void;
+  maintenanceStatus?: MaintenanceStatus | null;
 }
 
 export const NodeDetailView: React.FC<NodeDetailViewProps> = ({ 
@@ -28,8 +45,10 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   filteredVolumes,
   onDiskVolumeFilter,
   onShowMetrics,
+  maintenanceStatus,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
+  const [isMaintenanceLoading, setIsMaintenanceLoading] = useState(false);
 
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
@@ -39,6 +58,39 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       newExpanded.add(diskId);
     }
     setExpandedDisks(newExpanded);
+  };
+
+  const handleMaintenanceToggle = async (enable: boolean, force = false) => {
+    setIsMaintenanceLoading(true);
+    try {
+      const response = await fetch(`/api/nodes/${node}/maintenance`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          enable,
+          force,
+          migration_plan: null, // Let the system auto-generate migration plan
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to ${enable ? 'enable' : 'disable'} maintenance mode`);
+      }
+
+      const result = await response.json();
+      console.log(`Maintenance mode ${enable ? 'enabled' : 'disabled'}:`, result);
+      
+      // TODO: Show success notification and refresh data
+      alert(result.message);
+      
+    } catch (error) {
+      console.error('Error toggling maintenance mode:', error);
+      alert(`Error: ${error.message}`);
+    } finally {
+      setIsMaintenanceLoading(false);
+    }
   };
 
   // Use filtered volumes if provided, otherwise use all node volumes
@@ -79,10 +131,20 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="px-3 py-1 text-sm bg-green-100 text-green-800 rounded-full">
-            Ready
-          </span>
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Node Status Badge */}
+          {maintenanceStatus?.active ? (
+            <span className="px-3 py-1 text-sm bg-yellow-100 text-yellow-800 rounded-full flex items-center gap-1">
+              <AlertTriangle className="w-4 h-4" />
+              Maintenance
+            </span>
+          ) : (
+            <span className="px-3 py-1 text-sm bg-green-100 text-green-800 rounded-full flex items-center gap-1">
+              <CheckCircle className="w-4 h-4" />
+              Ready
+            </span>
+          )}
+          
           <span className="px-3 py-1 text-sm bg-blue-100 text-blue-800 rounded-full">
             {nodeDisks.length} Disks
           </span>
@@ -90,6 +152,46 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
             <span className="px-3 py-1 text-sm bg-purple-100 text-purple-800 rounded-full">
               {filteredVolumeCount} Filtered
             </span>
+          )}
+          
+          {/* Maintenance Mode Buttons */}
+          {maintenanceStatus?.active ? (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => handleMaintenanceToggle(false)}
+                disabled={isMaintenanceLoading}
+                className="px-3 py-1 text-sm bg-green-600 text-white rounded-full hover:bg-green-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Exit maintenance mode"
+              >
+                <CheckCircle className="w-4 h-4" />
+                {isMaintenanceLoading ? 'Exiting...' : 'Exit Maintenance'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => handleMaintenanceToggle(true)}
+                disabled={isMaintenanceLoading}
+                className="px-3 py-1 text-sm bg-yellow-600 text-white rounded-full hover:bg-yellow-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Enter maintenance mode with migration"
+              >
+                <Settings className="w-4 h-4" />
+                {isMaintenanceLoading ? 'Entering...' : 'Enter Maintenance'}
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to force maintenance mode? This will skip migration and may cause data unavailability!')) {
+                    handleMaintenanceToggle(true, true);
+                  }
+                }}
+                disabled={isMaintenanceLoading}
+                className="px-3 py-1 text-sm bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Force maintenance mode (DANGEROUS - no migration)"
+              >
+                <AlertTriangle className="w-4 h-4" />
+                Force
+              </button>
+            </div>
           )}
           
           {/* Node Metrics Button */}
@@ -118,6 +220,72 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Maintenance Status Section */}
+      {maintenanceStatus?.active && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="w-5 h-5 text-yellow-600" />
+            <h4 className="text-lg font-medium text-yellow-900">Maintenance Mode Active</h4>
+            {maintenanceStatus.started_at && (
+              <span className="text-sm text-yellow-700">
+                Started: {new Date(maintenanceStatus.started_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+          
+          {maintenanceStatus.migration_progress.length > 0 ? (
+            <div className="space-y-2">
+              <h5 className="text-sm font-medium text-yellow-900">Migration Progress:</h5>
+              {maintenanceStatus.migration_progress.map((progress, index) => (
+                <div key={index} className="bg-white rounded-lg p-3 border">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium">
+                      {progress.migration_type === 'raid' ? '🔧 RAID Migration' : '💾 Volume Migration'}: {progress.source_id}
+                    </span>
+                    <span className="text-sm text-gray-600">→ {progress.target_node}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 bg-gray-200 rounded-full h-2">
+                      <div 
+                        className={`h-2 rounded-full transition-all duration-300 ${
+                          progress.status === 'completed' ? 'bg-green-500' :
+                          progress.status === 'failed' ? 'bg-red-500' :
+                          'bg-blue-500'
+                        }`}
+                        style={{ width: `${progress.progress_percent}%` }}
+                      />
+                    </div>
+                    <span className="text-sm font-medium text-gray-700">
+                      {progress.progress_percent.toFixed(1)}%
+                    </span>
+                    <span className={`text-xs px-2 py-1 rounded-full ${
+                      progress.status === 'completed' ? 'bg-green-100 text-green-800' :
+                      progress.status === 'failed' ? 'bg-red-100 text-red-800' :
+                      progress.status === 'executing' ? 'bg-blue-100 text-blue-800' :
+                      'bg-gray-100 text-gray-800'
+                    }`}>
+                      {progress.status}
+                    </span>
+                  </div>
+                  {progress.error_message && (
+                    <div className="mt-2 text-sm text-red-600 bg-red-50 p-2 rounded">
+                      Error: {progress.error_message}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-yellow-700">
+              {maintenanceStatus.ready_for_shutdown ? 
+                '✅ Ready for shutdown - All migrations completed successfully' :
+                '⏳ Preparing migration plan...'
+              }
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-lg p-4">
