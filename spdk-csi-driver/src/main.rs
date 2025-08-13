@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nvmeof_target_port,
         nvmeof_transport: nvmeof_transport.clone(),
         target_namespace,
-                    // Removed ublk_target_initialized - no longer needed with NVMe-oF
+        ublk_target_initialized: Arc::new(Mutex::new(false)),
     });
     
     println!("🎯 [CONFIG] Using namespace for custom resources: {}", driver.target_namespace);

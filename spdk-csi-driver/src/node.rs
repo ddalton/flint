@@ -257,80 +257,26 @@ impl NodeService {
     async fn create_ublk_device_for_bdev(&self, volume_id: &str, bdev_name: &str) -> Result<String, Status> {
         println!("🔧 [UBLK_CREATE] Creating ublk device for bdev {} (volume {})", bdev_name, volume_id);
         
-        let ublk_device = self.driver
-            .ublk_start_disk(bdev_name, volume_id, "localhost", 0)
+        let ublk_id = self.driver.generate_ublk_id(volume_id);
+        let device_path = self.driver
+            .create_ublk_device(bdev_name, ublk_id)
             .await
             .map_err(|e| Status::internal(format!("Failed to create ublk device: {}", e)))?;
         
-        println!("✅ [UBLK_CREATE] Successfully created ublk device: {} -> {}", bdev_name, ublk_device.device_path);
-        Ok(ublk_device.device_path)
+        println!("✅ [UBLK_CREATE] Successfully created ublk device: {} -> {}", bdev_name, device_path);
+        Ok(device_path)
     }
 
-    /// Connect to a single disk volume (local or remote)
-    // Removed single-disk connect path in favor of unified RAID-based flow
-
-    /// Connect to a RAID disk volume (always local to the RAID disk's node)
-    async fn connect_to_raid_disk_volume(
-        &self,
-        volume: &SpdkVolume,
-        _raid_disk_ref: &str,
-        storage_node_id: &str,
-        volume_nqn: &str,
-    ) -> Result<String, Status> {
-        if storage_node_id == &self.driver.node_id {
-            // Local RAID disk: Create NVMe-oF target for the lvol and connect locally
-            if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
-                println!("🔗 [RAID_LOCAL] Creating NVMe-oF target for RAID disk lvol {}", lvol_uuid);
-                
-                // Create NVMe-oF target for the logical volume on RAID disk
-                self.driver.create_nvmeof_target_with_validation(lvol_uuid, volume_nqn).await
-                    .map_err(|e| Status::internal(format!("Failed to create NVMe-oF target for RAID volume: {}", e)))?;
-                
-                // Connect to the local NVMe-oF target
-                let node_ip = self.driver.get_current_node_ip().await
-                    .map_err(|e| Status::internal(format!("Failed to get node IP: {}", e)))?;
-                
-                let nvme_device = self.driver.connect_nvme_device(
-                    volume_nqn,
-                    &node_ip,
-                    self.driver.nvmeof_target_port,
-                    &self.driver.nvmeof_transport,
-                    &volume.spec.volume_id,
-                ).await.map_err(|e| Status::internal(format!("Failed to connect to local RAID NVMe-oF target: {}", e)))?;
-                
-                println!("✅ [RAID_LOCAL] Connected to local RAID disk: {}", nvme_device.device_path);
-                Ok(nvme_device.device_path)
-            } else {
-                Err(Status::internal("Local RAID disk volume missing lvol_uuid"))
-            }
-        } else {
-            // Remote RAID disk: Connect to existing NVMe-oF target on remote node
-            println!("🔗 [RAID_REMOTE] Connecting to remote RAID disk on node {}", storage_node_id);
-            
-            // Get the remote node IP
-            let remote_ip = self.driver.get_node_ip(storage_node_id).await?;
-            
-            // Connect directly to the remote NVMe-oF target
-            let nvme_device = self.driver.connect_nvme_device(
-                volume_nqn,
-                &remote_ip,
-                self.driver.nvmeof_target_port,
-                &self.driver.nvmeof_transport,
-                &volume.spec.volume_id,
-            ).await.map_err(|e| Status::internal(format!("Failed to connect to remote RAID disk: {}", e)))?;
-            
-            println!("✅ [RAID_REMOTE] Connected to remote RAID disk: {}", nvme_device.device_path);
-            Ok(nvme_device.device_path)
-        }
-    }
+    // Removed old connect_to_raid_disk_volume in favor of ublk-based approach
     
     /// Clean up ublk device and associated NVMe-oF bdev on unpublish (idempotent with retry)
     async fn cleanup_ublk_device(&self, volume_id: &str) -> Result<(), Status> {
         println!("🔌 [CLEANUP] Stopping ublk device and cleaning up bdevs for volume {}", volume_id);
         
         // Step 1: Stop ublk device first
+        let ublk_id = self.driver.generate_ublk_id(volume_id);
         for attempt in 1..=3 {
-            match self.driver.ublk_stop_disk(volume_id).await {
+            match self.driver.delete_ublk_device(ublk_id).await {
                 Ok(_) => {
                     println!("✅ [CLEANUP] Successfully stopped ublk device for volume {} (attempt {})", volume_id, attempt);
                     break;
