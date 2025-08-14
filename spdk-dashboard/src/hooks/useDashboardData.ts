@@ -14,6 +14,46 @@ export interface NvmeofTargetInfo {
   connection_count: number;
 }
 
+// Physical disk in the storage hierarchy
+export interface PhysicalDisk {
+  id: string;
+  node: string;
+  pci_addr: string;
+  capacity_gb: number;
+  model: string;
+  healthy: boolean;
+  blobstore_initialized: boolean;
+}
+
+// RAID device built from physical disks
+export interface SpdkRaid {
+  name: string;
+  raid_level: number;
+  state: string;
+  member_disks: PhysicalDisk[];
+  num_members: number;
+  operational_members: number;
+  rebuild_info?: RebuildInfo;
+  superblock_version?: number;
+  auto_rebuild_enabled: boolean;
+  node: string;
+  capacity_gb: number;
+  used_gb: number;
+}
+
+// Logical Volume Store built on RAID
+export interface LogicalVolumeStore {
+  name: string;
+  base_raid: string; // References SpdkRaid.name
+  capacity_gb: number;
+  used_gb: number;
+  utilization_pct: number;
+  cluster_size: number;
+  node: string;
+  logical_volumes: string[]; // Array of logical volume UUIDs
+}
+
+// Logical Volume (the actual volume in LVS)
 export interface Volume {
   id: string;
   name: string;
@@ -28,7 +68,10 @@ export interface Volume {
   replica_statuses: ReplicaStatus[];
   nvmeof_targets: NvmeofTargetInfo[];
   nvmeof_enabled: boolean;
-  raid_status?: RaidStatus;
+  
+  // Storage hierarchy references
+  lvs_name: string; // Which LVS this volume belongs to
+  lvol_uuid: string; // Logical volume UUID in SPDK
   
   // Add ublk device information
   ublk_device?: {
@@ -81,6 +124,7 @@ export interface SpdkVolumeDetails {
 // --- End of new/updated interfaces ---
 
 
+// DEPRECATED: Use SpdkRaid instead for correct topology
 export interface RaidStatus {
   raid_level: number;
   state: string;
@@ -263,6 +307,13 @@ export interface DashboardData {
   raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
+  
+  // New correct storage hierarchy
+  physical_disks: PhysicalDisk[];
+  spdk_raids: SpdkRaid[];
+  logical_volume_stores: LogicalVolumeStore[];
+  
+  // Deprecated - kept for backward compatibility
   raid_disks?: RaidDisk[];
   node_performance?: NodesPerformanceResponse;
 }
@@ -294,40 +345,136 @@ export type VolumeFilter =
 export type DiskFilter = string | null;
 export type VolumeReplicaFilter = string | null;
 
-// Enhanced mock data with RAID status and NVMe-oF details
+// Enhanced mock data with correct storage hierarchy
 const mockData: DashboardData = {
+  // Physical disks (bottom of hierarchy)
+  physical_disks: [
+    {
+      id: "nvme0n1",
+      node: "worker-node-1", 
+      pci_addr: "0000:01:00.0",
+      capacity_gb: 1000,
+      model: "Samsung SSD 980 PRO 1TB",
+      healthy: true,
+      blobstore_initialized: true
+    },
+    {
+      id: "nvme1n1", 
+      node: "worker-node-1",
+      pci_addr: "0000:02:00.0", 
+      capacity_gb: 1000,
+      model: "Samsung SSD 980 PRO 1TB",
+      healthy: true,
+      blobstore_initialized: true
+    },
+    {
+      id: "nvme2n1",
+      node: "worker-node-2",
+      pci_addr: "0000:01:00.0",
+      capacity_gb: 2000,
+      model: "WD Black SN850X 2TB", 
+      healthy: true,
+      blobstore_initialized: true
+    },
+    {
+      id: "nvme3n1",
+      node: "worker-node-2", 
+      pci_addr: "0000:02:00.0",
+      capacity_gb: 2000,
+      model: "WD Black SN850X 2TB",
+      healthy: true,
+      blobstore_initialized: true
+    }
+  ],
+  
+  // RAID devices built from physical disks
+  spdk_raids: [
+    {
+      name: "raid1_node1", 
+      raid_level: 1,
+      state: "online",
+      member_disks: [], // Will be populated with references 
+      num_members: 2,
+      operational_members: 2,
+      auto_rebuild_enabled: true,
+      node: "worker-node-1",
+      capacity_gb: 1000, // RAID 1 = capacity of smallest disk
+      used_gb: 200
+    },
+    {
+      name: "raid1_node2",
+      raid_level: 1, 
+      state: "online",
+      member_disks: [],
+      num_members: 2,
+      operational_members: 2,
+      auto_rebuild_enabled: true,
+      node: "worker-node-2", 
+      capacity_gb: 2000,
+      used_gb: 800
+    }
+  ],
+  
+  // Logical Volume Stores built on RAID
+  logical_volume_stores: [
+    {
+      name: "lvs_node1",
+      base_raid: "raid1_node1",
+      capacity_gb: 1000,
+      used_gb: 200,
+      utilization_pct: 20,
+      cluster_size: 4096,
+      node: "worker-node-1",
+      logical_volumes: ["77777777-7777-7777-7777-777777777777", "88888888-8888-8888-8888-888888888888"]
+    },
+    {
+      name: "lvs_node2", 
+      base_raid: "raid1_node2",
+      capacity_gb: 2000,
+      used_gb: 800,
+      utilization_pct: 40,
+      cluster_size: 4096,
+      node: "worker-node-2",
+      logical_volumes: ["99999999-9999-9999-9999-999999999999", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
+    }
+  ],
+  
   volumes: [
     {
       id: "pvc-single-replica-volume",
-      name: "single-replica-volume",
+      name: "single-replica-volume", 
       size: "20GB",
       state: "Healthy",
       replicas: 1,
       active_replicas: 1,
       local_nvme: true,
-      access_method: "nvmeof", // Set to nvmeof
+      access_method: "ublk",
       rebuild_progress: null,
       nodes: ["worker-node-1"],
-      // Add ublk device info
+      
+      // Storage hierarchy references
+      lvs_name: "lvs_node1",
+      lvol_uuid: "77777777-7777-7777-7777-777777777777",
+      
+      // ublk device that exposes this logical volume
       ublk_device: {
         id: 42,
         device_path: "/dev/ublkb42"
       },
       
-      // Remove or keep nvmeof_targets for backward compatibility
       nvmeof_enabled: false,
       nvmeof_targets: [],
       replica_statuses: [
         {
           node: "worker-node-1",
-          status: "healthy",
+          status: "healthy", 
           is_local: true,
           last_io_timestamp: "2025-06-01T11:00:00Z",
           rebuild_progress: null,
           rebuild_target: null,
           is_new_replica: false,
           nvmf_target: null,
-          access_method: "local-nvme",
+          access_method: "ublk",
           raid_member_state: "online",
           lvol_uuid: "77777777-7777-7777-7777-777777777777",
           disk_ref: "nvme0n1",
@@ -348,10 +495,15 @@ const mockData: DashboardData = {
       replicas: 3,
       active_replicas: 3,
       local_nvme: true,
-      access_method: "nvmeof",
+      access_method: "ublk",
       rebuild_progress: null,
       nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      // Add ublk device info
+      
+      // Storage hierarchy references
+      lvs_name: "lvs_node2",
+      lvol_uuid: "99999999-9999-9999-9999-999999999999",
+      
+      // ublk device that exposes this logical volume
       ublk_device: {
         id: 123,
         device_path: "/dev/ublkb123"
@@ -359,47 +511,7 @@ const mockData: DashboardData = {
       
       nvmeof_enabled: false,
       nvmeof_targets: [],
-      raid_status: {
-        raid_level: 1,
-        state: "online",
-        num_members: 3,
-        operational_members: 3,
-        discovered_members: 3,
-        members: [
-          {
-            slot: 0,
-            name: "nvme0n1",
-            state: "online",
-            uuid: "11111111-1111-1111-1111-111111111111",
-            is_configured: true,
-            node: "worker-node-1",
-            disk_ref: "nvme0n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 1,
-            name: "nvme1n1",
-            state: "online",
-            uuid: "22222222-2222-2222-2222-222222222222",
-            is_configured: true,
-            node: "worker-node-2",
-            disk_ref: "nvme1n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 2,
-            name: "nvme2n1",
-            state: "online",
-            uuid: "33333333-3333-3333-3333-333333333333",
-            is_configured: true,
-            node: "worker-node-3",
-            disk_ref: "nvme2n1",
-            health_status: "healthy"
-          }
-        ],
-        auto_rebuild_enabled: true,
-        superblock_version: 1
-      },
+
       replica_statuses: [
         {
           node: "worker-node-1",
@@ -410,11 +522,11 @@ const mockData: DashboardData = {
           rebuild_target: null,
           is_new_replica: false,
           nvmf_target: null,
-          access_method: "local-nvme",
+          access_method: "ublk",
           raid_member_slot: 0,
           raid_member_state: "online",
-          lvol_uuid: "11111111-1111-1111-1111-111111111111",
-          disk_ref: "nvme0n1",
+          lvol_uuid: "99999999-9999-9999-9999-999999999999",
+          disk_ref: "nvme2n1",
           replica_size: 107374182400
         },
         {
@@ -431,11 +543,11 @@ const mockData: DashboardData = {
             target_port: "4420",
             transport_type: "TCP"
           },
-          access_method: "remote-nvmf",
+          access_method: "nvmeof",
           raid_member_slot: 1,
           raid_member_state: "online",
-          lvol_uuid: "22222222-2222-2222-2222-222222222222",
-          disk_ref: "nvme1n1",
+          lvol_uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          disk_ref: "nvme3n1",
           replica_size: 107374182400
         },
         {
@@ -731,7 +843,10 @@ const mockData: DashboardData = {
     }
   ],
 
-  nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
+  nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
+  
+  // Legacy structures for backward compatibility  
+  raid_disks: []
 };
 
 // Enhanced hook implementation with API integration
@@ -741,6 +856,9 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     raw_volumes: [],
     disks: [],
     nodes: [],
+    physical_disks: [],
+    spdk_raids: [],
+    logical_volume_stores: [],
     raid_disks: []
   });
   const [loading, setLoading] = useState(true);
@@ -791,15 +909,34 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
       try {
         const response = await fetch('/api/dashboard');
         if (response.ok) {
-          // Be tolerant of missing/incorrect content-type; try to parse JSON anyway
-          const dashboardData = await response.json();
-          const transformedData = transformBackendData(dashboardData);
-          setData(transformedData);
+          // Check if response is actually JSON
+          const contentType = response.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const dashboardData = await response.json();
+            const transformedData = transformBackendData(dashboardData);
+            setData(transformedData);
+            setUsingMockData(false);
+          } else {
+            // Got HTML or other non-JSON response, likely from proxy error
+            throw new Error('Backend server not available (received HTML instead of JSON)');
+          }
         } else {
-          throw new Error(`HTTP error! status: ${response.status}`);
+          throw new Error(`Backend server error: ${response.status} ${response.statusText}`);
         }
       } catch (apiError) {
-        console.warn('API not available, using mock data:', apiError);
+        // Provide user-friendly error messages
+        let errorMessage = 'Dashboard API not available';
+        if (apiError instanceof Error) {
+          if (apiError.message.includes('Failed to fetch') || apiError.name === 'TypeError') {
+            errorMessage = 'Backend server not reachable';
+          } else if (apiError.message.includes('Unexpected token')) {
+            errorMessage = 'Backend server returned invalid response';
+          } else {
+            errorMessage = apiError.message;
+          }
+        }
+        
+        console.warn(`${errorMessage}, using mock data for demo:`, apiError);
         // Use mock data for development/demo
         setData(mockData);
         setUsingMockData(true);
@@ -843,9 +980,10 @@ const transformBackendData = (backendData: any): DashboardData => {
   return {
     volumes: backendData.volumes?.map((vol: any) => ({
       ...vol,
-      // Ensure all fields are properly mapped
-      raid_level: vol.raid_status?.raid_level ? `RAID-${vol.raid_status.raid_level}` : undefined,
-      primary_replica_uuid: vol.primary_lvol_uuid,
+      // Map new hierarchy fields
+      lvs_name: vol.lvs_name || "unknown",
+      lvol_uuid: vol.lvol_uuid || vol.primary_lvol_uuid || "unknown",
+      // Remove old raid_status field - RAID is now separate from volumes
       nvmeof_targets: vol.nvmeof_targets || [],
     })) || [],
     raw_volumes: backendData.raw_volumes || [],
@@ -854,8 +992,15 @@ const transformBackendData = (backendData: any): DashboardData => {
       // Ensure compatibility with existing frontend code
       blobstore_initialized: disk.blobstore_initialized
     })) || [],
-    nodes: backendData.nodes || []
-      ,raid_disks: backendData.raid_disks || []
+    nodes: backendData.nodes || [],
+    
+    // New storage hierarchy
+    physical_disks: backendData.physical_disks || [],
+    spdk_raids: backendData.spdk_raids || [],
+    logical_volume_stores: backendData.logical_volume_stores || [],
+    
+    // Legacy compatibility
+    raid_disks: backendData.raid_disks || []
   };
 };
 

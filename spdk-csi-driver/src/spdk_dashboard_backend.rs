@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use warp::{Filter, Reply, Rejection};
 use serde::{Serialize, Deserialize};
 use serde_json::json;
@@ -4347,7 +4349,7 @@ async fn get_dashboard_overview(state: AppState) -> Result<impl warp::Reply, war
 }
 
 /// Determine the source node for a volume (synchronous version)
-fn determine_volume_source_node_sync(volume: &SpdkVolume) -> Option<String> {
+fn determine_volume_source_node_sync(_volume: &SpdkVolume) -> Option<String> {
     // For simplicity, we'll need to implement this differently
     // In practice, this would need access to the state to query configs
     // For now, return None - the async version should be used

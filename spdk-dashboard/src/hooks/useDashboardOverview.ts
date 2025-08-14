@@ -65,15 +65,34 @@ export const useDashboardOverview = (autoRefresh: boolean = false): UseDashboard
       const response = await fetch('/api/dashboard/overview');
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch dashboard overview: ${response.status}`);
+        throw new Error(`Backend server error: ${response.status} ${response.statusText}`);
       }
       
-      const data = await response.json();
-      setOverview(data);
-      setError(null);
+      // Check if response is actually JSON
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const data = await response.json();
+        setOverview(data);
+        setError(null);
+      } else {
+        // Got HTML or other non-JSON response, likely from proxy error
+        throw new Error('Backend server not available (received HTML instead of JSON)');
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch overview');
-      console.error('Error fetching dashboard overview:', err);
+      // Provide user-friendly error messages
+      let errorMessage = 'Dashboard overview not available';
+      if (err instanceof Error) {
+        if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
+          errorMessage = 'Backend server not reachable';
+        } else if (err.message.includes('Unexpected token')) {
+          errorMessage = 'Backend server returned invalid response';
+        } else {
+          errorMessage = err.message;
+        }
+      }
+      
+      setError(errorMessage);
+      console.warn('Failed to load cluster overview:', errorMessage, err);
     } finally {
       setLoading(false);
     }

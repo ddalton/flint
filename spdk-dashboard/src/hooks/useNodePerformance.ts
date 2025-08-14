@@ -19,15 +19,34 @@ export const useNodePerformance = (refreshInterval: number = 30000): UseNodePerf
       const response = await fetch('/api/nodes/performance');
       
       if (!response.ok) {
-        throw new Error(`Failed to fetch performance data: ${response.statusText}`);
+        throw new Error(`Backend server error: ${response.status} ${response.statusText}`);
       }
       
-      const data: NodesPerformanceResponse = await response.json();
-      setPerformanceData(data);
-      setError(null);
+      // Check if response is actually JSON
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const data: NodesPerformanceResponse = await response.json();
+        setPerformanceData(data);
+        setError(null);
+      } else {
+        // Got HTML or other non-JSON response, likely from proxy error
+        throw new Error('Backend server not available (received HTML instead of JSON)');
+      }
     } catch (err) {
-      console.error('Failed to fetch node performance data:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      // Provide user-friendly error messages
+      let errorMessage = 'Performance data not available';
+      if (err instanceof Error) {
+        if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
+          errorMessage = 'Backend server not reachable';
+        } else if (err.message.includes('Unexpected token')) {
+          errorMessage = 'Backend server returned invalid response';
+        } else {
+          errorMessage = err.message;
+        }
+      }
+      
+      console.warn('Failed to fetch node performance data:', errorMessage, err);
+      setError(errorMessage);
       
       // Fallback to mock data for development
       setPerformanceData(getMockPerformanceData());
