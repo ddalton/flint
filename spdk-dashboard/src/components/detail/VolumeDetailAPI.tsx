@@ -41,7 +41,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
       if (volumeData) {
         const baseDetails = {
           volume: volumeData, // Use the real volume data
-          raidDetails: volumeData.raid_status || null,
+          raidDetails: (volumeData as any).raid_status || null, // Legacy compatibility
           nvmeofDetails: volumeData.nvmeof_targets || null,
           metrics: null,
           spdkDetails: undefined

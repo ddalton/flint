@@ -87,7 +87,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       alert(result.message);
       
     } catch (error) {
-      console.error('Error toggling maintenance mode:', error);
+      console.error('Error toggling maintenance mode:', error as Error);
       alert(`Error: ${error.message}`);
     } finally {
       setIsMaintenanceLoading(false);

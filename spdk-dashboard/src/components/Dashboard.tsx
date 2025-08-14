@@ -55,7 +55,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
 
   // Fetch dashboard overview data
-  const { overview, loading: overviewLoading, error: overviewError, refresh: refreshOverview } = useDashboardOverview(autoRefresh);
+  const { overview, error: overviewError, refresh: refreshOverview } = useDashboardOverview(autoRefresh);
 
   if (loading && data.volumes.length === 0) {
     return (

@@ -3,8 +3,8 @@
 // Shows the correct hierarchy: Physical Disks → RAID → LVS → Logical Volume → ublk device
 
 import React, { useState, useMemo } from 'react';
-import { Volume, PhysicalDisk, SpdkRaid, LogicalVolumeStore, DashboardData } from '../../hooks/useDashboardData';
-import { HardDisk, Shield, Database, Layers, MonitorCheck, AlertTriangle, CheckCircle2, Wifi, Globe } from 'lucide-react';
+import type { Volume, PhysicalDisk, SpdkRaid, LogicalVolumeStore, DashboardData } from '../../hooks/useDashboardData';
+import { HardDrive, Shield, Database, Layers, MonitorCheck, AlertTriangle, CheckCircle2, Wifi, Globe } from 'lucide-react';
 
 interface StorageHierarchyChartProps {
   data: DashboardData;
@@ -147,7 +147,7 @@ export const StorageHierarchyChart: React.FC<StorageHierarchyChartProps> = ({ da
             {/* 1. Physical Disks (Foundation) */}
             <div className="border border-gray-200 rounded-lg p-4 mb-4">
               <div className="flex items-center gap-2 mb-3">
-                <HardDisk className="w-5 h-5 text-gray-600" />
+                <HardDrive className="w-5 h-5 text-gray-600" />
                 <h5 className="font-medium text-gray-900">Physical Disks</h5>
                 <span className="text-sm text-gray-500">({localTopology.physicalDisks.length} disks on {localTopology.raid.node})</span>
               </div>
@@ -275,7 +275,7 @@ export const StorageHierarchyChart: React.FC<StorageHierarchyChartProps> = ({ da
             {remoteTopology.remotePhysicalDisks.length > 0 && (
               <div className="border border-gray-200 rounded-lg p-4 mb-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <HardDisk className="w-5 h-5 text-gray-600" />
+                  <HardDrive className="w-5 h-5 text-gray-600" />
                   <h5 className="font-medium text-gray-900">Remote Physical Disks</h5>
                   <span className="text-sm text-gray-500">({remoteTopology.remotePhysicalDisks.length} disks on {remoteTopology.replica.node})</span>
                 </div>

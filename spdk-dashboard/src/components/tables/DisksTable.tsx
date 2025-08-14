@@ -200,7 +200,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       
       if (nvmeofDriverFilter !== 'all') {
         result = result.filter(disk => 
-          nvmeofDriverFilter === 'bound' ? disk.nvme_driver_bound : !disk.nvme_driver_bound
+          nvmeofDriverFilter === 'bound' ? disk.blobstore_initialized : !disk.blobstore_initialized
         );
       }
       
@@ -749,7 +749,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                   <div>
                     <h3 className="text-sm font-semibold">Driver Bound</h3>
                     <p className="text-xl font-bold text-blue-600">
-                      {filteredDisks.filter(d => d.nvme_driver_bound).length}
+                      {filteredDisks.filter(d => d.blobstore_initialized).length}
                     </p>
                   </div>
                 </div>

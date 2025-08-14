@@ -110,7 +110,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                     (selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0) ||
                     selectedVolumeInfo.access_method === 'nvmeof';
 
-  const raidStatus = selectedVolumeInfo.raid_status;
+  const raidStatus = (selectedVolumeInfo as any).raid_status; // Legacy compatibility
   const hasDiskRefs = selectedVolumeInfo.replica_statuses.every(r => r.disk_ref);
 
   return (

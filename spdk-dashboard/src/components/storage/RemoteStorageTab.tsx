@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 // Deprecated component retained temporarily (no longer used in UI) – consider removal later
 import { useOperations } from '../../contexts/OperationsContext';
+import { 
+  WifiOff, CheckCircle, AlertTriangle, X, Wifi, Edit3, Trash2, 
+  EyeOff, Eye, Loader2, Search, Save, Plus, RefreshCw, Network, HardDrive 
+} from 'lucide-react';
 
 // Types for remote storage targets
 interface NVMeOFTarget {
