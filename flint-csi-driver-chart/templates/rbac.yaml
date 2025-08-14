@@ -46,10 +46,10 @@ rules:
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
   - apiGroups: ["flint.csi.storage.io"]
-    resources: ["spdkvolumes", "spdkdisks", "spdksnapshots", "spdkconfigs"]
+    resources: ["spdkvolumes", "spdkraiddisks", "spdksnapshots", "spdkconfigs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["flint.csi.storage.io"]
-    resources: ["spdkvolumes/status", "spdkdisks/status", "spdksnapshots/status", "spdkconfigs/status"]
+    resources: ["spdkvolumes/status", "spdkraiddisks/status", "spdksnapshots/status", "spdkconfigs/status"]
     verbs: ["get", "update", "patch"]
 
 ---
@@ -88,10 +88,10 @@ rules:
     resources: ["configmaps", "nodes", "pods", "events"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["flint.csi.storage.io"]
-    resources: ["spdkdisks", "spdkvolumes", "spdkconfigs"]
+    resources: ["spdkraiddisks", "spdkvolumes", "spdkconfigs"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["flint.csi.storage.io"]
-    resources: ["spdkdisks/status", "spdkvolumes/status", "spdkconfigs/status"]
+    resources: ["spdkraiddisks/status", "spdkvolumes/status", "spdkconfigs/status"]
     verbs: ["get", "update", "patch"]
 ---
 

@@ -9,7 +9,7 @@ path = "src/controller_operator.rs"
 
 [[bin]]
 name = "node-agent"
-path = "src/node_agent.rs"
+path = "src/bin/node_agent.rs"
 
 [[bin]]
 name = "csi-driver"
