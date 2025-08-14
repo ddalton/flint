@@ -79,6 +79,9 @@ export interface Volume {
     device_path: string;  // e.g., "/dev/ublkb42"
   };
   
+  // Legacy compatibility - deprecated
+  raid_status?: RaidStatus;
+  
   // SPDK validation status for frontend display
   spdk_validation_status: SpdkValidationStatus;
   
@@ -207,6 +210,14 @@ export interface Disk {
   // Orphaned SPDK volumes on this disk
   orphaned_spdk_volumes: OrphanedVolumeInfo[];
   is_remote?: boolean;
+  
+  // Legacy properties for backward compatibility
+  nvmeof_endpoint?: string;
+  raid_level?: number;
+  is_system_disk?: boolean;
+  mounted?: boolean;
+  raid_members?: string[];
+  raid_membership?: string;
 }
 
 export interface ProvisionedVolume {
@@ -230,7 +241,9 @@ export interface RawSpdkVolume {
   name: string;
   uuid: string;
   node: string;
+  lvs?: string; // Optional for compatibility
   lvs_name: string;
+  lvol_uuid?: string; // Optional for compatibility
   size_blocks: number;
   size_gb: number;
   is_managed: boolean;
@@ -597,6 +610,8 @@ const mockData: DashboardData = {
       
       nvmeof_enabled: false,
       nvmeof_targets: [],
+      lvs_name: "nvme-lv-store-1",
+      lvol_uuid: "12345678-1234-5678-9abc-def123456789",
       raid_status: {
         raid_level: 1,
         state: "degraded",
@@ -1433,6 +1448,7 @@ export const useDiskSetup = () => {
           size_bytes: d.capacity,
           model: d.model,
           serial: '',
+          firmware_version: 'Unknown',
           namespace_id: undefined,
           mounted_partitions: [],
           filesystem_type: undefined,

@@ -205,8 +205,13 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       }
       
       if (nvmeofTransportFilter !== 'all') {
-        result = result.filter(disk => 
-          disk.nvmeof_endpoint?.transport === nvmeofTransportFilter
+        result = result.filter(disk => {
+          if (!disk.nvmeof_endpoint) return false;
+          const transport = typeof disk.nvmeof_endpoint === 'string' ? 'tcp' : 
+                           disk.nvmeof_endpoint && typeof disk.nvmeof_endpoint === 'object' ? 
+                           (disk.nvmeof_endpoint as any).transport : 'tcp';
+          return transport === nvmeofTransportFilter;
+        }
         );
       }
     }
@@ -216,7 +221,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       if (raidLevelFilter !== 'all') {
         // Assuming raid level is stored in disk metadata - adjust as needed
         result = result.filter(disk => 
-          disk.raid_level === raidLevelFilter
+          String(disk.raid_level) === raidLevelFilter
         );
       }
       
@@ -1096,7 +1101,12 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       <>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {disk.nvmeof_endpoint?.transport || 'Local'}
+                          {(() => {
+                            const endpoint = disk.nvmeof_endpoint;
+                            if (typeof endpoint === 'string') return 'tcp';
+                            if (endpoint && typeof endpoint === 'object') return (endpoint as any).transport || 'tcp';
+                            return 'Local';
+                          })()}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
@@ -1112,8 +1122,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       <>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                            disk.raid_level === '0' ? 'bg-blue-100 text-blue-800' : 
-                            disk.raid_level === '1' ? 'bg-green-100 text-green-800' : 
+                            disk.raid_level === 0 ? 'bg-blue-100 text-blue-800' : 
+                            disk.raid_level === 1 ? 'bg-green-100 text-green-800' : 
                             'bg-gray-100 text-gray-800'
                           }`}>
                             {disk.raid_level ? `RAID-${disk.raid_level}` : 'Unknown'}
@@ -1162,10 +1172,10 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                           {disk.raid_membership ? (
                             <button
-                              onClick={() => onDiskClick?.(disk.raid_membership.raid_disk_id)}
+                              onClick={() => onDiskClick?.(typeof disk.raid_membership === 'string' ? disk.raid_membership : 'unknown')}
                               className="text-blue-600 hover:text-blue-800 hover:underline"
                             >
-                              {disk.raid_membership.raid_disk_name}
+                              {typeof disk.raid_membership === 'string' ? disk.raid_membership : 'RAID Array'}
                             </button>
                           ) : (
                             <span className="text-gray-400">Not in RAID</span>

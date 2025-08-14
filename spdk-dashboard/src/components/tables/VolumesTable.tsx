@@ -68,6 +68,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       replica_statuses: [],
       nvmeof_targets: [],
       nvmeof_enabled: false,
+      lvs_name: rv.lvs || 'unknown',
+      lvol_uuid: rv.lvol_uuid || 'unknown',
       spdk_validation_status: {
         has_spdk_backing: true,
         validation_message: 'Raw SPDK volume (unmanaged)',

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw
+  HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, Shield
 } from 'lucide-react';
 import { 
   useDiskSetup, 
