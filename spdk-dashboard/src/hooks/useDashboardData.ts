@@ -225,12 +225,46 @@ export interface PvcInfo {
   created_at: string;
 }
 
+export interface NodePerformanceMetrics {
+  node_id: string;
+  raid_count: number;
+  volume_count: number;
+  total_read_iops: number;
+  total_write_iops: number;
+  total_read_bandwidth_mbps: number;
+  total_write_bandwidth_mbps: number;
+  avg_read_latency_ms: number;
+  avg_write_latency_ms: number;
+  spdk_active: boolean;
+  last_updated: string;
+  failed_raids: number;
+  degraded_raids: number;
+  healthy_raids: number;
+  performance_score: number;
+}
+
+export interface ClusterPerformanceTotals {
+  total_read_iops: number;
+  total_write_iops: number;
+  total_bandwidth_mbps: number;
+  avg_cluster_latency_ms: number;
+  total_active_nodes: number;
+  total_raids: number;
+}
+
+export interface NodesPerformanceResponse {
+  nodes: NodePerformanceMetrics[];
+  cluster_totals: ClusterPerformanceTotals;
+  last_updated: string;
+}
+
 export interface DashboardData {
   volumes: Volume[];
   raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
   raid_disks?: RaidDisk[];
+  node_performance?: NodesPerformanceResponse;
 }
 
 export interface DashboardStats {

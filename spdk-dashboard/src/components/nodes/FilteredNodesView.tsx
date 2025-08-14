@@ -1,9 +1,11 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Activity } from 'lucide-react';
 import { NodeDetailView } from './NodeDetailView';
+import { NodePerformanceTable } from './NodePerformanceTable';
 import type { DashboardData, VolumeFilter } from '../../hooks/useDashboardData';
 import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import { useOperations } from '../../contexts/OperationsContext';
+import { useNodePerformance } from '../../hooks/useNodePerformance';
 
 interface FilteredNodesViewProps {
   data: DashboardData;
@@ -21,6 +23,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   // Search and filter state
   const [searchTerm, setSearchTerm] = useState('');
   const [showNodeSummary, setShowNodeSummary] = useState(true);
+  const [showPerformanceView, setShowPerformanceView] = useState(false);
   const [sortBy, setSortBy] = useState<'name' | 'volumes' | 'disks' | 'capacity'>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   
@@ -31,6 +34,9 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   // State for active metrics modal
   const [activeMetricsModal, setActiveMetricsModal] = useState<string | null>(null);
   const { setDialogVisible } = useOperations();
+
+  // Performance data
+  const { performanceData, loading: performanceLoading, refresh: refreshPerformance } = useNodePerformance(30000);
 
   useEffect(() => {
     setDialogVisible(activeMetricsModal !== null);
@@ -336,6 +342,17 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setShowPerformanceView(!showPerformanceView)}
+              className={`px-3 py-1 text-sm border rounded-md flex items-center gap-1 transition-colors ${
+                showPerformanceView 
+                  ? 'bg-blue-100 border-blue-300 text-blue-700' 
+                  : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Activity className="w-4 h-4" />
+              {showPerformanceView ? 'Hide Performance' : 'Show Performance'}
+            </button>
+            <button
               onClick={() => setShowNodeSummary(!showNodeSummary)}
               className="text-sm text-gray-600 hover:text-gray-800 flex items-center gap-1"
             >
@@ -623,6 +640,42 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
                   Clear Volume Filter
                 </button>
               )}
+            </div>
+          )}
+        </div>
+      ) : showPerformanceView ? (
+        <div className="space-y-6">
+          {performanceLoading ? (
+            <div className="text-center py-12">
+              <div className="inline-flex items-center px-4 py-2 font-semibold leading-6 text-sm shadow rounded-md text-white bg-indigo-500 hover:bg-indigo-400 transition ease-in-out duration-150 cursor-not-allowed">
+                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Loading performance metrics...
+              </div>
+            </div>
+          ) : performanceData ? (
+            <NodePerformanceTable
+              nodes={performanceData.nodes}
+              clusterTotals={performanceData.cluster_totals}
+              onNodeClick={(_nodeId) => {
+                // Switch back to regular view and show node details
+                setShowPerformanceView(false);
+                // Could also scroll to the specific node or show a modal
+              }}
+            />
+          ) : (
+            <div className="text-center py-12">
+              <Activity className="w-12 h-12 mx-auto mb-4 text-gray-400" />
+              <p className="text-lg font-medium text-gray-900">No performance data available</p>
+              <p className="text-sm text-gray-500">Unable to fetch node performance metrics</p>
+              <button
+                onClick={refreshPerformance}
+                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                Retry
+              </button>
             </div>
           )}
         </div>

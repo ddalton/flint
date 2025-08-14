@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Settings, AlertTriangle, CheckCircle } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+import { NodeAlertsPanel } from './NodeAlertsPanel';
 
 interface MaintenanceStatus {
   active: boolean;
@@ -286,6 +287,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           )}
         </div>
       )}
+
+      {/* Node Alerts Section */}
+      <div className="mb-6">
+        <NodeAlertsPanel nodeId={node} />
+      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-lg p-4">

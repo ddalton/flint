@@ -6,7 +6,9 @@ import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
 import { VolumeStatusChart } from './charts/VolumeStatusChart';
 import { DiskStatusChart } from './charts/DiskStatusChart';
+import { NodeStatusPieChart } from './charts/NodeStatusPieChart';
 import { EnhancedRaidTopologyChart } from './charts/EnhancedRaidTopologyChart';
+import { useDashboardOverview } from '../hooks/useDashboardOverview';
 import { VolumesTable } from './tables/VolumesTable';
 import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
@@ -50,6 +52,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
   const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
   const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
+
+  // Fetch dashboard overview data
+  const { overview, loading: overviewLoading, error: overviewError, refresh: refreshOverview } = useDashboardOverview(autoRefresh);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -201,11 +206,92 @@ export const Dashboard: React.FC<DashboardProps> = ({
     switch (activeTab) {
       case 'overview':
         return (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <VolumeStatusChart volumes={data.volumes} />
-            <DiskStatusChart disks={data.disks} />
-            <div className="lg:col-span-2">
-              <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks}/>
+          <div className="space-y-6">
+            {/* Dashboard Overview Section */}
+            {overview && !overviewError && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2">
+                  <NodeStatusPieChart clusterHealth={overview.cluster_health} />
+                </div>
+                <div className="space-y-4">
+                  {/* Alert Summary Card */}
+                  <div className="bg-white rounded-lg shadow-lg p-6">
+                    <h3 className="text-lg font-semibold mb-4">Alert Summary</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Total Alerts</span>
+                        <span className="font-bold text-lg">{overview.alert_summary.total_alerts}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-red-600">Critical</span>
+                        <span className="font-bold text-red-600">{overview.alert_summary.critical_alerts}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-yellow-600">Warnings</span>
+                        <span className="font-bold text-yellow-600">{overview.alert_summary.warning_alerts}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Affected Nodes</span>
+                        <span className="font-bold">{overview.alert_summary.nodes_with_alerts}</span>
+                      </div>
+                    </div>
+                    {overview.alert_summary.total_alerts > 0 && (
+                      <button
+                        onClick={() => setActiveTab('nodes')}
+                        className="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+                      >
+                        View Node Alerts
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Storage Stats Card */}
+                  <div className="bg-white rounded-lg shadow-lg p-6">
+                    <h3 className="text-lg font-semibold mb-4">Storage Overview</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Total RAIDs</span>
+                        <span className="font-bold">{overview.node_stats.total_raids}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-green-600">Healthy RAIDs</span>
+                        <span className="font-bold text-green-600">{overview.node_stats.healthy_raids}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-yellow-600">Degraded RAIDs</span>
+                        <span className="font-bold text-yellow-600">{overview.node_stats.degraded_raids}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Active Volumes</span>
+                        <span className="font-bold">{overview.node_stats.active_volumes}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {overviewError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-red-800">Failed to load cluster overview: {overviewError}</span>
+                  <button
+                    onClick={refreshOverview}
+                    className="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Existing Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <VolumeStatusChart volumes={data.volumes} />
+              <DiskStatusChart disks={data.disks} />
+              <div className="lg:col-span-2">
+                <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks}/>
+              </div>
             </div>
           </div>
         );
@@ -271,7 +357,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
       <DashboardHeader
         autoRefresh={autoRefresh}
         onAutoRefreshChange={onAutoRefreshChange}
-        onRefresh={onRefresh}
+        onRefresh={() => {
+          onRefresh();
+          refreshOverview();
+        }}
         onLogout={onLogout}
         usingMockData={usingMockData}
       />

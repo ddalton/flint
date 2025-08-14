@@ -5,6 +5,8 @@ use tokio::sync::Mutex;
 use tonic::transport::Server;
 use kube::Client;
 use warp::Filter;
+use futures::future::join_all;
+use chrono;
 
 mod controller;
 mod node;
@@ -104,8 +106,15 @@ async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), B
             // TODO: Save with SPDK native config
             println!("💾 [TODO] SPDK native config save after applying SpdkConfig");
             
-            // Apply the configuration to running SPDK via RPC
-            apply_spdk_config_via_rpc(&driver, &config.spec).await?;
+            // Smart validation - only when needed to prevent conflicts
+            let safe_config = if should_perform_validation(&config.spec, &driver).await? {
+                validate_config_with_fast_checks(&config.spec, &driver).await?
+            } else {
+                config.spec.clone()
+            };
+            
+            // Apply the validated configuration to running SPDK via RPC
+            apply_spdk_config_via_rpc(&driver, &safe_config).await?;
             
             // TODO: Sync status with SPDK native config
             println!("🔄 [TODO] SPDK native status sync to CRD");
@@ -129,6 +138,244 @@ async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), B
         }
     }
     
+    Ok(())
+}
+
+/// Check if validation should be performed based on conditions
+/// 
+/// FAIL-OPEN STRATEGY: This validation is designed to prevent conflicts while
+/// never blocking legitimate startup. If validation cannot be performed due to
+/// network issues, API problems, or node unavailability, we assume safety and
+/// allow normal startup to proceed.
+async fn should_perform_validation(
+    config: &spdk_csi_driver::models::SpdkConfigSpec,
+    driver: &SpdkCsiDriver,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Skip validation if no RAIDs to check
+    if config.raid_bdevs.is_empty() {
+        println!("ℹ️ [VALIDATION] No RAIDs in config - skipping validation");
+        return Ok(false);
+    }
+    
+    // Skip if node was properly put in maintenance mode (migration was planned)
+    if config.maintenance_mode {
+        println!("ℹ️ [VALIDATION] Node in maintenance mode - skipping validation");
+        return Ok(false);
+    }
+    
+    // Check environment variable to allow disabling validation
+    if std::env::var("SPDK_SKIP_VALIDATION").is_ok() {
+        println!("ℹ️ [VALIDATION] Validation disabled by environment variable");
+        return Ok(false);
+    }
+    
+    // Check if config is recent (node restart within 5 minutes = likely planned restart)
+    if let Some(last_save) = &config.last_config_save {
+        if let Ok(last_time) = chrono::DateTime::parse_from_rfc3339(last_save) {
+            let age = chrono::Utc::now().signed_duration_since(last_time);
+            if age.num_minutes() < 5 {
+                println!("ℹ️ [VALIDATION] Config is recent ({}m old) - skipping validation", age.num_minutes());
+                return Ok(false);
+            }
+            println!("⚠️ [VALIDATION] Config is old ({}m) - performing conflict validation", age.num_minutes());
+        }
+    }
+    
+    // Perform validation if config age is unknown or old
+    println!("🔍 [VALIDATION] Performing RAID conflict validation for safety");
+    Ok(true)
+}
+
+/// Fast parallel validation with aggressive timeouts
+async fn validate_config_with_fast_checks(
+    config: &spdk_csi_driver::models::SpdkConfigSpec,
+    driver: &SpdkCsiDriver,
+) -> Result<spdk_csi_driver::models::SpdkConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
+    use futures::future::join_all;
+    println!("🚀 [VALIDATION] Starting fast parallel RAID conflict checks");
+    
+    // Create validation futures for all RAIDs
+    let validation_futures: Vec<_> = config.raid_bdevs.iter().map(|raid| {
+        validate_single_raid_fast(&raid.name, driver)
+    }).collect();
+    
+    // Run all validations in parallel with timeout
+    let results = join_all(validation_futures).await;
+    
+    // Collect only safe RAIDs
+    let mut safe_raids = Vec::new();
+    let mut conflicts_found = false;
+    
+    for (raid, result) in config.raid_bdevs.iter().zip(results) {
+        match result {
+            Ok(true) => {
+                println!("✅ [VALIDATION] RAID {} is safe to create", raid.name);
+                safe_raids.push(raid.clone());
+            }
+            Ok(false) => {
+                println!("⚠️ [CONFLICT] RAID {} exists elsewhere - removing from config", raid.name);
+                conflicts_found = true;
+            }
+            Err(e) => {
+                println!("⚠️ [VALIDATION] Could not verify RAID {} ({}) - assuming safe for startup", raid.name, e);
+                safe_raids.push(raid.clone());
+            }
+        }
+    }
+    
+    let mut safe_config = config.clone();
+    safe_config.raid_bdevs = safe_raids;
+    
+    // Update the CRD if conflicts were found
+    if conflicts_found {
+        println!("💾 [VALIDATION] Updating SpdkConfig CRD with conflict-free configuration");
+        if let Err(e) = update_spdk_config_crd(&safe_config, driver).await {
+            println!("⚠️ [VALIDATION] Failed to update SpdkConfig CRD: {}", e);
+        }
+    }
+    
+    println!("✅ [VALIDATION] Validation completed. {} RAIDs validated as safe", safe_config.raid_bdevs.len());
+    Ok(safe_config)
+}
+
+/// Fast validation for a single RAID with aggressive timeout
+async fn validate_single_raid_fast(
+    raid_name: &str,
+    driver: &SpdkCsiDriver,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    use kube::api::{Api, ListParams};
+    use k8s_openapi::api::core::v1::{Node, Pod};
+    
+    const FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    
+    // Get all nodes in the cluster (quick Kubernetes API call)
+    let nodes_api: Api<Node> = Api::all(driver.kube_client.clone());
+    let node_list = match tokio::time::timeout(FAST_TIMEOUT, nodes_api.list(&ListParams::default())).await {
+        Ok(Ok(nodes)) => nodes,
+        _ => {
+            println!("⚠️ [VALIDATION] Could not list nodes (network/API issue) - assuming RAID {} is safe", raid_name);
+            return Ok(true); // Fail-open: can't check, so assume safe
+        }
+    };
+    
+    // Check a maximum of 10 nodes to limit validation time
+    let nodes_to_check: Vec<_> = node_list.items.into_iter()
+        .filter_map(|node| node.metadata.name)
+        .filter(|name| *name != driver.node_id)
+        .take(10)
+        .collect();
+    
+    for node_name in nodes_to_check {
+        match tokio::time::timeout(FAST_TIMEOUT, check_raid_exists_on_node_fast(&node_name, raid_name, driver)).await {
+            Ok(Ok(true)) => {
+                println!("🚨 [CONFLICT] RAID {} found on node {} - blocking creation", raid_name, node_name);
+                return Ok(false); // Conflict found
+            }
+            Ok(Ok(false)) => {
+                println!("✅ [CHECK] RAID {} not found on node {}", raid_name, node_name);
+                // No conflict on this node, continue
+            }
+            Ok(Err(e)) => {
+                println!("⚠️ [CHECK] Could not check node {} for RAID {}: {} - assuming safe", node_name, raid_name, e);
+                // Fail-open: can't check this node, continue checking others
+            }
+            Err(_) => {
+                println!("⚠️ [CHECK] Timeout checking node {} for RAID {} - assuming safe", node_name, raid_name);
+                // Timeout - node might be down, continue checking others
+            }
+        }
+    }
+    
+    Ok(true) // No conflicts found
+}
+
+/// Fast check if RAID exists on a specific node
+async fn check_raid_exists_on_node_fast(
+    node_name: &str,
+    raid_name: &str,
+    driver: &SpdkCsiDriver,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Get the node's SPDK RPC URL
+    let rpc_url = get_node_spdk_rpc_url_fast(node_name, driver).await?;
+    let http_client = reqwest::Client::new();
+    
+    // Quick check for the RAID
+    let response = http_client
+        .post(&rpc_url)
+        .json(&serde_json::json!({
+            "method": "bdev_get_bdevs",
+            "params": { "name": raid_name }
+        }))
+        .timeout(std::time::Duration::from_secs(1)) // Very aggressive timeout
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    
+    let bdevs_data: serde_json::Value = response.json().await?;
+    
+    // Check if we got a result and if it's a RAID
+    if let Some(bdevs) = bdevs_data.get("result").and_then(|r| r.as_array()) {
+        for bdev in bdevs {
+            if let Some(driver_specific) = bdev.get("driver_specific") {
+                if driver_specific.get("raid").is_some() {
+                    return Ok(true); // Found RAID conflict
+                }
+            }
+        }
+    }
+    
+    Ok(false)
+}
+
+/// Fast node SPDK RPC URL lookup with timeout
+async fn get_node_spdk_rpc_url_fast(
+    node_name: &str,
+    driver: &SpdkCsiDriver,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use kube::api::{Api, ListParams};
+    use k8s_openapi::api::core::v1::Pod;
+    
+    let pods_api: Api<Pod> = Api::all(driver.kube_client.clone());
+    let lp = ListParams::default().labels("app=flint-csi-node");
+    
+    let pods = tokio::time::timeout(
+        std::time::Duration::from_secs(1), 
+        pods_api.list(&lp)
+    ).await??;
+    
+    for pod in pods {
+        if pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(node_name) {
+            if let Some(pod_ip) = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()) {
+                return Ok(format!("http://{}:8081/api/spdk/rpc", pod_ip));
+            }
+        }
+    }
+    
+    Err(format!("Could not find flint-csi-node pod on node '{}'", node_name).into())
+}
+
+/// Update SpdkConfig CRD with cleaned configuration
+async fn update_spdk_config_crd(
+    safe_config: &spdk_csi_driver::models::SpdkConfigSpec,
+    driver: &SpdkCsiDriver,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use kube::api::{Api, PatchParams, Patch};
+    use spdk_csi_driver::models::SpdkConfig;
+    
+    let spdk_configs: Api<SpdkConfig> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
+    let config_name = format!("{}-config", driver.node_id);
+    
+    let patch = serde_json::json!({
+        "spec": {
+            "raid_bdevs": safe_config.raid_bdevs,
+            "last_config_save": chrono::Utc::now().to_rfc3339()
+        }
+    });
+    
+    spdk_configs.patch(&config_name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
     Ok(())
 }
 

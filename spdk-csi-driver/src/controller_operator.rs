@@ -199,6 +199,11 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
             }
             Err(e) => {
                 eprintln!("Error getting RAID status for volume {}: {}", volume_id, e);
+                // Set volume state to failed for now 
+                if status.state != "failed" {
+                    status.state = "failed".to_string();
+                    status_update_needed = true;
+                }
             }
         }
     } else {
