@@ -149,6 +149,257 @@ impl SpdkRaidDisk {
     }
 }
 
+impl RaidBdevConfig {
+    /// Determine optimal node placement for RAID based on member locality
+    /// Returns the node ID where the RAID should be created, given the current node context
+    /// 
+    /// Logic:
+    /// - If any member is local (member_type="local"), prioritize the current node
+    /// - If no local members exist, the RAID can be placed on any node with remote access
+    /// - This implements the locality optimization requirement
+    pub fn determine_optimal_placement_node(&self, current_node_id: &str) -> Option<String> {
+        // Check if this RAID has any local members
+        if self.has_local_members() {
+            // If there are local members, the RAID should be created on the local node
+            // for locality optimization (as per the requirement)
+            Some(current_node_id.to_string())
+        } else {
+            // No local members - can be placed on any node that can access all remote members
+            // For now, return None to indicate no specific placement requirement
+            None
+        }
+    }
+    
+    /// Advanced placement algorithm with locality + load balancing
+    /// 
+    /// Logic:
+    /// 1. First priority: nodes with local members (locality optimization)
+    /// 2. Second priority: among nodes with local members, choose node with the FEWEST existing RAIDs (load balancing)
+    /// 
+    /// Parameters:
+    /// - node_local_members: Map of node_id -> list of local member device paths
+    /// - existing_raid_counts: Map of node_id -> count of existing SpdkRaidDisks
+    pub fn determine_optimal_placement_with_load_balancing(
+        &self,
+        node_local_members: &std::collections::HashMap<String, Vec<String>>,
+        existing_raid_counts: &std::collections::HashMap<String, u32>
+    ) -> Option<String> {
+        // Step 1: Find all nodes that have local members for this RAID
+        let mut candidate_nodes: Vec<String> = Vec::new();
+        
+        for member in &self.members {
+            if member.member_type == "local" {
+                if let Some(device_path) = &member.local_device {
+                    // Find which node has this local device
+                    for (node_id, local_devices) in node_local_members {
+                        if local_devices.contains(device_path) {
+                            if !candidate_nodes.contains(node_id) {
+                                candidate_nodes.push(node_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Step 2: If no nodes have local members, return None (flexible placement)
+        if candidate_nodes.is_empty() {
+            return None;
+        }
+        
+        // Step 3: Among candidate nodes, choose the one with the lowest RAID count (load balancing)
+        let optimal_node = candidate_nodes.into_iter()
+            .min_by_key(|node_id| existing_raid_counts.get(node_id).unwrap_or(&0));
+            
+        optimal_node
+    }
+    
+    /// Get node IDs that provide remote members for this RAID
+    /// This helps understand the distribution of RAID members across nodes
+    pub fn get_remote_member_nodes(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter(|m| m.member_type == "nvmeof")
+            .filter_map(|m| m.nvmeof_config.as_ref())
+            .map(|config| config.target_node_id.clone())
+            .collect()
+    }
+    
+    /// Validate that this RAID configuration is suitable for the given node
+    /// Returns true if the node can host this RAID (has local members or can access remotes)
+    pub fn is_suitable_for_node(&self, node_id: &str) -> bool {
+        // If RAID has local members, it should only be on the local node
+        if self.has_local_members() {
+            // This would require knowledge of which node the local members belong to
+            // For now, assume local members belong to the current node being evaluated
+            true
+        } else {
+            // If no local members, any node can potentially host it if it can reach remotes
+            true
+        }
+    }
+    
+    /// Check if this RAID configuration has any local members
+    pub fn has_local_members(&self) -> bool {
+        self.members.iter().any(|m| m.member_type == "local")
+    }
+    
+    /// Get all local member device paths/addresses
+    pub fn get_local_member_devices(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter(|m| m.member_type == "local")
+            .filter_map(|m| m.local_device.clone())
+            .collect()
+    }
+    
+    /// Demonstrate the locality-based placement logic
+    /// This function shows how the RAID placement decision works
+    #[allow(dead_code)]
+    pub fn demonstrate_locality_placement(&self, node_id: &str) -> String {
+        let local_devices = self.get_local_member_devices();
+        let remote_nodes = self.get_remote_member_nodes();
+        
+        if self.has_local_members() {
+            format!(
+                "🏠 RAID '{}' should be placed on LOCAL node '{}' for locality optimization.\n\
+                 📀 Local devices: {:?}\n\
+                 🌐 Remote members from nodes: {:?}\n\
+                 ✅ LOCALITY RULE: At least one member is local → create RAID locally",
+                self.name, node_id, local_devices, remote_nodes
+            )
+        } else {
+            format!(
+                "🌐 RAID '{}' has NO local members - can be placed on any node.\n\
+                 🔗 All members are remote from nodes: {:?}\n\
+                 ℹ️  LOCALITY RULE: No local members → placement flexible",
+                self.name, remote_nodes
+            )
+        }
+    }
+    
+    /// Demonstrate the advanced placement algorithm with load balancing
+    /// Shows how locality + load balancing decisions are made
+    #[allow(dead_code)]
+    pub fn demonstrate_advanced_placement(
+        &self,
+        node_local_members: &std::collections::HashMap<String, Vec<String>>,
+        existing_raid_counts: &std::collections::HashMap<String, u32>
+    ) -> String {
+        let placement_result = self.determine_optimal_placement_with_load_balancing(
+            node_local_members, 
+            existing_raid_counts
+        );
+        
+        // Find candidate nodes with local members
+        let mut candidate_nodes = Vec::new();
+        for member in &self.members {
+            if member.member_type == "local" {
+                if let Some(device_path) = &member.local_device {
+                    for (node_id, local_devices) in node_local_members {
+                        if local_devices.contains(device_path) && !candidate_nodes.contains(node_id) {
+                            candidate_nodes.push(node_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        
+        if candidate_nodes.is_empty() {
+            format!(
+                "🌐 RAID '{}' - NO LOCAL MEMBERS\n\
+                 ℹ️  Can be placed on any node (no locality preference)\n\
+                 🔗 All members are remote from various nodes",
+                self.name
+            )
+        } else {
+            let mut analysis = format!(
+                "🎯 RAID '{}' - ADVANCED PLACEMENT ANALYSIS\n\n\
+                 📍 STEP 1 - LOCALITY ANALYSIS:\n",
+                self.name
+            );
+            
+            for node in &candidate_nodes {
+                let raid_count = existing_raid_counts.get(node).unwrap_or(&0);
+                analysis.push_str(&format!(
+                    "   • Node '{}': {} existing RAIDs\n",
+                    node, raid_count
+                ));
+            }
+            
+            match placement_result {
+                Some(chosen_node) => {
+                    let chosen_raid_count = existing_raid_counts.get(&chosen_node).unwrap_or(&0);
+                    analysis.push_str(&format!(
+                        "\n 🏆 STEP 2 - LOAD BALANCING DECISION:\n\
+                         ✅ Chosen Node: '{}' (has {} existing RAIDs)\n\
+                         📊 REASON: Among nodes with local members, '{}' serves the FEWEST RAIDs\n\
+                         🎯 ALGORITHM: Locality First → Choose Node with Fewest Existing RAIDs",
+                        chosen_node, chosen_raid_count, chosen_node
+                    ));
+                }
+                None => {
+                    analysis.push_str("\n ❌ No optimal placement found");
+                }
+            }
+            
+            analysis
+        }
+    }
+}
+
+impl SpdkConfigSpec {
+    /// Analyze existing RAID load across nodes for load balancing decisions
+    /// Returns a map of node_id -> count of existing SpdkRaidDisks
+    pub fn get_raid_load_per_node(&self) -> std::collections::HashMap<String, u32> {
+        let mut raid_counts = std::collections::HashMap::new();
+        
+        // Count RAIDs in this node's config
+        raid_counts.insert(self.node_id.clone(), self.raid_bdevs.len() as u32);
+        
+        raid_counts
+    }
+    
+    /// Get all local devices available on this node
+    /// Returns device paths/PCI addresses that are local to this node
+    pub fn get_local_devices(&self) -> Vec<String> {
+        let mut local_devices = Vec::new();
+        
+        for raid in &self.raid_bdevs {
+            for member in &raid.members {
+                if member.member_type == "local" {
+                    if let Some(device) = &member.local_device {
+                        if !local_devices.contains(device) {
+                            local_devices.push(device.clone());
+                        }
+                    }
+                }
+            }
+        }
+        
+        local_devices
+    }
+    
+    /// Create a global view of node capabilities and RAID load
+    /// This would typically be called with configs from all nodes
+    pub fn create_global_placement_view(
+        all_node_configs: &[SpdkConfigSpec]
+    ) -> (std::collections::HashMap<String, Vec<String>>, std::collections::HashMap<String, u32>) {
+        let mut node_local_devices = std::collections::HashMap::new();
+        let mut node_raid_counts = std::collections::HashMap::new();
+        
+        for config in all_node_configs {
+            // Map node -> local devices
+            node_local_devices.insert(config.node_id.clone(), config.get_local_devices());
+            
+            // Map node -> RAID count
+            node_raid_counts.insert(config.node_id.clone(), config.raid_bdevs.len() as u32);
+        }
+        
+        (node_local_devices, node_raid_counts)
+    }
+}
+
 impl SpdkRaidDiskSpec {
     /// Generate LVS name for this RAID disk
     /// Format: lvs_raid_{raid_disk_id}

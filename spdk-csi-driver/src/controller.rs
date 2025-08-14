@@ -488,14 +488,8 @@ impl Controller for ControllerService {
             Ok(spdk_volume) => {
                 println!("✅ [CSI_CONTROLLER] Volume provisioned successfully: {}", volume_name);
                 
-                // Auto-save SPDK configuration after volume creation (non-blocking)
-                spdk_csi_driver::spdk_config_sync::safe_auto_save_spdk_config(
-                    &self.driver.kube_client,
-                    &self.driver.target_namespace,
-                    &self.driver.node_id,
-                    &self.driver.spdk_rpc_url,
-                    "volume creation",
-                ).await;
+                // TODO: Auto-save with SPDK native config
+                println!("💾 [TODO] SPDK native config save after volume creation");
                 
                 let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
 
@@ -554,14 +548,8 @@ impl Controller for ControllerService {
         // Delete replicas
         self.delete_volume_replicas(&spdk_volume).await?;
 
-        // Auto-save SPDK configuration after volume deletion (non-blocking)
-        spdk_csi_driver::spdk_config_sync::safe_auto_save_spdk_config(
-            &self.driver.kube_client,
-            &self.driver.target_namespace,
-            &self.driver.node_id,
-            &self.driver.spdk_rpc_url,
-            "volume deletion",
-        ).await;
+        // TODO: Auto-save with SPDK native config
+        println!("💾 [TODO] SPDK native config save after volume deletion");
 
         // RAID disk status is maintained by operator; no per-disk status updates here
 

@@ -507,12 +507,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         println!("🔄 [RECONCILE] Starting periodic SPDK state reconciliation");
         
-        spdk_csi_driver::spdk_config_sync::start_periodic_config_sync(
-            reconcile_agent.kube_client,
-            reconcile_agent.target_namespace,
-            reconcile_agent.node_name,
-            reconcile_agent.spdk_rpc_url,
-        ).await;
+        // TODO: Add SPDK native periodic save here
+        println!("⏰ [TODO] Periodic SPDK native config save will be added here");
     });
     
     // Start periodic NVMe-oF export reconciliation
@@ -1039,14 +1035,8 @@ async fn initialize_blobstore_on_device(agent: &NodeAgent, raid: &SpdkRaidDisk) 
         "params": { "bdev_name": raid_bdev_name, "lvs_name": lvs_name, "cluster_sz": 1048576 }
     })).await?;
 
-    // Auto-save SPDK configuration after LVS creation (non-blocking)
-    spdk_csi_driver::spdk_config_sync::safe_auto_save_spdk_config(
-        &agent.kube_client,
-        &agent.target_namespace,
-        &agent.node_name,
-        &agent.spdk_rpc_url,
-        "LVS creation",
-    ).await;
+    // TODO: Auto-save with SPDK native config
+    println!("💾 [TODO] SPDK native config save after LVS creation");
 
     if let Some(error) = create.get("error") {
         let code = error["code"].as_i64().unwrap_or(0);
