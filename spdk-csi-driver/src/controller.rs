@@ -788,7 +788,10 @@ impl ControllerService {
         // Parse and filter available disks
         let mut available_disks = Vec::new();
         
+        println!("🔍 [BDEV_DEBUG] Raw bdev_data response: {:?}", bdev_data);
+        
         if let Some(bdevs) = bdev_data.as_array() {
+            println!("🔍 [BDEV_DEBUG] Found {} bdevs to evaluate", bdevs.len());
             for bdev in bdevs {
                 if let (Some(name), Some(num_blocks), Some(block_size)) = (
                     bdev["name"].as_str(),
@@ -801,12 +804,16 @@ impl ControllerService {
                     let is_claimed = bdev["claimed"].as_bool().unwrap_or(true);
                     let supports_read = bdev["supported_io_types"]["read"].as_bool().unwrap_or(false);
                     let supports_write = bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
+                    let is_in_use = self.is_bdev_in_use(node, name).await;
                     
                     let is_available_storage = !is_claimed && 
                                              supports_read && 
                                              supports_write && 
                                              capacity >= min_capacity as u64 && 
-                                             !self.is_bdev_in_use(node, name).await;
+                                             !is_in_use;
+                    
+                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | in_use: {} | available: {}", 
+                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_in_use, is_available_storage);
                     
                     if is_available_storage {
                         let disk = AvailableNvmeDisk {
