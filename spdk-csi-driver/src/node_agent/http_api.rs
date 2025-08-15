@@ -515,7 +515,7 @@ impl NodeAgent {
     /// Validate disk for setup
     async fn validate_disk_for_setup(&self, pci_addr: &str, _force_unmount: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Check if it's a system disk
-        if self.system_disk_check_by_pci(pci_addr).await {
+        if self.robust_system_disk_check_by_pci(pci_addr).await {
             return Err("Cannot setup system disk".into());
         }
         
