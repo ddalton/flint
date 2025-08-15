@@ -4,7 +4,7 @@
 // It provides a clean interface for making RPC calls over Unix sockets or HTTP.
 
 use serde_json::Value;
-use std::io::{Write, Read};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 
 /// Trait to ensure only approved RPC implementations are used
@@ -61,25 +61,14 @@ async fn call_spdk_rpc_unix(
         stream.write_all(message.as_bytes())
             .map_err(|e| format!("Failed to write to SPDK socket: {}", e))?;
         
-        // Read response (SPDK sends newline-delimited JSON, doesn't close socket)
+        // Read response using BufRead to handle newline-delimited JSON (like Go's json.Decoder)
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(&mut stream);
         let mut response = String::new();
-        let mut buffer = [0; 1];
         
-        // Read until we get a newline (complete JSON response)
-        loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => break, // EOF
-                Ok(1) => {
-                    let byte = buffer[0];
-                    if byte == b'\n' {
-                        break; // Complete response received
-                    }
-                    response.push(byte as char);
-                }
-                Err(e) => return Err(format!("Failed to read from SPDK socket: {}", e).into()),
-                _ => unreachable!(),
-            }
-        }
+        // Read a complete line (JSON response terminated by newline)
+        reader.read_line(&mut response)
+            .map_err(|e| format!("Failed to read JSON response from SPDK socket: {}", e))?;
         
         let response_str = response;
         
