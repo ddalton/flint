@@ -8,7 +8,6 @@ import { VolumeStatusChart } from './charts/VolumeStatusChart';
 import { DiskStatusChart } from './charts/DiskStatusChart';
 import { NodeStatusPieChart } from './charts/NodeStatusPieChart';
 import { EnhancedRaidTopologyChart } from './charts/EnhancedRaidTopologyChart';
-import { StorageHierarchyChart } from './charts/StorageHierarchyChart';
 import { useDashboardOverview } from '../hooks/useDashboardOverview';
 import { VolumesTable } from './tables/VolumesTable';
 import { DisksTable } from './tables/DisksTable';
@@ -55,7 +54,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
 
   // Fetch dashboard overview data
-  const { overview, error: overviewError, refresh: refreshOverview } = useDashboardOverview(autoRefresh);
+  const { overview, loading: overviewLoading, error: overviewError, refresh: refreshOverview } = useDashboardOverview(autoRefresh);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -286,29 +285,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
             )}
 
-            {/* Storage Overview Charts */}
+            {/* Existing Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <VolumeStatusChart volumes={data.volumes} />
               <DiskStatusChart disks={data.disks} />
-            </div>
-            
-            {/* Correct Storage Hierarchy Visualization */}
-            <div className="mt-6">
-              <StorageHierarchyChart data={data} />
-            </div>
-            
-            {/* Legacy RAID Chart (for backward compatibility) */}
-            {data.volumes.some(v => (v as any).raid_status) && (
-              <div className="mt-6">
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                  <p className="text-sm text-yellow-800">
-                    <strong>Note:</strong> The chart below shows legacy RAID topology. 
-                    The correct hierarchy is shown above: Physical Disks → RAID → LVS → Logical Volume → ublk device.
-                  </p>
-                </div>
+              <div className="lg:col-span-2">
                 <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks}/>
               </div>
-            )}
+            </div>
           </div>
         );
 

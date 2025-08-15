@@ -12,6 +12,9 @@ export interface NodeAlert {
   created_at: string;
   suggested_action: string;
   manual_migration_available: boolean;
+  has_external_nvmeof_members?: boolean; // Only set for network partition alerts
+  inaccessible_local_members?: number;    // Count of inaccessible local members
+  inaccessible_external_members?: number; // Count of inaccessible external members
 }
 
 export interface NodeAlertsData {
@@ -297,7 +300,7 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
                         </div>
                       </div>
 
-                      {alert.manual_migration_available && (
+                      {alert.manual_migration_available ? (
                         <div className="space-y-3">
                           <div className="flex items-center space-x-3">
                             <button
@@ -344,6 +347,48 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
                               <div className="flex items-center">
                                 <span className="font-medium mr-2">3.</span>
                                 <span>Verifies node health and schedulability</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        // Show network partition message when migration is not available
+                        <div className="space-y-3">
+                          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                            <div className="flex items-start space-x-3">
+                              <div className="flex-shrink-0">
+                                <div className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
+                                  <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                  </svg>
+                                </div>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <h4 className="text-sm font-medium text-red-800 mb-2">🚨 Network Partition Detected</h4>
+                                <p className="text-sm text-red-700 mb-3">
+                                  All RAID members are currently inaccessible. Migration is not possible until at least one member becomes accessible.
+                                </p>
+                                <div className="bg-red-100 rounded-md p-3">
+                                  <h5 className="text-xs font-medium text-red-800 mb-2">Recovery Options:</h5>
+                                  <ul className="text-xs text-red-700 space-y-1">
+                                    {alert.inaccessible_local_members && alert.inaccessible_local_members > 0 && (
+                                      <li className="flex items-center">
+                                        <span className="w-1.5 h-1.5 bg-red-400 rounded-full mr-2 flex-shrink-0"></span>
+                                        Restore connectivity to {alert.inaccessible_local_members} cluster node{alert.inaccessible_local_members > 1 ? 's' : ''} hosting local RAID members
+                                      </li>
+                                    )}
+                                    {alert.inaccessible_external_members && alert.inaccessible_external_members > 0 && (
+                                      <li className="flex items-center">
+                                        <span className="w-1.5 h-1.5 bg-red-400 rounded-full mr-2 flex-shrink-0"></span>
+                                        Fix {alert.inaccessible_external_members} external NVMe-oF endpoint{alert.inaccessible_external_members > 1 ? 's' : ''} (network connectivity or storage system issues)
+                                      </li>
+                                    )}
+                                    <li className="flex items-center">
+                                      <span className="w-1.5 h-1.5 bg-red-400 rounded-full mr-2 flex-shrink-0"></span>
+                                      Restore data from backup if available
+                                    </li>
+                                  </ul>
+                                </div>
                               </div>
                             </div>
                           </div>

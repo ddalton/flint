@@ -87,6 +87,9 @@ pub struct NvmeofDiskStatus {
     pub available_bytes: i64,
     pub last_checked: String,
     pub message: Option<String>,
+    pub consecutive_failures: u32,         // Track failure streaks to avoid false positives
+    pub last_successful_check: Option<String>, // When it last worked
+    pub failure_reason: Option<String>,    // Why it failed (network, spdk, timeout, etc.)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, JsonSchema)]

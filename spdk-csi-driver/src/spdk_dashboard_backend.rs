@@ -938,6 +938,9 @@ async fn create_or_update_nvmeofdisk(req: NvmeofDiskCreateRequest, state: AppSta
         available_bytes: req.size_bytes,
         last_checked: Utc::now().to_rfc3339(),
         message: Some("Created via dashboard backend".to_string()),
+        consecutive_failures: 0,
+        last_successful_check: Some(Utc::now().to_rfc3339()),
+        failure_reason: None,
     });
 
     let pp = kube::api::PostParams::default();
@@ -975,8 +978,37 @@ async fn update_nvmeofdisk(name: String, req: NvmeofDiskUpdateRequest, state: Ap
     if let Some(tr) = req.transport { spec.nvmeof_endpoint.transport = tr; }
 
     let mut status = current.status.unwrap_or_default();
-    if let Some(h) = req.healthy { status.healthy = h; }
-    status.last_checked = Utc::now().to_rfc3339();
+    let current_time = Utc::now().to_rfc3339();
+    
+    // Enhanced failure tracking logic
+    if let Some(h) = req.healthy {
+        let was_healthy = status.healthy;
+        status.healthy = h;
+        
+        if h && !was_healthy {
+            // Recovery: reset failure tracking
+            status.consecutive_failures = 0;
+            status.last_successful_check = Some(current_time.clone());
+            status.failure_reason = None;
+            println!("✅ [NVMEOF_HEALTH] {} recovered after {} consecutive failures", name, status.consecutive_failures);
+        } else if !h && was_healthy {
+            // New failure: start tracking
+            status.consecutive_failures = 1;
+            status.failure_reason = Some("External NVMe-oF endpoint unreachable".to_string());
+            println!("⚠️ [NVMEOF_HEALTH] {} failed (failure #{})", name, status.consecutive_failures);
+        } else if !h && !was_healthy {
+            // Continued failure: increment counter
+            status.consecutive_failures += 1;
+            println!("❌ [NVMEOF_HEALTH] {} still failing (failure #{})", name, status.consecutive_failures);
+            
+            // Update failure reason based on streak
+            if status.consecutive_failures >= 3 {
+                status.failure_reason = Some("Persistent external NVMe-oF connectivity issues - check network and storage system".to_string());
+            }
+        }
+    }
+    
+    status.last_checked = current_time;
 
     let patch = json!({
         "spec": spec,
@@ -988,6 +1020,94 @@ async fn update_nvmeofdisk(name: String, req: NvmeofDiskUpdateRequest, state: Ap
         Err(e) => {
             eprintln!("NvmeofDisk update failed: {}", e);
             Err(warp::reject())
+        }
+    }
+}
+
+/// Enhanced external NVMe-oF health check with failure tracking
+async fn check_external_nvmeof_health(
+    disk_name: &str,
+    endpoint: &NvmeofEndpoint, 
+    state: &AppState
+) -> bool {
+    println!("🔍 [EXTERNAL_HEALTH] Checking external NVMe-oF health for: {}", disk_name);
+    
+    // Step 1: Basic network connectivity test
+    let network_reachable = test_network_connectivity(&endpoint.target_addr, endpoint.target_port).await;
+    if !network_reachable {
+        println!("❌ [EXTERNAL_HEALTH] Network connectivity failed for {}:{}", endpoint.target_addr, endpoint.target_port);
+        update_nvmeofdisk_health(disk_name, false, Some("Network connectivity failed".to_string()), state).await;
+        return false;
+    }
+    
+    // Step 2: NVMe-oF specific validation would go here
+    // For now, if network is reachable, consider it healthy
+    update_nvmeofdisk_health(disk_name, true, None, state).await;
+    true
+}
+
+/// Test basic network connectivity to external endpoint
+async fn test_network_connectivity(target_addr: &str, target_port: u16) -> bool {
+    use std::time::Duration;
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+    
+    let address = format!("{}:{}", target_addr, target_port);
+    
+    match timeout(Duration::from_secs(5), TcpStream::connect(&address)).await {
+        Ok(Ok(_)) => {
+            println!("✅ [NETWORK] Connection successful to {}", address);
+            true
+        }
+        Ok(Err(e)) => {
+            println!("❌ [NETWORK] Connection failed to {}: {}", address, e);
+            false
+        }
+        Err(_) => {
+            println!("⏰ [NETWORK] Connection timeout to {}", address);
+            false
+        }
+    }
+}
+
+/// Update NvmeofDisk health status with failure tracking
+async fn update_nvmeofdisk_health(
+    disk_name: &str,
+    healthy: bool,
+    failure_reason: Option<String>,
+    state: &AppState,
+) {
+    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    
+    if let Ok(current) = api.get(disk_name).await {
+        let mut status = current.status.unwrap_or_default();
+        let current_time = Utc::now().to_rfc3339();
+        let was_healthy = status.healthy;
+        
+        status.healthy = healthy;
+        status.last_checked = current_time.clone();
+        
+        if healthy && !was_healthy {
+            // Recovery
+            let prev_failures = status.consecutive_failures;
+            status.consecutive_failures = 0;
+            status.last_successful_check = Some(current_time);
+            status.failure_reason = None;
+            println!("✅ [RECOVERY] {} recovered after {} failures", disk_name, prev_failures);
+        } else if !healthy {
+            // Failure
+            if was_healthy {
+                status.consecutive_failures = 1;
+            } else {
+                status.consecutive_failures += 1;
+            }
+            status.failure_reason = failure_reason;
+            println!("❌ [FAILURE] {} failure #{}: {:?}", disk_name, status.consecutive_failures, status.failure_reason);
+        }
+        
+        let patch = json!({ "status": status });
+        if let Err(e) = api.patch_status(disk_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(patch)).await {
+            eprintln!("Failed to update NvmeofDisk {} status: {}", disk_name, e);
         }
     }
 }
@@ -3218,6 +3338,205 @@ fn is_node_ready_and_schedulable(node: &k8s_openapi::api::core::v1::Node) -> boo
     false
 }
 
+/// Information about RAID member accessibility for network partition detection
+#[derive(Debug, Clone)]
+struct RaidMemberAccessibility {
+    pub all_members_inaccessible: bool,
+    pub has_external_nvmeof_members: bool,
+    pub inaccessible_local_members: u32,
+    pub inaccessible_external_members: u32,
+    pub total_members: u32,
+}
+
+/// Check if all RAID members are inaccessible (network partition scenario)
+/// Returns detailed information about member accessibility for appropriate recovery guidance
+async fn check_raid_member_accessibility(
+    volume: &SpdkVolume,
+    nodes: &kube::core::ObjectList<k8s_openapi::api::core::v1::Node>,
+    nvmeof_disks: &kube::core::ObjectList<NvmeofDisk>,
+) -> RaidMemberAccessibility {
+    // Get RAID status from the volume
+    let raid_status = match &volume.status {
+        Some(status) => match &status.raid_status {
+            Some(raid) => raid,
+            None => {
+                println!("🔍 [MEMBER_CHECK] No RAID status found for volume {}", volume.spec.volume_id);
+                return RaidMemberAccessibility {
+                    all_members_inaccessible: false,
+                    has_external_nvmeof_members: false,
+                    inaccessible_local_members: 0,
+                    inaccessible_external_members: 0,
+                    total_members: 0,
+                };
+            }
+        },
+        None => {
+            println!("🔍 [MEMBER_CHECK] No status found for volume {}", volume.spec.volume_id);
+            return RaidMemberAccessibility {
+                all_members_inaccessible: false,
+                has_external_nvmeof_members: false,
+                inaccessible_local_members: 0,
+                inaccessible_external_members: 0,
+                total_members: 0,
+            };
+        }
+    };
+
+    if raid_status.base_bdevs_list.is_empty() {
+        println!("🔍 [MEMBER_CHECK] No RAID members found for volume {}", volume.spec.volume_id);
+        return RaidMemberAccessibility {
+            all_members_inaccessible: false,
+            has_external_nvmeof_members: false,
+            inaccessible_local_members: 0,
+            inaccessible_external_members: 0,
+            total_members: 0,
+        };
+    }
+
+    println!("🔍 [MEMBER_CHECK] Checking accessibility for {} RAID members of volume {}", 
+             raid_status.base_bdevs_list.len(), volume.spec.volume_id);
+
+    let mut accessible_members = 0;
+    let mut has_external_nvmeof_members = false;
+    let mut inaccessible_local_members = 0;
+    let mut inaccessible_external_members = 0;
+    let total_members = raid_status.base_bdevs_list.len() as u32;
+
+    for member in &raid_status.base_bdevs_list {
+        // Find the corresponding replica to get node and endpoint info
+        let replica = volume.spec.replicas.iter()
+            .find(|r| r.raid_member_index == member.slot as usize);
+
+        let is_member_accessible = match replica {
+            Some(replica) => {
+                // Determine if this is an external NVMe-oF member by checking if it has external endpoint info
+                let is_external_nvmeof = is_external_nvmeof_member(replica, nvmeof_disks).await;
+                if is_external_nvmeof {
+                    has_external_nvmeof_members = true;
+                }
+
+                // Check if the node hosting this member is accessible
+                let node_accessible = nodes.items.iter()
+                    .find(|node| node.metadata.name.as_deref() == Some(&replica.node))
+                    .map(|node| is_node_ready_and_schedulable(node))
+                    .unwrap_or(false);
+
+                if node_accessible {
+                    println!("✅ [MEMBER_CHECK] Member {} (slot {}) accessible via node {}", 
+                             member.name, member.slot, replica.node);
+                    true
+                } else {
+                    // Node is down, but check if this is a remote NVMe-oF endpoint that might be accessible from other nodes
+                    let nvmeof_accessible = check_nvmeof_endpoint_accessibility(replica, nvmeof_disks).await;
+                    if nvmeof_accessible {
+                        println!("✅ [MEMBER_CHECK] Member {} (slot {}) accessible via NVMe-oF endpoint despite node {} being down", 
+                                 member.name, member.slot, replica.node);
+                        true
+                    } else {
+                        println!("❌ [MEMBER_CHECK] Member {} (slot {}) inaccessible - node {} down and no accessible NVMe-oF endpoint", 
+                                 member.name, member.slot, replica.node);
+                        
+                        // Track what type of member is inaccessible
+                        if is_external_nvmeof {
+                            inaccessible_external_members += 1;
+                        } else {
+                            inaccessible_local_members += 1;
+                        }
+                        false
+                    }
+                }
+            },
+            None => {
+                println!("⚠️ [MEMBER_CHECK] No replica info found for member {} (slot {}), assuming inaccessible local member", 
+                         member.name, member.slot);
+                inaccessible_local_members += 1;
+                false
+            }
+        };
+
+        if is_member_accessible {
+            accessible_members += 1;
+        }
+    }
+
+    let all_inaccessible = accessible_members == 0;
+    
+    if all_inaccessible {
+        println!("🚨 [NETWORK_PARTITION] ALL {} RAID members are inaccessible for volume {} - network partition detected!", 
+                 total_members, volume.spec.volume_id);
+        println!("📊 [PARTITION_DETAILS] {} local members, {} external NVMe-oF members inaccessible", 
+                 inaccessible_local_members, inaccessible_external_members);
+    } else {
+        println!("✅ [MEMBER_CHECK] {}/{} RAID members accessible for volume {} - migration still possible", 
+                 accessible_members, total_members, volume.spec.volume_id);
+    }
+
+    RaidMemberAccessibility {
+        all_members_inaccessible: all_inaccessible,
+        has_external_nvmeof_members,
+        inaccessible_local_members,
+        inaccessible_external_members,
+        total_members,
+    }
+}
+
+/// Check if a replica is using an external NVMe-oF member (vs local disk)
+async fn is_external_nvmeof_member(
+    replica: &Replica,
+    nvmeof_disks: &kube::core::ObjectList<NvmeofDisk>,
+) -> bool {
+    // Look up the NVMe-oF disk to check if it's marked as remote/external
+    if let Some(nvmeof_disk) = nvmeof_disks.items.iter()
+        .find(|disk| disk.metadata.name.as_deref() == Some(&replica.disk_ref)) {
+        
+        // Check if this disk is marked as remote/external
+        return nvmeof_disk.spec.is_remote;
+    }
+    
+    // If no NVMe-oF disk info found, assume local
+    false
+}
+
+/// Check if an NVMe-oF endpoint is accessible despite its host node being down
+/// This applies to external NVMe-oF endpoints that can be reached from multiple nodes
+async fn check_nvmeof_endpoint_accessibility(
+    replica: &Replica,
+    nvmeof_disks: &kube::core::ObjectList<NvmeofDisk>,
+) -> bool {
+    // Look up the NVMe-oF disk status for this replica
+    if let Some(nvmeof_disk) = nvmeof_disks.items.iter()
+        .find(|disk| disk.metadata.name.as_deref() == Some(&replica.disk_ref)) {
+        
+        if let Some(status) = &nvmeof_disk.status {
+            // Enhanced accessibility check with failure tracking
+            let is_accessible = status.healthy && status.endpoint_validated;
+            
+            // Only consider it inaccessible if we have multiple consecutive failures
+            // This avoids false positives from temporary network hiccups
+            let persistent_failure = status.consecutive_failures >= 2;
+            
+            if !is_accessible && persistent_failure {
+                println!("❌ [NVMEOF_CHECK] NVMe-oF disk {} persistently inaccessible: healthy={}, validated={}, consecutive_failures={}, reason={:?}", 
+                         replica.disk_ref, status.healthy, status.endpoint_validated, status.consecutive_failures, status.failure_reason);
+                return false;
+            } else if is_accessible {
+                println!("✅ [NVMEOF_CHECK] NVMe-oF disk {} accessible: healthy={}, validated={}", 
+                         replica.disk_ref, status.healthy, status.endpoint_validated);
+                return true;
+            } else {
+                // Unhealthy but not yet persistent failure - give it benefit of the doubt
+                println!("⚠️ [NVMEOF_CHECK] NVMe-oF disk {} temporarily unhealthy (failure #{} < 2), assuming still accessible", 
+                         replica.disk_ref, status.consecutive_failures);
+                return true;
+            }
+        }
+    }
+    
+    // If no NVMe-oF disk info found, assume not accessible
+    println!("⚠️ [NVMEOF_CHECK] No NVMe-oF disk info found for {}, assuming not accessible", replica.disk_ref);
+    false
+}
+
 /// Find single-replica volumes on a specific node
 async fn find_single_replica_volumes_on_node(
     node_id: &str,
@@ -3837,6 +4156,9 @@ struct DashboardAlert {
     created_at: String,
     suggested_action: String,
     manual_migration_available: bool,
+    has_external_nvmeof_members: Option<bool>, // Only set for network partition alerts
+    inaccessible_local_members: Option<u32>,    // Count of inaccessible local members
+    inaccessible_external_members: Option<u32>, // Count of inaccessible external members
 }
 
 #[derive(Serialize)]
@@ -3916,10 +4238,14 @@ async fn get_dashboard_alerts(state: AppState) -> Result<impl warp::Reply, warp:
     
     let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let configs_api: Api<SpdkConfig> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let nodes_api: Api<k8s_openapi::api::core::v1::Node> = Api::all(state.kube_client.clone());
+    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     
     match (volumes_api.list(&kube::api::ListParams::default()).await, 
-           configs_api.list(&kube::api::ListParams::default()).await) {
-        (Ok(volume_list), Ok(config_list)) => {
+           configs_api.list(&kube::api::ListParams::default()).await,
+           nodes_api.list(&kube::api::ListParams::default()).await,
+           nvmeof_api.list(&kube::api::ListParams::default()).await) {
+        (Ok(volume_list), Ok(config_list), Ok(node_list), Ok(nvmeof_list)) => {
             let mut alerts = Vec::new();
             let mut critical_count = 0;
             let mut warning_count = 0;
@@ -3961,21 +4287,55 @@ async fn get_dashboard_alerts(state: AppState) -> Result<impl warp::Reply, warp:
                             continue;
                         }
                         
+                        // Check if all RAID members are inaccessible (network partition scenario)
+                        let accessibility = check_raid_member_accessibility(&volume, &node_list, &nvmeof_list).await;
+                        
+                        let (message, suggested_action, migration_available) = if accessibility.all_members_inaccessible {
+                            let recovery_details = match (accessibility.inaccessible_local_members > 0, accessibility.inaccessible_external_members > 0) {
+                                (true, true) => "Data recovery requires fixing external NVMe-oF endpoint connectivity AND restoring cluster node connectivity, or backup restoration.",
+                                (true, false) => "Data recovery requires restoring cluster node connectivity or backup restoration.",
+                                (false, true) => "Data recovery requires fixing external NVMe-oF endpoint connectivity or backup restoration.",
+                                (false, false) => "Data recovery requires backup restoration.", // Shouldn't happen, but safe fallback
+                            };
+                            let message = format!("Network partition detected for volume {} - ALL RAID members are inaccessible. {}", volume.spec.volume_id, recovery_details);
+                            let action = "network_partition_recovery".to_string();
+                            (message, action, false)
+                        } else {
+                            let message = format!("RAID host failure for volume {}", volume.spec.volume_id);
+                            let action = if severity == "critical" { 
+                                "urgent_migrate_raid_host".to_string() 
+                            } else { 
+                                "migrate_raid_host".to_string() 
+                            };
+                            (message, action, true)
+                        };
+                        
                         let alert = DashboardAlert {
                             id: format!("raid-failure-{}", volume.spec.volume_id),
                             alert_type: alert_type.to_string(),
                             severity: severity.to_string(),
-                            message: format!("RAID host failure for volume {}", volume.spec.volume_id),
+                            message,
                             volume_id: volume.spec.volume_id.clone(),
                             raid_name: volume.spec.volume_id.clone(), // RAID name same as volume ID
                             source_node,
                             created_at: status.last_checked.clone(),
-                            suggested_action: if severity == "critical" { 
-                                "urgent_migrate_raid_host".to_string() 
-                            } else { 
-                                "migrate_raid_host".to_string() 
+                            suggested_action,
+                            manual_migration_available: migration_available,
+                            has_external_nvmeof_members: if accessibility.all_members_inaccessible {
+                                Some(accessibility.has_external_nvmeof_members)
+                            } else {
+                                None
                             },
-                            manual_migration_available: true,
+                            inaccessible_local_members: if accessibility.all_members_inaccessible {
+                                Some(accessibility.inaccessible_local_members)
+                            } else {
+                                None
+                            },
+                            inaccessible_external_members: if accessibility.all_members_inaccessible {
+                                Some(accessibility.inaccessible_external_members)
+                            } else {
+                                None
+                            },
                         };
                         
                         alerts.push(alert);
@@ -4001,7 +4361,7 @@ async fn get_dashboard_alerts(state: AppState) -> Result<impl warp::Reply, warp:
                 total_warnings: warning_count,
             }))
         }
-        (Err(e), _) | (_, Err(e)) => {
+        (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
             println!("❌ [ALERTS] Failed to get alerts: {}", e);
             Err(warp::reject::reject())
         }
@@ -4014,10 +4374,14 @@ async fn get_node_alerts(node_id: String, state: AppState) -> Result<impl warp::
     
     let volumes_api: Api<SpdkVolume> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     let configs_api: Api<SpdkConfig> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let nodes_api: Api<k8s_openapi::api::core::v1::Node> = Api::all(state.kube_client.clone());
+    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
     
     match (volumes_api.list(&kube::api::ListParams::default()).await,
-           configs_api.list(&kube::api::ListParams::default()).await) {
-        (Ok(volume_list), Ok(config_list)) => {
+           configs_api.list(&kube::api::ListParams::default()).await,
+           nodes_api.list(&kube::api::ListParams::default()).await,
+           nvmeof_api.list(&kube::api::ListParams::default()).await) {
+        (Ok(volume_list), Ok(config_list), Ok(node_list), Ok(nvmeof_list)) => {
             let mut node_alerts = Vec::new();
             let mut raid_count = 0;
             let mut volume_count = 0;
@@ -4055,21 +4419,55 @@ async fn get_node_alerts(node_id: String, state: AppState) -> Result<impl warp::
                                 "raid_host_failure" 
                             };
                             
+                            // Check if all RAID members are inaccessible (network partition scenario)
+                            let accessibility = check_raid_member_accessibility(&volume, &node_list, &nvmeof_list).await;
+                            
+                            let (message, suggested_action, migration_available) = if accessibility.all_members_inaccessible {
+                                let recovery_details = match (accessibility.inaccessible_local_members > 0, accessibility.inaccessible_external_members > 0) {
+                                    (true, true) => "Data recovery requires fixing external NVMe-oF endpoint connectivity AND restoring cluster node connectivity, or backup restoration.",
+                                    (true, false) => "Data recovery requires restoring cluster node connectivity or backup restoration.",
+                                    (false, true) => "Data recovery requires fixing external NVMe-oF endpoint connectivity or backup restoration.",
+                                    (false, false) => "Data recovery requires backup restoration.", // Shouldn't happen, but safe fallback
+                                };
+                                let message = format!("Network partition detected for volume {} - ALL RAID members are inaccessible. {}", volume.spec.volume_id, recovery_details);
+                                let action = "network_partition_recovery".to_string();
+                                (message, action, false)
+                            } else {
+                                let message = format!("RAID host failure for volume {}", volume.spec.volume_id);
+                                let action = if severity == "critical" { 
+                                    "urgent_migrate_raid_host".to_string() 
+                                } else { 
+                                    "migrate_raid_host".to_string() 
+                                };
+                                (message, action, true)
+                            };
+                            
                             let alert = DashboardAlert {
                                 id: format!("raid-failure-{}", volume.spec.volume_id),
                                 alert_type: alert_type.to_string(),
                                 severity: severity.to_string(),
-                                                            message: format!("RAID host failure for volume {}", volume.spec.volume_id),
+                                message,
                                 volume_id: volume.spec.volume_id.clone(),
                                 raid_name: volume.spec.volume_id.clone(),
                                 source_node: node_id.clone(),
                                 created_at: status.last_checked.clone(),
-                                suggested_action: if severity == "critical" { 
-                                    "urgent_migrate_raid_host".to_string() 
-                                } else { 
-                                    "migrate_raid_host".to_string() 
+                                suggested_action,
+                                manual_migration_available: migration_available,
+                                has_external_nvmeof_members: if accessibility.all_members_inaccessible {
+                                    Some(accessibility.has_external_nvmeof_members)
+                                } else {
+                                    None
                                 },
-                                manual_migration_available: true,
+                                inaccessible_local_members: if accessibility.all_members_inaccessible {
+                                    Some(accessibility.inaccessible_local_members)
+                                } else {
+                                    None
+                                },
+                                inaccessible_external_members: if accessibility.all_members_inaccessible {
+                                    Some(accessibility.inaccessible_external_members)
+                                } else {
+                                    None
+                                },
                             };
                             
                             node_alerts.push(alert);
@@ -4102,7 +4500,7 @@ async fn get_node_alerts(node_id: String, state: AppState) -> Result<impl warp::
                 volume_count,
             }))
         }
-        (Err(e), _) | (_, Err(e)) => {
+        (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
             println!("❌ [NODE_ALERTS] Failed to get node alerts: {}", e);
             Err(warp::reject::reject())
         }

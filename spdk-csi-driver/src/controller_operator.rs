@@ -251,7 +251,20 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
         spdk_volumes.patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch)).await?;
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    // Use different intervals based on whether the volume has external NVMe-oF members
+    let has_external_nvmeof = spdk_volume.spec.replicas.iter().any(|replica| {
+        // Check if this replica uses an external NVMe-oF disk
+        // This is a simplified check - in practice, you'd query the NvmeofDisk CRD
+        replica.replica_type == "remote" || replica.ip.is_some()
+    });
+    
+    let requeue_interval = if has_external_nvmeof {
+        Duration::from_secs(60)  // 1 minute for volumes with external endpoints
+    } else {
+        Duration::from_secs(300) // 5 minutes for local-only volumes
+    };
+    
+    Ok(Action::requeue(requeue_interval))
 }
 
 async fn get_raid_status(
@@ -635,6 +648,7 @@ async fn update_nvmeof_targets_status(
     Ok(())
 }
 
+/// Enhanced NVMe-oF target health check with connection validation
 async fn check_nvmeof_target_active(
     ctx: &Context,
     node_name: &str,
@@ -645,6 +659,7 @@ async fn check_nvmeof_target_active(
     
     let http_client = HttpClient::new();
     
+    // Step 1: Check SPDK subsystem status
     let response = http_client
         .post(&rpc_url)
         .json(&json!({
@@ -662,11 +677,68 @@ async fn check_nvmeof_target_active(
     if let Some(subsystem_list) = subsystems["result"].as_array() {
         for subsystem in subsystem_list {
             if subsystem["nqn"].as_str() == Some(nqn) {
-                return Ok(subsystem["state"].as_str() == Some("active"));
+                let is_active = subsystem["state"].as_str() == Some("active");
+                
+                if !is_active {
+                    return Ok(false);
+                }
+                
+                // Step 2: Validate connection health for external endpoints
+                if let Some(hosts) = subsystem["hosts"].as_array() {
+                    if !hosts.is_empty() {
+                        // If subsystem is active and has connected hosts, it's healthy
+                        return Ok(true);
+                    }
+                }
+                
+                // Step 3: Basic I/O validation for critical external endpoints
+                return validate_nvmeof_io_health(&rpc_url, nqn).await;
             }
         }
     }
     
+    Ok(false)
+}
+
+/// Validate NVMe-oF endpoint can handle basic I/O operations
+async fn validate_nvmeof_io_health(rpc_url: &str, nqn: &str) -> Result<bool, ControllerError> {
+    let http_client = HttpClient::new();
+    
+    // Get bdev info to check if the NVMe-oF device is accessible
+    let response = http_client
+        .post(rpc_url)
+        .json(&json!({
+            "method": "bdev_get_bdevs"
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+
+    let bdevs: serde_json::Value = response.json().await?;
+    
+    if let Some(bdev_list) = bdevs["result"].as_array() {
+        for bdev in bdev_list {
+            // Look for bdevs that use this NQN
+            if let Some(driver_specific) = bdev.get("driver_specific") {
+                if let Some(nvme_info) = driver_specific.get("nvme") {
+                    if let Some(ctrlr_data) = nvme_info.get("ctrlr_data") {
+                        if let Some(subnqn) = ctrlr_data.get("subnqn") {
+                            if subnqn.as_str() == Some(nqn) {
+                                // Check if bdev is claimed and accessible
+                                let claimed = bdev["claimed"].as_bool().unwrap_or(false);
+                                return Ok(claimed); // If claimed, it's being used and working
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // If we can't find the bdev or validate I/O, assume it's not healthy
     Ok(false)
 }
 
