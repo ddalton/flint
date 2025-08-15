@@ -526,7 +526,7 @@ impl ControllerService {
                 model: Some(disk.model.clone()),
                 vendor: Some(disk.vendor.clone()),
                 nvmeof_endpoint: NvmeofEndpoint::default(), // Local disk, no NVMe-oF endpoint needed
-                state: RaidMemberState::Online,
+                state: RaidMemberState::Online,  // Using correct enum value
                 capacity_bytes: disk.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
@@ -535,7 +535,7 @@ impl ControllerService {
 
         let spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_id.clone(),
-            raid_level: raid_level.to_string(),
+            raid_level: format!("raid{}", raid_level),  // Changed from "1" to "raid1" per schema
             num_member_disks: member_disks.len() as i32,
             member_disks,
             stripe_size_kb: 1024, // 1MB default stripe size
@@ -549,7 +549,7 @@ impl ControllerService {
         
         // Set initial status for new RAID disk
         raid_disk.status = Some(SpdkRaidDiskStatus {
-            state: "creating".to_string(),
+            state: "online".to_string(),  // Changed from "creating" to "online" per schema
             health_status: "initializing".to_string(),
             degraded: false,
             total_capacity_bytes: selected_disks.iter().map(|d| d.capacity).min().unwrap_or(0),
