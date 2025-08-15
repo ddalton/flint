@@ -865,7 +865,7 @@ impl ControllerService {
                     target_addr: endpoint.spec.nvmeof_endpoint.target_addr.clone(),
                     target_port: endpoint.spec.nvmeof_endpoint.target_port,
                     transport: endpoint.spec.nvmeof_endpoint.transport.clone(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
                     active: true,
                 },
                 state: RaidMemberState::Online,
