@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y \
     util-linux \
     curl \
     ca-certificates \
+    nvme-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary from the builder stage

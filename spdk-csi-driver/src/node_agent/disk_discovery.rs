@@ -55,16 +55,25 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
                  device.capacity / (1024 * 1024 * 1024));
     }
 
-    // Automatically attach discovered disks to SPDK (unified with manual setup path)
-    for device in &discovered_devices {
-        if let Err(e) = agent.attach_discovered_disk_to_spdk(device).await {
-            println!("⚠️ [DISCOVERY] Failed to attach disk {} to SPDK: {}", device.device_path, e);
+    // Deduplicate devices by device_path to avoid duplicate processing
+    let mut unique_devices = std::collections::HashMap::new();
+    for device in discovered_devices {
+        unique_devices.insert(device.device_path.clone(), device);
+    }
+    
+    println!("✅ [DISCOVERY] Deduplicated to {} unique devices", unique_devices.len());
+    
+    // Automatically attach discovered disks to SPDK using native NVMe controller attachment
+    for (device_path, device) in &unique_devices {
+        println!("🔗 [DISCOVERY] Processing unique device: {}", device_path);
+        if let Err(e) = agent.attach_nvme_controller_to_spdk(device).await {
+            println!("⚠️ [DISCOVERY] Failed to attach NVMe controller {} to SPDK: {}", device.pcie_addr, e);
         }
     }
     
-    // Perform health monitoring and create alerts for operator review
+    // Perform health monitoring and create alerts for operator review  
     println!("🏥 [DISCOVERY] Running health checks and alert generation...");
-    for device in &discovered_devices {
+    for (_, device) in &unique_devices {
         if let Err(e) = crate::node_agent::health_monitor::check_device_health(agent, device).await {
             println!("⚠️ [DISCOVERY] Health check failed for device {}: {}", device.controller_id, e);
         }
@@ -465,52 +474,54 @@ impl NodeAgent {
         Ok(lvs_names)
     }
 
-    /// Attach a discovered disk to SPDK (unified code path for manual and automatic setup)
-    pub async fn attach_discovered_disk_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔗 [ATTACH_SPDK] Attaching discovered disk to SPDK: {}", device.device_path);
+    /// Attach NVMe controller to SPDK using native methods (replaces AIO approach)
+    pub async fn attach_nvme_controller_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔗 [NVME_ATTACH] Attaching NVMe controller to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
         
-        // Skip system disks - use the full device name (e.g., "nvme1n1" not "nvme1")
-        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
-        if self.quick_system_disk_check(device_name).await {
-            println!("⚠️ [ATTACH_SPDK] Skipping system disk: {}", device.device_path);
+        // Skip system disks using PCI-based check for better accuracy
+        if self.system_disk_check_by_pci(&device.pcie_addr).await {
+            println!("⚠️ [NVME_ATTACH] Skipping system disk PCI: {}", device.pcie_addr);
             return Ok(());
         }
 
-        // Use the same logic as initialize_disk_blobstore but without LVS creation  
-        let bdev_name = format!("nvme-{}", device_name);
+        // Use SPDK's native NVMe controller attachment instead of AIO
+        let controller_name = format!("nvme-{}", device.controller_id);
 
-        // Check if bdev already exists in SPDK  
-        let bdevs = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
-            "method": "bdev_get_bdevs" 
+        // Check if controller already exists
+        let controllers = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
+            "method": "bdev_nvme_get_controllers" 
         })).await?;
         
-        let Some(bdev_list) = bdevs["result"].as_array() else {
-            return Err("Failed to get bdev list".into());
+        let Some(controller_list) = controllers["result"].as_array() else {
+            return Err("Failed to get controller list".into());
         };
 
-        let bdev_exists = bdev_list.iter().any(|b| b["name"].as_str() == Some(&bdev_name));
-        if !bdev_exists {
-            // Create AIO bdev for the device (unified with manual setup path)
-            println!("🔧 [ATTACH_SPDK] Creating AIO bdev: {}", bdev_name);
-            let create_bdev = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({
-                "method": "bdev_aio_create",
+        let controller_exists = controller_list.iter()
+            .any(|c| c["name"].as_str() == Some(&controller_name));
+
+        if !controller_exists {
+            println!("🔧 [NVME_ATTACH] Attaching NVMe controller: {} at PCI {}", controller_name, device.pcie_addr);
+            
+            let attach_result = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_nvme_attach_controller",
                 "params": {
-                    "name": bdev_name,
-                    "filename": device.device_path
+                    "name": controller_name,
+                    "trtype": "PCIe",
+                    "traddr": device.pcie_addr
                 }
             })).await;
 
-            match create_bdev {
+            match attach_result {
                 Ok(_) => {
-                    println!("✅ [ATTACH_SPDK] Successfully attached disk to SPDK: {} -> {}", device.device_path, bdev_name);
+                    println!("✅ [NVME_ATTACH] Successfully attached NVMe controller: {} -> {}", device.pcie_addr, controller_name);
                 }
                 Err(e) => {
-                    println!("❌ [ATTACH_SPDK] Failed to create AIO bdev for {}: {}", device.device_path, e);
+                    println!("❌ [NVME_ATTACH] Failed to attach NVMe controller {}: {}", device.pcie_addr, e);
                     return Err(e);
                 }
             }
         } else {
-            println!("ℹ️ [ATTACH_SPDK] Bdev already exists: {}", bdev_name);
+            println!("ℹ️ [NVME_ATTACH] Controller already exists: {}", controller_name);
         }
 
         Ok(())
