@@ -187,19 +187,25 @@ nodeResources:
       memory: "2Gi"
       hugepages-2Mi: "1Gi"
     # CPU pinning configuration for optimal performance
-    # Pin SPDK to a specific CPU core to minimize involuntary context switches
+    # Pin SPDK to specific CPU core(s) to minimize involuntary context switches
     # Uses SPDK's native --cpumask parameter for proper reactor configuration
     # 
-    # Recommended values:
+    # Single Core Examples:
     #   1: Pin to CPU core 1 (default, avoids core 0 which handles interrupts)
     #   2, 3, etc.: Pin to specific core if you have >2 CPU cores
     #   -1: Disable CPU pinning (not recommended for production)
+    #
+    # Multi-Core Examples (use hex CPU mask):
+    #   "0x6": Pin to CPU cores 1 and 2 (binary: 110 = cores 1&2)
+    #   "0xE": Pin to CPU cores 1, 2, and 3 (binary: 1110 = cores 1&2&3)
+    #   "0x18": Pin to CPU cores 3 and 4 (binary: 11000 = cores 3&4)
     #
     # Benefits of SPDK native CPU pinning:
     #   - Eliminates involuntary context switches (should see 0 involuntary switches)
     #   - Reduces latency and improves consistent performance
     #   - Better cache locality for SPDK reactor threads
     #   - Proper DPDK EAL core assignment
+    #   - Multiple cores improve throughput for high IOPS workloads
     cpuCore: 1
     
     # Scheduling policy to eliminate involuntary context switches

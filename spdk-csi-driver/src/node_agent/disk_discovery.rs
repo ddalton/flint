@@ -396,16 +396,39 @@ impl NodeAgent {
 
     /// Find PCI address for a given device name
     pub async fn find_pci_address_for_device(&self, device_name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let device_link_path = format!("/sys/block/{}/device", device_name);
+        let pci_regex = Regex::new(r"([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])")?;
         
+        // Method 1: Check /sys/block/{device}/device (traditional path)
+        let device_link_path = format!("/sys/block/{}/device", device_name);
         if let Ok(device_link) = fs::read_link(&device_link_path) {
-            // Extract PCI address from the symlink path
             let link_str = device_link.to_string_lossy();
-            
-            // Look for PCI address pattern (e.g., "0000:00:04.0")
-            let pci_regex = Regex::new(r"([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])")?;
-            
             if let Some(captures) = pci_regex.captures(&link_str) {
+                if let Some(pci_addr) = captures.get(1) {
+                    return Ok(pci_addr.as_str().to_string());
+                }
+            }
+        }
+        
+        // Method 2: Check /sys/class/nvme/{controller}/device (AWS EBS NVMe path)
+        let controller_name = device_name.chars()
+            .take_while(|c| c.is_alphabetic() || c.is_numeric())
+            .collect::<String>();
+        
+        let nvme_device_path = format!("/sys/class/nvme/{}/device", controller_name);
+        if let Ok(nvme_device_link) = fs::read_link(&nvme_device_path) {
+            let link_str = nvme_device_link.to_string_lossy();
+            if let Some(captures) = pci_regex.captures(&link_str) {
+                if let Some(pci_addr) = captures.get(1) {
+                    println!("✅ [PCI_DISCOVERY] Found PCI address {} for device {} via /sys/class/nvme/", pci_addr.as_str(), device_name);
+                    return Ok(pci_addr.as_str().to_string());
+                }
+            }
+        }
+        
+        // Method 3: Try to resolve the full path and extract PCI address
+        if let Ok(full_path) = fs::canonicalize(format!("/sys/block/{}/device", device_name)) {
+            let path_str = full_path.to_string_lossy();
+            if let Some(captures) = pci_regex.captures(&path_str) {
                 if let Some(pci_addr) = captures.get(1) {
                     return Ok(pci_addr.as_str().to_string());
                 }

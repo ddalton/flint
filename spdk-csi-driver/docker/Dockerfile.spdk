@@ -132,10 +132,17 @@ echo "Starting SPDK target daemon as PID 1 for proper signal handling..."\n\
 # CPU pinning: Use environment variable SPDK_CPU_CORE (default: CPU 1)\n\
 SPDK_CPU_CORE=${SPDK_CPU_CORE:-1}\n\
 \n\
-# Calculate CPU mask for SPDK (2^core_number)\n\
-# CPU 0 = 0x1, CPU 1 = 0x2, CPU 2 = 0x4, CPU 3 = 0x8, etc.\n\
-SPDK_CPU_MASK=$((1 << SPDK_CPU_CORE))\n\
-SPDK_CPU_MASK_HEX=$(printf "0x%x" $SPDK_CPU_MASK)\n\
+# CPU mask configuration - supports single core or direct mask\n\
+# If SPDK_CPU_CORE looks like hex (0x...), use as mask directly\n\
+# Otherwise calculate single core mask (2^core_number)\n\
+# Examples: cpuCore: 1 = CPU 1 only, cpuCore: "0x6" = CPUs 1&2\n\
+if [[ "$SPDK_CPU_CORE" =~ ^0x[0-9a-fA-F]+$ ]]; then\n\
+    SPDK_CPU_MASK_HEX="$SPDK_CPU_CORE"\n\
+    echo "Using CPU mask directly: $SPDK_CPU_MASK_HEX"\n\
+else\n\
+    SPDK_CPU_MASK=$((1 << SPDK_CPU_CORE))\n\
+    SPDK_CPU_MASK_HEX=$(printf "0x%x" $SPDK_CPU_MASK)\n\
+fi\n\
 \n\
 echo "Pinning SPDK to CPU core: $SPDK_CPU_CORE (mask: $SPDK_CPU_MASK_HEX)"\n\
 \n\
