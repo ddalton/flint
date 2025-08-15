@@ -88,26 +88,39 @@ impl NodeAgent {
 
 
 
-    /// Enhanced system disk detection using PCI address
-    pub async fn system_disk_check_by_pci(&self, pci_addr: &str) -> bool {
+    /// Robust system disk detection using PCI address (with proper error handling)
+    pub async fn robust_system_disk_check_by_pci(&self, pci_addr: &str) -> bool {
         println!("🔍 [SYSTEM_CHECK_PCI] Checking if PCI device {} contains system disk", pci_addr);
         
-        // Method 1: Find any block device that belongs to this PCI and check if it's mounted on root
-        if let Ok(entries) = fs::read_dir("/sys/block") {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let device_name = entry.file_name();
-                    let device_str = device_name.to_string_lossy();
-                    
-                    // Check if this block device belongs to our PCI address
-                    if let Ok(pci_path) = fs::read_link(format!("/sys/block/{}/device", device_str)) {
-                        if let Some(pci_str) = pci_path.to_string_lossy().split('/').last() {
-                            if pci_str == pci_addr {
-                                // This device belongs to our PCI address, check if it's system disk
-                                if self.quick_system_disk_check(&device_str).await {
-                                    println!("⚠️ [SYSTEM_CHECK_PCI] PCI device {} contains system disk via {}", pci_addr, device_str);
-                                    return true;
-                                }
+        // Direct approach: Check if this specific PCI device has mounted partitions
+        let block_devices = match fs::read_dir("/sys/block") {
+            Ok(entries) => entries,
+            Err(e) => {
+                println!("⚠️ [SYSTEM_CHECK_PCI] Failed to read /sys/block: {}", e);
+                return false; // Fail safe: if we can't check, don't skip
+            }
+        };
+        
+        for entry in block_devices {
+            if let Ok(entry) = entry {
+                let device_name = entry.file_name();
+                let device_str = device_name.to_string_lossy();
+                
+                // Skip non-nvme devices for efficiency
+                if !device_str.starts_with("nvme") {
+                    continue;
+                }
+                
+                // Check if this block device belongs to our PCI address
+                let device_link_path = format!("/sys/block/{}/device", device_str);
+                if let Ok(pci_path) = fs::read_link(&device_link_path) {
+                    if let Some(pci_str) = pci_path.to_string_lossy().split('/').last() {
+                        if pci_str == pci_addr {
+                            println!("🔍 [SYSTEM_CHECK_PCI] Found device {} for PCI {}", device_str, pci_addr);
+                            // This device belongs to our PCI address, check if it's system disk
+                            if self.quick_system_disk_check(&device_str).await {
+                                println!("⚠️ [SYSTEM_CHECK_PCI] PCI device {} contains system disk via {}", pci_addr, device_str);
+                                return true;
                             }
                         }
                     }
@@ -115,6 +128,7 @@ impl NodeAgent {
             }
         }
         
+        println!("✅ [SYSTEM_CHECK_PCI] PCI device {} is not a system disk", pci_addr);
         false
     }
 
@@ -478,10 +492,9 @@ impl NodeAgent {
     pub async fn attach_nvme_controller_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔗 [NVME_ATTACH] Attaching NVMe controller to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
         
-        // Skip system disks using direct device check (more reliable than PCI-based)
-        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
-        if self.quick_system_disk_check(device_name).await {
-            println!("⚠️ [NVME_ATTACH] Skipping system disk: {}", device.device_path);
+        // Skip system disks using PCI-based check (most reliable)
+        if self.robust_system_disk_check_by_pci(&device.pcie_addr).await {
+            println!("⚠️ [NVME_ATTACH] Skipping system disk PCI: {} ({})", device.pcie_addr, device.device_path);
             return Ok(());
         }
 
