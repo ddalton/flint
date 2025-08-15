@@ -734,116 +734,7 @@ impl ControllerService {
         Ok(())
     }
 
-    /// Create SpdkVolume CRD with initial status
-    async fn create_volume_crd(&self, volume_id: &str, capacity: i64, raid_disk: &SpdkRaidDisk, lvol_uuid: &str) -> Result<SpdkVolume, Status> {
-        use uuid::Uuid;
-
-        let spec = SpdkVolumeSpec {
-            volume_id: volume_id.to_string(),
-            size_bytes: capacity,
-            raid_disk_name: raid_disk.metadata.name.clone().unwrap_or_default(),
-            created_on_node: raid_disk.spec.created_on_node.clone(),
-            replica_count: raid_disk.spec.num_member_disks,
-            nvmeof_enabled: true,
-            encryption_enabled: false,
-            compression_enabled: false,
-        };
-
-        let mut volume = SpdkVolume::new_with_metadata(volume_id, spec, &self.driver.target_namespace);
-        
-        // Set initial status
-        volume.status = Some(SpdkVolumeStatus {
-            state: "creating".to_string(),
-            degraded: false,
-            last_checked: chrono::Utc::now().to_rfc3339(),
-            active_replicas: (0..raid_disk.spec.num_member_disks as usize).collect(),
-            failed_replicas: vec![],
-            write_sequence: 0,
-            last_successful_write: None,
-            raid_status: None,
-            nvmeof_targets: vec![],
-            ublk_device: None,
-            nvme_device: Some(NvmeClientDevice {
-                controller_id: format!("flint-{}", volume_id),
-                namespace_id: 1,
-                transport: "tcp".to_string(),
-                target_addr: "127.0.0.1".to_string(), // Will be updated
-                target_port: 4420,
-                hostnqn: format!("nqn.2016-06.io.spdk:host-{}", Uuid::new_v4()),
-                subnqn: format!("nqn.2016-06.io.spdk:vol-{}", volume_id),
-                connected: false,
-                device_path: None,
-            }),
-        });
-
-        // Create the CRD in Kubernetes
-        let volumes: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        let created_volume = volumes.create(&PostParams::default(), &volume).await
-            .map_err(|e| Status::internal(format!("Failed to create SpdkVolume CRD: {}", e)))?;
-
-        println!("✅ [VOLUME_CRD] Created SpdkVolume CRD: {} with 'creating' status", volume_id);
-        Ok(created_volume)
-    }
-
-    /// Update SpdkVolume status to ready after successful creation
-    async fn update_volume_status_ready(&self, volume: &SpdkVolume, lvol_uuid: &str) -> Result<(), Status> {
-        let volumes: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        
-        let mut status = volume.status.clone().unwrap_or_default();
-        status.state = "ready".to_string();
-        status.degraded = false;
-        status.last_checked = chrono::Utc::now().to_rfc3339();
-        status.last_successful_write = Some(chrono::Utc::now().to_rfc3339());
-        
-        // Update NVMe device info if present
-        if let Some(ref mut nvme_device) = status.nvme_device {
-            nvme_device.connected = true;
-            nvme_device.device_path = Some(format!("/dev/nvme-{}", lvol_uuid));
-        }
-        
-        let patch = json!({ "status": status });
-        volumes.patch_status(
-            &volume.metadata.name.as_ref().unwrap(),
-            &PatchParams::default(),
-            &Patch::Merge(patch)
-        ).await
-        .map_err(|e| Status::internal(format!("Failed to update SpdkVolume status to ready: {}", e)))?;
-
-        println!("✅ [VOLUME_STATUS] Updated SpdkVolume {} to 'ready' status", 
-                 volume.metadata.name.as_ref().unwrap());
-        Ok(())
-    }
-
-    /// Update SpdkVolume status on failure
-    async fn update_volume_status_failed(&self, volume: &SpdkVolume, error_msg: &str) -> Result<(), Status> {
-        let volumes: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        
-        let mut status = volume.status.clone().unwrap_or_default();
-        status.state = "failed".to_string();
-        status.degraded = true;
-        status.last_checked = chrono::Utc::now().to_rfc3339();
-        
-        let patch = json!({ 
-            "status": status,
-            "metadata": {
-                "annotations": {
-                    "flint.csi.storage.io/last-error": error_msg,
-                    "flint.csi.storage.io/failed-at": chrono::Utc::now().to_rfc3339()
-                }
-            }
-        });
-        
-        volumes.patch_status(
-            &volume.metadata.name.as_ref().unwrap(),
-            &PatchParams::default(),
-            &Patch::Merge(patch)
-        ).await
-        .map_err(|e| Status::internal(format!("Failed to update SpdkVolume status to failed: {}", e)))?;
-
-        println!("❌ [VOLUME_STATUS] Updated SpdkVolume {} to 'failed' status: {}", 
-                 volume.metadata.name.as_ref().unwrap(), error_msg);
-        Ok(())
-    }
+    // Volume CRD creation is handled by the existing provision_volume logic below
 
     /// Mark local disks as used by updating any related CRDs
     async fn mark_local_disks_as_used(&self, _selected_disks: &[AvailableNvmeDisk]) -> Result<(), Status> {
@@ -884,38 +775,20 @@ impl ControllerService {
         println!("🌐 [NODE_QUERY] Querying node {} for available disks (min {}GB)", 
                  node, min_capacity / (1024 * 1024 * 1024));
 
-        // Step 1: Trigger disk discovery refresh on the node
-        let refresh_url = format!("http://{}:8081/api/disks/refresh", node);
-        match self.driver.http_client.post(&refresh_url).send().await {
-            Ok(_) => println!("✅ [NODE_QUERY] Triggered disk discovery refresh on node {}", node),
-            Err(e) => println!("⚠️ [NODE_QUERY] Failed to refresh disk discovery on node {}: {}", node, e),
-        }
+        // Query SPDK for bdev information via existing RPC URL mechanism
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(node).await
+            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", node, e)))?;
 
-        // Step 2: Query disk status from node agent
-        let status_url = format!("http://{}:8081/api/disks/status", node);
-        let response = self.driver.http_client.get(&status_url).send().await
-            .map_err(|e| Status::internal(format!("Failed to query node {}: {}", node, e)))?;
-
-        let disk_status: serde_json::Value = response.json().await
-            .map_err(|e| Status::internal(format!("Failed to parse response from node {}: {}", node, e)))?;
-
-        // Step 3: Query SPDK for bdev information
-        let spdk_url = format!("http://{}:8081/api/spdk/rpc", node);
-        let bdev_response = self.driver.http_client.post(&spdk_url)
-            .json(&json!({
-                "method": "bdev_get_bdevs",
-                "params": {}
-            }))
-            .send().await
+        let bdev_data = call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs",
+            "params": {}
+        })).await
             .map_err(|e| Status::internal(format!("Failed to query SPDK bdevs on node {}: {}", node, e)))?;
 
-        let bdev_data: serde_json::Value = bdev_response.json().await
-            .map_err(|e| Status::internal(format!("Failed to parse SPDK response from node {}: {}", node, e)))?;
-
-        // Step 4: Parse and filter available disks
+        // Parse and filter available disks
         let mut available_disks = Vec::new();
         
-        if let Some(bdevs) = bdev_data["result"].as_array() {
+        if let Some(bdevs) = bdev_data.as_array() {
             for bdev in bdevs {
                 if let (Some(name), Some(num_blocks), Some(block_size)) = (
                     bdev["name"].as_str(),
@@ -969,7 +842,7 @@ impl ControllerService {
     fn is_nvmeof_disk_in_use(&self, disk: &NvmeofDisk) -> bool {
         // This is a sync method, so we'll use a simple heuristic
         // In practice, this should query the cluster state
-        disk.status.as_ref().map_or(false, |status| !status.healthy || status.in_use)
+        disk.status.as_ref().map_or(false, |status| !status.healthy)
     }
 
     /// Create RAID CRD with NVMe-oF endpoints  
@@ -982,17 +855,18 @@ impl ControllerService {
             RaidMemberDisk {
                 member_index: i as u32,
                 node_id: target_node.to_string(),
-                hardware_id: Some(format!("nvmeof-{}", endpoint.spec.nqn)),
-                serial_number: Some(endpoint.spec.serial_number.clone()),
+                hardware_id: Some(format!("nvmeof-{}", endpoint.spec.nvmeof_endpoint.nqn)),
+                serial_number: endpoint.spec.serial_number.clone(),
                 wwn: None,
                 model: Some("NVMe-oF".to_string()),
                 vendor: Some("Remote".to_string()),
                 nvmeof_endpoint: NvmeofEndpoint {
-                    nqn: endpoint.spec.nqn.clone(),
-                    target_addr: endpoint.spec.target_addr.clone(),
-                    target_port: endpoint.spec.target_port,
-                    transport_type: endpoint.spec.transport_type.clone(),
-                    hostnqn: endpoint.spec.hostnqn.clone(),
+                    nqn: endpoint.spec.nvmeof_endpoint.nqn.clone(),
+                    target_addr: endpoint.spec.nvmeof_endpoint.target_addr.clone(),
+                    target_port: endpoint.spec.nvmeof_endpoint.target_port,
+                    transport: endpoint.spec.nvmeof_endpoint.transport.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    active: true,
                 },
                 state: RaidMemberState::Online,
                 capacity_bytes: endpoint.spec.size_bytes,
@@ -1078,11 +952,10 @@ impl ControllerService {
                 "method": "bdev_nvme_attach_controller",
                 "params": {
                     "name": format!("nvmeof-{}", endpoint.nqn.split(':').last().unwrap_or("unknown")),
-                    "trtype": endpoint.transport_type,
+                    "trtype": endpoint.transport,
                     "traddr": endpoint.target_addr,
                     "trsvcid": endpoint.target_port.to_string(),
-                    "subnqn": endpoint.nqn,
-                    "hostnqn": endpoint.hostnqn
+                    "subnqn": endpoint.nqn
                 }
             })).await;
 
@@ -1144,7 +1017,7 @@ impl ControllerService {
             &self.driver.target_namespace,
         );
 
-        // Set initial status
+        // Set initial status with all required fields
         spdk_volume.status = Some(SpdkVolumeStatus {
             state: "ready".to_string(),
             degraded: false,
@@ -1157,16 +1030,22 @@ impl ControllerService {
             nvmeof_targets: vec![],
             ublk_device: None,
             nvme_device: Some(NvmeClientDevice {
-                controller_id: format!("flint-{}", volume_id),
-                namespace_id: 1,
+                device_path: format!("/dev/nvme-{}", lvol_uuid),
+                nqn: format!("nqn.2016-06.io.spdk:vol-{}", volume_id),
                 transport: self.driver.nvmeof_transport.clone(),
                 target_addr: raid_disk.spec.created_on_node.clone(),
-                target_port: self.driver.nvmeof_target_port as u32,
-                hostnqn: format!("nqn.2016-06.io.spdk:host-{}", volume_id),
-                subnqn: format!("nqn.2016-06.io.spdk:vol-{}", volume_id),
-                connected: true,
-                device_path: Some(format!("/dev/nvme-{}", lvol_uuid)),
+                target_port: self.driver.nvmeof_target_port,
+                connected_at: chrono::Utc::now().to_rfc3339(),
+                node: raid_disk.spec.created_on_node.clone(),
+                controller_id: Some(format!("flint-{}", volume_id)),
             }),
+            scheduled_node: Some(raid_disk.spec.created_on_node.clone()),
+            has_local_replica: true,
+            scheduling_policy: Some("local-preferred".to_string()),
+            replica_nodes: vec![raid_disk.spec.created_on_node.clone()],
+            read_optimized: true,
+            read_policy: Some("local-first".to_string()),
+            local_replica_performance: None,
         });
 
         // Create CRD with enhanced debugging
