@@ -300,9 +300,25 @@ impl ControllerService {
         // Step 2: Create RAID bdev
         println!("⚙️ [RAID_INIT] Step 2: Creating RAID bdev...");
         let raid_bdev_name = raid_disk.spec.raid_bdev_name();
+        // Extract SPDK bdev names from device paths (hardware_id contains "/dev/aio-nvme0")
         let member_names: Vec<String> = raid_disk.spec.member_disks.iter()
-            .map(|m| format!("nvme-{}", m.hardware_id.as_ref().unwrap_or(&"unknown".to_string())))
+            .filter_map(|m| {
+                if let Some(hardware_id) = &m.hardware_id {
+                    // hardware_id is "/dev/aio-nvme0", extract "aio-nvme0"
+                    if let Some(bdev_name) = hardware_id.strip_prefix("/dev/") {
+                        Some(bdev_name.to_string())
+                    } else {
+                        // Fallback if hardware_id doesn't have /dev/ prefix
+                        Some(hardware_id.clone())
+                    }
+                } else {
+                    println!("⚠️ [RAID_INIT] Member disk missing hardware_id, skipping");
+                    None
+                }
+            })
             .collect();
+
+        println!("🔧 [RAID_INIT] Using member bdev names: {:?}", member_names);
 
         let raid_create_result = call_spdk_rpc(&spdk_rpc_url, &json!({
             "method": "bdev_raid_create",
