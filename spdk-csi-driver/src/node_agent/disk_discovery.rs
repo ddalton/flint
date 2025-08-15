@@ -489,41 +489,52 @@ impl NodeAgent {
         Ok(lvs_names)
     }
 
-    /// Attach NVMe controller to SPDK using native methods (replaces AIO approach)
+    /// Attach discovered NVMe device to SPDK with intelligent strategy selection
+    /// Tries native NVMe first (optimal for bare metal), falls back to AIO (compatible with cloud)
     pub async fn attach_nvme_controller_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔗 [NVME_ATTACH] Attaching NVMe controller to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
-        
-        // Skip system disks using PCI-based check (most reliable)
+        println!("🔗 [SMART_ATTACH] Attaching NVMe device to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
+
+        // Skip system disks
         if self.robust_system_disk_check_by_pci(&device.pcie_addr).await {
-            println!("⚠️ [NVME_ATTACH] Skipping system disk PCI: {} ({})", device.pcie_addr, device.device_path);
+            println!("⚠️ [SMART_ATTACH] Skipping system disk: {} ({})", device.pcie_addr, device.device_path);
             return Ok(());
         }
 
-        // Use SPDK's native NVMe controller attachment instead of AIO
+        // Strategy 1: Try native NVMe first (best performance for bare metal/IOMMU)
+        println!("🎯 [SMART_ATTACH] Attempting native NVMe attachment (optimal for bare metal)...");
+        match self.try_native_nvme_attachment(device).await {
+            Ok(()) => {
+                println!("✅ [SMART_ATTACH] Successfully attached via native NVMe: {}", device.pcie_addr);
+                return Ok(());
+            }
+            Err(e) => {
+                println!("⚠️ [SMART_ATTACH] Native NVMe failed (likely cloud/AWS): {}", e);
+                println!("🔄 [SMART_ATTACH] Falling back to AIO attachment (cloud-compatible)...");
+            }
+        }
+
+        // Strategy 2: Fallback to AIO (works with kernel driver on cloud instances)
+        self.try_aio_attachment(device).await
+    }
+
+    /// Try native NVMe controller attachment (optimal for bare metal with IOMMU)
+    async fn try_native_nvme_attachment(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let controller_name = format!("nvme-{}", device.controller_id);
-        println!("🔧 [NVME_ATTACH] Generated controller name: {}", controller_name);
+        println!("🏠 [NATIVE_NVME] Attempting native attachment: {} -> {}", device.pcie_addr, controller_name);
 
         // Check if controller already exists
-        println!("🔍 [NVME_ATTACH] Checking existing controllers via RPC...");
         let controllers = call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
             "method": "bdev_nvme_get_controllers" 
         })).await?;
-        println!("✅ [NVME_ATTACH] RPC call successful, parsing response...");
         
         let Some(controller_list) = controllers["result"].as_array() else {
-            println!("❌ [NVME_ATTACH] Failed to parse controller list from RPC response");
             return Err("Failed to get controller list".into());
         };
-        println!("🔍 [NVME_ATTACH] Found {} existing controllers", controller_list.len());
 
         let controller_exists = controller_list.iter()
             .any(|c| c["name"].as_str() == Some(&controller_name));
-        println!("🔍 [NVME_ATTACH] Controller {} exists: {}", controller_name, controller_exists);
 
         if !controller_exists {
-            println!("🔧 [NVME_ATTACH] Attaching NVMe controller: {} at PCI {}", controller_name, device.pcie_addr);
-            println!("🔧 [NVME_ATTACH] Making bdev_nvme_attach_controller RPC call...");
-            
             let attach_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
                 "method": "bdev_nvme_attach_controller",
                 "params": {
@@ -532,23 +543,74 @@ impl NodeAgent {
                     "traddr": device.pcie_addr
                 }
             })).await;
-            println!("🔧 [NVME_ATTACH] RPC call completed, processing result...");
 
             match attach_result {
                 Ok(_) => {
-                    println!("✅ [NVME_ATTACH] Successfully attached NVMe controller: {} -> {}", device.pcie_addr, controller_name);
+                    println!("✅ [NATIVE_NVME] Native NVMe attachment successful: {}", device.pcie_addr);
+                    Ok(())
                 }
                 Err(e) => {
-                    println!("❌ [NVME_ATTACH] Failed to attach NVMe controller {}: {}", device.pcie_addr, e);
-                    return Err(e);
+                    // Detect kernel driver binding issues (common on cloud instances)
+                    let error_msg = e.to_string().to_lowercase();
+                    if error_msg.contains("no controller was found") || 
+                       error_msg.contains("failed to connect") ||
+                       error_msg.contains("device busy") ||
+                       error_msg.contains("permission denied") {
+                        Err(format!("Kernel driver bound (cloud/AWS): {}", e).into())
+                    } else {
+                        Err(e)
+                    }
                 }
             }
         } else {
-            println!("ℹ️ [NVME_ATTACH] Controller already exists: {}", controller_name);
+            println!("ℹ️ [NATIVE_NVME] Controller {} already exists", controller_name);
+            Ok(())
         }
-
-        Ok(())
     }
+
+    /// Try AIO attachment (compatible with cloud instances and kernel drivers)
+    async fn try_aio_attachment(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let bdev_name = format!("aio-{}", device.controller_id);
+        println!("☁️ [AIO_ATTACH] Attempting AIO attachment: {} -> {}", device.device_path, bdev_name);
+
+        // Check if AIO bdev already exists
+        let bdevs = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs"
+        })).await?;
+        
+        let Some(bdev_list) = bdevs["result"].as_array() else {
+            return Err("Failed to get bdev list".into());
+        };
+
+        let bdev_exists = bdev_list.iter()
+            .any(|b| b["name"].as_str() == Some(&bdev_name));
+
+        if !bdev_exists {
+            let create_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_aio_create",
+                "params": {
+                    "name": bdev_name,
+                    "filename": device.device_path
+                }
+            })).await;
+
+            match create_result {
+                Ok(_) => {
+                    println!("✅ [AIO_ATTACH] AIO attachment successful: {} -> {}", device.device_path, bdev_name);
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("❌ [AIO_ATTACH] AIO attachment failed: {}", e);
+                    Err(format!("Both native NVMe and AIO attachment failed for {}: {}", device.device_path, e).into())
+                }
+            }
+        } else {
+            println!("ℹ️ [AIO_ATTACH] AIO bdev {} already exists", bdev_name);
+            Ok(())
+        }
+    }
+
+
 
     /// Read disk cluster metadata (returns default metadata)
     pub async fn read_disk_cluster_metadata(&self, device_name: &str) -> Result<FlintDiskMetadata, Box<dyn std::error::Error + Send + Sync>> {
