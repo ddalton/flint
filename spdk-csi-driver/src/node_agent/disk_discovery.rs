@@ -54,6 +54,13 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
                  device.controller_id, device.model, device.pcie_addr, 
                  device.capacity / (1024 * 1024 * 1024));
     }
+
+    // Automatically attach discovered disks to SPDK (unified with manual setup path)
+    for device in &discovered_devices {
+        if let Err(e) = agent.attach_discovered_disk_to_spdk(device).await {
+            println!("⚠️ [DISCOVERY] Failed to attach disk {} to SPDK: {}", device.device_path, e);
+        }
+    }
     
     // Perform health monitoring and create alerts for operator review
     println!("🏥 [DISCOVERY] Running health checks and alert generation...");
@@ -455,6 +462,57 @@ impl NodeAgent {
         }
         
         Ok(lvs_names)
+    }
+
+    /// Attach a discovered disk to SPDK (unified code path for manual and automatic setup)
+    pub async fn attach_discovered_disk_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔗 [ATTACH_SPDK] Attaching discovered disk to SPDK: {}", device.device_path);
+        
+        // Skip system disks
+        if self.quick_system_disk_check(&device.controller_id).await {
+            println!("⚠️ [ATTACH_SPDK] Skipping system disk: {}", device.device_path);
+            return Ok(());
+        }
+
+        // Use the same logic as initialize_disk_blobstore but without LVS creation
+        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
+        let bdev_name = format!("nvme-{}", device_name);
+
+        // Check if bdev already exists in SPDK
+        let bdevs = crate::node_agent::rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
+            "method": "bdev_get_bdevs" 
+        })).await?;
+        
+        let Some(bdev_list) = bdevs["result"].as_array() else {
+            return Err("Failed to get bdev list".into());
+        };
+
+        let bdev_exists = bdev_list.iter().any(|b| b["name"].as_str() == Some(&bdev_name));
+        if !bdev_exists {
+            // Create AIO bdev for the device (unified with manual setup path)
+            println!("🔧 [ATTACH_SPDK] Creating AIO bdev: {}", bdev_name);
+            let create_bdev = crate::node_agent::rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_aio_create",
+                "params": {
+                    "name": bdev_name,
+                    "filename": device.device_path
+                }
+            })).await;
+
+            match create_bdev {
+                Ok(_) => {
+                    println!("✅ [ATTACH_SPDK] Successfully attached disk to SPDK: {} -> {}", device.device_path, bdev_name);
+                }
+                Err(e) => {
+                    println!("❌ [ATTACH_SPDK] Failed to create AIO bdev for {}: {}", device.device_path, e);
+                    return Err(e);
+                }
+            }
+        } else {
+            println!("ℹ️ [ATTACH_SPDK] Bdev already exists: {}", bdev_name);
+        }
+
+        Ok(())
     }
 
     /// Read disk cluster metadata (returns default metadata)
