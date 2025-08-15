@@ -61,12 +61,27 @@ async fn call_spdk_rpc_unix(
         stream.write_all(message.as_bytes())
             .map_err(|e| format!("Failed to write to SPDK socket: {}", e))?;
         
-        // Read response
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response)
-            .map_err(|e| format!("Failed to read from SPDK socket: {}", e))?;
+        // Read response (SPDK sends newline-delimited JSON, doesn't close socket)
+        let mut response = String::new();
+        let mut buffer = [0; 1];
         
-        let response_str = String::from_utf8_lossy(&response);
+        // Read until we get a newline (complete JSON response)
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(1) => {
+                    let byte = buffer[0];
+                    if byte == b'\n' {
+                        break; // Complete response received
+                    }
+                    response.push(byte as char);
+                }
+                Err(e) => return Err(format!("Failed to read from SPDK socket: {}", e).into()),
+                _ => unreachable!(),
+            }
+        }
+        
+        let response_str = response;
         
         // Parse JSON response directly (no HTTP parsing needed)
         let parsed_response: Value = serde_json::from_str(response_str.trim())
