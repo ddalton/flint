@@ -546,11 +546,31 @@ impl NodeAgent {
 
             match attach_result {
                 Ok(_) => {
-                    println!("✅ [NATIVE_NVME] Native NVMe attachment successful: {}", device.pcie_addr);
-                    Ok(())
+                    // RPC succeeded, but verify controller was actually attached
+                    println!("🔍 [NATIVE_NVME] RPC successful, verifying controller attachment...");
+                    
+                    // Re-check if controller exists after "successful" RPC
+                    let verify_controllers = call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
+                        "method": "bdev_nvme_get_controllers" 
+                    })).await?;
+                    
+                    let Some(verify_list) = verify_controllers["result"].as_array() else {
+                        return Err("Failed to verify controller attachment".into());
+                    };
+
+                    let actually_attached = verify_list.iter()
+                        .any(|c| c["name"].as_str() == Some(&controller_name));
+
+                    if actually_attached {
+                        println!("✅ [NATIVE_NVME] Native NVMe attachment verified: {}", device.pcie_addr);
+                        Ok(())
+                    } else {
+                        println!("⚠️ [NATIVE_NVME] RPC succeeded but controller not attached (silent SPDK failure)");
+                        Err("SPDK silent failure - controller not attached despite successful RPC".into())
+                    }
                 }
                 Err(e) => {
-                    // Detect kernel driver binding issues (common on cloud instances)
+                    // Detect explicit RPC errors
                     let error_msg = e.to_string().to_lowercase();
                     if error_msg.contains("no controller was found") || 
                        error_msg.contains("failed to connect") ||
