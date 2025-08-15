@@ -29,7 +29,7 @@ pub use nvmeof_manager::{manage_nvmeof_exports_intelligently, repair_spdkraiddis
 pub use http_api::start_api_server;
 pub use raid_operations::initialize_blobstore_on_device;
 pub use health_monitor::check_device_health;
-pub use rpc_client::call_spdk_rpc;
+// Removed re-export to prevent confusion - use direct imports instead
 
 // Core dependencies - FlintDiskMetadata and models only used in specific modules
 
@@ -153,7 +153,7 @@ pub async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::e
             "method": "spdk_get_version"
         });
         
-        match call_spdk_rpc(&agent.spdk_rpc_url, &test_request).await {
+        match rpc_client::call_spdk_rpc(&agent.spdk_rpc_url, &test_request).await {
             Ok(response) => {
                 if response.get("result").is_some() {
                     println!("✅ [SPDK_READY] SPDK is ready! Version check successful.");

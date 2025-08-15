@@ -2,8 +2,12 @@
 //
 // This module handles discovery of local NVMe devices, reading hardware information,
 // and managing disk identification using persistent paths (Portworx-style approach).
+//
+// ⚠️  RPC SAFETY: Always use `call_spdk_rpc` from rpc_client module
+// ❌ NEVER use `super::call_spdk_rpc` - this can lead to wrong implementations
 
-use crate::node_agent::{NodeAgent, rpc_client::call_spdk_rpc};
+use crate::node_agent::NodeAgent;
+use crate::node_agent::rpc_client::call_spdk_rpc;  // ✅ OFFICIAL RPC CLIENT
 use crate::FlintDiskMetadata;
 use serde_json::json;
 use std::process::Command;
@@ -468,7 +472,7 @@ impl NodeAgent {
 
     /// Read LVS stores from SPDK
     pub async fn read_lvs_stores(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let response = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({
+        let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
             "method": "bdev_lvol_get_lvstores"
         })).await?;
         

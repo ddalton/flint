@@ -7,12 +7,21 @@ use serde_json::Value;
 use std::io::{Write, Read};
 use std::os::unix::net::UnixStream;
 
+/// Trait to ensure only approved RPC implementations are used
+/// This prevents calling wrong RPC functions by accident
+pub trait SpdkRpcClient {
+    async fn call_rpc(&self, method: &str, params: Option<Value>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
+}
 
 /// SPDK RPC interface for CSI operations
 /// 
 /// This implementation uses SPDK v25.05.x RPC interface exclusively.
 /// All operations are performed via persistent socket connections to the SPDK target process.
 /// Implementation matches the official SPDK Go client pattern.
+/// 
+/// ⚠️  WARNING: This is the ONLY approved SPDK RPC client function.
+/// ❌ Do NOT create alternative implementations or use re-exports.
+/// ✅ Always import as: `use crate::node_agent::rpc_client::call_spdk_rpc;`
 pub async fn call_spdk_rpc(
     spdk_rpc_url: &str,
     rpc_request: &Value,
