@@ -40,32 +40,7 @@ impl ControllerService {
     // Single replica path removed: unified RAID-based provisioning is used for all volumes
 
     /// Provision a multi-replica volume on a RAID disk
-    async fn provision_multi_replica_volume(
-        &self,
-        volume_id: &str,
-        capacity: i64,
-        num_replicas: i32,
-    ) -> Result<(StorageBackend, String, String), Status> {
-        // Find a suitable RAID1 disk
-        let raid_disk = self.find_or_create_raid_disk(num_replicas, capacity, "1").await?;
-        
-        // Create logical volume on the RAID disk's LVS
-        let lvol_uuid = self.create_volume_lvol_on_raid(&raid_disk, capacity, volume_id).await?;
-        
-        // Get the LVS name for this RAID disk
-        let lvs_name = raid_disk.spec.lvs_name();
-        
-        // Create storage backend reference
-        let storage_backend = StorageBackend::RaidDisk {
-            raid_disk_ref: raid_disk.metadata.name.clone().unwrap_or_default(),
-            node_id: raid_disk.spec.created_on_node.clone(),
-        };
-        
-        println!("✅ [MULTI_VOLUME] Created multi-replica volume {} on RAID disk {} (node {})", 
-                 volume_id, raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()), raid_disk.spec.created_on_node);
-        
-        Ok((storage_backend, lvol_uuid, lvs_name))
-    }
+
 
     /// Create logical volume on a RAID disk (same interface as single disk)
     async fn create_volume_lvol_on_raid(
@@ -165,34 +140,7 @@ impl ControllerService {
     /// Create LVS on the RAID disk
     // LVS creation on RAID disk removed from controller (expect existing LVS)
 
-    /// Update RAID disk status after successful LVS creation
-    async fn update_raid_disk_status(&self, raid_disk: &SpdkRaidDisk, lvs_name: &str) -> Result<(), Status> {
-        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        
-        let mut status = raid_disk.status.clone().unwrap_or_default();
-        status.state = "online".to_string();
-        status.raid_bdev_name = Some(raid_disk.spec.raid_bdev_name());
-        status.lvs_name = Some(lvs_name.to_string());
-        status.health_status = "healthy".to_string();
-        status.degraded = false;
-        status.active_member_count = raid_disk.spec.num_member_disks as u32;
-        status.failed_member_count = 0;
-        status.last_checked = chrono::Utc::now().to_rfc3339();
-        status.created_at = Some(chrono::Utc::now().to_rfc3339());
 
-        let patch = json!({
-            "status": status
-        });
-
-        raid_disks.patch_status(
-            &raid_disk.metadata.name.as_ref().unwrap(),
-            &PatchParams::default(),
-            &Patch::Merge(patch)
-        ).await
-        .map_err(|e| Status::internal(format!("Failed to update RAID disk status: {}", e)))?;
-
-        Ok(())
-    }
 
     /// Provision volume with specified number of replicas - unified for single and multi-replica
     async fn provision_volume(
@@ -488,8 +436,7 @@ impl Controller for ControllerService {
             Ok(spdk_volume) => {
                 println!("✅ [CSI_CONTROLLER] Volume provisioned successfully: {}", volume_name);
                 
-                // TODO: Auto-save with SPDK native config
-                println!("💾 [TODO] SPDK native config save after volume creation");
+                // SPDK configuration auto-save could be added here if needed
                 
                 let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
 
@@ -548,8 +495,7 @@ impl Controller for ControllerService {
         // Delete replicas
         self.delete_volume_replicas(&spdk_volume).await?;
 
-        // TODO: Auto-save with SPDK native config
-        println!("💾 [TODO] SPDK native config save after volume deletion");
+        // SPDK configuration auto-save could be added here if needed
 
         // RAID disk status is maintained by operator; no per-disk status updates here
 

@@ -6,7 +6,7 @@
 use serde_json::Value;
 use std::io::{Write, Read};
 use std::os::unix::net::UnixStream;
-use tokio::process::Command;
+
 
 /// SPDK RPC interface for CSI operations
 /// 
@@ -119,47 +119,4 @@ fn parse_http_response(response: &str) -> Result<Value, Box<dyn std::error::Erro
     } else {
         Err("No JSON found in HTTP response".into())
     }
-}
-
-/// Execute SPDK RPC script command (for compatibility with existing scripts)
-pub async fn call_spdk_rpc_script(
-    socket_path: &str,
-    method: &str,
-    params: Option<&Value>,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let mut cmd = Command::new("python3");
-    cmd.arg("/usr/local/bin/rpc.py");
-    cmd.arg("-s").arg(socket_path);
-    cmd.arg(method);
-    
-    // Add parameters if provided
-    if let Some(params) = params {
-        if let Value::Object(param_map) = params {
-            for (key, value) in param_map {
-                cmd.arg(format!("--{}", key));
-                
-                // Convert value to string argument
-                match value {
-                    Value::String(s) => cmd.arg(s),
-                    Value::Number(n) => cmd.arg(n.to_string()),
-                    Value::Bool(b) => cmd.arg(b.to_string()),
-                    _ => cmd.arg(value.to_string()),
-                };
-            }
-        }
-    }
-    
-    let output = cmd.output().await
-        .map_err(|e| format!("Failed to execute rpc.py: {}", e))?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("RPC script failed: {}", stderr).into());
-    }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse RPC script output: {}", e))?;
-    
-    Ok(result)
 }

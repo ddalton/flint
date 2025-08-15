@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use chrono;
 use chrono::{DateTime, Utc};
-use uuid;
+
 // Shared NVMe-oF endpoint type used by NvmeofDisk and RAID member specs
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
 pub struct NvmeofEndpoint {
@@ -230,7 +230,7 @@ impl RaidBdevConfig {
     
     /// Validate that this RAID configuration is suitable for the given node
     /// Returns true if the node can host this RAID (has local members or can access remotes)
-    pub fn is_suitable_for_node(&self, node_id: &str) -> bool {
+    pub fn is_suitable_for_node(&self, _node_id: &str) -> bool {
         // If RAID has local members, it should only be on the local node
         if self.has_local_members() {
             // This would require knowledge of which node the local members belong to

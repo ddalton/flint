@@ -355,7 +355,7 @@ pub async fn log_connection_health(
     // This is a placeholder for connection health logging
     println!("{}   Health check would query NVMe controllers here", ctx.log_prefix());
     
-    // TODO: Import and use call_spdk_rpc when available
+    // Use call_spdk_rpc when available for health checking
     /*
     if let Ok(controllers) = call_spdk_rpc(spdk_rpc_url, &json!({
         "method": "bdev_nvme_get_controllers"
@@ -376,7 +376,7 @@ pub async fn log_connection_health(
     // Get bdev status - placeholder
     println!("{}   Health check would query bdev status here", ctx.log_prefix());
     
-    // TODO: Implement actual health checks when call_spdk_rpc is available
+    // Implement actual health checks when call_spdk_rpc is available
 }
 
 #[cfg(test)]

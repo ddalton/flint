@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
-import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Settings, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Settings, AlertTriangle, CheckCircle, Plus, RefreshCw } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
 import { NodeAlertsPanel } from './NodeAlertsPanel';
+import { NodeTargetSelectionDialog } from '../ui/NodeTargetSelectionDialog';
+import { EnhancedRaidMigrationDialog } from '../ui/EnhancedRaidMigrationDialog';
+import { MigrationProgressMonitor } from '../ui/MigrationProgressMonitor';
+import { MigrationAlertSystem } from '../ui/MigrationAlertSystem';
+import { useMigrationData } from '../../hooks/useMigrationData';
+import { useMigrationMonitoring } from '../../hooks/useMigrationMonitoring';
 
 interface MaintenanceStatus {
   active: boolean;
@@ -32,6 +38,7 @@ interface NodeDetailViewProps {
   onDiskVolumeFilter?: (diskId: string) => void;
   onShowMetrics: () => void;
   maintenanceStatus?: MaintenanceStatus | null;
+  availableNodes: string[];
 }
 
 export const NodeDetailView: React.FC<NodeDetailViewProps> = ({ 
@@ -47,9 +54,34 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   onDiskVolumeFilter,
   onShowMetrics,
   maintenanceStatus,
+  availableNodes,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
   const [isMaintenanceLoading, setIsMaintenanceLoading] = useState(false);
+  const [showMaintenanceDialog, setShowMaintenanceDialog] = useState(false);
+  const [showEnhancedMaintenanceDialog, setShowEnhancedMaintenanceDialog] = useState(false);
+  const [maintenanceDialogType, setMaintenanceDialogType] = useState<'normal' | 'force'>('normal');
+  
+  // Enhanced maintenance migration data
+  const {
+    availableDisks,
+    availableNvmeofTargets,
+    loading: migrationDataLoading,
+    refreshData: refreshMigrationData
+  } = useMigrationData(undefined, undefined, false);
+  
+  // Migration monitoring for real-time progress
+  const {
+    operations: migrationOperations,
+    alerts: migrationAlerts,
+    cleanupQueue,
+    loading: monitoringLoading,
+    isConnected: monitoringConnected,
+    retryOperation,
+    cancelOperation,
+    dismissAlert,
+    refreshData: refreshMonitoring
+  } = useMigrationMonitoring(node, true, 5000);
 
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
@@ -61,19 +93,26 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
     setExpandedDisks(newExpanded);
   };
 
-  const handleMaintenanceToggle = async (enable: boolean, force = false) => {
+  const handleMaintenanceToggle = async (enable: boolean, force = false, targetNode?: string) => {
     setIsMaintenanceLoading(true);
     try {
+      const requestBody: any = {
+        enable,
+        force,
+        migration_plan: null, // Let the system auto-generate migration plan
+      };
+      
+      // Add target node if specified
+      if (targetNode) {
+        requestBody.target_node = targetNode;
+      }
+
       const response = await fetch(`/api/nodes/${node}/maintenance`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          enable,
-          force,
-          migration_plan: null, // Let the system auto-generate migration plan
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -83,15 +122,41 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       const result = await response.json();
       console.log(`Maintenance mode ${enable ? 'enabled' : 'disabled'}:`, result);
       
-      // TODO: Show success notification and refresh data
-      alert(result.message);
+      // Show success notification with target info
+      const message = targetNode 
+        ? `Maintenance mode ${enable ? 'enabled' : 'disabled'} with target node: ${targetNode}\n\n${result.message}`
+        : result.message;
+      alert(message);
+      
+      // Close dialog
+      setShowMaintenanceDialog(false);
       
     } catch (error) {
       console.error('Error toggling maintenance mode:', error);
-      alert(`Error: ${error.message}`);
+      alert(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsMaintenanceLoading(false);
     }
+  };
+
+  const handleEnterMaintenance = (type: 'normal' | 'force', enhanced: boolean = false) => {
+    setMaintenanceDialogType(type);
+    if (enhanced) {
+      setShowEnhancedMaintenanceDialog(true);
+    } else {
+      setShowMaintenanceDialog(true);
+    }
+  };
+
+  const handleEnhancedMaintenanceConfirm = async (operation: any) => {
+    const force = maintenanceDialogType === 'force';
+    await handleMaintenanceToggle(true, force, operation.target_node);
+    setShowEnhancedMaintenanceDialog(false);
+  };
+
+  const handleMaintenanceConfirm = async (targetNode?: string) => {
+    const force = maintenanceDialogType === 'force';
+    await handleMaintenanceToggle(true, force, targetNode);
   };
 
   // Use filtered volumes if provided, otherwise use all node volumes
@@ -171,25 +236,30 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           ) : (
             <div className="flex items-center gap-1">
               <button
-                onClick={() => handleMaintenanceToggle(true)}
+                onClick={() => handleEnterMaintenance('normal', false)}
                 disabled={isMaintenanceLoading}
-                className="px-3 py-1 text-sm bg-yellow-600 text-white rounded-full hover:bg-yellow-700 transition-colors flex items-center gap-1 disabled:opacity-50"
-                title="Enter maintenance mode with migration"
+                className="px-2 py-1 text-xs bg-yellow-600 text-white rounded-full hover:bg-yellow-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Enter maintenance mode with automatic migration"
               >
-                <Settings className="w-4 h-4" />
-                {isMaintenanceLoading ? 'Entering...' : 'Enter Maintenance'}
+                <Settings className="w-3 h-3" />
+                {isMaintenanceLoading ? 'Entering...' : 'Auto Maintenance'}
               </button>
               <button
-                onClick={() => {
-                  if (confirm('Are you sure you want to force maintenance mode? This will skip migration and may cause data unavailability!')) {
-                    handleMaintenanceToggle(true, true);
-                  }
-                }}
+                onClick={() => handleEnterMaintenance('normal', true)}
                 disabled={isMaintenanceLoading}
-                className="px-3 py-1 text-sm bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                className="px-2 py-1 text-xs bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Enter maintenance mode with custom target selection"
+              >
+                <Plus className="w-3 h-3" />
+                Custom Targets
+              </button>
+              <button
+                onClick={() => handleEnterMaintenance('force', false)}
+                disabled={isMaintenanceLoading}
+                className="px-2 py-1 text-xs bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors flex items-center gap-1 disabled:opacity-50"
                 title="Force maintenance mode (DANGEROUS - no migration)"
               >
-                <AlertTriangle className="w-4 h-4" />
+                <AlertTriangle className="w-3 h-3" />
                 Force
               </button>
             </div>
@@ -288,9 +358,35 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
         </div>
       )}
 
+      {/* Migration Progress Monitor */}
+      {migrationOperations.length > 0 && (
+        <div className="mb-6">
+          <div className="bg-white rounded-lg p-6 border">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <RefreshCw className={`w-5 h-5 ${monitoringConnected ? 'text-green-600' : 'text-gray-400'}`} />
+                Active Migrations
+              </h3>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <div className={`w-2 h-2 rounded-full ${
+                  monitoringConnected ? 'bg-green-500' : 'bg-red-500'
+                }`} />
+                {monitoringConnected ? 'Live Updates' : 'Disconnected'}
+              </div>
+            </div>
+            <MigrationProgressMonitor
+              operations={migrationOperations}
+              onRetry={retryOperation}
+              onCancel={cancelOperation}
+              refreshInterval={5000}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Node Alerts Section */}
       <div className="mb-6">
-        <NodeAlertsPanel nodeId={node} />
+        <NodeAlertsPanel nodeId={node} availableNodes={availableNodes} />
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -641,6 +737,54 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Maintenance Mode Target Selection Dialog */}
+      <NodeTargetSelectionDialog
+        isOpen={showMaintenanceDialog}
+        onClose={() => setShowMaintenanceDialog(false)}
+        onConfirm={handleMaintenanceConfirm}
+        title={maintenanceDialogType === 'force' ? 'Force Maintenance Mode' : 'Enter Maintenance Mode'}
+        description={
+          maintenanceDialogType === 'force'
+            ? `Force maintenance mode on ${node}. This will skip migration and may cause data unavailability.`
+            : `Enter maintenance mode on ${node}. This will migrate RAID volumes to other nodes before putting this node into maintenance.`
+        }
+        confirmText={maintenanceDialogType === 'force' ? 'Force Maintenance' : 'Enter Maintenance'}
+        availableNodes={availableNodes}
+        currentNode={node}
+        warningMessage={
+          maintenanceDialogType === 'force'
+            ? 'WARNING: Force mode skips migration! This may cause data unavailability if volumes cannot be served from other replicas.'
+            : undefined
+        }
+        infoMessage={
+          maintenanceDialogType === 'normal'
+            ? 'The system will intelligently migrate RAID volumes to maintain availability during maintenance.'
+            : undefined
+        }
+        isLoading={isMaintenanceLoading}
+      />
+
+      {/* Enhanced Maintenance Mode Migration Dialog */}
+      <EnhancedRaidMigrationDialog
+        isOpen={showEnhancedMaintenanceDialog}
+        onClose={() => setShowEnhancedMaintenanceDialog(false)}
+        onConfirm={handleEnhancedMaintenanceConfirm}
+        migrationType="node_migration"
+        currentNode={node}
+        availableNodes={availableNodes}
+        availableDisks={availableDisks}
+        availableNvmeofTargets={availableNvmeofTargets}
+        isLoading={migrationDataLoading || isMaintenanceLoading}
+      />
+
+      {/* Migration Alert System */}
+      <MigrationAlertSystem
+        alerts={migrationAlerts}
+        onDismiss={dismissAlert}
+        maxVisible={5}
+        position="top-right"
+      />
     </div>
   );
 };

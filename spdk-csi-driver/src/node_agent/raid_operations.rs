@@ -43,8 +43,7 @@ pub async fn initialize_blobstore_on_device(agent: &NodeAgent, raid: &SpdkRaidDi
         "params": { "bdev_name": raid_bdev_name, "lvs_name": lvs_name, "cluster_sz": 1048576 }
     })).await?;
 
-    // TODO: Auto-save with SPDK native config
-    println!("💾 [TODO] SPDK native config save after LVS creation");
+    // SPDK configuration auto-save could be added here if needed
 
     if let Some(error) = create.get("error") {
         let code = error["code"].as_i64().unwrap_or(0);
@@ -126,8 +125,7 @@ pub async fn initialize_disk_blobstore(
     match create_lvs {
         Ok(_) => {
             println!("✅ [DISK_INIT] Successfully created LVS '{}' on bdev '{}'", lvs_name, bdev_name);
-            // TODO: Auto-save with SPDK native config
-            println!("💾 [TODO] SPDK native config save after LVS creation");
+            // SPDK configuration auto-save could be added here if needed
         }
         Err(e) => {
             // Check if it's an "already exists" error
@@ -176,12 +174,11 @@ pub async fn create_logical_volume(
     })).await;
 
     match create_lvol {
-        Ok(response) => {
+        Ok(_response) => {
             let full_lvol_name = format!("{}/{}", lvs_name, lvol_name);
             println!("✅ [LVOL] Successfully created logical volume: {}", full_lvol_name);
             
-            // TODO: Auto-save with SPDK native config
-            println!("💾 [TODO] SPDK native config save after logical volume creation");
+            // SPDK configuration auto-save could be added here if needed
             
             Ok(full_lvol_name)
         }
@@ -215,8 +212,7 @@ pub async fn delete_logical_volume(
     match delete_lvol {
         Ok(_) => {
             println!("✅ [LVOL] Successfully deleted logical volume: {}", lvol_name);
-            // TODO: Auto-save with SPDK native config
-            println!("💾 [TODO] SPDK native config save after logical volume deletion");
+            // SPDK configuration auto-save could be added here if needed
         }
         Err(e) => {
             if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
@@ -264,8 +260,7 @@ pub async fn create_raid_bdev(
     match create_raid {
         Ok(_) => {
             println!("✅ [RAID] Successfully created RAID bdev: {}", raid_name);
-            // TODO: Auto-save with SPDK native config
-            println!("💾 [TODO] SPDK native config save after RAID creation");
+            // SPDK configuration auto-save could be added here if needed
         }
         Err(e) => {
             if e.to_string().contains("exists") {
@@ -297,8 +292,7 @@ pub async fn delete_raid_bdev(
     match delete_raid {
         Ok(_) => {
             println!("✅ [RAID] Successfully deleted RAID bdev: {}", raid_name);
-            // TODO: Auto-save with SPDK native config
-            println!("💾 [TODO] SPDK native config save after RAID deletion");
+            // SPDK configuration auto-save could be added here if needed
         }
         Err(e) => {
             if e.to_string().contains("not found") || e.to_string().contains("does not exist") {

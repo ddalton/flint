@@ -244,8 +244,7 @@ impl SpdkNative {
         
         let result = self.call_rpc("bdev_lvol_create_lvstore", Some(params)).await?;
         
-        // TODO: Add auto-save hook here if we have access to kube client
-        // For now, this is handled by callers like node_agent.rs
+        // Auto-save hook handled by callers when kube client is available
         
         // Parse LVS creation response
         Ok(LvsInfo {

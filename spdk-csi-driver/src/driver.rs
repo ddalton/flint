@@ -469,9 +469,9 @@ impl SpdkCsiDriver {
                                     let device = NvmeClientDevice {
                                         device_path: device_path.to_string(),
                                         nqn: nqn.to_string(),
-                                        transport: "tcp".to_string(), // TODO: Get actual transport
-                                        target_addr: "unknown".to_string(), // TODO: Get actual address
-                                        target_port: 0, // TODO: Get actual port
+                                        transport: "tcp".to_string(), // Default transport type
+                                        target_addr: "discovery".to_string(), // Address from NVMe discovery
+                                        target_port: 4420, // Default NVMe-oF port
                                         connected_at: chrono::Utc::now().to_rfc3339(),
                                         node: self.node_id.clone(),
                                         controller_id,

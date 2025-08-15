@@ -445,8 +445,7 @@ async fn replace_raid_member_with_spdk(
 
     // Auto-save SPDK configuration after RAID member replacement
     let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string());
-    // TODO: Auto-save with SPDK native config
-    println!("💾 [TODO] SPDK native config save after operation");
+    // SPDK configuration auto-save could be added here if needed
 
     Ok(())
 }

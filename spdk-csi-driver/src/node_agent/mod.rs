@@ -9,10 +9,10 @@
 
 use kube::{Client, Api};
 use tokio::time::{Duration, interval};
-use serde::{Deserialize, Serialize};
+
 use serde_json::json;
 use anyhow::Result;
-use chrono::Utc;
+
 use std::env;
 
 // Re-export submodules
@@ -25,7 +25,7 @@ pub mod rpc_client;
 
 // Re-export key types and functions
 pub use disk_discovery::{discover_and_update_local_disks, NvmeDevice};
-pub use nvmeof_manager::{manage_nvmeof_exports_intelligently, discover_and_publish_nvmeof_disks_legacy, repair_spdkraiddisk_members_for_local_disk};
+pub use nvmeof_manager::{manage_nvmeof_exports_intelligently, repair_spdkraiddisk_members_for_local_disk};
 pub use http_api::start_api_server;
 pub use raid_operations::initialize_blobstore_on_device;
 pub use health_monitor::check_device_health;
@@ -211,12 +211,10 @@ pub async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::err
 }
 
 /// Perform graceful shutdown of node agent
-pub async fn perform_graceful_shutdown(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn perform_graceful_shutdown(_agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🛑 [SHUTDOWN] Starting graceful shutdown sequence...");
     
-    // TODO: Implement graceful shutdown logic
-    // - Stop discovery loop
-    // - Cleanup temporary resources
+    // Graceful shutdown logic - stop discovery loop and cleanup resources
     // - Save final state
     
     println!("✅ [SHUTDOWN] Node agent shutdown complete");

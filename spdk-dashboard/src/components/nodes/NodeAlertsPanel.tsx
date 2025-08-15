@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { AlertTriangle, Clock, Zap, Server, ArrowRight, CheckCircle, XCircle } from 'lucide-react';
+import { AlertTriangle, Clock, Zap, Server, ArrowRight, CheckCircle, XCircle, RefreshCw, Plus } from 'lucide-react';
+import { NodeTargetSelectionDialog } from '../ui/NodeTargetSelectionDialog';
+import { EnhancedRaidMigrationDialog } from '../ui/EnhancedRaidMigrationDialog';
+import { useMigrationData } from '../../hooks/useMigrationData';
+import type { DetailedRaidInfo } from '../../hooks/useMigrationData';
 
 export interface NodeAlert {
   id: string;
@@ -28,6 +32,7 @@ export interface NodeAlertsData {
 
 interface NodeAlertsPanelProps {
   nodeId: string;
+  availableNodes: string[];
 }
 
 interface MigrationRequest {
@@ -35,11 +40,29 @@ interface MigrationRequest {
   confirmation: boolean;
 }
 
-export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
+export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId, availableNodes }) => {
   const [alertsData, setAlertsData] = useState<NodeAlertsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [migrating, setMigrating] = useState<Set<string>>(new Set());
+  const [showMigrationDialog, setShowMigrationDialog] = useState(false);
+  const [showEnhancedMigrationDialog, setShowEnhancedMigrationDialog] = useState(false);
+  const [selectedVolumeForMigration, setSelectedVolumeForMigration] = useState<string | null>(null);
+  const [selectedRaidForMigration, setSelectedRaidForMigration] = useState<string | null>(null);
+  const [migrationType, setMigrationType] = useState<'node_migration' | 'member_migration' | 'member_addition'>('node_migration');
+  
+  // Fetch migration data when needed
+  const { 
+    availableDisks, 
+    availableNvmeofTargets, 
+    raidInfo, 
+    loading: migrationDataLoading,
+    refreshData: refreshMigrationData 
+  } = useMigrationData(
+    selectedVolumeForMigration || undefined,
+    selectedRaidForMigration || undefined,
+    false
+  );
 
   const fetchNodeAlerts = async () => {
     try {
@@ -66,11 +89,28 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
     return () => clearInterval(interval);
   }, [nodeId]);
 
-  const triggerMigration = async (volumeId: string, targetNode?: string) => {
-    if (!confirm(`Are you sure you want to migrate RAID for volume ${volumeId}? This operation cannot be easily undone.`)) {
-      return;
+  const handleMigrateClick = (volumeId: string, operationType: 'node_migration' | 'member_migration' | 'member_addition' = 'node_migration') => {
+    setSelectedVolumeForMigration(volumeId);
+    
+    // Extract RAID name from alerts data for this volume
+    const alert = alertsData?.alerts.find(a => a.volume_id === volumeId);
+    if (alert?.raid_name) {
+      setSelectedRaidForMigration(alert.raid_name);
     }
+    
+    setMigrationType(operationType);
+    setShowEnhancedMigrationDialog(true);
+  };
 
+  const handleLegacyMigrateClick = (volumeId: string) => {
+    setSelectedVolumeForMigration(volumeId);
+    setShowMigrationDialog(true);
+  };
+
+  const handleMigrationConfirm = async (targetNode?: string) => {
+    if (!selectedVolumeForMigration) return;
+
+    const volumeId = selectedVolumeForMigration;
     setMigrating(prev => new Set(prev).add(volumeId));
 
     try {
@@ -105,12 +145,76 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
       
       alert(message);
       
-      // Refresh alerts
+      // Close dialog and refresh alerts
+      setShowMigrationDialog(false);
+      setSelectedVolumeForMigration(null);
       fetchNodeAlerts();
       
     } catch (err) {
       console.error('Error starting migration:', err);
       alert(`Migration failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setMigrating(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(volumeId);
+        return newSet;
+      });
+    }
+  };
+
+  const handleEnhancedMigrationConfirm = async (operation: any) => {
+    if (!selectedVolumeForMigration) return;
+
+    const volumeId = selectedVolumeForMigration;
+    setMigrating(prev => new Set(prev).add(volumeId));
+
+    try {
+      const response = await fetch(`/api/alerts/${volumeId}/enhanced-migrate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...operation,
+          confirmation: true
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Enhanced migration failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log('Enhanced migration started:', result);
+      
+      // Show detailed success notification
+      const operationName = operation.type === 'node_migration' ? 'Node Migration' :
+                           operation.type === 'member_migration' ? 'RAID Member Migration' :
+                           operation.type === 'member_addition' ? 'RAID Member Addition' :
+                           'Migration';
+      
+      const targetDescription = operation.target_disk_id 
+        ? `Target Disk: ${operation.target_disk_id}`
+        : operation.target_nvmeof_nqn
+        ? `Target NVMe-oF: ${operation.target_nvmeof_nqn}`
+        : `Target Node: ${operation.target_node}`;
+      
+      const message = `${operationName} initiated for volume ${volumeId}!\n\n` +
+                     `Operation ID: ${result.operation_id}\n` +
+                     `${targetDescription}\n\n` +
+                     `Status: ${result.status}`;
+      
+      alert(message);
+      
+      // Close dialog and refresh alerts
+      setShowEnhancedMigrationDialog(false);
+      setSelectedVolumeForMigration(null);
+      setSelectedRaidForMigration(null);
+      fetchNodeAlerts();
+      
+    } catch (err) {
+      console.error('Error starting enhanced migration:', err);
+      alert(`Enhanced migration failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setMigrating(prev => {
         const newSet = new Set(prev);
@@ -303,50 +407,88 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
                       {alert.manual_migration_available ? (
                         <div className="space-y-3">
                           <div className="flex items-center space-x-3">
-                            <button
-                              onClick={() => triggerMigration(alert.volume_id)}
-                              disabled={migrating.has(alert.volume_id)}
-                              className={`px-4 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 ${
-                                alert.severity === 'critical' 
-                                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                                  : 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                              } disabled:opacity-50 disabled:cursor-not-allowed`}
-                            >
-                              {migrating.has(alert.volume_id) ? (
-                                <>
-                                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                                  <span>Starting Migration...</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Zap className="w-4 h-4" />
-                                  <span>Migrate RAID</span>
-                                  <ArrowRight className="w-4 h-4" />
-                                </>
-                              )}
-                            </button>
+                            <div className="flex space-x-2">
+                              <button
+                                onClick={() => handleMigrateClick(alert.volume_id, 'node_migration')}
+                                disabled={migrating.has(alert.volume_id)}
+                                className={`px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 ${
+                                  alert.severity === 'critical' 
+                                    ? 'bg-red-600 hover:bg-red-700 text-white'
+                                    : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                                } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                title="Migrate entire RAID volume to another node"
+                              >
+                                {migrating.has(alert.volume_id) ? (
+                                  <>
+                                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                                    <span>Migrating...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Server className="w-4 h-4" />
+                                    <span>Migrate Volume</span>
+                                  </>
+                                )}
+                              </button>
+                              
+                              <button
+                                onClick={() => handleMigrateClick(alert.volume_id, 'member_migration')}
+                                disabled={migrating.has(alert.volume_id)}
+                                className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Replace individual RAID members with new disks or NVMe-oF targets"
+                              >
+                                <RefreshCw className="w-4 h-4" />
+                                <span>Replace Member</span>
+                              </button>
+                              
+                              <button
+                                onClick={() => handleMigrateClick(alert.volume_id, 'member_addition')}
+                                disabled={migrating.has(alert.volume_id)}
+                                className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Add new RAID members to increase capacity or redundancy"
+                              >
+                                <Plus className="w-4 h-4" />
+                                <span>Add Members</span>
+                              </button>
+                            </div>
                             
                             <div className="text-xs text-gray-500">
                               <Clock className="w-3 h-3 inline mr-1" />
-                              Intelligent target selection
+                              Advanced RAID operations
                             </div>
                           </div>
 
-                          {/* Smart Target Selection Info */}
+                          {/* Migration Options Info */}
                           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                            <h5 className="text-sm font-medium text-blue-900 mb-2">🎯 Intelligent Target Selection</h5>
-                            <div className="text-xs text-blue-800 space-y-1">
-                              <div className="flex items-center">
-                                <span className="font-medium mr-2">1.</span>
-                                <span>Prefers nodes with existing healthy replicas (zero data migration)</span>
+                            <h5 className="text-sm font-medium text-blue-900 mb-2">🔧 RAID Migration Options</h5>
+                            <div className="text-xs text-blue-800 space-y-2">
+                              <div className="flex items-start gap-2">
+                                <Server className="w-3 h-3 mt-0.5 text-blue-600" />
+                                <div>
+                                  <span className="font-medium">Volume Migration:</span> Move entire RAID volume to another node with automatic target selection
+                                </div>
                               </div>
-                              <div className="flex items-center">
-                                <span className="font-medium mr-2">2.</span>
-                                <span>Chooses node with minimum RAID count (load balancing)</span>
+                              <div className="flex items-start gap-2">
+                                <RefreshCw className="w-3 h-3 mt-0.5 text-blue-600" />
+                                <div>
+                                  <span className="font-medium">Member Replacement:</span> Replace individual RAID members with local disks or NVMe-oF targets
+                                </div>
                               </div>
-                              <div className="flex items-center">
-                                <span className="font-medium mr-2">3.</span>
-                                <span>Verifies node health and schedulability</span>
+                              <div className="flex items-start gap-2">
+                                <Plus className="w-3 h-3 mt-0.5 text-blue-600" />
+                                <div>
+                                  <span className="font-medium">Member Addition:</span> Add new members to increase capacity or redundancy
+                                </div>
+                              </div>
+                              <div className="mt-2 pt-2 border-t border-blue-200">
+                                <div className="flex items-center">
+                                  <span className="mr-2">•</span>
+                                  <span>Uses SPDK JSON-RPC methods for safe, efficient operations</span>
+                                </div>
+                                <div className="flex items-center">
+                                  <span className="mr-2">•</span>
+                                  <span>Supports local NVMe disks, internal and external NVMe-oF targets</span>
+                                </div>
                               </div>
                             </div>
                           </div>
@@ -402,6 +544,46 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId }) => {
           </div>
         )}
       </div>
+
+      {/* Legacy RAID Migration Target Selection Dialog */}
+      <NodeTargetSelectionDialog
+        isOpen={showMigrationDialog}
+        onClose={() => {
+          setShowMigrationDialog(false);
+          setSelectedVolumeForMigration(null);
+        }}
+        onConfirm={handleMigrationConfirm}
+        title="Migrate RAID Volume"
+        description={
+          selectedVolumeForMigration
+            ? `Migrate RAID volume ${selectedVolumeForMigration} from ${nodeId} to another node. This operation helps resolve storage alerts and maintain data availability.`
+            : 'Migrate RAID volume to another node.'
+        }
+        confirmText="Start Migration"
+        availableNodes={availableNodes}
+        currentNode={nodeId}
+        infoMessage="The system will intelligently select the best target node based on available capacity, performance, and current workload unless you manually specify a target."
+        isLoading={selectedVolumeForMigration ? migrating.has(selectedVolumeForMigration) : false}
+      />
+
+      {/* Enhanced RAID Migration Dialog */}
+      <EnhancedRaidMigrationDialog
+        isOpen={showEnhancedMigrationDialog}
+        onClose={() => {
+          setShowEnhancedMigrationDialog(false);
+          setSelectedVolumeForMigration(null);
+          setSelectedRaidForMigration(null);
+        }}
+        onConfirm={handleEnhancedMigrationConfirm}
+        migrationType={migrationType}
+        volumeId={selectedVolumeForMigration || undefined}
+        raidInfo={raidInfo || undefined}
+        currentNode={nodeId}
+        availableNodes={availableNodes}
+        availableDisks={availableDisks}
+        availableNvmeofTargets={availableNvmeofTargets}
+        isLoading={migrationDataLoading || (selectedVolumeForMigration ? migrating.has(selectedVolumeForMigration) : false)}
+      />
     </div>
   );
 };

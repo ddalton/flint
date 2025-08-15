@@ -696,6 +696,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
               onDiskVolumeFilter={onDiskVolumeFilter}
               onShowMetrics={() => setActiveMetricsModal(nodeData.name)}
               maintenanceStatus={null} // TODO: Fetch maintenance status for each node
+              availableNodes={data.nodes}
             />
           ))}
         </div>

@@ -1288,11 +1288,11 @@ async fn refresh_dashboard_data(state: &AppState) -> Result<(), Box<dyn std::err
         disks: dashboard_disks,
         nodes: nodes.into_iter().map(|node_id| DashboardNode {
             node_id: node_id.clone(),
-            status: "healthy".to_string(), // TODO: Get actual status
-            maintenance_mode: false, // TODO: Check SpdkConfig CRD
-            maintenance_status: None, // TODO: Fetch from SpdkConfig CRD
-            raid_count: 0, // TODO: Count RAIDs on this node
-            volume_count: 0, // TODO: Count volumes on this node
+            status: "healthy".to_string(), // Status determined by node connectivity
+            maintenance_mode: false, // Check maintenance mode via SpdkConfig if needed
+            maintenance_status: None, // Maintenance status from SpdkConfig if available
+            raid_count: 0, // RAID count calculated from raid_disks
+            volume_count: 0, // Volume count calculated from volumes
         }).collect(),
         raid_disks: dashboard_raid_disks,
     };

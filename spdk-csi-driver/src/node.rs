@@ -110,8 +110,7 @@ impl NodeService {
                 println!("Successfully deleted RAID1 bdev: {}", raid_name);
                 
                 // Auto-save SPDK configuration after RAID bdev deletion
-                // TODO: Auto-save with SPDK native config
-                println!("💾 [TODO] SPDK native config save after cleanup");
+                // SPDK configuration auto-save could be added here if needed
             }
             Err(e) => eprintln!("Warning: Failed to delete RAID1 bdev {}: {}", raid_name, e),
         }
@@ -1013,68 +1012,7 @@ impl Node for NodeService {
 impl NodeService {
 
     // Add method to update NVMe device status  
-    async fn update_volume_nvme_status(
-        &self,
-        volume_id: &str,
-        nvme_device: Option<NvmeClientDevice>,
-    ) -> Result<(), Status> {
-        println!("🔍 [DEBUG] Starting update_volume_nvme_status for volume: {}", volume_id);
-        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        
-        // Get current volume
-        println!("🔍 [DEBUG] Getting volume {} from namespace: {}", volume_id, self.driver.target_namespace);
-        let volume = volumes_api.get(volume_id).await
-            .map_err(|e| {
-                println!("❌ [ERROR] Failed to get volume {}: {:?}", volume_id, e);
-                Status::not_found(format!("Volume {} not found: {}", volume_id, e))
-            })?;
-        
-        println!("🔍 [DEBUG] Successfully retrieved volume, current status: {:?}", volume.status);
-        
-        // Update status
-        let mut status = volume.status.unwrap_or_else(|| {
-            println!("🔍 [DEBUG] No existing status, creating default with state='creating'");
-            let mut default_status = SpdkVolumeStatus::default();
-            default_status.state = "creating".to_string(); // Set valid state instead of empty string
-            default_status
-        });
-        
-        println!("🔍 [DEBUG] Current status state before update: '{}'", status.state);
-        status.nvme_device = nvme_device.clone();
-        println!("🔍 [DEBUG] Updated nvme_device: {:?}", nvme_device);
-        
-        // Patch the status
-        let patch = json!({ "status": status });
-        println!("🔍 [DEBUG] Attempting to patch status with: {}", serde_json::to_string_pretty(&patch).unwrap_or_else(|_| "serialization failed".to_string()));
-        
-        match volumes_api.patch_status(volume_id, &PatchParams::default(), &Patch::Merge(patch)).await {
-            Ok(updated_volume) => {
-                println!("✅ [SUCCESS] Successfully updated volume status for {}", volume_id);
-                println!("🔍 [DEBUG] Updated volume status: {:?}", updated_volume.status);
-                Ok(())
-            }
-            Err(e) => {
-                println!("❌ [ERROR] Failed to patch volume status for {}: {:?}", volume_id, e);
-                println!("❌ [ERROR] Error details: {}", e);
-                
-                // e is already a kube::Error, so we can examine it directly
-                match &e {
-                    kube::Error::Api(api_err) => {
-                        println!("❌ [ERROR] Kubernetes API error - code: {}, message: {}", api_err.code, api_err.message);
-                        println!("❌ [ERROR] API error reason: {}", api_err.reason);
-                    }
-                    kube::Error::Service(service_err) => {
-                        println!("❌ [ERROR] Kubernetes service error: {:?}", service_err);
-                    }
-                    _ => {
-                        println!("❌ [ERROR] Other kubernetes error type: {:?}", e);
-                    }
-                }
-                
-                Err(Status::internal(format!("Failed to update volume status: {}", e)))
-            }
-        }
-    }
+
     
     /// Update volume status with ublk device information
     async fn update_volume_ublk_status(

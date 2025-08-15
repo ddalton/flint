@@ -7,36 +7,74 @@ use crate::node_agent::{NodeAgent, disk_discovery::NvmeDevice, rpc_client::call_
 use serde_json::json;
 use std::process::Command;
 
-/// Check device health status
+/// Check device health status and create alerts for operator review
 pub async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     println!("🏥 [HEALTH] Checking health for device: {}", device.controller_id);
+    
+    let mut device_healthy = true;
+    let mut warnings = Vec::new();
     
     // Method 1: Check SPDK bdev status
     if let Ok(spdk_health) = check_spdk_bdev_health(agent, &device.controller_id).await {
         if !spdk_health {
-            println!("⚠️ [HEALTH] SPDK reports device unhealthy: {}", device.controller_id);
-            return Ok(false);
+            warnings.push("SPDK reports device issues".to_string());
+            device_healthy = false;
         }
     }
     
-    // Method 2: Check NVMe SMART data if available
+    // Method 2: Check NVMe SMART data if available  
     if let Ok(smart_health) = check_nvme_smart_health(&device.device_path).await {
         if !smart_health {
-            println!("⚠️ [HEALTH] SMART data indicates device issues: {}", device.controller_id);
-            return Ok(false);
+            warnings.push("SMART data indicates potential issues".to_string());
+            // Note: Don't mark unhealthy on SMART alone - often false positives
         }
     }
     
     // Method 3: Basic connectivity test
     if let Ok(connectivity) = check_device_connectivity(&device.device_path).await {
         if !connectivity {
-            println!("⚠️ [HEALTH] Device connectivity test failed: {}", device.controller_id);
-            return Ok(false);
+            warnings.push("Device connectivity test failed".to_string());
+            device_healthy = false;
         }
     }
     
-    println!("✅ [HEALTH] Device health check passed: {}", device.controller_id);
-    Ok(true)
+    // Create alerts for operator review instead of automatic repair
+    if !warnings.is_empty() {
+        create_health_alert(agent, device, &warnings).await?;
+    }
+    
+    if device_healthy {
+        println!("✅ [HEALTH] Device health check passed: {}", device.controller_id);
+    } else {
+        println!("⚠️ [HEALTH] Device health issues detected: {} - operator review recommended", device.controller_id);
+    }
+    
+    Ok(device_healthy)
+}
+
+/// Create health alert for operator review in dashboard
+async fn create_health_alert(
+    agent: &NodeAgent,
+    device: &NvmeDevice,
+    warnings: &[String],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🚨 [HEALTH_ALERT] Creating operator alert for device: {}", device.controller_id);
+    
+    for warning in warnings {
+        println!("⚠️ [HEALTH_ALERT] Warning: {}", warning);
+    }
+    
+    // TODO: In production, this would:
+    // 1. Create Kubernetes events visible in dashboard
+    // 2. Update device status in CRDs with health warnings
+    // 3. Send notifications to monitoring systems (Prometheus, AlertManager)
+    // 4. Log structured alerts for dashboard consumption
+    
+    // For now, log in a format the dashboard can parse
+    println!("📊 [ALERT] DEVICE_HEALTH_WARNING node={} device={} warnings={:?}", 
+             agent.node_name, device.controller_id, warnings);
+             
+    Ok(())
 }
 
 /// Check SPDK bdev health status
