@@ -478,9 +478,10 @@ impl NodeAgent {
     pub async fn attach_nvme_controller_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔗 [NVME_ATTACH] Attaching NVMe controller to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
         
-        // Skip system disks using PCI-based check for better accuracy
-        if self.system_disk_check_by_pci(&device.pcie_addr).await {
-            println!("⚠️ [NVME_ATTACH] Skipping system disk PCI: {}", device.pcie_addr);
+        // Skip system disks using direct device check (more reliable than PCI-based)
+        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
+        if self.quick_system_disk_check(device_name).await {
+            println!("⚠️ [NVME_ATTACH] Skipping system disk: {}", device.device_path);
             return Ok(());
         }
 
