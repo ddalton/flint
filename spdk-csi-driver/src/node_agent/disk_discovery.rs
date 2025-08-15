@@ -468,14 +468,14 @@ impl NodeAgent {
     pub async fn attach_discovered_disk_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔗 [ATTACH_SPDK] Attaching discovered disk to SPDK: {}", device.device_path);
         
-        // Skip system disks
-        if self.quick_system_disk_check(&device.controller_id).await {
+        // Skip system disks - use the full device name (e.g., "nvme1n1" not "nvme1")
+        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
+        if self.quick_system_disk_check(device_name).await {
             println!("⚠️ [ATTACH_SPDK] Skipping system disk: {}", device.device_path);
             return Ok(());
         }
 
-        // Use the same logic as initialize_disk_blobstore but without LVS creation
-        let device_name = device.device_path.strip_prefix("/dev/").unwrap_or(&device.device_path);
+        // Use the same logic as initialize_disk_blobstore but without LVS creation  
         let bdev_name = format!("nvme-{}", device_name);
 
         // Check if bdev already exists in SPDK
