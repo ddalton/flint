@@ -447,7 +447,7 @@ impl NodeAgent {
 
     /// Read LVS stores from SPDK
     pub async fn read_lvs_stores(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+        let response = crate::node::call_spdk_rpc(&self.spdk_rpc_url, &json!({
             "method": "bdev_lvol_get_lvstores"
         })).await?;
         
@@ -478,8 +478,8 @@ impl NodeAgent {
         // Use the same logic as initialize_disk_blobstore but without LVS creation  
         let bdev_name = format!("nvme-{}", device_name);
 
-        // Check if bdev already exists in SPDK
-        let bdevs = crate::node_agent::rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
+        // Check if bdev already exists in SPDK  
+        let bdevs = crate::node::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
             "method": "bdev_get_bdevs" 
         })).await?;
         
@@ -491,7 +491,7 @@ impl NodeAgent {
         if !bdev_exists {
             // Create AIO bdev for the device (unified with manual setup path)
             println!("🔧 [ATTACH_SPDK] Creating AIO bdev: {}", bdev_name);
-            let create_bdev = crate::node_agent::rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            let create_bdev = crate::node::call_spdk_rpc(&self.spdk_rpc_url, &json!({
                 "method": "bdev_aio_create",
                 "params": {
                     "name": bdev_name,
