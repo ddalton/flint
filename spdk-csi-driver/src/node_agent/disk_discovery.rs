@@ -501,7 +501,7 @@ impl NodeAgent {
 
         // Check if controller already exists
         println!("🔍 [NVME_ATTACH] Checking existing controllers via RPC...");
-        let controllers = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
+        let controllers = call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
             "method": "bdev_nvme_get_controllers" 
         })).await?;
         println!("✅ [NVME_ATTACH] RPC call successful, parsing response...");
@@ -520,7 +520,7 @@ impl NodeAgent {
             println!("🔧 [NVME_ATTACH] Attaching NVMe controller: {} at PCI {}", controller_name, device.pcie_addr);
             println!("🔧 [NVME_ATTACH] Making bdev_nvme_attach_controller RPC call...");
             
-            let attach_result = super::call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            let attach_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
                 "method": "bdev_nvme_attach_controller",
                 "params": {
                     "name": controller_name,
