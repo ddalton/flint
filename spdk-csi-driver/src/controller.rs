@@ -517,9 +517,17 @@ impl ControllerService {
         let raid_id = format!("auto-raid-{}", Uuid::new_v4().to_string().split('-').next().unwrap());
         
         let member_disks: Vec<RaidMemberDisk> = selected_disks.iter().enumerate().map(|(i, disk)| {
+            // Extract SPDK bdev name from device path for disk_ref
+            let bdev_name = if let Some(stripped) = disk.device_path.strip_prefix("/dev/") {
+                stripped.to_string()
+            } else {
+                disk.device_path.clone()
+            };
+            
             RaidMemberDisk {
                 member_index: i as u32,
                 node_id: disk.node_id.clone(),
+                disk_ref: bdev_name.clone(), // Required disk_ref field (SPDK bdev name)
                 hardware_id: Some(disk.device_path.clone()),
                 serial_number: Some(disk.serial_number.clone()),
                 wwn: disk.wwn.clone(),
@@ -899,6 +907,7 @@ impl ControllerService {
             RaidMemberDisk {
                 member_index: i as u32,
                 node_id: target_node.to_string(),
+                disk_ref: endpoint.spec.nvmeof_endpoint.nqn.clone(), // Use NQN as disk reference for NVMe-oF
                 hardware_id: Some(format!("nvmeof-{}", endpoint.spec.nvmeof_endpoint.nqn)),
                 serial_number: endpoint.spec.serial_number.clone(),
                 wwn: None,

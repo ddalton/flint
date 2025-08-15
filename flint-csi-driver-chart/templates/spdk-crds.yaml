@@ -261,8 +261,8 @@ spec:
                 description: "RAID level (currently only RAID1 supported)"
               num_member_disks:
                 type: integer
-                minimum: 2
-                description: "Number of member disks in the RAID"
+                minimum: 1
+                description: "Number of member disks in the RAID (1 for single-disk, 2+ for multi-disk)"
               member_disks:
                 type: array
                 items:
@@ -282,7 +282,7 @@ spec:
                       description: "Node ID where member disk is located"
                     state:
                       type: string
-                      enum: ["active", "failed", "rebuilding", "degraded"]
+                      enum: ["online", "active", "failed", "rebuilding", "degraded"]
                       description: "Current state of the member disk"
                     capacity_bytes:
                       type: integer

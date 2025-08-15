@@ -97,6 +97,8 @@ pub struct RaidMemberDisk {
     pub member_index: u32,                       // Position in RAID array (0, 1, 2...)
     // Node where this member disk is accessed from
     pub node_id: String,
+    // Reference to disk resource (required by CRD schema)
+    pub disk_ref: String,                        // Reference to SpdkDisk CRD or bdev name
     // Stable hardware identity for local disks (used to repair endpoints)
     pub hardware_id: Option<String>,
     pub serial_number: Option<String>,
