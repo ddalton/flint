@@ -790,7 +790,7 @@ impl ControllerService {
         
         println!("🔍 [BDEV_DEBUG] Raw bdev_data response: {:?}", bdev_data);
         
-        if let Some(bdevs) = bdev_data.as_array() {
+        if let Some(bdevs) = bdev_data["result"].as_array() {
             println!("🔍 [BDEV_DEBUG] Found {} bdevs to evaluate", bdevs.len());
             for bdev in bdevs {
                 if let (Some(name), Some(num_blocks), Some(block_size)) = (
