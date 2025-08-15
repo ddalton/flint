@@ -111,17 +111,14 @@ impl NodeAgent {
                     continue;
                 }
                 
-                // Check if this block device belongs to our PCI address
-                let device_link_path = format!("/sys/block/{}/device", device_str);
-                if let Ok(pci_path) = fs::read_link(&device_link_path) {
-                    if let Some(pci_str) = pci_path.to_string_lossy().split('/').last() {
-                        if pci_str == pci_addr {
-                            println!("🔍 [SYSTEM_CHECK_PCI] Found device {} for PCI {}", device_str, pci_addr);
-                            // This device belongs to our PCI address, check if it's system disk
-                            if self.quick_system_disk_check(&device_str).await {
-                                println!("⚠️ [SYSTEM_CHECK_PCI] PCI device {} contains system disk via {}", pci_addr, device_str);
-                                return true;
-                            }
+                // Check if this block device belongs to our PCI address (use same logic as find_pci_address_for_device)
+                if let Ok(actual_pci) = self.find_pci_address_for_device(&device_str).await {
+                    if actual_pci == pci_addr {
+                        println!("🔍 [SYSTEM_CHECK_PCI] Found device {} for PCI {}", device_str, pci_addr);
+                        // This device belongs to our PCI address, check if it's system disk
+                        if self.quick_system_disk_check(&device_str).await {
+                            println!("⚠️ [SYSTEM_CHECK_PCI] PCI device {} contains system disk via {}", pci_addr, device_str);
+                            return true;
                         }
                     }
                 }
