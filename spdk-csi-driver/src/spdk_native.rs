@@ -309,8 +309,8 @@ impl SpdkNative {
             "lvs_name": lvs_name,
             "lvol_name": lvol_name,
             "size_in_mib": size_in_mib,
-            "thin_provision": false,
-            "clear_method": "unmap"
+            "thin_provision": true,    // Enable thin provisioning for efficient storage usage
+            "clear_method": "none"     // Don't clear blocks for better performance
         });
         
         let result = self.call_rpc("bdev_lvol_create", Some(params)).await?;

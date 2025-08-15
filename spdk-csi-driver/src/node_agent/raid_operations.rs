@@ -169,7 +169,8 @@ pub async fn create_logical_volume(
             "lvol_name": lvol_name,
             "size": size_bytes,
             "lvs_name": lvs_name,
-            "thin_provision": false
+            "thin_provision": true,    // Enable thin provisioning for efficient storage usage
+            "clear_method": "none"     // Don't clear blocks on allocation for performance
         }
     })).await;
 

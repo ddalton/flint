@@ -497,8 +497,8 @@ async fn create_replacement_lvol(
                 "lvs_name": lvs_name,
                 "lvol_name": lvol_name,
                 "size_in_mib": size_in_mib,
-                "thin_provision": false,
-                "clear_method": "unmap"
+                "thin_provision": true,    // Enable thin provisioning for efficient storage usage
+                "clear_method": "none"     // Don't clear blocks for better performance
             }
         }))
         .send()
