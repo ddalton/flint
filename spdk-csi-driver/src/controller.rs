@@ -509,6 +509,11 @@ impl ControllerService {
     ) -> Result<SpdkRaidDisk, Status> {
         use uuid::Uuid;
 
+        println!("🏗️ [CRD_CREATE] Creating SpdkRaidDisk CRD with {} disks on node {}", selected_disks.len(), target_node);
+        for (i, disk) in selected_disks.iter().enumerate() {
+            println!("🏗️ [CRD_CREATE] Disk {}: {} ({}GB) on node {}", i, disk.device_path, disk.capacity / (1024*1024*1024), disk.node_id);
+        }
+
         let raid_id = format!("auto-raid-{}", Uuid::new_v4().to_string().split('-').next().unwrap());
         
         let member_disks: Vec<RaidMemberDisk> = selected_disks.iter().enumerate().map(|(i, disk)| {
@@ -558,9 +563,15 @@ impl ControllerService {
         });
 
         // Create the CRD in Kubernetes
+        println!("🏗️ [CRD_CREATE] Creating Kubernetes CRD: {}", raid_id);
         let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let created_raid = raids.create(&PostParams::default(), &raid_disk).await
-            .map_err(|e| Status::internal(format!("Failed to create SpdkRaidDisk CRD: {}", e)))?;
+            .map_err(|e| {
+                println!("❌ [CRD_CREATE] Failed to create SpdkRaidDisk CRD: {}", e);
+                Status::internal(format!("Failed to create SpdkRaidDisk CRD: {}", e))
+            })?;
+        
+        println!("✅ [CRD_CREATE] Successfully created SpdkRaidDisk CRD: {}", raid_id);
 
         println!("✅ [CRD_CREATE] Created SpdkRaidDisk CRD: {} with initial 'creating' status", raid_id);
         
