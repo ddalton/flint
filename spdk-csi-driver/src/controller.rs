@@ -797,8 +797,18 @@ impl ControllerService {
                 ) {
                     let capacity = num_blocks * block_size;
                     
-                    // Filter for NVMe devices that meet minimum capacity and are not in use
-                    if name.starts_with("nvme") && capacity >= min_capacity as u64 && !self.is_bdev_in_use(node, name).await {
+                    // Filter for available storage devices based on properties, not naming assumptions
+                    let is_claimed = bdev["claimed"].as_bool().unwrap_or(true);
+                    let supports_read = bdev["supported_io_types"]["read"].as_bool().unwrap_or(false);
+                    let supports_write = bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
+                    
+                    let is_available_storage = !is_claimed && 
+                                             supports_read && 
+                                             supports_write && 
+                                             capacity >= min_capacity as u64 && 
+                                             !self.is_bdev_in_use(node, name).await;
+                    
+                    if is_available_storage {
                         let disk = AvailableNvmeDisk {
                             node_id: node.to_string(),
                             device_path: format!("/dev/{}", name),
