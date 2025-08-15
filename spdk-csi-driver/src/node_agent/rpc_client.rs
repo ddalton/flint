@@ -33,21 +33,23 @@ async fn call_spdk_rpc_unix(
     
     // Use tokio::task::spawn_blocking for blocking socket operations
     let socket_path = socket_path.to_string();
-    let request_json = rpc_request.to_string();
+    let rpc_request = rpc_request.clone();
     
-    let result = tokio::task::spawn_blocking(move || -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut stream = UnixStream::connect(&socket_path)
             .map_err(|e| format!("Failed to connect to SPDK socket {}: {}", socket_path, e))?;
         
-        // Build HTTP-over-Unix request
-        let http_request = format!(
-            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            request_json.len(),
-            request_json
-        );
+        // Create proper JSON-RPC 2.0 request (SPDK expects raw JSON, not HTTP)
+        let jsonrpc_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": rpc_request["method"],
+            "params": rpc_request.get("params").unwrap_or(&serde_json::json!({})),
+            "id": 1
+        });
         
-        // Send request
-        stream.write_all(http_request.as_bytes())
+        // Send raw JSON with newline (SPDK expects newline-delimited JSON)
+        let message = format!("{}\n", jsonrpc_request.to_string());
+        stream.write_all(message.as_bytes())
             .map_err(|e| format!("Failed to write to SPDK socket: {}", e))?;
         
         // Read response
@@ -55,11 +57,17 @@ async fn call_spdk_rpc_unix(
         stream.read_to_end(&mut response)
             .map_err(|e| format!("Failed to read from SPDK socket: {}", e))?;
         
-        Ok(String::from_utf8_lossy(&response).to_string())
+        let response_str = String::from_utf8_lossy(&response);
+        
+        // Parse JSON response directly (no HTTP parsing needed)
+        let parsed_response: Value = serde_json::from_str(response_str.trim())
+            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+        
+        Ok(parsed_response)
     }).await??;
     
-    // Parse HTTP response to extract JSON
-    parse_http_response(&result)
+    // Return parsed JSON response directly
+    Ok(result)
 }
 
 /// Make RPC call over HTTP
