@@ -350,6 +350,7 @@ impl NodeAgent {
         
         // Extract controller name (e.g., "nvme0" from "nvme0n1")
         let controller_id = extract_nvme_controller_name(device_name);
+        println!("🔍 [CREATE_DEVICE] Extracted controller_id: '{}' from device_name: '{}'", controller_id, device_name);
         
         // Get PCI address for this device
         let pcie_addr = self.find_pci_address_for_device(device_name).await?;
@@ -582,13 +583,24 @@ impl NodeAgent {
 }
 
 /// Extract NVMe controller name from device name
-/// e.g., "nvme0n1" -> "nvme0"
+/// e.g., "nvme0n1" -> "nvme0", "nvme1n1" -> "nvme1"
 pub fn extract_nvme_controller_name(device_name: &str) -> String {
-    if let Some(n_pos) = device_name.find('n') {
-        device_name[..n_pos].to_string()
-    } else {
-        device_name.to_string()
+    // Find the 'n' that separates controller from namespace (followed by a digit)
+    let mut chars = device_name.char_indices().peekable();
+    
+    while let Some((i, ch)) = chars.next() {
+        if ch == 'n' {
+            // Check if this 'n' is followed by a digit (namespace number)
+            if let Some((_, next_ch)) = chars.peek() {
+                if next_ch.is_ascii_digit() {
+                    return device_name[..i].to_string();
+                }
+            }
+        }
     }
+    
+    // Fallback: if no 'n' followed by digit found, return the whole name
+    device_name.to_string()
 }
 
 /// Check device health using basic filesystem checks
