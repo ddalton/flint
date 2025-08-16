@@ -369,7 +369,7 @@ spec:
             properties:
               state:
                 type: string
-                enum: ["creating", "online", "degraded", "failed", "rebuilding"]
+                enum: ["creating", "initializing", "bdev_created", "online", "degraded", "failed", "rebuilding"]
                 description: "Overall RAID disk state"
               raid_bdev_name:
                 type: string
@@ -439,6 +439,8 @@ spec:
                   num_base_bdevs_operational:
                     type: integer
                     format: int32
+    subresources:
+      status: {}
     additionalPrinterColumns:
     - name: State
       type: string
