@@ -433,6 +433,9 @@ impl ControllerService {
     /// Update RAID disk status to 'initializing'
     async fn update_raid_disk_status_initializing(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
         let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let raid_name = raid_disk.metadata.name.as_ref().unwrap();
+        
+        println!("🔄 [RAID_STATUS] Updating RAID disk {} to 'initializing' status...", raid_name);
         
         let mut status = raid_disk.status.clone().unwrap_or_default();
         status.state = "initializing".to_string();
@@ -440,16 +443,27 @@ impl ControllerService {
         status.last_checked = chrono::Utc::now().to_rfc3339();
         
         let patch = json!({ "status": status });
-        raids.patch_status(
-            &raid_disk.metadata.name.as_ref().unwrap(),
-            &PatchParams::default(),
-            &Patch::Merge(patch)
-        ).await
-        .map_err(|e| Status::internal(format!("Failed to update RAID status to initializing: {}", e)))?;
-
-        println!("🔄 [RAID_STATUS] Updated RAID disk {} to 'initializing' status", 
-                 raid_disk.metadata.name.as_ref().unwrap());
-        Ok(())
+        
+        // Retry mechanism for eventual consistency
+        for attempt in 1..=5 {
+            match raids.patch_status(raid_name, &PatchParams::default(), &Patch::Merge(patch.clone())).await {
+                Ok(_) => {
+                    println!("✅ [RAID_STATUS] Successfully updated RAID disk {} to 'initializing' status (attempt {})", raid_name, attempt);
+                    return Ok(());
+                }
+                Err(kube::Error::Api(api_error)) if api_error.code == 404 => {
+                    println!("⏳ [RAID_STATUS] CRD not yet available for status update (attempt {}), retrying in 1s...", attempt);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(e) => {
+                    println!("❌ [RAID_STATUS] Failed to update RAID status (attempt {}): {}", attempt, e);
+                    return Err(Status::internal(format!("Failed to update RAID status to initializing: {}", e)));
+                }
+            }
+        }
+        
+        Err(Status::internal("Failed to update RAID status after 5 attempts - CRD may not be properly created"))
     }
 
     /// Update RAID disk status when bdev is created
