@@ -459,7 +459,7 @@ impl ControllerService {
         println!("🔧 [SINGLE_STORAGE] Creating LVS directly on single bdev: {}", bdev_name);
         
         // Update status to indicate we're using single-member approach
-        self.update_raid_disk_status(raid_disk, "bdev_created", "Using single-member direct LVS approach").await?;
+        self.update_raid_disk_status_bdev_created(raid_disk).await?;
         
         // Create LVS directly on the single bdev (same as RAID LVS creation)
         let lvs_name = raid_disk.spec.lvs_name();
