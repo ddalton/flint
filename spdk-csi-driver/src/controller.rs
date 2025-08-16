@@ -389,17 +389,27 @@ impl ControllerService {
         
         println!("🔍 [RAID_INIT] SPDK RPC request: {}", raid_params);
 
-        let raid_create_result = call_spdk_rpc(&spdk_rpc_url, &raid_params).await;
+        // Add timeout to prevent hanging on RAID creation (30 seconds)
+        let raid_create_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            call_spdk_rpc(&spdk_rpc_url, &raid_params)
+        ).await;
 
         match raid_create_result {
-            Ok(response) => {
+            Ok(Ok(response)) => {
                 println!("✅ [RAID_INIT] RAID bdev created: {}", raid_bdev_name);
                 println!("🔍 [RAID_INIT] SPDK response: {}", response);
                 self.update_raid_disk_status_bdev_created(raid_disk).await?;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let error_msg = format!("Failed to create RAID bdev: {}", e);
                 println!("❌ [RAID_INIT] {}", error_msg);
+                self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
+                return Err(Status::internal(error_msg));
+            }
+            Err(_) => {
+                let error_msg = format!("RAID bdev creation timed out after 30 seconds: {}", raid_bdev_name);
+                println!("⏰ [RAID_INIT] {}", error_msg);
                 self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
                 return Err(Status::internal(error_msg));
             }
@@ -466,10 +476,14 @@ impl ControllerService {
         
         println!("🔍 [SINGLE_STORAGE] LVS creation request: {}", lvs_params);
         
-        let lvs_create_result = call_spdk_rpc(spdk_rpc_url, &lvs_params).await;
+        // Add timeout to prevent hanging on response (30 seconds for LVS creation)
+        let lvs_create_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            call_spdk_rpc(spdk_rpc_url, &lvs_params)
+        ).await;
         
         match lvs_create_result {
-            Ok(response) => {
+            Ok(Ok(response)) => {
                 println!("✅ [SINGLE_STORAGE] LVS created successfully: {}", lvs_name);
                 println!("🔍 [SINGLE_STORAGE] SPDK response: {}", response);
                 
@@ -479,9 +493,15 @@ impl ControllerService {
                 println!("✅ [SINGLE_STORAGE] Single-replica storage initialization completed successfully");
                 Ok(())
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let error_msg = format!("Failed to create LVS on single bdev {}: {}", bdev_name, e);
                 println!("❌ [SINGLE_STORAGE] {}", error_msg);
+                self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
+                Err(Status::internal(error_msg))
+            }
+            Err(_) => {
+                let error_msg = format!("LVS creation timed out after 30 seconds on bdev {}", bdev_name);
+                println!("⏰ [SINGLE_STORAGE] {}", error_msg);
                 self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
                 Err(Status::internal(error_msg))
             }

@@ -58,6 +58,8 @@ async fn call_spdk_rpc_unix(
         
         // Send raw JSON with newline (SPDK expects newline-delimited JSON)
         let message = format!("{}\n", jsonrpc_request.to_string());
+        println!("🔍 [UNIX_SOCKET] Sending to SPDK: {}", message.trim());
+        
         stream.write_all(message.as_bytes())
             .map_err(|e| format!("Failed to write to SPDK socket: {}", e))?;
         
@@ -67,14 +69,46 @@ async fn call_spdk_rpc_unix(
         let mut response = String::new();
         
         // Read a complete line (JSON response terminated by newline)
-        reader.read_line(&mut response)
-            .map_err(|e| format!("Failed to read JSON response from SPDK socket: {}", e))?;
+        // Add debugging for LVS creation hangs
+        println!("🔍 [UNIX_SOCKET] Waiting for SPDK response to method: {}", 
+                 rpc_request["method"].as_str().unwrap_or("unknown"));
+        
+        let read_result = std::io::BufRead::read_line(&mut reader, &mut response);
+        
+        match read_result {
+            Ok(bytes_read) => {
+                println!("🔍 [UNIX_SOCKET] Read {} bytes from SPDK", bytes_read);
+                println!("🔍 [UNIX_SOCKET] Raw response: {:?}", response.as_bytes());
+                println!("🔍 [UNIX_SOCKET] Response as string: {}", response.trim());
+                
+                if bytes_read == 0 {
+                    println!("❌ [UNIX_SOCKET] SPDK closed connection (0 bytes read)");
+                    return Err("SPDK closed connection without sending response".into());
+                }
+            }
+            Err(e) => {
+                println!("❌ [UNIX_SOCKET] Failed to read from SPDK socket: {}", e);
+                return Err(format!("Failed to read JSON response from SPDK socket: {}", e).into());
+            }
+        }
         
         let response_str = response;
         
         // Parse JSON response directly (no HTTP parsing needed)
         let parsed_response: Value = serde_json::from_str(response_str.trim())
-            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+            .map_err(|e| {
+                println!("❌ [UNIX_SOCKET] Failed to parse JSON: {} | Raw response: {}", e, response_str);
+                format!("Failed to parse JSON response: {}", e)
+            })?;
+        
+        // Debug the parsed response structure
+        if let Some(result) = parsed_response.get("result") {
+            println!("✅ [UNIX_SOCKET] SPDK success result: {}", result);
+        } else if let Some(error) = parsed_response.get("error") {
+            println!("❌ [UNIX_SOCKET] SPDK error response: {}", error);
+        } else {
+            println!("⚠️ [UNIX_SOCKET] Unexpected response format: {}", parsed_response);
+        }
         
         Ok(parsed_response)
     }).await??;
