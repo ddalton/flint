@@ -4,7 +4,7 @@
 // It provides a clean interface for making RPC calls over Unix sockets or HTTP.
 
 use serde_json::Value;
-use std::io::Write;
+use std::io::{Write, BufRead};
 use std::os::unix::net::UnixStream;
 
 /// Trait to ensure only approved RPC implementations are used
@@ -47,6 +47,20 @@ async fn call_spdk_rpc_unix(
     let result = tokio::task::spawn_blocking(move || -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut stream = UnixStream::connect(&socket_path)
             .map_err(|e| format!("Failed to connect to SPDK socket {}: {}", socket_path, e))?;
+            
+        // Set socket timeout for LVS operations (can take several seconds)
+        // Use longer timeout for async operations like bdev_lvol_create_lvstore
+        let timeout_secs = if rpc_request["method"].as_str() == Some("bdev_lvol_create_lvstore") {
+            120  // 2 minutes for LVS creation
+        } else {
+            30   // 30 seconds for other operations
+        };
+        
+        println!("🔍 [UNIX_SOCKET] Setting socket timeout to {} seconds for method: {}", 
+                 timeout_secs, rpc_request["method"].as_str().unwrap_or("unknown"));
+        
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(timeout_secs)))
+            .map_err(|e| format!("Failed to set socket read timeout: {}", e))?;
         
         // Create proper JSON-RPC 2.0 request (SPDK expects raw JSON, not HTTP)
         let jsonrpc_request = serde_json::json!({
@@ -62,18 +76,34 @@ async fn call_spdk_rpc_unix(
         
         stream.write_all(message.as_bytes())
             .map_err(|e| format!("Failed to write to SPDK socket: {}", e))?;
+            
+        // Flush to ensure data is sent immediately
+        stream.flush()
+            .map_err(|e| format!("Failed to flush SPDK socket: {}", e))?;
+            
+        println!("🔍 [UNIX_SOCKET] Request sent and flushed successfully");
         
         // Read response using BufRead to handle newline-delimited JSON (like Go's json.Decoder)
-        use std::io::BufRead;
         let mut reader = std::io::BufReader::new(&mut stream);
         let mut response = String::new();
         
         // Read a complete line (JSON response terminated by newline)
         // Add debugging for LVS creation hangs
-        println!("🔍 [UNIX_SOCKET] Waiting for SPDK response to method: {}", 
-                 rpc_request["method"].as_str().unwrap_or("unknown"));
+        let method_name = rpc_request["method"].as_str().unwrap_or("unknown");
+        println!("🔍 [UNIX_SOCKET] Waiting for SPDK response to method: {}", method_name);
         
-        let read_result = std::io::BufRead::read_line(&mut reader, &mut response);
+        // For async operations, track timing
+        let start_time = std::time::Instant::now();
+        if method_name == "bdev_lvol_create_lvstore" {
+            println!("🔍 [UNIX_SOCKET] This is an async operation - will wait up to 2 minutes for response");
+        }
+        
+        let read_result = reader.read_line(&mut response);
+        
+        // Log timing for async operations
+        if method_name == "bdev_lvol_create_lvstore" {
+            println!("🔍 [UNIX_SOCKET] Read operation completed after {} seconds", start_time.elapsed().as_secs());
+        }
         
         match read_result {
             Ok(bytes_read) => {
@@ -88,6 +118,17 @@ async fn call_spdk_rpc_unix(
             }
             Err(e) => {
                 println!("❌ [UNIX_SOCKET] Failed to read from SPDK socket: {}", e);
+                println!("❌ [UNIX_SOCKET] Error kind: {:?}", e.kind());
+                
+                // Check for timeout vs connection issues
+                if e.kind() == std::io::ErrorKind::TimedOut {
+                    println!("❌ [UNIX_SOCKET] Socket read timeout after 30 seconds - SPDK may not be responding");
+                } else if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    println!("❌ [UNIX_SOCKET] SPDK closed connection unexpectedly");
+                } else if e.kind() == std::io::ErrorKind::ConnectionReset {
+                    println!("❌ [UNIX_SOCKET] SPDK reset connection");
+                }
+                
                 return Err(format!("Failed to read JSON response from SPDK socket: {}", e).into());
             }
         }
