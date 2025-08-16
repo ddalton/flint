@@ -268,18 +268,67 @@ spec:
                 items:
                   type: object
                   required:
+                  - member_index
                   - disk_ref
                   - node_id
                   - state
                   - capacity_bytes
                   - connected
                   properties:
+                    member_index:
+                      type: integer
+                      format: int32
+                      description: "Position in RAID array (0, 1, 2...)"
                     disk_ref:
                       type: string
-                      description: "Reference to SpdkDisk CRD"
+                      description: "Reference to SpdkDisk CRD or bdev name"
                     node_id:
                       type: string
                       description: "Node ID where member disk is located"
+                    hardware_id:
+                      type: string
+                      nullable: true
+                      description: "Hardware ID for local disks"
+                    serial_number:
+                      type: string
+                      nullable: true
+                      description: "Serial number of the disk"
+                    wwn:
+                      type: string
+                      nullable: true
+                      description: "World Wide Name of the disk"
+                    model:
+                      type: string
+                      nullable: true
+                      description: "Model name of the disk"
+                    vendor:
+                      type: string
+                      nullable: true
+                      description: "Vendor name of the disk"
+                    nvmeof_endpoint:
+                      type: object
+                      description: "NVMe-oF endpoint configuration"
+                      properties:
+                        nqn:
+                          type: string
+                          description: "NQN identifier"
+                        target_addr:
+                          type: string
+                          description: "Target address"
+                        target_port:
+                          type: integer
+                          description: "Target port"
+                        transport:
+                          type: string
+                          description: "Transport protocol"
+                        created_at:
+                          type: string
+                          nullable: true
+                          description: "Creation timestamp"
+                        active:
+                          type: boolean
+                          description: "Whether endpoint is active"
+                      required: ["nqn", "target_addr", "target_port", "transport", "active"]
                     state:
                       type: string
                       enum: ["online", "active", "failed", "rebuilding", "degraded"]
@@ -320,30 +369,76 @@ spec:
             properties:
               state:
                 type: string
-                enum: ["online", "degraded", "failed", "rebuilding"]
+                enum: ["creating", "online", "degraded", "failed", "rebuilding"]
                 description: "Overall RAID disk state"
-              active_members:
-                type: integer
-                description: "Number of currently active member disks"
-              total_capacity:
-                type: integer
-                format: int64
-                description: "Total usable capacity in bytes"
-              used_space:
-                type: integer
-                format: int64
-                description: "Used space in bytes"
-              free_space:
-                type: integer
-                format: int64
-                description: "Free space in bytes"
-              blobstore_initialized:
-                type: boolean
-                description: "Whether blobstore is initialized on RAID disk"
-              last_rebuild:
+              raid_bdev_name:
                 type: string
                 nullable: true
-                description: "Last rebuild timestamp"
+                description: "SPDK RAID bdev name"
+              lvs_name:
+                type: string
+                nullable: true
+                description: "LVS created on this RAID disk"
+              lvs_uuid:
+                type: string
+                nullable: true
+                description: "LVS UUID"
+              total_capacity_bytes:
+                type: integer
+                format: int64
+                description: "Total RAID capacity in bytes"
+              usable_capacity_bytes:
+                type: integer
+                format: int64
+                description: "Available capacity for volumes in bytes"
+              used_capacity_bytes:
+                type: integer
+                format: int64
+                description: "Capacity used by volumes in bytes"
+              health_status:
+                type: string
+                description: "Health status of the RAID disk"
+              degraded:
+                type: boolean
+                description: "Whether RAID is in degraded state"
+              rebuild_progress:
+                type: number
+                nullable: true
+                description: "Rebuild progress percentage (0.0-100.0)"
+              active_member_count:
+                type: integer
+                format: int32
+                description: "Number of active members"
+              failed_member_count:
+                type: integer
+                format: int32
+                description: "Number of failed members"
+              last_checked:
+                type: string
+                description: "Last health check timestamp"
+              created_at:
+                type: string
+                nullable: true
+                description: "When RAID disk was created"
+              raid_status:
+                type: object
+                nullable: true
+                description: "Detailed RAID status from SPDK"
+                properties:
+                  raid_level:
+                    type: integer
+                    format: int32
+                  state:
+                    type: string
+                  num_base_bdevs:
+                    type: integer
+                    format: int32
+                  num_base_bdevs_discovered:
+                    type: integer
+                    format: int32
+                  num_base_bdevs_operational:
+                    type: integer
+                    format: int32
     additionalPrinterColumns:
     - name: State
       type: string
@@ -352,11 +447,11 @@ spec:
     - name: Members
       type: string
       description: Active/Total members
-      jsonPath: .status.active_members
+      jsonPath: .status.active_member_count
     - name: Capacity
       type: string
       description: Total capacity
-      jsonPath: .status.total_capacity
+      jsonPath: .status.total_capacity_bytes
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp

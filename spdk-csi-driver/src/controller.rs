@@ -233,7 +233,16 @@ impl ControllerService {
         let raid_disk = self.create_raid_disk_crd(&selected_disks, raid_level, &optimal_node).await?;
 
         // Step 5: Initialize the actual RAID bdev and LVS on the target node
-        self.initialize_raid_bdev_and_lvs(&raid_disk).await?;
+        println!("🔧 [RAID_INIT] Proceeding to initialize RAID bdev and LVS...");
+        match self.initialize_raid_bdev_and_lvs(&raid_disk).await {
+            Ok(_) => {
+                println!("✅ [RAID_INIT] RAID bdev and LVS initialization completed successfully");
+            }
+            Err(e) => {
+                println!("❌ [RAID_INIT] RAID bdev and LVS initialization failed: {}", e);
+                return Err(e);
+            }
+        }
 
         println!("✅ [LOCAL_RAID] Successfully created RAID disk from local NVMe disks");
         Ok(raid_disk)
@@ -268,7 +277,16 @@ impl ControllerService {
         let raid_disk = self.create_nvmeof_raid_disk_crd(&selected_endpoints, raid_level, &target_node).await?;
 
         // Step 5: Initialize the RAID bdev and LVS
-        self.initialize_raid_bdev_and_lvs(&raid_disk).await?;
+        println!("🔧 [NVMEOF_RAID_INIT] Proceeding to initialize RAID bdev and LVS...");
+        match self.initialize_raid_bdev_and_lvs(&raid_disk).await {
+            Ok(_) => {
+                println!("✅ [NVMEOF_RAID_INIT] RAID bdev and LVS initialization completed successfully");
+            }
+            Err(e) => {
+                println!("❌ [NVMEOF_RAID_INIT] RAID bdev and LVS initialization failed: {}", e);
+                return Err(e);
+            }
+        }
 
         println!("✅ [REMOTE_RAID] Successfully created RAID disk from NVMe-oF endpoints");
         Ok(raid_disk)
@@ -277,20 +295,39 @@ impl ControllerService {
     /// Initialize RAID bdev and LVS on the target node with comprehensive status updates
     async fn initialize_raid_bdev_and_lvs(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
         let target_node = &raid_disk.spec.created_on_node;
-        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
         
         println!("🔧 [RAID_INIT] Initializing RAID bdev and LVS on node: {}", target_node);
+        println!("🔍 [RAID_INIT] Getting RPC URL for node: {}", target_node);
+        
+        let spdk_rpc_url = match self.driver.get_rpc_url_for_node(target_node).await {
+            Ok(url) => {
+                println!("✅ [RAID_INIT] Got RPC URL: {}", url);
+                url
+            }
+            Err(e) => {
+                println!("❌ [RAID_INIT] Failed to get RPC URL for node {}: {}", target_node, e);
+                return Err(e);
+            }
+        };
 
         // Update status to 'initializing'
         self.update_raid_disk_status_initializing(raid_disk).await?;
 
         // Step 1: Ensure all member bdevs are available in SPDK
         println!("🔗 [RAID_INIT] Step 1: Ensuring member bdevs are available...");
+        println!("🔍 [RAID_INIT] Total member disks to check: {}", raid_disk.spec.member_disks.len());
+        
         for (index, member) in raid_disk.spec.member_disks.iter().enumerate() {
+            println!("🔍 [RAID_INIT] Checking member {} - node: {}, hardware_id: {:?}", 
+                     index, member.node_id, member.hardware_id);
+            
             match self.ensure_member_bdev_available(&spdk_rpc_url, member, index).await {
-                Ok(_) => println!("✅ [RAID_INIT] Member {} bdev ready", index),
+                Ok(_) => {
+                    println!("✅ [RAID_INIT] Member {} bdev ready", index);
+                }
                 Err(e) => {
                     let error_msg = format!("Failed to ensure member {} bdev: {}", index, e);
+                    println!("❌ [RAID_INIT] {}", error_msg);
                     self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
                     return Err(e);
                 }
@@ -300,15 +337,19 @@ impl ControllerService {
         // Step 2: Create RAID bdev
         println!("⚙️ [RAID_INIT] Step 2: Creating RAID bdev...");
         let raid_bdev_name = raid_disk.spec.raid_bdev_name();
+        println!("🔍 [RAID_INIT] Target RAID bdev name: {}", raid_bdev_name);
+        
         // Extract SPDK bdev names from device paths (hardware_id contains "/dev/aio-nvme0")
         let member_names: Vec<String> = raid_disk.spec.member_disks.iter()
             .filter_map(|m| {
                 if let Some(hardware_id) = &m.hardware_id {
                     // hardware_id is "/dev/aio-nvme0", extract "aio-nvme0"
                     if let Some(bdev_name) = hardware_id.strip_prefix("/dev/") {
+                        println!("🔍 [RAID_INIT] Extracted bdev name '{}' from hardware_id '{}'", bdev_name, hardware_id);
                         Some(bdev_name.to_string())
                     } else {
                         // Fallback if hardware_id doesn't have /dev/ prefix
+                        println!("🔍 [RAID_INIT] Using hardware_id directly: '{}'", hardware_id);
                         Some(hardware_id.clone())
                     }
                 } else {
@@ -319,8 +360,10 @@ impl ControllerService {
             .collect();
 
         println!("🔧 [RAID_INIT] Using member bdev names: {:?}", member_names);
+        println!("🔧 [RAID_INIT] RAID level: {}", raid_disk.spec.raid_level);
+        println!("🔧 [RAID_INIT] Strip size: {} KB", raid_disk.spec.stripe_size_kb);
 
-        let raid_create_result = call_spdk_rpc(&spdk_rpc_url, &json!({
+        let raid_params = json!({
             "method": "bdev_raid_create",
             "params": {
                 "name": raid_bdev_name,
@@ -328,15 +371,21 @@ impl ControllerService {
                 "base_bdevs": member_names,
                 "strip_size_kb": raid_disk.spec.stripe_size_kb
             }
-        })).await;
+        });
+        
+        println!("🔍 [RAID_INIT] SPDK RPC request: {}", raid_params);
+
+        let raid_create_result = call_spdk_rpc(&spdk_rpc_url, &raid_params).await;
 
         match raid_create_result {
-            Ok(_) => {
+            Ok(response) => {
                 println!("✅ [RAID_INIT] RAID bdev created: {}", raid_bdev_name);
+                println!("🔍 [RAID_INIT] SPDK response: {}", response);
                 self.update_raid_disk_status_bdev_created(raid_disk).await?;
             }
             Err(e) => {
                 let error_msg = format!("Failed to create RAID bdev: {}", e);
+                println!("❌ [RAID_INIT] {}", error_msg);
                 self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
                 return Err(Status::internal(error_msg));
             }
@@ -345,26 +394,36 @@ impl ControllerService {
         // Step 3: Create LVS on RAID bdev (with thin provisioning)
         println!("💾 [RAID_INIT] Step 3: Creating LVS with thin provisioning...");
         let lvs_name = raid_disk.spec.lvs_name();
-        let lvs_create_result = call_spdk_rpc(&spdk_rpc_url, &json!({
+        println!("🔍 [RAID_INIT] Target LVS name: {}", lvs_name);
+        println!("🔍 [RAID_INIT] Target RAID bdev for LVS: {}", raid_bdev_name);
+        
+        let lvs_params = json!({
             "method": "bdev_lvol_create_lvstore",
             "params": {
                 "bdev_name": raid_bdev_name,
                 "lvs_name": lvs_name,
                 "cluster_sz": 1048576  // 1MB clusters for thin provisioning
             }
-        })).await;
+        });
+        
+        println!("🔍 [RAID_INIT] LVS creation RPC request: {}", lvs_params);
+        let lvs_create_result = call_spdk_rpc(&spdk_rpc_url, &lvs_params).await;
 
         match lvs_create_result {
-            Ok(_) => {
+            Ok(response) => {
                 println!("✅ [RAID_INIT] LVS created with thin provisioning: {}", lvs_name);
+                println!("🔍 [RAID_INIT] LVS creation response: {}", response);
                 
                 // Update RAID disk status to indicate it's ready
+                println!("🔧 [RAID_INIT] Updating RAID disk status to ready...");
                 self.update_raid_disk_status_to_ready(raid_disk).await?;
                 
+                println!("🎉 [RAID_INIT] RAID initialization completed successfully!");
                 Ok(())
             }
             Err(e) => {
                 let error_msg = format!("Failed to create LVS: {}", e);
+                println!("❌ [RAID_INIT] {}", error_msg);
                 self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
                 Err(Status::internal(error_msg))
             }
