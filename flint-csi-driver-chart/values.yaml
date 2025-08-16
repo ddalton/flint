@@ -179,11 +179,11 @@ nodeResources:
   # SPDK Target Container - High performance storage daemon
   spdkTarget:
     requests:
-      cpu: "1"
+      cpu: "2"
       memory: "2Gi"
       hugepages-2Mi: "1Gi"
     limits:
-      cpu: "1"
+      cpu: "2"
       memory: "2Gi"
       hugepages-2Mi: "1Gi"
     # CPU pinning configuration for optimal performance
@@ -206,7 +206,7 @@ nodeResources:
     #   - Better cache locality for SPDK reactor threads
     #   - Proper DPDK EAL core assignment
     #   - Multiple cores improve throughput for high IOPS workloads
-    cpuCore: 1
+    cpuCore: "0x6"
     
     # Scheduling policy to eliminate involuntary context switches
     # Options:
@@ -216,13 +216,13 @@ nodeResources:
     # 
     # Warning: "realtime" requires careful system tuning to avoid blocking other processes
     # Recommended: Start with "high", upgrade to "realtime" if needed
-    schedulingPolicy: "high"
+    schedulingPolicy: "realtime"
     
     # Advanced: Disable RT throttling for absolute zero context switches
     # Only use with "realtime" scheduling policy
     # WARNING: Can cause system unresponsiveness if misconfigured
     # Requires: Careful monitoring and isolated CPU cores
-    disableRtThrottling: false
+    disableRtThrottling: true
   
   # CSI Driver Container - Lightweight CSI protocol handler
   flintCsiDriver:
