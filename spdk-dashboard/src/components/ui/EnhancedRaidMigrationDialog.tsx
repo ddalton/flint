@@ -111,6 +111,9 @@ export const EnhancedRaidMigrationDialog: React.FC<EnhancedRaidMigrationDialogPr
   const [force, setForce] = useState<boolean>(false);
   const [isConfirming, setIsConfirming] = useState(false);
 
+  // Check if this is a single-replica volume (cannot be migrated)
+  const isSingleReplica = raidInfo && raidInfo.members.length === 1 && raidInfo.raid_level === 1;
+
   // Reset form when dialog opens
   useEffect(() => {
     if (isOpen) {
@@ -511,6 +514,25 @@ export const EnhancedRaidMigrationDialog: React.FC<EnhancedRaidMigrationDialogPr
         <div className="p-6 space-y-6">
           <p className="text-gray-700">{getOperationDescription()}</p>
 
+          {/* Single-replica warning */}
+          {isSingleReplica && (
+            <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" />
+                <div>
+                  <h4 className="font-medium text-orange-900 mb-1">Migration Not Available</h4>
+                  <p className="text-sm text-orange-800">
+                    This is a single-replica volume that uses direct LVS storage without RAID redundancy. 
+                    Single-replica volumes cannot be migrated as they have no redundancy to maintain availability during the migration process.
+                  </p>
+                  <p className="text-sm text-orange-700 mt-2">
+                    To enable migration, consider upgrading to a multi-replica configuration.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Current RAID Info */}
           {raidInfo && (
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
@@ -543,16 +565,16 @@ export const EnhancedRaidMigrationDialog: React.FC<EnhancedRaidMigrationDialogPr
           )}
 
           {/* Target Type Selection */}
-          {renderTargetTypeSelection()}
+          {!isSingleReplica && renderTargetTypeSelection()}
 
           {/* Target Selection */}
-          {renderTargetSelection()}
+          {!isSingleReplica && renderTargetSelection()}
 
           {/* Operation-Specific Options */}
-          {renderOperationOptions()}
+          {!isSingleReplica && renderOperationOptions()}
 
           {/* Advanced Options */}
-          {renderAdvancedOptions()}
+          {!isSingleReplica && renderAdvancedOptions()}
 
           {/* Warning Message */}
           {getWarningMessage() && (
@@ -586,8 +608,13 @@ export const EnhancedRaidMigrationDialog: React.FC<EnhancedRaidMigrationDialogPr
           </button>
           <button
             onClick={handleConfirm}
-            disabled={!isValidSelection() || isConfirming || isLoading}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+            disabled={isSingleReplica || !isValidSelection() || isConfirming || isLoading}
+            className={`px-4 py-2 rounded-lg flex items-center gap-2 disabled:opacity-50 ${
+              isSingleReplica 
+                ? 'bg-gray-400 text-gray-600 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700'
+            }`}
+            title={isSingleReplica ? 'Migration not available for single-replica volumes' : ''}
           >
             {isConfirming ? (
               <>
@@ -597,7 +624,7 @@ export const EnhancedRaidMigrationDialog: React.FC<EnhancedRaidMigrationDialogPr
             ) : (
               <>
                 <RefreshCw className="w-4 h-4" />
-                <span>Start {getOperationTitle()}</span>
+                <span>{isSingleReplica ? 'Migration Not Available' : `Start ${getOperationTitle()}`}</span>
               </>
             )}
           </button>

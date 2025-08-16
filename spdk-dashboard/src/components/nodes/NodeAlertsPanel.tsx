@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AlertTriangle, Clock, Zap, Server, ArrowRight, CheckCircle, XCircle, RefreshCw, Plus } from 'lucide-react';
+import { AlertTriangle, Clock, Zap, Server, ArrowRight, CheckCircle, XCircle, RefreshCw, Plus, Info } from 'lucide-react';
 import { NodeTargetSelectionDialog } from '../ui/NodeTargetSelectionDialog';
 import { EnhancedRaidMigrationDialog } from '../ui/EnhancedRaidMigrationDialog';
 import { useMigrationData } from '../../hooks/useMigrationData';
@@ -89,7 +89,27 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId, availa
     return () => clearInterval(interval);
   }, [nodeId]);
 
+  // Check if a volume is single-replica (cannot be migrated)
+  // Single-replica volumes use direct LVS storage without RAID redundancy.
+  // They cannot be migrated because:
+  // 1. No redundancy to maintain availability during migration
+  // 2. Direct LVS architecture doesn't support live migration
+  // 3. Would require downtime to move the underlying storage
+  const isSingleReplica = (volumeId: string): boolean => {
+    const alert = alertsData?.alerts.find(a => a.volume_id === volumeId);
+    if (!alert) return false;
+    
+    // Check if this is a single-replica volume based on RAID member count
+    // Single-replica volumes use direct LVS without RAID and cannot be migrated
+    return alert.raid_level === 1 && alert.total_members === 1;
+  };
+
   const handleMigrateClick = (volumeId: string, operationType: 'node_migration' | 'member_migration' | 'member_addition' = 'node_migration') => {
+    // Prevent migration of single-replica volumes
+    if (isSingleReplica(volumeId)) {
+      return;
+    }
+    
     setSelectedVolumeForMigration(volumeId);
     
     // Extract RAID name from alerts data for this volume
@@ -408,48 +428,74 @@ export const NodeAlertsPanel: React.FC<NodeAlertsPanelProps> = ({ nodeId, availa
                         <div className="space-y-3">
                           <div className="flex items-center space-x-3">
                             <div className="flex space-x-2">
-                              <button
-                                onClick={() => handleMigrateClick(alert.volume_id, 'node_migration')}
-                                disabled={migrating.has(alert.volume_id)}
-                                className={`px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 ${
-                                  alert.severity === 'critical' 
-                                    ? 'bg-red-600 hover:bg-red-700 text-white'
-                                    : 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                                } disabled:opacity-50 disabled:cursor-not-allowed`}
-                                title="Migrate entire RAID volume to another node"
-                              >
-                                {migrating.has(alert.volume_id) ? (
-                                  <>
-                                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                                    <span>Migrating...</span>
-                                  </>
-                                ) : (
-                                  <>
+                              {isSingleReplica(alert.volume_id) ? (
+                                // Single-replica volumes cannot be migrated
+                                <div className="relative">
+                                  <button
+                                    disabled={true}
+                                    className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-gray-400 text-gray-600 cursor-not-allowed opacity-50"
+                                    title="Single-replica volumes cannot be migrated. They use direct LVS storage without RAID redundancy."
+                                  >
                                     <Server className="w-4 h-4" />
-                                    <span>Migrate Volume</span>
-                                  </>
-                                )}
-                              </button>
+                                    <span>Cannot Migrate</span>
+                                  </button>
+                                  <div className="absolute -top-8 left-0 bg-gray-800 text-white text-xs px-2 py-1 rounded opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-10 whitespace-nowrap">
+                                    Single-replica volumes are not migratable
+                                  </div>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => handleMigrateClick(alert.volume_id, 'node_migration')}
+                                  disabled={migrating.has(alert.volume_id)}
+                                  className={`px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 ${
+                                    alert.severity === 'critical' 
+                                      ? 'bg-red-600 hover:bg-red-700 text-white'
+                                      : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+                                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                  title="Migrate entire RAID volume to another node"
+                                >
+                                  {migrating.has(alert.volume_id) ? (
+                                    <>
+                                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                                      <span>Migrating...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Server className="w-4 h-4" />
+                                      <span>Migrate Volume</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
                               
-                              <button
-                                onClick={() => handleMigrateClick(alert.volume_id, 'member_migration')}
-                                disabled={migrating.has(alert.volume_id)}
-                                className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Replace individual RAID members with new disks or NVMe-oF targets"
-                              >
-                                <RefreshCw className="w-4 h-4" />
-                                <span>Replace Member</span>
-                              </button>
-                              
-                              <button
-                                onClick={() => handleMigrateClick(alert.volume_id, 'member_addition')}
-                                disabled={migrating.has(alert.volume_id)}
-                                className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Add new RAID members to increase capacity or redundancy"
-                              >
-                                <Plus className="w-4 h-4" />
-                                <span>Add Members</span>
-                              </button>
+                              {!isSingleReplica(alert.volume_id) ? (
+                                <>
+                                  <button
+                                    onClick={() => handleMigrateClick(alert.volume_id, 'member_migration')}
+                                    disabled={migrating.has(alert.volume_id)}
+                                    className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Replace individual RAID members with new disks or NVMe-oF targets"
+                                  >
+                                    <RefreshCw className="w-4 h-4" />
+                                    <span>Replace Member</span>
+                                  </button>
+                                  
+                                  <button
+                                    onClick={() => handleMigrateClick(alert.volume_id, 'member_addition')}
+                                    disabled={migrating.has(alert.volume_id)}
+                                    className="px-3 py-2 text-sm font-medium rounded-lg flex items-center space-x-2 bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Add new RAID members to increase capacity or redundancy"
+                                  >
+                                    <Plus className="w-4 h-4" />
+                                    <span>Add Members</span>
+                                  </button>
+                                </>
+                              ) : (
+                                <div className="flex items-center space-x-2 text-sm text-gray-500">
+                                  <Info className="w-4 h-4" />
+                                  <span>Single-replica volumes use direct storage without RAID</span>
+                                </div>
+                              )}
                             </div>
                             
                             <div className="text-xs text-gray-500">

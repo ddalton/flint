@@ -363,25 +363,26 @@ impl ControllerService {
         println!("🔧 [RAID_INIT] RAID level: {}", raid_disk.spec.raid_level);
         println!("🔧 [RAID_INIT] Strip size: {} KB", raid_disk.spec.stripe_size_kb);
 
-        // For single-member RAID1, we need to handle this specially
-        // SPDK RAID1 requires at least 2 members, so we'll create it in degraded mode
-        let (effective_member_names, raid_level) = if member_names.len() == 1 && raid_disk.spec.raid_level == "1" {
-            println!("🔧 [RAID_INIT] Creating degraded RAID1 with single member");
-            // For single-member RAID1, we'll add a second member later or handle via different approach
-            (member_names.clone(), "1".to_string())
-        } else {
-            let level = raid_disk.spec.raid_level.strip_prefix("raid").unwrap_or(&raid_disk.spec.raid_level).to_string();
-            (member_names.clone(), level)
-        };
-        
-        println!("🔧 [RAID_INIT] RAID level: {} with {} members", raid_level, effective_member_names.len());
+        // Check if this is a single-replica scenario - skip RAID entirely and go directly to LVS
+        if member_names.len() == 1 && (raid_disk.spec.raid_level == "1" || raid_disk.spec.raid_level == "raid1") {
+            println!("🔄 [RAID_INIT] Single-replica detected - skipping RAID creation and going directly to LVS");
+            println!("💡 [RAID_INIT] Single-replica volumes don't need RAID and can't be migrated");
+            
+            // For single-replica scenario, create LVS directly on the bdev
+            // This is more efficient than attempting RAID1 just to have it fail
+            return self.create_single_member_storage(&raid_disk, &member_names[0], &spdk_rpc_url).await;
+        }
+
+        // Multi-replica scenario: proceed with RAID creation
+        let raid_level = raid_disk.spec.raid_level.strip_prefix("raid").unwrap_or(&raid_disk.spec.raid_level).to_string();
+        println!("🔧 [RAID_INIT] Multi-replica RAID level: {} with {} members", raid_level, member_names.len());
 
         let raid_params = json!({
             "method": "bdev_raid_create",
             "params": {
                 "name": raid_bdev_name,
                 "raid_level": raid_level,
-                "base_bdevs": effective_member_names,
+                "base_bdevs": member_names,
                 "strip_size_kb": raid_disk.spec.stripe_size_kb
             }
         });
@@ -397,21 +398,10 @@ impl ControllerService {
                 self.update_raid_disk_status_bdev_created(raid_disk).await?;
             }
             Err(e) => {
-                println!("❌ [RAID_INIT] RAID creation failed: {}", e);
-                
-                // If single-member RAID1 failed with "Invalid argument", try direct LVS approach
-                if member_names.len() == 1 && raid_disk.spec.raid_level == "1" && e.to_string().contains("Invalid argument") {
-                    println!("🔄 [RAID_INIT] Single-member RAID1 failed as expected, falling back to direct LVS approach...");
-                    
-                    // For single-member scenario, create LVS directly on the bdev
-                    // This maintains unified interface while working around SPDK RAID1 limitation
-                    return self.create_single_member_storage(&raid_disk, &member_names[0], &spdk_rpc_url).await;
-                } else {
-                    let error_msg = format!("Failed to create RAID bdev: {}", e);
-                    println!("❌ [RAID_INIT] {}", error_msg);
-                    self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
-                    return Err(Status::internal(error_msg));
-                }
+                let error_msg = format!("Failed to create RAID bdev: {}", e);
+                println!("❌ [RAID_INIT] {}", error_msg);
+                self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
+                return Err(Status::internal(error_msg));
             }
         }
 
@@ -442,7 +432,7 @@ impl ControllerService {
                 println!("🔧 [RAID_INIT] Updating RAID disk status to ready...");
                 self.update_raid_disk_status_to_ready(raid_disk).await?;
                 
-                println!("🎉 [RAID_INIT] RAID initialization completed successfully!");
+                println!("🎉 [RAID_INIT] Multi-replica RAID initialization completed successfully!");
                 Ok(())
             }
             Err(e) => {
@@ -454,7 +444,7 @@ impl ControllerService {
         }
     }
 
-    /// Create storage on single member bdev (fallback for single-member RAID1)
+    /// Create storage on single member bdev (direct LVS for single-replica scenarios)
     async fn create_single_member_storage(&self, raid_disk: &SpdkRaidDisk, bdev_name: &str, spdk_rpc_url: &str) -> Result<(), Status> {
         println!("🔧 [SINGLE_STORAGE] Creating LVS directly on single bdev: {}", bdev_name);
         
@@ -486,7 +476,7 @@ impl ControllerService {
                 // Update RAID disk status to indicate it's ready (single-member)
                 self.update_raid_disk_status_to_ready(raid_disk).await?;
                 
-                println!("✅ [SINGLE_STORAGE] Single-member storage initialization completed successfully");
+                println!("✅ [SINGLE_STORAGE] Single-replica storage initialization completed successfully");
                 Ok(())
             }
             Err(e) => {

@@ -435,13 +435,23 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       {extVolume.isRaw ? (
                         <span className="text-gray-400">N/A</span>
                       ) : (
-                        <button
-                          onClick={() => onReplicaClick?.(volume.id, volume.name)}
-                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
-                          title={`Click to see disks with replicas for ${volume.name}`}
-                        >
-                          {volume.active_replicas}/{volume.replicas}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => onReplicaClick?.(volume.id, volume.name)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                            title={`Click to see disks with replicas for ${volume.name}`}
+                          >
+                            {volume.active_replicas}/{volume.replicas}
+                          </button>
+                          {volume.replicas === 1 && (
+                            <span 
+                              className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600"
+                              title="Single-replica volumes cannot be migrated"
+                            >
+                              Non-migratable
+                            </span>
+                          )}
+                        </div>
                       )}
                       {volume.active_replicas < volume.replicas && (
                         <div className="text-xs text-red-600 mt-1">
