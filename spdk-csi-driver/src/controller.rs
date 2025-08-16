@@ -1123,38 +1123,44 @@ impl ControllerService {
             if let Some(hardware_id) = &member.hardware_id {
                 println!("🔧 [BDEV_ENSURE] Ensuring local bdev available: {}", hardware_id);
                 
-                // Check if bdev already exists
+                // Extract bdev name from hardware_id ("/dev/aio-nvme1" -> "aio-nvme1")
+                let bdev_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
+                    name.to_string()
+                } else {
+                    hardware_id.clone()
+                };
+                
+                println!("🔍 [BDEV_ENSURE] Looking for bdev: {}", bdev_name);
+                
+                // Check if bdev already exists in SPDK
                 let check_result = call_spdk_rpc(rpc_url, &json!({
                     "method": "bdev_get_bdevs",
-                    "params": { "name": hardware_id }
+                    "params": {}
                 })).await;
 
                 match check_result {
-                    Ok(_) => {
-                        println!("✅ [BDEV_ENSURE] Local bdev already available: {}", hardware_id);
-                        Ok(())
-                    }
-                    Err(_) => {
-                        // Try to attach via PCIe if not already attached
-                        let attach_result = call_spdk_rpc(rpc_url, &json!({
-                            "method": "bdev_nvme_attach_controller",
-                            "params": {
-                                "name": hardware_id,
-                                "trtype": "PCIe",
-                                "traddr": hardware_id // Assuming hardware_id is PCI address
-                            }
-                        })).await;
-
-                        match attach_result {
-                            Ok(_) => {
-                                println!("✅ [BDEV_ENSURE] Attached local NVMe device: {}", hardware_id);
+                    Ok(bdev_data) => {
+                        // Check if our bdev exists in the list
+                        if let Some(bdevs) = bdev_data["result"].as_array() {
+                            let bdev_exists = bdevs.iter().any(|bdev| {
+                                bdev["name"].as_str() == Some(&bdev_name)
+                            });
+                            
+                            if bdev_exists {
+                                println!("✅ [BDEV_ENSURE] Local bdev already available: {}", bdev_name);
                                 Ok(())
+                            } else {
+                                println!("❌ [BDEV_ENSURE] Bdev {} not found in SPDK - this should have been discovered earlier", bdev_name);
+                                Err(Status::internal(format!("Bdev {} not available in SPDK", bdev_name)))
                             }
-                            Err(e) => {
-                                println!("❌ [BDEV_ENSURE] Failed to attach local device {}: {}", hardware_id, e);
-                                Err(Status::internal(format!("Failed to ensure local bdev: {}", e)))
-                            }
+                        } else {
+                            println!("❌ [BDEV_ENSURE] Failed to parse bdev list from SPDK");
+                            Err(Status::internal("Failed to parse bdev list"))
                         }
+                    }
+                    Err(e) => {
+                        println!("❌ [BDEV_ENSURE] Failed to query SPDK bdevs: {}", e);
+                        Err(Status::internal(format!("Failed to query SPDK bdevs: {}", e)))
                     }
                 }
             } else {
