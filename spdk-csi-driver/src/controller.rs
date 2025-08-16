@@ -573,15 +573,38 @@ impl ControllerService {
         // Create the CRD in Kubernetes
         println!("🏗️ [CRD_CREATE] Creating Kubernetes CRD: {}", raid_id);
         let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        let created_raid = raids.create(&PostParams::default(), &raid_disk).await
-            .map_err(|e| {
-                println!("❌ [CRD_CREATE] Failed to create SpdkRaidDisk CRD: {}", e);
-                Status::internal(format!("Failed to create SpdkRaidDisk CRD: {}", e))
-            })?;
         
-        println!("✅ [CRD_CREATE] Successfully created SpdkRaidDisk CRD: {}", raid_id);
-
-        println!("✅ [CRD_CREATE] Created SpdkRaidDisk CRD: {} with initial 'creating' status", raid_id);
+        println!("🔍 [CRD_DEBUG] About to submit CRD to Kubernetes API...");
+        let created_raid = match raids.create(&PostParams::default(), &raid_disk).await {
+            Ok(crd) => {
+                println!("✅ [CRD_CREATE] Successfully created SpdkRaidDisk CRD: {}", raid_id);
+                println!("🔍 [CRD_DEBUG] Returned CRD name: {:?}", crd.metadata.name);
+                println!("🔍 [CRD_DEBUG] Returned CRD status: {:?}", crd.status);
+                crd
+            },
+            Err(kube::Error::Api(api_error)) => {
+                println!("❌ [CRD_CREATE] Kubernetes API error:");
+                println!("   Status: {}", api_error.status);
+                println!("   Code: {}", api_error.code);
+                println!("   Message: {}", api_error.message);
+                println!("   Reason: {}", api_error.reason);
+                return Err(Status::internal(format!("Failed to create SpdkRaidDisk CRD: API error: {}", api_error.message)));
+            },
+            Err(kube::Error::SerdeError(serde_error)) => {
+                println!("❌ [CRD_CREATE] Serialization/Deserialization error:");
+                println!("   Error: {}", serde_error);
+                println!("   This usually means the Kubernetes response doesn't match our Rust model");
+                return Err(Status::internal(format!("Failed to create SpdkRaidDisk CRD: Deserialization error: {}", serde_error)));
+            },
+            Err(other_error) => {
+                println!("❌ [CRD_CREATE] Other error:");
+                println!("   Error type: {:?}", std::any::type_name_of_val(&other_error));
+                println!("   Error: {}", other_error);
+                return Err(Status::internal(format!("Failed to create SpdkRaidDisk CRD: {}", other_error)));
+            }
+        };
+        
+        println!("🔧 [RAID_INIT] Proceeding to initialize RAID bdev and LVS...");
         
         // Update NVMe disk usage status if needed
         self.mark_local_disks_as_used(selected_disks).await?;
