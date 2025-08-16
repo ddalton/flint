@@ -1170,8 +1170,11 @@ impl SpdkCsiDriver {
             
             let response: serde_json::Value = serde_json::from_str(&response_str)?;
             
+            println!("🔍 [UNIX_RPC] Received JSON response: {}", response);
+            
             // Check for JSON-RPC error responses (critical fix!)
             if let Some(error) = response.get("error") {
+                println!("❌ [UNIX_RPC] SPDK RPC error detected: {}", error);
                 return Err(format!("SPDK RPC error: {}", error).into());
             }
             
@@ -1191,10 +1194,13 @@ impl SpdkCsiDriver {
                 return Err(format!("HTTP RPC failed: {}", error_text).into());
             }
             
-            let response_json = response.json().await?;
+            let response_json: serde_json::Value = response.json().await?;
+            
+            println!("🔍 [HTTP_RPC] Received JSON response: {}", response_json);
             
             // Check for JSON-RPC error responses (HTTP path)
             if let Some(error) = response_json.get("error") {
+                println!("❌ [HTTP_RPC] SPDK RPC error detected: {}", error);
                 return Err(format!("SPDK RPC error: {}", error).into());
             }
             
