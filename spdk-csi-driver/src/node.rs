@@ -45,6 +45,15 @@ pub async fn call_spdk_rpc(
         let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
         
         let response: serde_json::Value = serde_json::from_str(&response_str)?;
+        
+        println!("🔍 [NODE_RPC] Received JSON response: {}", response);
+        
+        // Check for JSON-RPC error responses (critical fix!)
+        if let Some(error) = response.get("error") {
+            println!("❌ [NODE_RPC] SPDK RPC error detected: {}", error);
+            return Err(format!("SPDK RPC error: {}", error).into());
+        }
+        
         Ok(response)
     } else {
         // HTTP connection
@@ -60,6 +69,15 @@ pub async fn call_spdk_rpc(
         }
         
         let json_response: serde_json::Value = response.json().await?;
+        
+        println!("🔍 [NODE_HTTP] Received JSON response: {}", json_response);
+        
+        // Check for JSON-RPC error responses (HTTP path)
+        if let Some(error) = json_response.get("error") {
+            println!("❌ [NODE_HTTP] SPDK RPC error detected: {}", error);
+            return Err(format!("SPDK RPC error: {}", error).into());
+        }
+        
         Ok(json_response)
     }
 }
