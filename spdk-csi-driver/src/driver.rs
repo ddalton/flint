@@ -1169,6 +1169,13 @@ impl SpdkCsiDriver {
             let response_str = String::from_utf8_lossy(&buffer[..bytes_read]);
             
             let response: serde_json::Value = serde_json::from_str(&response_str)?;
+            
+            // Check for JSON-RPC error responses (critical fix!)
+            if let Some(error) = response.get("error") {
+                return Err(format!("SPDK RPC error: {}", error).into());
+            }
+            
+            // Return the full response (controller code will extract result field)
             Ok(response)
         } else {
             // HTTP connection fallback
@@ -1185,6 +1192,12 @@ impl SpdkCsiDriver {
             }
             
             let response_json = response.json().await?;
+            
+            // Check for JSON-RPC error responses (HTTP path)
+            if let Some(error) = response_json.get("error") {
+                return Err(format!("SPDK RPC error: {}", error).into());
+            }
+            
             Ok(response_json)
         }
     }
