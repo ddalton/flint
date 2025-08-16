@@ -854,6 +854,7 @@ async fn create_raid_disk(req: CreateRaidDiskRequest, state: AppState) -> Result
             member_index: i as u32,
             node_id: req.created_on_node.clone(), // Node where this RAID is being created
             hardware_id: Some(member_name.clone()),
+            disk_ref: member_name.clone(), // Reference to the actual disk/bdev name
             serial_number: None, // Will be populated when actual disk is identified
             wwn: None,
             model: None,
