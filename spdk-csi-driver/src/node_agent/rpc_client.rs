@@ -163,19 +163,43 @@ async fn call_spdk_rpc_http(
     spdk_rpc_url: &str,
     rpc_request: &Value,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 [HTTP_RPC_DEBUG] Making HTTP request to: {}", spdk_rpc_url);
+    println!("🔍 [HTTP_RPC_DEBUG] Request payload: {}", rpc_request);
+    
     let client = reqwest::Client::new();
     
     let response = client
         .post(spdk_rpc_url)
+        .header("Content-Type", "application/json")
         .json(rpc_request)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
     
-    let json_response: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+    let status = response.status();
+    println!("🔍 [HTTP_RPC_DEBUG] Response status: {}", status);
+    
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        println!("❌ [HTTP_RPC_DEBUG] HTTP error response: {}", error_text);
+        return Err(format!("HTTP {} error: {}", status, error_text).into());
+    }
+    
+    let response_text = response.text().await
+        .map_err(|e| format!("Failed to read response text: {}", e))?;
+    
+    println!("🔍 [HTTP_RPC_DEBUG] Raw response text: {}", response_text);
+    
+    let json_response: Value = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse JSON response '{}': {}", response_text, e))?;
+    
+    println!("🔍 [HTTP_RPC_DEBUG] Parsed JSON response: {}", json_response);
+    
+    // Check for JSON-RPC error in response
+    if let Some(error) = json_response.get("error") {
+        println!("❌ [HTTP_RPC_DEBUG] JSON-RPC error in response: {}", error);
+        return Err(format!("SPDK RPC error: {}", error).into());
+    }
     
     Ok(json_response)
 }

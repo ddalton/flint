@@ -397,18 +397,50 @@ async fn proxy_spdk_rpc(
     rpc_request: serde_json::Value,
     agent: NodeAgent,
 ) -> Result<impl Reply, Rejection> {
-    println!("🌐 [API] Received SPDK RPC proxy request: {}", rpc_request["method"].as_str().unwrap_or("unknown"));
+    let method = rpc_request["method"].as_str().unwrap_or("unknown");
+    println!("🌐 [API] Received SPDK RPC proxy request: {}", method);
+    println!("🔍 [API_DEBUG] Full RPC request: {}", rpc_request);
+    println!("🔍 [API_DEBUG] Agent SPDK RPC URL: {}", agent.spdk_rpc_url);
+    
+    // Add detailed JSON-RPC request validation
+    if rpc_request.get("method").is_none() {
+        println!("❌ [API_DEBUG] Missing 'method' field in RPC request");
+        let error_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request - missing method field"
+            },
+            "id": rpc_request.get("id")
+        });
+        return Ok(json(&error_response));
+    }
     
     match crate::node_agent::rpc_client::call_spdk_rpc(&agent.spdk_rpc_url, &rpc_request).await {
         Ok(response) => {
-            println!("✅ [API] SPDK RPC proxy completed successfully");
+            println!("✅ [API_DEBUG] SPDK RPC proxy successful response: {}", response);
             Ok(json(&response))
         }
         Err(e) => {
-            println!("❌ [API] SPDK RPC proxy failed: {}", e);
+            println!("❌ [API_DEBUG] SPDK RPC proxy failed with error: {}", e);
+            println!("🔍 [API_DEBUG] Error details: {:?}", e);
+            
+            // Check for specific error types
+            let error_str = e.to_string();
+            if error_str.contains("Invalid argument") {
+                println!("🔍 [API_DEBUG] SPDK returned 'Invalid argument' error for method: {}", method);
+                println!("🔍 [API_DEBUG] This might indicate incorrect RPC parameters");
+            }
+            
+            // Return a proper JSON-RPC error response
             let error_response = serde_json::json!({
-                "error": "RPC call failed",
-                "details": e.to_string()
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": error_str
+                },
+                "id": rpc_request.get("id")
             });
             Ok(json(&error_response))
         }

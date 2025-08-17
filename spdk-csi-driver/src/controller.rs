@@ -1177,12 +1177,28 @@ impl ControllerService {
         let spdk_rpc_url = self.driver.get_rpc_url_for_node(node).await
             .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", node, e)))?;
 
-        // Get existing LVS information
-        let lvs_data = call_spdk_rpc(&spdk_rpc_url, &json!({
+        println!("🔍 [LVS_CHECK_DEBUG] Using RPC URL: {}", spdk_rpc_url);
+        
+        // Prepare the RPC request
+        let rpc_request = json!({
             "method": "bdev_lvol_get_lvstores",
             "params": {}
-        })).await
-            .map_err(|e| Status::internal(format!("Failed to query LVS on node {}: {}", node, e)))?;
+        });
+        
+        println!("🔍 [LVS_CHECK_DEBUG] Sending RPC request: {}", rpc_request);
+        
+        // Get existing LVS information with detailed error logging
+        let lvs_data = match call_spdk_rpc(&spdk_rpc_url, &rpc_request).await {
+            Ok(data) => {
+                println!("✅ [LVS_CHECK_DEBUG] Received response: {}", data);
+                data
+            }
+            Err(e) => {
+                println!("❌ [LVS_CHECK_DEBUG] RPC call failed with error: {}", e);
+                println!("🔍 [LVS_CHECK_DEBUG] Error details: {:?}", e);
+                return Err(Status::internal(format!("Failed to query LVS on node {}: {}", node, e)));
+            }
+        };
 
         let mut available_storage = Vec::new();
         
