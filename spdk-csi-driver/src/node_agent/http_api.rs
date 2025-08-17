@@ -95,6 +95,14 @@ pub async fn start_api_server(agent: NodeAgent) {
                 .and(agent_filter.clone())
                 .and_then(proxy_spdk_rpc)
         )
+        .or(
+            // System disk check for controller
+            warp::path("system-disk-check")
+                .and(warp::post())
+                .and(warp::body::json())
+                .and(agent_filter.clone())
+                .and_then(check_system_disk_status)
+        )
     );
 
     let routes = api.with(cors);
@@ -153,6 +161,18 @@ pub struct InitializeBlobstoreResult {
     pub success: bool,
     pub message: String,
     pub lvs_name: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SystemDiskCheckRequest {
+    pub device_name: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SystemDiskCheckResult {
+    pub device_name: String,
+    pub is_system_disk: bool,
+    pub check_method: String,
 }
 
 // HTTP API Handlers
@@ -393,6 +413,27 @@ async fn proxy_spdk_rpc(
             Ok(json(&error_response))
         }
     }
+}
+
+/// Check if a device is a system disk
+async fn check_system_disk_status(
+    request: SystemDiskCheckRequest,
+    agent: NodeAgent,
+) -> Result<impl Reply, Rejection> {
+    println!("🌐 [API] Received system disk check request for device: {}", request.device_name);
+    
+    // Use the node agent's robust system disk detection
+    let is_system_disk = agent.quick_system_disk_check(&request.device_name).await;
+    
+    let result = SystemDiskCheckResult {
+        device_name: request.device_name,
+        is_system_disk,
+        check_method: "mount_point_analysis".to_string(),
+    };
+    
+    println!("✅ [API] System disk check completed: {} is_system_disk={}", 
+             result.device_name, result.is_system_disk);
+    Ok(json(&result))
 }
 
 // Helper functions

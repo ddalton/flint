@@ -214,20 +214,34 @@ impl ControllerService {
         println!("🏠 [LOCAL_RAID] Attempting to create RAID from local NVMe disks");
 
         // Step 1: Find available local NVMe disks across cluster nodes
-        let available_disks = self.find_available_local_nvme_disks(required_capacity).await?;
+        let available_storage = self.find_available_local_nvme_disks(required_capacity).await?;
         
-        if available_disks.len() < num_replicas as usize {
+        // Check if we found existing LVS to reuse (reactive approach)
+        if let Some(existing_lvs) = available_storage.iter().find(|d| d.device_path.starts_with("existing-lvs:")) {
+            println!("💡 [REACTIVE_STORAGE] Reusing existing LVS instead of creating new RAID");
+            let lvs_name = existing_lvs.device_path.strip_prefix("existing-lvs:").unwrap();
+            
+            // Create a simplified "RAID disk" CRD pointing to existing LVS
+            let raid_disk = self.create_existing_lvs_raid_crd(existing_lvs, lvs_name).await?;
+            println!("✅ [REACTIVE_STORAGE] Successfully configured existing LVS for reuse");
+            return Ok(raid_disk);
+        }
+        
+        // Fallback: Create new RAID disk if no existing LVS available
+        if available_storage.len() < num_replicas as usize {
             return Err(Status::resource_exhausted(format!(
-                "Need {} disks but only {} local NVMe disks available",
-                num_replicas, available_disks.len()
+                "Need {} disks but only {} storage options available",
+                num_replicas, available_storage.len()
             )));
         }
 
-        // Step 2: Select optimal node for RAID creation (node with most local members)
-        let optimal_node = self.select_optimal_raid_node(&available_disks, num_replicas).await?;
+        println!("🔧 [NEW_RAID] No existing LVS found, creating new RAID disk");
         
-        // Step 3: Select disks for RAID (prefer disks on optimal node, then nearby nodes)
-        let selected_disks = self.select_raid_member_disks(&available_disks, num_replicas, &optimal_node).await?;
+        // Step 2: Select optimal node for RAID creation (prefer local storage)
+        let optimal_node = self.select_optimal_raid_node(&available_storage, num_replicas).await?;
+        
+        // Step 3: Select disks for RAID with reactive NVMe-oF creation
+        let selected_disks = self.select_raid_member_disks_with_reactive_nvmeof(&available_storage, num_replicas, &optimal_node).await?;
 
         // Step 4: Create the SpdkRaidDisk CRD
         let raid_disk = self.create_raid_disk_crd(&selected_disks, raid_level, &optimal_node).await?;
@@ -575,17 +589,27 @@ impl ControllerService {
 
     /// Find available local NVMe disks across all cluster nodes
     async fn find_available_local_nvme_disks(&self, min_capacity: i64) -> Result<Vec<AvailableNvmeDisk>, Status> {
-        println!("🔍 [DISK_DISCOVERY] Searching for available local NVMe disks (min {}GB)", 
+        println!("🔍 [DISK_DISCOVERY] Searching for available storage capacity (min {}GB)", 
                  min_capacity / (1024 * 1024 * 1024));
+        println!("💡 [DISK_DISCOVERY] Checking for existing LVS with free space before creating new disks");
 
-        // TODO: Implement actual discovery across cluster nodes
-        // This would query node agents to get their discovered local disks
-        // For now, return placeholder structure
-        
         let mut available_disks = Vec::new();
         
-        // Query all nodes for available local disks via node agent APIs
+        // First: Check for existing LVS with sufficient free space (reactive approach)
         let nodes = self.get_cluster_nodes().await?;
+        for node in &nodes {
+            if let Ok(existing_capacity) = self.check_existing_lvs_capacity(node, min_capacity).await {
+                if !existing_capacity.is_empty() {
+                    println!("✅ [DISK_DISCOVERY] Found existing LVS with sufficient capacity on node {}", node);
+                    available_disks.extend(existing_capacity);
+                    // Return early - prefer reusing existing LVS over creating new disks
+                    return Ok(available_disks);
+                }
+            }
+        }
+        
+        // Second: Only if no existing LVS has space, look for new unclaimed disks
+        println!("🔄 [DISK_DISCOVERY] No existing LVS found with sufficient space, searching for new disks");
         for node in nodes {
             match self.query_node_available_disks(&node, min_capacity).await {
                 Ok(mut node_disks) => available_disks.append(&mut node_disks),
@@ -593,29 +617,54 @@ impl ControllerService {
             }
         }
 
-        println!("✅ [DISK_DISCOVERY] Found {} available local NVMe disks", available_disks.len());
+        println!("✅ [DISK_DISCOVERY] Found {} available storage options", available_disks.len());
         Ok(available_disks)
     }
 
-    /// Select optimal node for RAID creation (node with most local members)
+    /// Select optimal node for RAID creation (prioritize storage nodes over system-only nodes)
     async fn select_optimal_raid_node(&self, available_disks: &[AvailableNvmeDisk], _num_replicas: i32) -> Result<String, Status> {
         use std::collections::HashMap;
 
-        let mut node_disk_counts: HashMap<String, usize> = HashMap::new();
+        let mut node_storage_counts: HashMap<String, usize> = HashMap::new();
+        let mut node_system_counts: HashMap<String, usize> = HashMap::new();
+
+        // Classify disks by node and type (storage vs system)
         for disk in available_disks {
-            *node_disk_counts.entry(disk.node_id.clone()).or_insert(0) += 1;
+            let is_system_disk = self.is_system_disk_by_path(&disk.device_path, &disk.node_id).await;
+            
+            if is_system_disk {
+                *node_system_counts.entry(disk.node_id.clone()).or_insert(0) += 1;
+                println!("🔒 [NODE_CLASSIFY] Node {} has system disk: {}", disk.node_id, disk.device_path);
+            } else {
+                *node_storage_counts.entry(disk.node_id.clone()).or_insert(0) += 1;
+                println!("💾 [NODE_CLASSIFY] Node {} has storage disk: {}", disk.node_id, disk.device_path);
+            }
         }
 
-        // Find node with most disks (prefer local storage for performance)
-        let optimal_node = node_disk_counts.iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(node, _)| node.clone())
-            .ok_or_else(|| Status::resource_exhausted("No nodes with available disks found"))?;
+        // ONLY use nodes with storage disks - NEVER use system disks
+        if !node_storage_counts.is_empty() {
+            let optimal_node = node_storage_counts.iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(node, _)| node.clone())
+                .unwrap(); // Safe unwrap since we checked !is_empty()
 
-        println!("🎯 [NODE_SELECT] Selected optimal node: {} ({} local disks)", 
-                 optimal_node, node_disk_counts.get(&optimal_node).unwrap_or(&0));
-        
-        Ok(optimal_node)
+            println!("🎯 [NODE_SELECT] Selected storage node: {} ({} storage disks)", 
+                     optimal_node, 
+                     node_storage_counts.get(&optimal_node).unwrap_or(&0));
+            return Ok(optimal_node);
+        }
+
+        // REJECT: Never use system disks for storage
+        if !node_system_counts.is_empty() {
+            println!("🚫 [NODE_SELECT] REJECTED: Only system disks available, refusing to use them for safety");
+            let total_system_disks: usize = node_system_counts.values().sum();
+            return Err(Status::resource_exhausted(format!(
+                "No storage disks available. Found {} system disks across {} nodes, but system disks are not allowed for storage", 
+                total_system_disks, node_system_counts.len()
+            )));
+        }
+
+        Err(Status::resource_exhausted("No nodes with available disks found"))
     }
 
     /// Select specific disks for RAID members
@@ -1015,14 +1064,19 @@ impl ControllerService {
                     let supports_write = bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
                     let is_in_use = self.is_bdev_in_use(node, name).await;
                     
+                    // Check if this is a system disk (should be excluded from storage)
+                    let device_path = format!("/dev/{}", name);
+                    let is_system_disk = self.is_system_disk_by_path(&device_path, node).await;
+                    
                     let is_available_storage = !is_claimed && 
                                              supports_read && 
                                              supports_write && 
                                              capacity >= min_capacity as u64 && 
-                                             !is_in_use;
+                                             !is_in_use &&
+                                             !is_system_disk; // EXCLUDE system disks from storage
                     
-                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | in_use: {} | available: {}", 
-                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_in_use, is_available_storage);
+                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | in_use: {} | system_disk: {} | available: {}", 
+                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_in_use, is_system_disk, is_available_storage);
                     
                     if is_available_storage {
                         let disk = AvailableNvmeDisk {
@@ -1062,6 +1116,330 @@ impl ControllerService {
             }
         }
         false
+    }
+
+    /// Check if a disk is a system disk by querying the node agent's system disk detection
+    async fn is_system_disk_by_path(&self, device_path: &str, node_id: &str) -> bool {
+        // Extract device name from path (e.g., "/dev/aio-nvme0" -> "nvme0n1")
+        let device_name = if device_path.starts_with("/dev/aio-") {
+            // For AIO bdevs, extract the underlying device name
+            device_path.strip_prefix("/dev/aio-").unwrap_or(device_path)
+        } else if device_path.starts_with("/dev/") {
+            device_path.strip_prefix("/dev/").unwrap_or(device_path)
+        } else {
+            device_path
+        };
+
+        // Convert aio-nvme0 to nvme0n1 format if needed
+        let canonical_device = if device_name.starts_with("nvme") && !device_name.contains("n1") {
+            format!("{}n1", device_name)
+        } else {
+            device_name.to_string()
+        };
+
+        println!("🔍 [SYSTEM_DISK_CHECK] Checking if {} (canonical: {}) on node {} is system disk", 
+                 device_path, canonical_device, node_id);
+
+        // Query the node agent via RPC to check if this is a system disk
+        match self.driver.get_rpc_url_for_node(node_id).await {
+            Ok(rpc_url) => {
+                // Call a custom RPC method to check system disk status
+                // We'll add this RPC endpoint to the node agent
+                match call_spdk_rpc(&rpc_url.replace("/rpc", "/api/system-disk-check"), &json!({
+                    "device_name": canonical_device
+                })).await {
+                    Ok(response) => {
+                        let is_system = response["is_system_disk"].as_bool().unwrap_or(false);
+                        println!("🔍 [SYSTEM_DISK_CHECK] Node {} reports {} is_system_disk: {}", 
+                                 node_id, canonical_device, is_system);
+                        is_system
+                    }
+                    Err(e) => {
+                        println!("⚠️ [SYSTEM_DISK_CHECK] Failed to query node {} for system disk status: {}", node_id, e);
+                        // CONSERVATIVE FALLBACK: Assume system disk if we can't verify
+                        // This prevents accidentally using system disks
+                        canonical_device.contains("nvme0") // nvme0n1 is typically system disk
+                    }
+                }
+            }
+            Err(e) => {
+                println!("⚠️ [SYSTEM_DISK_CHECK] Failed to get RPC URL for node {}: {}", node_id, e);
+                // CONSERVATIVE FALLBACK: Assume system disk if we can't verify  
+                canonical_device.contains("nvme0") // nvme0n1 is typically system disk
+            }
+        }
+    }
+
+    /// Check existing LVS for available capacity (reactive storage reuse)
+    async fn check_existing_lvs_capacity(&self, node: &str, min_capacity: i64) -> Result<Vec<AvailableNvmeDisk>, Status> {
+        println!("🔍 [LVS_CHECK] Checking existing LVS capacity on node: {}", node);
+        
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(node).await
+            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", node, e)))?;
+
+        // Get existing LVS information
+        let lvs_data = call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores",
+            "params": {}
+        })).await
+            .map_err(|e| Status::internal(format!("Failed to query LVS on node {}: {}", node, e)))?;
+
+        let mut available_storage = Vec::new();
+        
+        if let Some(lvs_list) = lvs_data["result"].as_array() {
+            for lvs in lvs_list {
+                if let (Some(name), Some(free_clusters), Some(cluster_size), Some(base_bdev)) = (
+                    lvs["name"].as_str(),
+                    lvs["free_clusters"].as_u64(),
+                    lvs["cluster_size"].as_u64(),
+                    lvs["base_bdev"].as_str()
+                ) {
+                    let free_bytes = free_clusters * cluster_size;
+                    
+                    if free_bytes >= min_capacity as u64 {
+                        println!("✅ [LVS_CHECK] Found LVS '{}' with {}GB free capacity", 
+                               name, free_bytes / (1024 * 1024 * 1024));
+                        
+                        // Create a virtual "disk" representing this LVS capacity
+                        available_storage.push(AvailableNvmeDisk {
+                            node_id: node.to_string(),
+                            device_path: format!("existing-lvs:{}", name),  // Special marker
+                            serial_number: format!("lvs-{}", name),
+                            wwn: None,
+                            model: "Existing LVS".to_string(),
+                            vendor: "SPDK".to_string(),
+                            capacity: free_bytes as i64,
+                            pci_address: base_bdev.to_string(),  // Store base bdev for reference
+                        });
+                    } else {
+                        println!("⚠️ [LVS_CHECK] LVS '{}' only has {}GB free (need {}GB)", 
+                               name, free_bytes / (1024 * 1024 * 1024), min_capacity / (1024 * 1024 * 1024));
+                    }
+                }
+            }
+        }
+        
+        println!("🔍 [LVS_CHECK] Found {} LVS with sufficient capacity on {}", available_storage.len(), node);
+        Ok(available_storage)
+    }
+
+    /// Select RAID member disks with reactive NVMe-oF creation (only when remote disks needed)
+    async fn select_raid_member_disks_with_reactive_nvmeof(
+        &self, 
+        available_disks: &[AvailableNvmeDisk], 
+        num_replicas: i32, 
+        optimal_node: &str
+    ) -> Result<Vec<AvailableNvmeDisk>, Status> {
+        println!("💡 [REACTIVE_NVMEOF] Selecting {} disks with local-first preference", num_replicas);
+        
+        let mut selected_disks = Vec::new();
+        let mut local_disks = Vec::new();
+        let mut remote_disks = Vec::new();
+        
+        // Separate local vs remote disks
+        for disk in available_disks {
+            if disk.node_id == optimal_node {
+                local_disks.push(disk.clone());
+            } else {
+                remote_disks.push(disk.clone());
+            }
+        }
+        
+        println!("📊 [REACTIVE_NVMEOF] Found {} local disks, {} remote disks on optimal node {}", 
+                 local_disks.len(), remote_disks.len(), optimal_node);
+        
+        // Step 1: Prefer local disks (no NVMe-oF needed)
+        let local_count = std::cmp::min(local_disks.len(), num_replicas as usize);
+        for i in 0..local_count {
+            selected_disks.push(local_disks[i].clone());
+            println!("✅ [LOCAL_DISK] Selected local disk: {} (no NVMe-oF needed)", local_disks[i].device_path);
+        }
+        
+        // Step 2: Only if we need more disks, reactively create NVMe-oF exports for remote disks
+        let remaining_needed = (num_replicas as usize) - selected_disks.len();
+        if remaining_needed > 0 {
+            println!("🌐 [REACTIVE_NVMEOF] Need {} more disks, creating NVMe-oF exports for remote disks", remaining_needed);
+            
+            for i in 0..std::cmp::min(remaining_needed, remote_disks.len()) {
+                let remote_disk = &remote_disks[i];
+                
+                // Reactively create NVMe-oF export for this specific remote disk
+                match self.create_nvmeof_export_for_disk(remote_disk).await {
+                    Ok(nvmeof_disk) => {
+                        selected_disks.push(nvmeof_disk);
+                        println!("✅ [REACTIVE_NVMEOF] Created NVMe-oF export for remote disk: {}", remote_disk.device_path);
+                    }
+                    Err(e) => {
+                        println!("⚠️ [REACTIVE_NVMEOF] Failed to create NVMe-oF export for {}: {}", remote_disk.device_path, e);
+                        // Continue with next disk
+                    }
+                }
+            }
+        }
+        
+        if selected_disks.len() < num_replicas as usize {
+            return Err(Status::resource_exhausted(format!(
+                "Could only select {} disks (needed {}). Local: {}, Remote exports created: {}",
+                selected_disks.len(), num_replicas, local_count, selected_disks.len() - local_count
+            )));
+        }
+        
+        println!("✅ [REACTIVE_NVMEOF] Successfully selected {} disks ({} local, {} remote via NVMe-oF)", 
+                 selected_disks.len(), local_count, selected_disks.len() - local_count);
+        Ok(selected_disks)
+    }
+    
+    /// Create NVMe-oF export for a specific remote disk (reactive approach)
+    async fn create_nvmeof_export_for_disk(&self, disk: &AvailableNvmeDisk) -> Result<AvailableNvmeDisk, Status> {
+        println!("🌐 [NVMEOF_CREATE] Creating on-demand NVMe-oF export for disk: {} on node {}", 
+                 disk.device_path, disk.node_id);
+        
+        // Get the target node's SPDK RPC URL
+        let target_rpc_url = self.driver.get_rpc_url_for_node(&disk.node_id).await
+            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", disk.node_id, e)))?;
+        
+        // Extract the bdev name from device path (e.g., "/dev/nvme1n1" -> "aio-nvme1")
+        let bdev_name = if disk.device_path.starts_with("/dev/") {
+            format!("aio-{}", disk.device_path.strip_prefix("/dev/").unwrap_or(&disk.device_path))
+        } else {
+            disk.device_path.clone()
+        };
+        
+        // Create NVMe-oF subsystem for this specific disk
+        let nqn = format!("nqn.2024-01.io.flint:disk-{}-{}", disk.node_id, bdev_name);
+        
+        // Create the NVMe-oF subsystem
+        let create_subsystem = call_spdk_rpc(&target_rpc_url, &json!({
+            "method": "nvmf_create_subsystem",
+            "params": {
+                "nqn": nqn,
+                "allow_any_host": true
+            }
+        })).await
+            .map_err(|e| Status::internal(format!("Failed to create NVMe-oF subsystem: {}", e)))?;
+        
+        // Add the bdev as a namespace
+        let add_namespace = call_spdk_rpc(&target_rpc_url, &json!({
+            "method": "nvmf_subsystem_add_ns",
+            "params": {
+                "nqn": nqn,
+                "namespace": {
+                    "bdev_name": bdev_name,
+                    "nsid": 1
+                }
+            }
+        })).await
+            .map_err(|e| Status::internal(format!("Failed to add namespace to NVMe-oF subsystem: {}", e)))?;
+        
+        // Add listener (using node's IP)
+        let node_ip = self.get_node_ip(&disk.node_id).await
+            .map_err(|e| Status::internal(format!("Failed to get IP for node {}: {}", disk.node_id, e)))?;
+        
+        let add_listener = call_spdk_rpc(&target_rpc_url, &json!({
+            "method": "nvmf_subsystem_add_listener",
+            "params": {
+                "nqn": nqn,
+                "listen_address": {
+                    "trtype": "TCP",
+                    "traddr": node_ip,
+                    "trsvcid": "4420"
+                }
+            }
+        })).await
+            .map_err(|e| Status::internal(format!("Failed to add listener to NVMe-oF subsystem: {}", e)))?;
+        
+        // Return modified disk info with NVMe-oF connection details
+        let mut nvmeof_disk = disk.clone();
+        nvmeof_disk.device_path = format!("nvmeof://{}:4420/{}", node_ip, nqn);
+        
+        println!("✅ [NVMEOF_CREATE] Successfully created NVMe-oF export: {}", nvmeof_disk.device_path);
+        Ok(nvmeof_disk)
+    }
+    
+    /// Get node IP address for NVMe-oF connection
+    async fn get_node_ip(&self, node_id: &str) -> Result<String, Status> {
+        use k8s_openapi::api::core::v1::Node;
+        
+        let nodes_api: Api<Node> = Api::all(self.driver.kube_client.clone());
+        let node = nodes_api.get(node_id).await
+            .map_err(|e| Status::internal(format!("Failed to get node info: {}", e)))?;
+        
+        // Try to get internal IP
+        if let Some(status) = &node.status {
+            if let Some(addresses) = &status.addresses {
+                for addr in addresses {
+                    if addr.type_ == "InternalIP" {
+                        return Ok(addr.address.clone());
+                    }
+                }
+            }
+        }
+        
+        Err(Status::internal(format!("No internal IP found for node {}", node_id)))
+    }
+
+    /// Create SpdkRaidDisk CRD for existing LVS reuse
+    async fn create_existing_lvs_raid_crd(&self, existing_lvs: &AvailableNvmeDisk, lvs_name: &str) -> Result<SpdkRaidDisk, Status> {
+        use spdk_csi_driver::models::{SpdkRaidDisk, SpdkRaidDiskSpec, RaidMemberDisk};
+        
+        let raid_name = format!("reuse-{}", lvs_name);
+        println!("🔄 [LVS_REUSE] Creating RAID CRD for existing LVS: {} -> {}", lvs_name, raid_name);
+        
+        let raid_spec = SpdkRaidDiskSpec {
+            raid_disk_id: raid_name.clone(),
+            raid_level: "0".to_string(), // Single disk, no actual RAID
+            num_member_disks: 1,
+            member_disks: vec![RaidMemberDisk {
+                member_index: 0,
+                node_id: existing_lvs.node_id.clone(),
+                disk_ref: existing_lvs.pci_address.clone(), // Base bdev name
+                hardware_id: Some(existing_lvs.pci_address.clone()),
+                serial_number: Some(existing_lvs.serial_number.clone()),
+                wwn: existing_lvs.wwn.clone(),
+                model: Some(existing_lvs.model.clone()),
+                vendor: Some(existing_lvs.vendor.clone()),
+                nvmeof_endpoint: spdk_csi_driver::models::NvmeofEndpoint::default(),
+                state: spdk_csi_driver::models::RaidMemberState::Online,
+                capacity_bytes: existing_lvs.capacity,
+                connected: true,
+                last_health_check: Some(chrono::Utc::now().to_rfc3339()),
+            }],
+            stripe_size_kb: 1024, // Default stripe size for LVS reuse
+            superblock_enabled: true,
+            created_on_node: existing_lvs.node_id.clone(),
+            min_capacity_bytes: existing_lvs.capacity,
+            auto_rebuild: true,
+        };
+        
+        let mut raid_disk = SpdkRaidDisk::new(&raid_name, raid_spec);
+        
+        // Set status to indicate this is reusing existing LVS
+        raid_disk.status = Some(spdk_csi_driver::models::SpdkRaidDiskStatus {
+            state: "online".to_string(), // Skip bdev_created since LVS already exists
+            raid_bdev_name: Some(existing_lvs.pci_address.clone()), // Base bdev
+            lvs_name: Some(lvs_name.to_string()),
+            lvs_uuid: None,
+            total_capacity_bytes: existing_lvs.capacity,
+            usable_capacity_bytes: existing_lvs.capacity,
+            used_capacity_bytes: 0,
+            health_status: "healthy".to_string(),
+            degraded: false,
+            rebuild_progress: None,
+            active_member_count: 1,
+            failed_member_count: 0,
+            last_checked: chrono::Utc::now().to_rfc3339(),
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+            raid_status: None,
+        });
+        
+        // Create the CRD in Kubernetes
+        let raids_api: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        let created_raid = raids_api.create(&kube::api::PostParams::default(), &raid_disk).await
+            .map_err(|e| Status::internal(format!("Failed to create RAID CRD for existing LVS: {}", e)))?;
+        
+        println!("✅ [LVS_REUSE] Successfully created RAID CRD for existing LVS: {}", raid_name);
+        Ok(created_raid)
     }
 
     /// Check if NVMe-oF disk is already used in existing RAID
