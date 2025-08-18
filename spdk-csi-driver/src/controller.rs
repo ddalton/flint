@@ -179,10 +179,15 @@ impl ControllerService {
         
         println!("❌ [AUTO_RAID] {}", error_msg);
         
-        // TODO: Create Kubernetes event on PVC for user visibility
-        // self.create_pvc_event("Warning", "ProvisioningFailed", &error_msg).await;
+        // Create detailed Kubernetes event for better user visibility
+        let enhanced_error_msg = format!(
+            "Storage provisioning failed: {}. This may indicate that driver unbinding is not supported on this instance type. For userspace SPDK, the system requires: 1) Kernel driver unbinding capability, 2) Userspace drivers (vfio-pci or uio_pci_generic), 3) Write access to /sys/bus/pci/drivers_probe. Consider using instances that support IOMMU and userspace driver management.",
+            error_msg
+        );
         
-        Err(Status::resource_exhausted(error_msg))
+        println!("📊 [USER_GUIDANCE] {}", enhanced_error_msg);
+        
+        Err(Status::resource_exhausted(enhanced_error_msg))
     }
 
     /// Find an existing RAID disk that can accommodate a volume of given size
@@ -1853,6 +1858,77 @@ impl ControllerService {
         false
     }
     
+    /// Create Kubernetes event on PVC for user visibility
+    async fn create_pvc_event(&self, pvc_name: &str, pvc_namespace: &str, event_type: &str, reason: &str, message: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::{Event, ObjectReference};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, Time};
+        use kube::api::PostParams;
+        
+        println!("🚨 [PVC_EVENT] Creating Kubernetes event for PVC: {}/{}", pvc_namespace, pvc_name);
+        
+        // Create Kubernetes client
+        let client = match kube::Client::try_default().await {
+            Ok(client) => client,
+            Err(e) => {
+                println!("⚠️ [PVC_EVENT] Failed to create Kubernetes client: {}", e);
+                return Err(format!("Failed to create Kubernetes client: {}", e).into());
+            }
+        };
+        
+        let events: kube::Api<Event> = kube::Api::namespaced(client, pvc_namespace);
+        
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        
+        let event_time = Time(chrono::DateTime::from_timestamp(now.as_secs() as i64, 0).unwrap());
+        let first_timestamp = event_time.clone();
+        let last_timestamp = event_time.clone();
+        let event_time_micro = MicroTime(chrono::DateTime::from_timestamp(now.as_secs() as i64, 0).unwrap());
+        
+        let event = Event {
+            metadata: kube::api::ObjectMeta {
+                name: Some(format!("pvc-userspace-binding-{}-{}", pvc_name, now.as_secs())),
+                namespace: Some(pvc_namespace.to_string()),
+                ..Default::default()
+            },
+            action: Some(event_type.to_string()),
+            count: Some(1),
+            event_time: Some(event_time_micro),
+            first_timestamp: Some(first_timestamp),
+            last_timestamp: Some(last_timestamp),
+            message: Some(message.to_string()),
+            reason: Some(reason.to_string()),
+            reporting_component: Some("flint-csi-controller".to_string()),
+            reporting_instance: Some("controller".to_string()),
+            source: Some(k8s_openapi::api::core::v1::EventSource {
+                component: Some("flint-csi-controller".to_string()),
+                host: Some("controller".to_string()),
+            }),
+            type_: Some(event_type.to_string()),
+            involved_object: ObjectReference {
+                api_version: Some("v1".to_string()),
+                kind: Some("PersistentVolumeClaim".to_string()),
+                name: Some(pvc_name.to_string()),
+                namespace: Some(pvc_namespace.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        
+        match events.create(&PostParams::default(), &event).await {
+            Ok(_) => {
+                println!("✅ [PVC_EVENT] Successfully created Kubernetes event on PVC {}/{}", pvc_namespace, pvc_name);
+            }
+            Err(e) => {
+                println!("⚠️ [PVC_EVENT] Failed to create Kubernetes event: {}", e);
+                return Err(format!("Failed to create Kubernetes event: {}", e).into());
+            }
+        }
+        
+        Ok(())
+    }
+    
     /// Query SPDK state for idempotent RAID operations
     async fn query_spdk_state_for_raid(&self, rpc_url: &str, _raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidState, Status> {
         println!("🔍 [SPDK_STATE] Querying SPDK state as source of truth");
@@ -2273,7 +2349,28 @@ impl Controller for ControllerService {
                 println!("❌ [CSI_CONTROLLER] Volume provisioning failed for '{}': {}", volume_name, status.message());
                 println!("   Error code: {:?}", status.code());
                 
-                // For resource exhaustion errors, provide more detailed context
+                // Extract PVC name and namespace from volume name for event creation
+                let (pvc_name, pvc_namespace) = if volume_name.starts_with("pvc-") {
+                    // Standard CSI PVC naming: pvc-{uuid}
+                    // Try to find the actual PVC name from parameters or use the volume name
+                    let pvc_name = req.parameters.get("csi.storage.k8s.io/pvc/name")
+                        .map(|s| s.as_str())
+                        .unwrap_or(volume_name.as_str());
+                    let pvc_namespace = req.parameters.get("csi.storage.k8s.io/pvc/namespace")
+                        .map(|s| s.as_str())
+                        .or_else(|| req.parameters.get("csi.storage.k8s.io/pod/namespace").map(|s| s.as_str()))
+                        .unwrap_or("default");
+                    (pvc_name, pvc_namespace)
+                } else {
+                    // Extract namespace from parameters if available
+                    let default_namespace = req.parameters.get("csi.storage.k8s.io/pvc/namespace")
+                        .map(|s| s.as_str())
+                        .or_else(|| req.parameters.get("csi.storage.k8s.io/pod/namespace").map(|s| s.as_str()))
+                        .unwrap_or("default");
+                    (volume_name.as_str(), default_namespace)
+                };
+                
+                // For resource exhaustion errors, provide more detailed context and create PVC events
                 if status.code() == tonic::Code::ResourceExhausted {
                     if status.message().contains("Insufficient healthy disks") {
                         let enhanced_message = format!(
@@ -2285,6 +2382,25 @@ impl Controller for ControllerService {
                         );
                         println!("   Enhanced error message: {}", enhanced_message);
                         return Err(Status::resource_exhausted(enhanced_message));
+                    } else if status.message().contains("No local NVMe disks or external NVMe-oF endpoints available") {
+                        // This indicates userspace binding limitation - create PVC event
+                        let event_message = format!(
+                            "Storage provisioning failed: {}. This instance type may not support userspace SPDK operations. Required: 1) Kernel driver unbinding capability, 2) Userspace drivers (vfio-pci or uio_pci_generic), 3) Write access to /sys/bus/pci/drivers_probe. Consider using instances that support IOMMU and userspace driver management.",
+                            status.message()
+                        );
+                        
+                        // Create event on PVC for user visibility
+                        if let Err(e) = self.create_pvc_event(
+                            pvc_name,
+                            pvc_namespace,
+                            "Warning",
+                            "UserspaceBindingNotSupported",
+                            &event_message
+                        ).await {
+                            println!("⚠️ [PVC_EVENT] Failed to create PVC event: {}", e);
+                        }
+                        
+                        return Err(Status::resource_exhausted(event_message));
                     }
                 }
                 
