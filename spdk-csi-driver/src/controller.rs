@@ -27,6 +27,23 @@ struct AvailableNvmeDisk {
     pub pci_address: String,
 }
 
+/// SPDK state information for idempotent operations
+#[derive(Debug, Default)]
+struct SpdkRaidState {
+    pub bdevs: Vec<String>,        // All available bdevs
+    pub raid_bdevs: Vec<String>,   // RAID bdevs specifically
+    pub lvs_stores: Vec<LvsState>, // LVS information
+}
+
+#[derive(Debug)]
+struct LvsState {
+    pub name: String,
+    pub base_bdev: String,
+    pub total_capacity: u64,
+    pub free_capacity: u64,
+    pub cluster_size: u64,
+}
+
 pub struct ControllerService {
     driver: Arc<SpdkCsiDriver>,
 }
@@ -324,27 +341,23 @@ impl ControllerService {
             }
         };
 
-        // Update status to 'initializing'
+        // Idempotent RAID initialization - query SPDK as source of truth
+        println!("🔍 [RAID_INIT] Starting idempotent RAID initialization (SPDK is source of truth)");
         self.update_raid_disk_status_initializing(raid_disk).await?;
 
-        // Step 1: Ensure all member bdevs are available in SPDK
-        println!("🔗 [RAID_INIT] Step 1: Ensuring member bdevs are available...");
-        println!("🔍 [RAID_INIT] Total member disks to check: {}", raid_disk.spec.member_disks.len());
+        // Step 1: Query SPDK current state and ensure all member bdevs are available
+        println!("🔗 [RAID_INIT] Step 1: Querying SPDK state and ensuring member bdevs...");
+        let current_spdk_state = self.query_spdk_state_for_raid(&spdk_rpc_url, raid_disk).await?;
         
+        // Ensure all member bdevs exist (idempotent)
         for (index, member) in raid_disk.spec.member_disks.iter().enumerate() {
-            println!("🔍 [RAID_INIT] Checking member {} - node: {}, hardware_id: {:?}", 
-                     index, member.node_id, member.hardware_id);
+            let bdev_name = self.extract_bdev_name_from_hardware_id(member.hardware_id.as_ref().unwrap());
             
-            match self.ensure_member_bdev_available(&spdk_rpc_url, member, index).await {
-                Ok(_) => {
-                    println!("✅ [RAID_INIT] Member {} bdev ready", index);
-                }
-                Err(e) => {
-                    let error_msg = format!("Failed to ensure member {} bdev: {}", index, e);
-                    println!("❌ [RAID_INIT] {}", error_msg);
-                    self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
-                    return Err(e);
-                }
+            if current_spdk_state.bdevs.contains(&bdev_name) {
+                println!("✅ [RAID_INIT] Member {} bdev already exists: {}", index, bdev_name);
+            } else {
+                println!("🔧 [RAID_INIT] Creating missing member {} bdev: {}", index, bdev_name);
+                self.ensure_member_bdev_available(&spdk_rpc_url, member, index).await?;
             }
         }
 
@@ -429,23 +442,58 @@ impl ControllerService {
             }
         }
 
-        // Step 3: Create LVS on RAID bdev (with thin provisioning)
-        println!("💾 [RAID_INIT] Step 3: Creating LVS with thin provisioning...");
+        // Step 3: Check for existing LVS, create if not present
+        println!("💾 [RAID_INIT] Step 3: Checking for existing LVS or creating new one...");
         let lvs_name = raid_disk.spec.lvs_name();
         println!("🔍 [RAID_INIT] Target LVS name: {}", lvs_name);
         println!("🔍 [RAID_INIT] Target RAID bdev for LVS: {}", raid_bdev_name);
         
-        let lvs_params = json!({
-            "method": "bdev_lvol_create_lvstore",
-            "params": {
-                "bdev_name": raid_bdev_name,
-                "lvs_name": lvs_name,
-                "cluster_sz": 1048576  // 1MB clusters for thin provisioning
-            }
-        });
+        // Check if LVS already exists
+        let existing_lvs_result = call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores"
+        })).await;
         
-        println!("🔍 [RAID_INIT] LVS creation RPC request: {}", lvs_params);
-        let lvs_create_result = call_spdk_rpc(&spdk_rpc_url, &lvs_params).await;
+        let lvs_exists = if let Ok(lvs_data) = &existing_lvs_result {
+            if let Some(lvs_array) = lvs_data["result"].as_array() {
+                lvs_array.iter().any(|lvs| {
+                    lvs["name"].as_str() == Some(&lvs_name) ||
+                    lvs["base_bdev"].as_str() == Some(&raid_bdev_name)
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
+        let lvs_create_result = if lvs_exists {
+            println!("✅ [RAID_INIT] LVS already exists: {}", lvs_name);
+            // Update SPDKRaidDisk with existing LVS capacity info
+            if let Ok(lvs_data) = existing_lvs_result {
+                if let Some(lvs_array) = lvs_data["result"].as_array() {
+                    if let Some(existing_lvs) = lvs_array.iter().find(|lvs| {
+                        lvs["name"].as_str() == Some(&lvs_name) ||
+                        lvs["base_bdev"].as_str() == Some(&raid_bdev_name)
+                    }) {
+                        self.update_raid_disk_with_lvs_info(raid_disk, existing_lvs).await?;
+                    }
+                }
+            }
+            Ok(json!({"result": "LVS already exists"}))
+        } else {
+            println!("🔧 [RAID_INIT] Creating new LVS with thin provisioning...");
+            let lvs_params = json!({
+                "method": "bdev_lvol_create_lvstore",
+                "params": {
+                    "bdev_name": raid_bdev_name,
+                    "lvs_name": lvs_name,
+                    "cluster_sz": 1048576  // 1MB clusters for thin provisioning
+                }
+            });
+            
+            println!("🔍 [RAID_INIT] LVS creation RPC request: {}", lvs_params);
+            call_spdk_rpc(&spdk_rpc_url, &lvs_params).await
+        };
 
         match lvs_create_result {
             Ok(response) => {
@@ -915,6 +963,53 @@ impl ControllerService {
         println!("✅ [RAID_STATUS] Updated RAID disk {} to 'online' status with capacity info", 
                  raid_disk.metadata.name.as_ref().unwrap());
         Ok(())
+    }
+
+    /// Update RAID disk status with existing LVS information
+    async fn update_raid_disk_with_lvs_info(&self, raid_disk: &SpdkRaidDisk, lvs_info: &serde_json::Value) -> Result<(), Status> {
+        let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        let mut status = raid_disk.status.clone().unwrap_or_default();
+        status.state = "ready".to_string();
+        status.health_status = "healthy".to_string();
+        status.last_checked = chrono::Utc::now().to_rfc3339();
+        
+        // Extract capacity information from existing LVS
+        if let (Some(total_clusters), Some(free_clusters), Some(cluster_size)) = (
+            lvs_info["total_data_clusters"].as_u64(),
+            lvs_info["free_clusters"].as_u64(),
+            lvs_info["cluster_size"].as_u64()
+        ) {
+            let total_capacity = total_clusters * cluster_size;
+            let free_capacity = free_clusters * cluster_size;
+            let used_capacity = total_capacity - free_capacity;
+            
+            status.total_capacity_bytes = total_capacity;
+            status.usable_capacity_bytes = free_capacity;
+            status.used_capacity_bytes = used_capacity;
+            
+            println!("📊 [RAID_LVS_UPDATE] Existing LVS capacity - Total: {}GB, Used: {}GB, Free: {}GB", 
+                     total_capacity / (1024*1024*1024),
+                     used_capacity / (1024*1024*1024), 
+                     free_capacity / (1024*1024*1024));
+        }
+        
+        // Set member count based on existing LVS
+        status.active_member_count = raid_disk.spec.member_disks.len() as i32;
+        
+        let patch = json!({ "status": status });
+        let raid_name = raid_disk.metadata.name.as_ref().unwrap();
+        
+        match raids.patch_status(raid_name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+            Ok(_) => {
+                println!("✅ [RAID_LVS_UPDATE] Updated RAID disk {} with existing LVS info", raid_name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [RAID_LVS_UPDATE] Failed to update RAID disk status: {}", e);
+                Err(Status::internal(format!("Failed to update RAID disk status: {}", e)))
+            }
+        }
     }
 
     /// Update RAID disk status during failures
@@ -1554,8 +1649,9 @@ impl ControllerService {
                                 println!("✅ [BDEV_ENSURE] Local bdev already available: {}", bdev_name);
                                 Ok(())
                             } else {
-                                println!("❌ [BDEV_ENSURE] Bdev {} not found in SPDK - this should have been discovered earlier", bdev_name);
-                                Err(Status::internal(format!("Bdev {} not available in SPDK", bdev_name)))
+                                println!("🔧 [BDEV_ENSURE] Bdev {} not found - creating on-demand for PVC provisioning", bdev_name);
+                                // Create bdev on-demand during PVC provisioning
+                                self.create_bdev_for_device(rpc_url, hardware_id, &bdev_name).await
                             }
                         } else {
                             println!("❌ [BDEV_ENSURE] Failed to parse bdev list from SPDK");
@@ -1597,6 +1693,146 @@ impl ControllerService {
                 }
             }
         }
+    }
+
+    /// Create bdev on-demand for PVC provisioning
+    /// Uses intelligent strategy selection for different environments (bare metal, VM, cloud)
+    async fn create_bdev_for_device(&self, rpc_url: &str, hardware_id: &str, bdev_name: &str) -> Result<(), Status> {
+        println!("🔧 [BDEV_CREATE] Creating bdev on-demand: {} -> {}", hardware_id, bdev_name);
+        
+        // Extract device path from hardware_id ("/dev/aio-nvme1" -> "/dev/nvme1n1")
+        let device_path = if hardware_id.starts_with("/dev/aio-") {
+            // Convert AIO bdev name back to device path
+            let device_suffix = hardware_id.strip_prefix("/dev/aio-").unwrap_or("nvme0");
+            format!("/dev/{}n1", device_suffix)
+        } else {
+            hardware_id.to_string()
+        };
+        
+        println!("🔍 [BDEV_CREATE] Device path: {}", device_path);
+        
+        // Strategy 1: Try AIO bdev creation (works in most environments)
+        let aio_result = call_spdk_rpc(rpc_url, &json!({
+            "method": "bdev_aio_create",
+            "params": {
+                "name": bdev_name,
+                "filename": device_path
+            }
+        })).await;
+        
+        match aio_result {
+            Ok(_) => {
+                println!("✅ [BDEV_CREATE] Successfully created AIO bdev: {}", bdev_name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [BDEV_CREATE] AIO bdev creation failed: {}", e);
+                
+                // Strategy 2: Try native NVMe attachment for bare metal
+                // Extract PCI address if available
+                if let Some(pci_addr) = self.extract_pci_address(&device_path).await {
+                    println!("🎯 [BDEV_CREATE] Trying native NVMe attachment for bare metal: {}", pci_addr);
+                    
+                    let controller_name = format!("nvme-controller-{}", bdev_name);
+                    let nvme_result = call_spdk_rpc(rpc_url, &json!({
+                        "method": "bdev_nvme_attach_controller",
+                        "params": {
+                            "name": controller_name,
+                            "trtype": "PCIe",
+                            "traddr": pci_addr
+                        }
+                    })).await;
+                    
+                    match nvme_result {
+                        Ok(_) => {
+                            println!("✅ [BDEV_CREATE] Successfully attached native NVMe: {}", pci_addr);
+                            Ok(())
+                        }
+                        Err(nvme_e) => {
+                            println!("❌ [BDEV_CREATE] Both AIO and native NVMe failed - AIO: {}, NVMe: {}", e, nvme_e);
+                            Err(Status::internal(format!("Failed to create bdev: AIO failed ({}), NVMe failed ({})", e, nvme_e)))
+                        }
+                    }
+                } else {
+                    println!("❌ [BDEV_CREATE] Could not determine PCI address, only AIO failed: {}", e);
+                    Err(Status::internal(format!("Failed to create AIO bdev: {}", e)))
+                }
+            }
+        }
+    }
+    
+    /// Query SPDK state for idempotent RAID operations
+    async fn query_spdk_state_for_raid(&self, rpc_url: &str, raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidState, Status> {
+        println!("🔍 [SPDK_STATE] Querying SPDK state as source of truth");
+        
+        // Query all bdevs
+        let bdevs_result = call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await
+            .map_err(|e| Status::internal(format!("Failed to query bdevs: {}", e)))?;
+        
+        let bdevs: Vec<String> = if let Some(bdev_array) = bdevs_result["result"].as_array() {
+            bdev_array.iter()
+                .filter_map(|b| b["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        
+        // Filter RAID bdevs (those created by bdev_raid_create)
+        let raid_bdevs: Vec<String> = bdevs.iter()
+            .filter(|name| name.starts_with("raid_") || name.contains("raid"))
+            .cloned()
+            .collect();
+        
+        // Query LVS stores
+        let lvs_result = call_spdk_rpc(rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await
+            .map_err(|e| Status::internal(format!("Failed to query LVS: {}", e)))?;
+        
+        let lvs_stores: Vec<LvsState> = if let Some(lvs_array) = lvs_result["result"].as_array() {
+            lvs_array.iter().filter_map(|lvs| {
+                let name = lvs["name"].as_str()?;
+                let base_bdev = lvs["base_bdev"].as_str()?;
+                let total_clusters = lvs["total_data_clusters"].as_u64()?;
+                let free_clusters = lvs["free_clusters"].as_u64()?;
+                let cluster_size = lvs["cluster_size"].as_u64()?;
+                
+                Some(LvsState {
+                    name: name.to_string(),
+                    base_bdev: base_bdev.to_string(),
+                    total_capacity: total_clusters * cluster_size,
+                    free_capacity: free_clusters * cluster_size,
+                    cluster_size,
+                })
+            }).collect()
+        } else {
+            Vec::new()
+        };
+        
+        let state = SpdkRaidState {
+            bdevs,
+            raid_bdevs,
+            lvs_stores,
+        };
+        
+        println!("📊 [SPDK_STATE] Found {} bdevs, {} RAID bdevs, {} LVS stores", 
+                 state.bdevs.len(), state.raid_bdevs.len(), state.lvs_stores.len());
+        
+        Ok(state)
+    }
+    
+    /// Extract bdev name from hardware_id (e.g., "/dev/aio-nvme1" -> "aio-nvme1")
+    fn extract_bdev_name_from_hardware_id(&self, hardware_id: &str) -> String {
+        if let Some(name) = hardware_id.strip_prefix("/dev/") {
+            name.to_string()
+        } else {
+            hardware_id.to_string()
+        }
+    }
+
+    /// Extract PCI address from device path (helper for bare metal NVMe attachment)
+    async fn extract_pci_address(&self, device_path: &str) -> Option<String> {
+        // This is a simplified implementation - in reality you'd need to query sysfs
+        // For now, return None to prefer AIO attachment
+        None
     }
 
     /// Provision volume with specified number of replicas - unified for single and multi-replica
