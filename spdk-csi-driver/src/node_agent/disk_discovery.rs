@@ -67,13 +67,18 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
     
     println!("✅ [DISCOVERY] Deduplicated to {} unique devices", unique_devices.len());
     
-    // Automatically attach discovered disks to SPDK using native NVMe controller attachment
-    for (device_path, device) in &unique_devices {
-        println!("🔗 [DISCOVERY] Processing unique device: {}", device_path);
-        if let Err(e) = agent.attach_nvme_controller_to_spdk(device).await {
-            println!("⚠️ [DISCOVERY] Failed to attach NVMe controller {} to SPDK: {}", device.pcie_addr, e);
-        }
-    }
+    // DISABLED: Automatic SPDK bdev attachment during discovery
+    // Bdevs will only be created during PVC provisioning to avoid unnecessary PCIe errors
+    // and allow the dashboard to show disk inventory without binding them to SPDK
+    // 
+    // for (device_path, device) in &unique_devices {
+    //     println!("🔗 [DISCOVERY] Processing unique device: {}", device_path);
+    //     if let Err(e) = agent.attach_nvme_controller_to_spdk(device).await {
+    //         println!("⚠️ [DISCOVERY] Failed to attach NVMe controller {} to SPDK: {}", device.pcie_addr, e);
+    //     }
+    // }
+    
+    println!("📋 [DISCOVERY] Discovered {} devices for dashboard inventory (no automatic SPDK binding)", unique_devices.len());
     
     // Perform health monitoring and create alerts for operator review  
     println!("🏥 [DISCOVERY] Running health checks and alert generation...");
