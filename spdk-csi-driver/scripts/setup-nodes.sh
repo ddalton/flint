@@ -3,11 +3,134 @@
 # Enhanced SPDK CSI Node Setup Script for Bare Metal and Virtualized Environments
 set -e
 
-echo "Setting up SPDK CSI node..."
+# Script configuration
+SCRIPT_NAME=$(basename "$0")
+ENABLE_IOMMU=false
+SKIP_HUGEPAGES=false
+SKIP_DRIVERS=false
+VERBOSE=false
+
+# Usage function
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+SPDK CSI Node Setup Script - Prepares nodes for SPDK CSI driver deployment
+
+OPTIONS:
+    -i, --enable-iommu      Enable IOMMU configuration (modifies GRUB, requires reboot)
+                           WARNING: May affect network connectivity after reboot!
+                           Ensure console/IPMI access before using this option.
+                           
+    -s, --skip-hugepages   Skip hugepages configuration
+    
+    -d, --skip-drivers     Skip userspace driver setup (uio_pci_generic, vfio-pci, etc.)
+    
+    -v, --verbose          Enable verbose output
+    
+    -h, --help             Show this help message
+
+DESCRIPTION:
+    This script prepares a node for SPDK CSI driver deployment by:
+    
+    1. USERSPACE DRIVERS (default: enabled)
+       - Detects environment (bare metal vs virtualized)
+       - Sets up appropriate drivers:
+         * Bare metal: uio_pci_generic or igb_uio
+         * Virtualized: vfio-pci (requires IOMMU)
+       
+    2. HUGEPAGES (default: enabled)
+       - Configures 2MB hugepages for SPDK
+       - Auto-scales based on system memory (1-4GB)
+       - Makes configuration persistent
+    
+    3. IOMMU (default: DISABLED - must use -i flag)
+       - Configures Intel or AMD IOMMU
+       - Modifies GRUB configuration
+       - REQUIRES REBOOT to take effect
+       - Required for vfio-pci in virtualized environments
+
+EXAMPLES:
+    # Basic setup (drivers + hugepages, NO IOMMU changes)
+    sudo $SCRIPT_NAME
+    
+    # Full setup including IOMMU (use with caution)
+    sudo $SCRIPT_NAME --enable-iommu
+    
+    # Setup only hugepages
+    sudo $SCRIPT_NAME --skip-drivers
+    
+    # Dry run to see what would be configured
+    sudo $SCRIPT_NAME --verbose
+
+SAFETY NOTES:
+    ⚠️  IOMMU WARNING: Enabling IOMMU modifies kernel boot parameters and may:
+       - Change network interface names (eth0 → ens3, etc.)
+       - Cause network connectivity loss after reboot
+       - Bind network cards to wrong drivers
+       
+    ✅ BEFORE enabling IOMMU, ensure you have:
+       - Console access (physical, IPMI, or hypervisor console)
+       - Network configuration backups
+       - Tested on a non-production node first
+
+RECOVERY:
+    If you lose SSH access after IOMMU setup:
+    1. Access via console/IPMI
+    2. Check network interfaces: 'ip addr' or 'ifconfig -a'
+    3. Manually restore network: 'dhclient <interface>' or 'ifup <interface>'
+    4. To revert IOMMU: Remove 'intel_iommu=on iommu=pt' from /etc/default/grub
+       Then run 'update-grub' and reboot
+
+For more information, see: https://spdk.io/doc/getting_started.html
+
+EOF
+    exit 0
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i|--enable-iommu)
+                ENABLE_IOMMU=true
+                shift
+                ;;
+            -s|--skip-hugepages)
+                SKIP_HUGEPAGES=true
+                shift
+                ;;
+            -d|--skip-drivers)
+                SKIP_DRIVERS=true
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Use -h or --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Verbose logging function
+log_verbose() {
+    if [ "$VERBOSE" = true ]; then
+        echo "[VERBOSE] $*"
+    fi
+}
 
 # Function to detect if we're in a virtualized environment
 detect_virtualization() {
     local is_virtual=false
+    log_verbose "Detecting virtualization environment..."
     
     # Check DMI product name
     if [ -f /sys/class/dmi/id/product_name ]; then
@@ -41,6 +164,7 @@ detect_virtualization() {
 # Function to build and install igb_uio
 setup_igb_uio() {
     echo "🔧 Setting up igb_uio driver for bare metal SPDK..."
+    log_verbose "Building igb_uio from source..."
     
     # Install build dependencies
     if command -v apt-get >/dev/null 2>&1; then
@@ -332,45 +456,99 @@ main() {
     echo "======================"
     echo ""
     
+    # Display configuration
+    echo "📋 Configuration:"
+    echo "   • Userspace Drivers: $([ "$SKIP_DRIVERS" = true ] && echo "SKIP" || echo "ENABLED")"
+    echo "   • Hugepages: $([ "$SKIP_HUGEPAGES" = true ] && echo "SKIP" || echo "ENABLED")"
+    echo "   • IOMMU Setup: $([ "$ENABLE_IOMMU" = true ] && echo "ENABLED ⚠️" || echo "DISABLED (safe)")"
+    echo ""
+    
     # Check if running as root
     if [ "$EUID" -ne 0 ]; then
         echo "❌ This script must be run as root"
         exit 1
     fi
     
-    # Setup userspace drivers based on environment
-    setup_userspace_drivers
-    echo ""
+    # Warn about IOMMU if enabled
+    if [ "$ENABLE_IOMMU" = true ]; then
+        echo "⚠️  WARNING: IOMMU setup is ENABLED!"
+        echo "   This will modify GRUB and require a reboot."
+        echo "   Network connectivity may be affected after reboot."
+        echo ""
+        echo -n "   Are you sure you have console/IPMI access? (yes/no): "
+        read -r confirm
+        if [ "$confirm" != "yes" ]; then
+            echo "   Aborting for safety. Use without -i flag for safe setup."
+            exit 1
+        fi
+        echo ""
+    fi
     
-    # Setup IOMMU if needed (mainly for bare metal)
-    setup_iommu_if_needed
-    echo ""
+    # Setup userspace drivers based on environment
+    if [ "$SKIP_DRIVERS" = false ]; then
+        setup_userspace_drivers
+        echo ""
+    else
+        echo "ℹ️  Skipping userspace driver setup (--skip-drivers)"
+        echo ""
+    fi
+    
+    # Setup IOMMU only if explicitly enabled
+    if [ "$ENABLE_IOMMU" = true ]; then
+        echo "🔧 IOMMU setup explicitly requested..."
+        setup_iommu_if_needed
+        echo ""
+    else
+        echo "ℹ️  IOMMU setup skipped (use -i/--enable-iommu to enable)"
+        log_verbose "Current IOMMU groups: $(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)"
+        echo ""
+    fi
     
     # Setup hugepages
-    setup_hugepages
-    echo ""
+    if [ "$SKIP_HUGEPAGES" = false ]; then
+        setup_hugepages
+        echo ""
+    else
+        echo "ℹ️  Skipping hugepages setup (--skip-hugepages)"
+        echo ""
+    fi
     
     echo "✅ SPDK CSI node setup completed!"
     echo ""
     echo "📋 Summary:"
-    echo "   🔧 Userspace drivers configured for $([ "$(detect_virtualization)" = "true" ] && echo "virtualized" || echo "bare metal") environment"
-    echo "   📊 Hugepages: $(cat /proc/sys/vm/nr_hugepages) x 2MB = $(($(cat /proc/sys/vm/nr_hugepages) * 2 / 1024))GB"
+    if [ "$SKIP_DRIVERS" = false ]; then
+        echo "   🔧 Userspace drivers configured for $([ "$(detect_virtualization)" = "true" ] && echo "virtualized" || echo "bare metal") environment"
+    fi
+    if [ "$SKIP_HUGEPAGES" = false ]; then
+        echo "   📊 Hugepages: $(cat /proc/sys/vm/nr_hugepages) x 2MB = $(($(cat /proc/sys/vm/nr_hugepages) * 2 / 1024))GB"
+    fi
     echo "   🔍 IOMMU groups: $(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)"
+    echo "   🔐 IOMMU config: $([ "$ENABLE_IOMMU" = true ] && echo "Modified (reboot required)" || echo "Not modified")"
     echo ""
     
     # Check if reboot is needed
-    if [ "$(detect_virtualization)" = "false" ] && [ "$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)" -eq 0 ]; then
+    if [ "$ENABLE_IOMMU" = true ]; then
         if grep -q "intel_iommu=on\|amd_iommu=on" /etc/default/grub; then
             echo "🔄 REBOOT REQUIRED to activate IOMMU configuration"
+            echo "⚠️  WARNING: Ensure you have console access before rebooting!"
             echo ""
         fi
     fi
     
     echo "🎯 Next steps:"
-    echo "   1. If reboot required, reboot now: sudo reboot"
-    echo "   2. Deploy SPDK CSI driver: kubectl apply -f flint-csi-driver-chart/"
-    echo "   3. Verify driver status: kubectl get pods -n flint-system"
+    if [ "$ENABLE_IOMMU" = true ] && grep -q "intel_iommu=on\|amd_iommu=on" /etc/default/grub; then
+        echo "   1. IMPORTANT: Ensure console/IPMI access is available"
+        echo "   2. Reboot to activate IOMMU: sudo reboot"
+        echo "   3. After reboot, verify network connectivity"
+        echo "   4. Deploy SPDK CSI driver: kubectl apply -f flint-csi-driver-chart/"
+    else
+        echo "   1. Deploy SPDK CSI driver: kubectl apply -f flint-csi-driver-chart/"
+        echo "   2. Verify driver status: kubectl get pods -n flint-system"
+    fi
 }
 
+# Parse arguments first
+parse_args "$@"
+
 # Run main function
-main "$@"
+main
