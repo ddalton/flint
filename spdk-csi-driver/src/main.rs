@@ -123,7 +123,7 @@ async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), B
             println!("ℹ️ [STARTUP] No SpdkConfig found for node {} - SPDK will start with empty config", driver.node_id);
             
             // Create empty ConfigMap for SPDK startup
-            let empty_config = spdk_csi_driver::models::SpdkConfigSpec {
+            let _empty_config = spdk_csi_driver::models::SpdkConfigSpec {
                 node_id: driver.node_id.clone(),
                 maintenance_mode: false,
                 last_config_save: Some(chrono::Utc::now().to_rfc3339()),
@@ -146,7 +146,7 @@ async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), B
 /// allow normal startup to proceed.
 async fn should_perform_validation(
     config: &spdk_csi_driver::models::SpdkConfigSpec,
-    driver: &SpdkCsiDriver,
+    _driver: &SpdkCsiDriver,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Skip validation if no RAIDs to check
     if config.raid_bdevs.is_empty() {
@@ -188,8 +188,7 @@ async fn validate_config_with_fast_checks(
     config: &spdk_csi_driver::models::SpdkConfigSpec,
     driver: &SpdkCsiDriver,
 ) -> Result<spdk_csi_driver::models::SpdkConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
-    use futures::future::join_all;
-    println!("🚀 [VALIDATION] Starting fast parallel RAID conflict checks");
+        println!("🚀 [VALIDATION] Starting fast parallel RAID conflict checks");
     
     // Create validation futures for all RAIDs
     let validation_futures: Vec<_> = config.raid_bdevs.iter().map(|raid| {
@@ -241,7 +240,7 @@ async fn validate_single_raid_fast(
     driver: &SpdkCsiDriver,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     use kube::api::{Api, ListParams};
-    use k8s_openapi::api::core::v1::{Node, Pod};
+    use k8s_openapi::api::core::v1::Node;
     
     const FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     
@@ -663,7 +662,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         
         // Start periodic SPDK state reconciliation for state drift prevention
-        let reconcile_driver = driver.clone();
+        let _reconcile_driver = driver.clone();
         tokio::spawn(async move {
             // Wait a bit longer before starting reconciliation to ensure SPDK is fully initialized
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

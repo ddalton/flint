@@ -944,7 +944,7 @@ async fn create_or_update_nvmeofdisk(req: NvmeofDiskCreateRequest, state: AppSta
         failure_reason: None,
     });
 
-    let pp = kube::api::PostParams::default();
+    let _pp = kube::api::PostParams::default();
     let patch_params = kube::api::PatchParams::apply("dashboard");
     let patch = kube::api::Patch::Apply(&resource);
 
@@ -3939,7 +3939,7 @@ async fn set_maintenance_mode(
     request: MaintenanceModeRequest,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    use spdk_csi_driver::models::{SpdkConfig, MaintenanceStatus, MigrationProgress};
+    use spdk_csi_driver::models::SpdkConfig;
     use kube::api::{Api, PatchParams, Patch};
     use serde_json::json;
     

@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
     let spdk_volumes: Api<SpdkVolume> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
-    let nvmeof_api: Api<NvmeofDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
+    let _nvmeof_api: Api<NvmeofDisk> = Api::namespaced(ctx.client.clone(), &ctx.target_namespace);
     let volume_id = &spdk_volume.spec.volume_id;
     let mut status = spdk_volume.status.clone().unwrap_or_default();
     let mut status_update_needed = false;
@@ -444,7 +444,7 @@ async fn replace_raid_member_with_spdk(
     // No manual rebuild initiation needed
 
     // Auto-save SPDK configuration after RAID member replacement
-    let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string());
+    let _node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".to_string());
     // SPDK configuration auto-save could be added here if needed
 
     Ok(())
@@ -455,7 +455,7 @@ async fn get_rpc_url_for_node(
     node_name: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // If operator runs in the same Pod and targets the local node, prefer localhost
-    let local_node = std::env::var("NODE_ID").unwrap_or_default();
+    let _local_node = std::env::var("NODE_ID").unwrap_or_default();
     // Operator is not a DaemonSet; always use HTTP to reach the node-agent sidecar
 
     let pods_api: Api<Pod> = Api::all(client.clone());

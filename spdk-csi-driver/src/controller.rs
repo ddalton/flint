@@ -984,9 +984,9 @@ impl ControllerService {
             let free_capacity = free_clusters * cluster_size;
             let used_capacity = total_capacity - free_capacity;
             
-            status.total_capacity_bytes = total_capacity;
-            status.usable_capacity_bytes = free_capacity;
-            status.used_capacity_bytes = used_capacity;
+            status.total_capacity_bytes = total_capacity as i64;
+            status.usable_capacity_bytes = free_capacity as i64;
+            status.used_capacity_bytes = used_capacity as i64;
             
             println!("📊 [RAID_LVS_UPDATE] Existing LVS capacity - Total: {}GB, Used: {}GB, Free: {}GB", 
                      total_capacity / (1024*1024*1024),
@@ -995,7 +995,7 @@ impl ControllerService {
         }
         
         // Set member count based on existing LVS
-        status.active_member_count = raid_disk.spec.member_disks.len() as i32;
+        status.active_member_count = raid_disk.spec.member_disks.len() as u32;
         
         let patch = json!({ "status": status });
         let raid_name = raid_disk.metadata.name.as_ref().unwrap();
@@ -1420,7 +1420,7 @@ impl ControllerService {
         let nqn = format!("nqn.2024-01.io.flint:disk-{}-{}", disk.node_id, bdev_name);
         
         // Create the NVMe-oF subsystem
-        let create_subsystem = call_spdk_rpc(&target_rpc_url, &json!({
+        let _create_subsystem = call_spdk_rpc(&target_rpc_url, &json!({
             "method": "nvmf_create_subsystem",
             "params": {
                 "nqn": nqn,
@@ -1430,7 +1430,7 @@ impl ControllerService {
             .map_err(|e| Status::internal(format!("Failed to create NVMe-oF subsystem: {}", e)))?;
         
         // Add the bdev as a namespace
-        let add_namespace = call_spdk_rpc(&target_rpc_url, &json!({
+        let _add_namespace = call_spdk_rpc(&target_rpc_url, &json!({
             "method": "nvmf_subsystem_add_ns",
             "params": {
                 "nqn": nqn,
@@ -1446,7 +1446,7 @@ impl ControllerService {
         let node_ip = self.get_node_ip(&disk.node_id).await
             .map_err(|e| Status::internal(format!("Failed to get IP for node {}: {}", disk.node_id, e)))?;
         
-        let add_listener = call_spdk_rpc(&target_rpc_url, &json!({
+        let _add_listener = call_spdk_rpc(&target_rpc_url, &json!({
             "method": "nvmf_subsystem_add_listener",
             "params": {
                 "nqn": nqn,
@@ -1762,7 +1762,7 @@ impl ControllerService {
     }
     
     /// Query SPDK state for idempotent RAID operations
-    async fn query_spdk_state_for_raid(&self, rpc_url: &str, raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidState, Status> {
+    async fn query_spdk_state_for_raid(&self, rpc_url: &str, _raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidState, Status> {
         println!("🔍 [SPDK_STATE] Querying SPDK state as source of truth");
         
         // Query all bdevs
@@ -1829,7 +1829,7 @@ impl ControllerService {
     }
 
     /// Extract PCI address from device path (helper for bare metal NVMe attachment)
-    async fn extract_pci_address(&self, device_path: &str) -> Option<String> {
+    async fn extract_pci_address(&self, _device_path: &str) -> Option<String> {
         // This is a simplified implementation - in reality you'd need to query sysfs
         // For now, return None to prefer AIO attachment
         None
