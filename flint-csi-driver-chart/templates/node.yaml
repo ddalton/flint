@@ -56,6 +56,37 @@ spec:
           volumeMounts:
             - name: spdk-config
               mountPath: /shared-config
+        # Userspace Validation Init Container
+        - name: userspace-validation
+          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
+          imagePullPolicy: Always
+          command:
+            - /usr/local/bin/node-agent
+            - --validate-only
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SPDK_RPC_URL
+              value: "unix:///var/tmp/spdk.sock"
+            - name: LOG_LEVEL
+              value: "{{ .Values.logging.level | default "info" }}"
+            - name: FLINT_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_RAWIO
+          volumeMounts:
+            - name: device-dir
+              mountPath: /dev
+              mountPropagation: "HostToContainer"
+            - name: sys-dir
+              mountPath: /sys
+              mountPropagation: "HostToContainer"
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
         # SPDK Target Container (v25.05.x)

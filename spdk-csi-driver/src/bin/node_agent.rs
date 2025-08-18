@@ -6,13 +6,33 @@
 use spdk_csi_driver::node_agent::{NodeAgent, start_api_server, run_discovery_loop};
 use std::env;
 use kube::Client;
+use clap::{Arg, Command};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command line arguments
+    let matches = Command::new("node-agent")
+        .version("1.0")
+        .about("SPDK CSI Node Agent")
+        .arg(
+            Arg::new("validate-only")
+                .long("validate-only")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run validation checks only (for init container use)")
+        )
+        .get_matches();
+    
+    // Check if running in validation-only mode
+    let validate_only = matches.get_flag("validate-only");
+    
     // Initialize tracing
     tracing_subscriber::fmt::init();
     
-    println!("🚀 [NODE_AGENT] Starting SPDK Node Agent...");
+    if validate_only {
+        println!("🧪 [INIT_VALIDATION] Running userspace SPDK validation checks...");
+    } else {
+        println!("🚀 [NODE_AGENT] Starting SPDK Node Agent...");
+    }
     
     // Get configuration from environment
     let node_name = env::var("NODE_NAME").unwrap_or_else(|_| "unknown-node".to_string());
@@ -50,7 +70,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cluster_id,
     );
     
-    // Perform startup validation to check driver unbinding capability
+    // Handle validation-only mode (for init container)
+    if validate_only {
+        println!("🧪 [INIT_VALIDATION] Performing userspace SPDK validation checks...");
+        
+        match agent.validate_driver_environment().await {
+            Ok(_) => {
+                println!("✅ [INIT_VALIDATION] Validation PASSED - environment supports userspace SPDK");
+                println!("✅ [INIT_VALIDATION] Init container validation successful");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("❌ [INIT_VALIDATION] Validation FAILED: {}", e);
+                eprintln!("❌ [INIT_VALIDATION] This node does not support userspace SPDK operations");
+                eprintln!("💡 [INIT_VALIDATION] Required: 1) Kernel driver unbinding capability");
+                eprintln!("💡 [INIT_VALIDATION] Required: 2) Userspace drivers (vfio-pci or uio_pci_generic)");
+                eprintln!("💡 [INIT_VALIDATION] Required: 3) Write access to /sys/bus/pci/drivers_probe");
+                eprintln!("🚫 [INIT_VALIDATION] SPDK containers will NOT start on this node");
+                std::process::exit(1);
+            }
+        }
+    }
+    
+    // Normal mode - perform validation but continue on failure (with warnings)
     println!("🧪 [NODE_AGENT] Performing startup validation...");
     if let Err(e) = agent.validate_driver_environment().await {
         eprintln!("❌ [NODE_AGENT] Startup validation failed: {}", e);
