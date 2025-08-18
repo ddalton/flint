@@ -67,18 +67,14 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
     
     println!("✅ [DISCOVERY] Deduplicated to {} unique devices", unique_devices.len());
     
-    // DISABLED: Automatic SPDK bdev attachment during discovery
-    // Bdevs will only be created during PVC provisioning to avoid unnecessary PCIe errors
-    // and allow the dashboard to show disk inventory without binding them to SPDK
-    // 
-    // for (device_path, device) in &unique_devices {
-    //     println!("🔗 [DISCOVERY] Processing unique device: {}", device_path);
-    //     if let Err(e) = agent.attach_nvme_controller_to_spdk(device).await {
-    //         println!("⚠️ [DISCOVERY] Failed to attach NVMe controller {} to SPDK: {}", device.pcie_addr, e);
-    //     }
-    // }
+    // ❌ AUTOMATIC BINDING REMOVED: Disks are only bound during PV provisioning
+    // This ensures:
+    // - No unnecessary driver binding during discovery
+    // - Reduced conflicts with unused drives  
+    // - Binding only when storage is actually needed
+    // - Safer operation that doesn't interfere with system stability
     
-    println!("📋 [DISCOVERY] Discovered {} devices for dashboard inventory (no automatic SPDK binding)", unique_devices.len());
+    println!("📋 [DISCOVERY] Discovered {} devices for inventory (binding only during PV provisioning)", unique_devices.len());
     
     // Perform health monitoring and create alerts for operator review  
     println!("🏥 [DISCOVERY] Running health checks and alert generation...");
@@ -94,8 +90,107 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
 
 impl NodeAgent {
 
+    /// Validate the environment supports driver unbinding operations during startup
+    /// This provides early feedback about userspace SPDK compatibility
+    pub async fn validate_driver_environment(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [STARTUP_VALIDATION] Testing driver management infrastructure...");
+        
+        // Test 1: Check if basic driver management paths exist
+        let required_paths = [
+            "/sys/bus/pci/drivers_probe",
+            "/sys/bus/pci/devices",
+            "/sys/bus/pci/drivers",
+        ];
+        
+        for path in &required_paths {
+            if !std::path::Path::new(path).exists() {
+                return Err(format!("Required driver management path missing: {}", path).into());
+            }
+        }
+        println!("✅ [STARTUP_VALIDATION] Basic driver management paths exist");
+        
+        // Test 2: Check if we have write access to drivers_probe
+        match tokio::fs::metadata("/sys/bus/pci/drivers_probe").await {
+            Ok(metadata) => {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.mode() & 0o200 == 0 {
+                    return Err("drivers_probe is not writable - insufficient permissions".into());
+                }
+                println!("✅ [STARTUP_VALIDATION] drivers_probe is writable");
+            }
+            Err(e) => {
+                return Err(format!("Cannot access drivers_probe: {}", e).into());
+            }
+        }
+        
+        // Test 3: Check for userspace driver availability
+        let userspace_available = self.test_userspace_driver_availability().await?;
+        if !userspace_available {
+            return Err("No userspace drivers available (vfio-pci, uio_pci_generic)".into());
+        }
+        println!("✅ [STARTUP_VALIDATION] Userspace drivers available");
+        
+        // Test 4: Try to find any NVMe devices to test driver_override access
+        if let Ok(nvme_devices) = self.get_nvme_pci_devices().await {
+            if !nvme_devices.is_empty() {
+                // Test on the first device found
+                let test_pci = &nvme_devices[0];
+                let driver_override_path = format!("/sys/bus/pci/devices/{}/driver_override", test_pci);
+                
+                if std::path::Path::new(&driver_override_path).exists() {
+                    match tokio::fs::read_to_string(&driver_override_path).await {
+                        Ok(_) => {
+                            println!("✅ [STARTUP_VALIDATION] driver_override is accessible");
+                        }
+                        Err(e) => {
+                            return Err(format!("Cannot read driver_override on {}: {}", test_pci, e).into());
+                        }
+                    }
+                } else {
+                    return Err(format!("driver_override not available on device {}", test_pci).into());
+                }
+            } else {
+                println!("ℹ️ [STARTUP_VALIDATION] No NVMe devices found - cannot test driver_override");
+            }
+        }
+        
+        println!("✅ [STARTUP_VALIDATION] Environment validation passed - userspace SPDK should work");
+        Ok(())
+    }
 
-
+    /// Comprehensive system disk detection - NEVER bind/unbind drivers on system storage
+    /// This is a critical safety check that prevents any driver operations on system disks
+    pub async fn comprehensive_system_disk_check(&self, pci_addr: &str, device_path: &str) -> bool {
+        println!("🛡️ [SYSTEM_CRITICAL] Comprehensive system disk check for PCI: {} Device: {}", pci_addr, device_path);
+        
+        // Method 1: Check by PCI address (existing logic)
+        if self.robust_system_disk_check_by_pci(pci_addr).await {
+            println!("🚨 [SYSTEM_CRITICAL] SYSTEM DISK DETECTED via PCI check: {}", pci_addr);
+            return true;
+        }
+        
+        // Method 2: Check by device path directly
+        let device_name = device_path.strip_prefix("/dev/").unwrap_or(device_path);
+        if self.enhanced_system_disk_check(device_name).await {
+            println!("🚨 [SYSTEM_CRITICAL] SYSTEM DISK DETECTED via device path check: {}", device_path);
+            return true;
+        }
+        
+        // Method 3: Check all partitions on this device
+        if self.check_device_partitions_for_system_use(device_name).await {
+            println!("🚨 [SYSTEM_CRITICAL] SYSTEM DISK DETECTED via partition check: {}", device_name);
+            return true;
+        }
+        
+        // Method 4: Check if device is in critical mount points
+        if self.check_device_in_critical_mounts(device_name).await {
+            println!("🚨 [SYSTEM_CRITICAL] SYSTEM DISK DETECTED via critical mount check: {}", device_name);
+            return true;
+        }
+        
+        println!("✅ [SYSTEM_CRITICAL] Device {} is safe for SPDK operations", device_path);
+        false
+    }
 
     /// Robust system disk detection using PCI address (with proper error handling)
     pub async fn robust_system_disk_check_by_pci(&self, pci_addr: &str) -> bool {
@@ -106,7 +201,7 @@ impl NodeAgent {
             Ok(entries) => entries,
             Err(e) => {
                 println!("⚠️ [SYSTEM_CHECK_PCI] Failed to read /sys/block: {}", e);
-                return false; // Fail safe: if we can't check, don't skip
+                return true; // Fail safe: if we can't check, assume it's a system disk
             }
         };
         
@@ -125,7 +220,7 @@ impl NodeAgent {
                     if actual_pci == pci_addr {
                         println!("🔍 [SYSTEM_CHECK_PCI] Found device {} for PCI {}", device_str, pci_addr);
                         // This device belongs to our PCI address, check if it's system disk
-                        if self.quick_system_disk_check(&device_str).await {
+                        if self.enhanced_system_disk_check(&device_str).await {
                             println!("⚠️ [SYSTEM_CHECK_PCI] PCI device {} contains system disk via {}", pci_addr, device_str);
                             return true;
                         }
@@ -138,43 +233,156 @@ impl NodeAgent {
         false
     }
 
-    /// Quick system disk check for individual devices
-    pub async fn quick_system_disk_check(&self, device_name: &str) -> bool {
-        println!("🔍 [SYSTEM_CHECK] Checking if {} is a system disk", device_name);
+    /// Enhanced system disk check for individual devices with comprehensive safety checks
+    pub async fn enhanced_system_disk_check(&self, device_name: &str) -> bool {
+        println!("🛡️ [ENHANCED_SYSTEM_CHECK] Checking if {} is a system disk", device_name);
         
         // Method 1: Check if it's mounted on root filesystem
         if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
             let root_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("🔍 [SYSTEM_CHECK] Root filesystem source: {}", root_source);
+            println!("🔍 [ENHANCED_SYSTEM_CHECK] Root filesystem source: {}", root_source);
             
             if root_source.contains(device_name) {
-                println!("⚠️ [SYSTEM_CHECK] {} is mounted as root filesystem", device_name);
+                println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is mounted as root filesystem", device_name);
                 return true;
             }
         }
         
-        // Method 2: Check boot partitions
-        if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/boot"]).output() {
-            let boot_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if boot_source.contains(device_name) {
-                println!("⚠️ [SYSTEM_CHECK] {} contains boot partition", device_name);
-                return true;
-            }
-        }
-        
-        // Method 3: Check if any partition is mounted on critical system paths
-        let critical_paths = ["/", "/boot", "/var", "/usr", "/opt"];
-        for path in &critical_paths {
-            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
-                let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if source.contains(device_name) {
-                    println!("⚠️ [SYSTEM_CHECK] {} is mounted on critical path {}", device_name, path);
+        // Method 2: Check boot partitions (including EFI)
+        let boot_paths = ["/boot", "/boot/efi", "/efi"];
+        for boot_path in &boot_paths {
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", boot_path]).output() {
+                let boot_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if boot_source.contains(device_name) {
+                    println!("🚨 [ENHANCED_SYSTEM_CHECK] {} contains boot partition at {}", device_name, boot_path);
                     return true;
                 }
             }
         }
         
+        // Method 3: Check if any partition is mounted on critical system paths
+        let critical_paths = ["/", "/boot", "/var", "/usr", "/opt", "/home", "/tmp"];
+        for path in &critical_paths {
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
+                let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if source.contains(device_name) {
+                    println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is mounted on critical path {}", device_name, path);
+                    return true;
+                }
+            }
+        }
+        
+        // Method 4: Check swap devices
+        if let Ok(output) = Command::new("swapon").args(["--show=NAME", "--noheadings"]).output() {
+            let swap_devices = String::from_utf8_lossy(&output.stdout);
+            if swap_devices.contains(device_name) {
+                println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is used as swap device", device_name);
+                return true;
+            }
+        }
+        
         false
+    }
+
+    /// Check all partitions on a device for system use
+    pub async fn check_device_partitions_for_system_use(&self, device_name: &str) -> bool {
+        println!("🔍 [PARTITION_CHECK] Checking all partitions on {} for system use", device_name);
+        
+        // Get all partitions for this device using lsblk
+        if let Ok(output) = Command::new("lsblk")
+            .args(["-n", "-o", "NAME", "-r", &format!("/dev/{}", device_name)])
+            .output()
+        {
+            let partitions = String::from_utf8_lossy(&output.stdout);
+            for line in partitions.lines() {
+                let partition = line.trim();
+                if !partition.is_empty() && partition != device_name {
+                    println!("🔍 [PARTITION_CHECK] Checking partition: {}", partition);
+                    if self.enhanced_system_disk_check(partition).await {
+                        println!("🚨 [PARTITION_CHECK] System partition found: {}", partition);
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        // Alternative method: Check /proc/partitions and /sys/block
+        let sys_block_path = format!("/sys/block/{}", device_name);
+        if let Ok(entries) = fs::read_dir(&sys_block_path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let entry_name = entry.file_name();
+                    let entry_str = entry_name.to_string_lossy();
+                    
+                    // Look for partition entries (e.g., nvme0n1p1, nvme0n1p2)
+                    if entry_str.starts_with(device_name) && entry_str.len() > device_name.len() {
+                        println!("🔍 [PARTITION_CHECK] Found partition via sysfs: {}", entry_str);
+                        if self.enhanced_system_disk_check(&entry_str).await {
+                            println!("🚨 [PARTITION_CHECK] System partition found via sysfs: {}", entry_str);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        false
+    }
+
+    /// Check if device is used in critical system mounts (including LVM, RAID, etc.)
+    pub async fn check_device_in_critical_mounts(&self, device_name: &str) -> bool {
+        println!("🔍 [CRITICAL_MOUNT_CHECK] Checking if {} is used in critical system mounts", device_name);
+        
+        // Check all mounted filesystems for this device
+        if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE,TARGET"]).output() {
+            let mounts = String::from_utf8_lossy(&output.stdout);
+            for line in mounts.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let source = parts[0];
+                    let target = parts[1];
+                    
+                    if source.contains(device_name) {
+                        println!("🔍 [CRITICAL_MOUNT_CHECK] Device {} found in mount: {} -> {}", device_name, source, target);
+                        
+                        // Check if mounted on critical system paths
+                        let critical_targets = ["/", "/boot", "/var", "/usr", "/opt", "/home", "/tmp", "/var/log", "/var/lib"];
+                        for critical in &critical_targets {
+                            if target.starts_with(critical) {
+                                println!("🚨 [CRITICAL_MOUNT_CHECK] Device {} mounted on critical path: {}", device_name, target);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check if device is part of LVM
+        if let Ok(output) = Command::new("pvs").args(["--noheadings", "-o", "pv_name"]).output() {
+            let pv_list = String::from_utf8_lossy(&output.stdout);
+            if pv_list.contains(device_name) {
+                println!("🚨 [CRITICAL_MOUNT_CHECK] Device {} is part of LVM", device_name);
+                return true;
+            }
+        }
+        
+        // Check if device is part of software RAID
+        if let Ok(output) = Command::new("cat").arg("/proc/mdstat").output() {
+            let mdstat = String::from_utf8_lossy(&output.stdout);
+            if mdstat.contains(device_name) {
+                println!("🚨 [CRITICAL_MOUNT_CHECK] Device {} is part of software RAID", device_name);
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    /// Quick system disk check for individual devices (legacy method)
+    pub async fn quick_system_disk_check(&self, device_name: &str) -> bool {
+        // Delegate to enhanced method for better safety
+        self.enhanced_system_disk_check(device_name).await
     }
 
     /// Get NVMe PCI devices using lspci
@@ -494,148 +702,209 @@ impl NodeAgent {
         Ok(lvs_names)
     }
 
-    /// Attach discovered NVMe device to SPDK with intelligent strategy selection
-    /// Tries native NVMe first (optimal for bare metal), falls back to AIO (compatible with cloud)
-    pub async fn attach_nvme_controller_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔗 [SMART_ATTACH] Attaching NVMe device to SPDK: {} (PCI: {})", device.device_path, device.pcie_addr);
+    // ❌ AUTOMATIC DEVICE ATTACHMENT REMOVED
+    // Device binding is now handled only during PV provisioning in the controller
+    // This ensures devices are only bound when actually needed for storage volumes
 
-        // Skip system disks
-        if self.robust_system_disk_check_by_pci(&device.pcie_addr).await {
-            println!("⚠️ [SMART_ATTACH] Skipping system disk: {} ({})", device.pcie_addr, device.device_path);
-            return Ok(());
+    // ❌ DEVICE ATTACHMENT METHODS REMOVED
+    // All device binding now happens in the controller during PV provisioning
+    // This prevents unnecessary binding during discovery and ensures devices
+    // are only attached when actually needed for storage operations
+
+    /// Test if driver unbinding is possible for a PCI device
+    /// Uses SPDK-style actual testing rather than environment detection
+    async fn test_driver_unbinding_capability(&self, pci_addr: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [UNBIND_TEST] Testing driver unbinding capability for PCI: {}", pci_addr);
+        
+        // Get current driver
+        let current_driver = match self.get_current_driver(pci_addr).await {
+            Ok(driver) => driver,
+            Err(e) => {
+                println!("⚠️ [UNBIND_TEST] Failed to get current driver for {}: {}", pci_addr, e);
+                return Ok(false);
+            }
+        };
+        
+        println!("🔍 [UNBIND_TEST] Current driver for {}: {}", pci_addr, current_driver);
+        
+        // If no driver is bound, binding should work
+        if current_driver == "none" {
+            println!("✅ [UNBIND_TEST] Device {} has no driver - binding operations should work", pci_addr);
+            return self.test_driver_probe_capability(pci_addr).await;
         }
-
-        // Strategy 1: Try native NVMe first (best performance for bare metal/IOMMU)
-        println!("🎯 [SMART_ATTACH] Attempting native NVMe attachment (optimal for bare metal)...");
-        match self.try_native_nvme_attachment(device).await {
-            Ok(()) => {
-                println!("✅ [SMART_ATTACH] Successfully attached via native NVMe: {}", device.pcie_addr);
-                return Ok(());
+        
+        // Test the actual driver unbinding and binding capability using SPDK approach
+        self.test_actual_driver_operations(pci_addr, &current_driver).await
+    }
+    
+    /// Test actual driver operations capability (inspired by SPDK's probe_driver function)
+    async fn test_actual_driver_operations(&self, pci_addr: &str, current_driver: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧪 [DRIVER_TEST] Testing actual driver operations for {}", pci_addr);
+        
+        // Test 1: Check if driver paths exist and are accessible
+        let driver_override_path = format!("/sys/bus/pci/devices/{}/driver_override", pci_addr);
+        let drivers_probe_path = "/sys/bus/pci/drivers_probe";
+        let unbind_path = format!("/sys/bus/pci/drivers/{}/unbind", current_driver);
+        
+        if !std::path::Path::new(&driver_override_path).exists() {
+            println!("❌ [DRIVER_TEST] driver_override not available: {}", driver_override_path);
+            return Ok(false);
+        }
+        
+        if !std::path::Path::new(drivers_probe_path).exists() {
+            println!("❌ [DRIVER_TEST] drivers_probe not available: {}", drivers_probe_path);
+            return Ok(false);
+        }
+        
+        if !std::path::Path::new(&unbind_path).exists() {
+            println!("❌ [DRIVER_TEST] unbind path not available: {}", unbind_path);
+            return Ok(false);
+        }
+        
+        // Test 2: Check write permissions by attempting to read current driver_override
+        match tokio::fs::read_to_string(&driver_override_path).await {
+            Ok(_) => {
+                println!("✅ [DRIVER_TEST] driver_override is accessible");
             }
             Err(e) => {
-                println!("⚠️ [SMART_ATTACH] Native NVMe failed (likely cloud/AWS): {}", e);
-                println!("🔄 [SMART_ATTACH] Falling back to AIO attachment (cloud-compatible)...");
+                println!("❌ [DRIVER_TEST] Cannot access driver_override: {}", e);
+                return Ok(false);
             }
         }
-
-        // Strategy 2: Fallback to AIO (works with kernel driver on cloud instances)
-        self.try_aio_attachment(device).await
-    }
-
-    /// Try native NVMe controller attachment (optimal for bare metal with IOMMU)
-    async fn try_native_nvme_attachment(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let controller_name = format!("nvme-{}", device.controller_id);
-        println!("🏠 [NATIVE_NVME] Attempting native attachment: {} -> {}", device.pcie_addr, controller_name);
-
-        // Check if controller already exists
-        let controllers = call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
-            "method": "bdev_nvme_get_controllers" 
-        })).await?;
         
-        let Some(controller_list) = controllers["result"].as_array() else {
-            return Err("Failed to get controller list".into());
-        };
-
-        let controller_exists = controller_list.iter()
-            .any(|c| c["name"].as_str() == Some(&controller_name));
-
-        if !controller_exists {
-            let attach_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-                "method": "bdev_nvme_attach_controller",
-                "params": {
-                    "name": controller_name,
-                    "trtype": "PCIe",
-                    "traddr": device.pcie_addr
-                }
-            })).await;
-
-            match attach_result {
-                Ok(_) => {
-                    // RPC succeeded, but verify controller was actually attached
-                    println!("🔍 [NATIVE_NVME] RPC successful, verifying controller attachment...");
-                    
-                    // Re-check if controller exists after "successful" RPC
-                    let verify_controllers = call_spdk_rpc(&self.spdk_rpc_url, &json!({ 
-                        "method": "bdev_nvme_get_controllers" 
-                    })).await?;
-                    
-                    let Some(verify_list) = verify_controllers["result"].as_array() else {
-                        return Err("Failed to verify controller attachment".into());
-                    };
-
-                    let actually_attached = verify_list.iter()
-                        .any(|c| c["name"].as_str() == Some(&controller_name));
-
-                    if actually_attached {
-                        println!("✅ [NATIVE_NVME] Native NVMe attachment verified: {}", device.pcie_addr);
-                        Ok(())
-                    } else {
-                        println!("⚠️ [NATIVE_NVME] RPC succeeded but controller not attached (silent SPDK failure)");
-                        Err("SPDK silent failure - controller not attached despite successful RPC".into())
-                    }
-                }
-                Err(e) => {
-                    // Detect explicit RPC errors
-                    let error_msg = e.to_string().to_lowercase();
-                    if error_msg.contains("no controller was found") || 
-                       error_msg.contains("failed to connect") ||
-                       error_msg.contains("device busy") ||
-                       error_msg.contains("permission denied") {
-                        Err(format!("Kernel driver bound (cloud/AWS): {}", e).into())
-                    } else {
-                        Err(e)
-                    }
-                }
+        // Test 3: Try to write to driver_override (this is a safe test operation)
+        match tokio::fs::write(&driver_override_path, current_driver).await {
+            Ok(_) => {
+                println!("✅ [DRIVER_TEST] Can write to driver_override");
+                // Clean up - clear the override
+                let _ = tokio::fs::write(&driver_override_path, "").await;
             }
-        } else {
-            println!("ℹ️ [NATIVE_NVME] Controller {} already exists", controller_name);
-            Ok(())
+            Err(e) => {
+                println!("❌ [DRIVER_TEST] Cannot write to driver_override: {}", e);
+                return Ok(false);
+            }
         }
-    }
-
-    /// Try AIO attachment (compatible with cloud instances and kernel drivers)
-    async fn try_aio_attachment(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let bdev_name = format!("aio-{}", device.controller_id);
-        println!("☁️ [AIO_ATTACH] Attempting AIO attachment: {} -> {}", device.device_path, bdev_name);
-
-        // Check if AIO bdev already exists
-        let bdevs = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-            "method": "bdev_get_bdevs"
-        })).await?;
         
-        let Some(bdev_list) = bdevs["result"].as_array() else {
-            return Err("Failed to get bdev list".into());
-        };
-
-        let bdev_exists = bdev_list.iter()
-            .any(|b| b["name"].as_str() == Some(&bdev_name));
-
-        if !bdev_exists {
-            let create_result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
-                "method": "bdev_aio_create",
-                "params": {
-                    "name": bdev_name,
-                    "filename": device.device_path
+        // Test 4: Check if we can access the drivers_probe interface
+        match tokio::fs::metadata(drivers_probe_path).await {
+            Ok(metadata) => {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.mode() & 0o200 == 0 {
+                    println!("❌ [DRIVER_TEST] drivers_probe is not writable");
+                    return Ok(false);
                 }
-            })).await;
-
-            match create_result {
-                Ok(_) => {
-                    println!("✅ [AIO_ATTACH] AIO attachment successful: {} -> {}", device.device_path, bdev_name);
-                    Ok(())
-                }
-                Err(e) => {
-                    println!("❌ [AIO_ATTACH] AIO attachment failed: {}", e);
-                    Err(format!("Both native NVMe and AIO attachment failed for {}: {}", device.device_path, e).into())
-                }
+                println!("✅ [DRIVER_TEST] drivers_probe is writable");
             }
-        } else {
-            println!("ℹ️ [AIO_ATTACH] AIO bdev {} already exists", bdev_name);
-            Ok(())
+            Err(e) => {
+                println!("❌ [DRIVER_TEST] Cannot access drivers_probe metadata: {}", e);
+                return Ok(false);
+            }
+        }
+        
+        // Test 5: For kernel nvme driver, test if we can switch to VFIO or UIO
+        if current_driver.contains("nvme") {
+            return self.test_userspace_driver_availability().await;
+        }
+        
+        println!("✅ [DRIVER_TEST] Driver operations capability test passed for {}", pci_addr);
+        Ok(true)
+    }
+    
+    /// Test if userspace drivers (vfio-pci, uio_pci_generic) are available
+    async fn test_userspace_driver_availability(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [USERSPACE_TEST] Testing userspace driver availability");
+        
+        // Check for VFIO support (preferred)
+        if std::path::Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
+            println!("✅ [USERSPACE_TEST] vfio-pci driver available");
+            return Ok(true);
+        }
+        
+        // Check for UIO support (fallback)
+        if std::path::Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
+            println!("✅ [USERSPACE_TEST] uio_pci_generic driver available");
+            return Ok(true);
+        }
+        
+        // Try to load vfio-pci module
+        if let Ok(output) = tokio::process::Command::new("modinfo")
+            .arg("vfio-pci")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                println!("✅ [USERSPACE_TEST] vfio-pci module available (can be loaded)");
+                return Ok(true);
+            }
+        }
+        
+        // Try to load uio_pci_generic module
+        if let Ok(output) = tokio::process::Command::new("modinfo")
+            .arg("uio_pci_generic")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                println!("✅ [USERSPACE_TEST] uio_pci_generic module available (can be loaded)");
+                return Ok(true);
+            }
+        }
+        
+        println!("❌ [USERSPACE_TEST] No userspace drivers available (vfio-pci, uio_pci_generic)");
+        Ok(false)
+    }
+    
+    /// Test driver probe capability for devices with no current driver
+    async fn test_driver_probe_capability(&self, pci_addr: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [PROBE_TEST] Testing driver probe capability for {}", pci_addr);
+        
+        let driver_override_path = format!("/sys/bus/pci/devices/{}/driver_override", pci_addr);
+        let drivers_probe_path = "/sys/bus/pci/drivers_probe";
+        
+        // Check if probe interface exists
+        if !std::path::Path::new(&driver_override_path).exists() ||
+           !std::path::Path::new(drivers_probe_path).exists() {
+            println!("❌ [PROBE_TEST] Driver probe interface not available");
+            return Ok(false);
+        }
+        
+        // Test write access to driver_override
+        match tokio::fs::write(&driver_override_path, "").await {
+            Ok(_) => {
+                println!("✅ [PROBE_TEST] Driver probe interface is accessible");
+                Ok(true)
+            }
+            Err(e) => {
+                println!("❌ [PROBE_TEST] Cannot access driver probe interface: {}", e);
+                Ok(false)
+            }
         }
     }
+    
 
-
+    
+    /// Create Kubernetes event for unsupported storage setup
+    async fn create_unsupported_storage_event(&self, device: &NvmeDevice, reason: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🚨 [USERSPACE_SPDK_EVENT] Creating event for incompatible storage device");
+        
+        // Create detailed log entries that operators can see in pod logs
+        println!("📊 [USERSPACE_SPDK_ONLY] EVENT: Device {} (PCI: {}) - Cannot use with userspace SPDK: {}", 
+                 device.device_path, device.pcie_addr, reason);
+        println!("📊 [USERSPACE_SPDK_ONLY] DEVICE_INFO: Model: {}, Serial: {}, Capacity: {}GB", 
+                 device.model, device.serial_number, device.capacity / (1024 * 1024 * 1024));
+        println!("📊 [USERSPACE_SPDK_ONLY] POLICY: No kernel driver fallback - userspace SPDK only");
+        println!("📊 [USERSPACE_SPDK_ONLY] TESTED: Actual driver operation tests failed - not environment guessing");
+        println!("📊 [USERSPACE_SPDK_ONLY] RECOMMENDATION: Verify system supports:");
+        println!("📊 [USERSPACE_SPDK_ONLY] - Driver unbinding (echo PCI_ADDR > /sys/bus/pci/drivers/DRIVER/unbind)");
+        println!("📊 [USERSPACE_SPDK_ONLY] - Userspace drivers (vfio-pci or uio_pci_generic)");
+        println!("📊 [USERSPACE_SPDK_ONLY] - Write access to /sys/bus/pci/devices/*/driver_override");
+        println!("📊 [USERSPACE_SPDK_ONLY] ENVIRONMENT_NOTE: System must support kernel driver unbinding for userspace SPDK");
+        
+        // TODO: If we add kube_client to NodeAgent, we can create actual Kubernetes events here
+        // Following the pattern from create_ublk_kernel_missing_event in driver.rs
+        
+        Ok(())
+    }
 
     /// Read disk cluster metadata (returns default metadata)
     pub async fn read_disk_cluster_metadata(&self, device_name: &str) -> Result<FlintDiskMetadata, Box<dyn std::error::Error + Send + Sync>> {

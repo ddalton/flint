@@ -1695,10 +1695,10 @@ impl ControllerService {
         }
     }
 
-    /// Create bdev on-demand for PVC provisioning
-    /// Uses intelligent strategy selection for different environments (bare metal, VM, cloud)
+    /// Create bdev on-demand for PVC provisioning using userspace-only native NVMe
+    /// Only supports environments where kernel driver unbinding is possible - no kernel driver fallback
     async fn create_bdev_for_device(&self, rpc_url: &str, hardware_id: &str, bdev_name: &str) -> Result<(), Status> {
-        println!("🔧 [BDEV_CREATE] Creating bdev on-demand: {} -> {}", hardware_id, bdev_name);
+        println!("🔧 [USERSPACE_BDEV] Creating userspace bdev on-demand: {} -> {}", hardware_id, bdev_name);
         
         // Extract device path from hardware_id ("/dev/aio-nvme1" -> "/dev/nvme1n1")
         let device_path = if hardware_id.starts_with("/dev/aio-") {
@@ -1709,56 +1709,148 @@ impl ControllerService {
             hardware_id.to_string()
         };
         
-        println!("🔍 [BDEV_CREATE] Device path: {}", device_path);
+        println!("🔍 [USERSPACE_BDEV] Device path: {}", device_path);
         
-        // Strategy 1: Try AIO bdev creation (works in most environments)
-        let aio_result = call_spdk_rpc(rpc_url, &json!({
-            "method": "bdev_aio_create",
+        // Extract PCI address - required for userspace NVMe binding
+        let pci_addr = match self.extract_pci_address(&device_path).await {
+            Some(addr) => addr,
+            None => {
+                let error_msg = format!("Cannot determine PCI address for device {}", device_path);
+                println!("❌ [USERSPACE_BDEV] {}", error_msg);
+                return Err(Status::internal(error_msg));
+            }
+        };
+        
+        println!("🔍 [USERSPACE_BDEV] PCI address: {}", pci_addr);
+        
+        // Test driver unbinding capability before attempting binding
+        if let Err(e) = self.test_driver_unbinding_capability_for_pci(&pci_addr).await {
+            let error_msg = format!("Driver unbinding not supported for {}: {}", pci_addr, e);
+            println!("❌ [USERSPACE_BDEV] {}", error_msg);
+            return Err(Status::internal(error_msg));
+        }
+        
+        println!("✅ [USERSPACE_BDEV] Driver unbinding capability verified for {}", pci_addr);
+        
+        // Userspace-only strategy: Native NVMe attachment with driver unbinding
+        let controller_name = format!("nvme-{}", bdev_name);
+        println!("🎯 [USERSPACE_BDEV] Attempting userspace NVMe attachment: {} -> {}", pci_addr, controller_name);
+        
+        let nvme_result = call_spdk_rpc(rpc_url, &json!({
+            "method": "bdev_nvme_attach_controller",
             "params": {
-                "name": bdev_name,
-                "filename": device_path
+                "name": controller_name,
+                "trtype": "PCIe",
+                "traddr": pci_addr
             }
         })).await;
         
-        match aio_result {
+        match nvme_result {
             Ok(_) => {
-                println!("✅ [BDEV_CREATE] Successfully created AIO bdev: {}", bdev_name);
+                println!("✅ [USERSPACE_BDEV] Successfully attached userspace NVMe: {}", pci_addr);
                 Ok(())
             }
             Err(e) => {
-                println!("⚠️ [BDEV_CREATE] AIO bdev creation failed: {}", e);
-                
-                // Strategy 2: Try native NVMe attachment for bare metal
-                // Extract PCI address if available
-                if let Some(pci_addr) = self.extract_pci_address(&device_path).await {
-                    println!("🎯 [BDEV_CREATE] Trying native NVMe attachment for bare metal: {}", pci_addr);
-                    
-                    let controller_name = format!("nvme-controller-{}", bdev_name);
-                    let nvme_result = call_spdk_rpc(rpc_url, &json!({
-                        "method": "bdev_nvme_attach_controller",
-                        "params": {
-                            "name": controller_name,
-                            "trtype": "PCIe",
-                            "traddr": pci_addr
-                        }
-                    })).await;
-                    
-                    match nvme_result {
-                        Ok(_) => {
-                            println!("✅ [BDEV_CREATE] Successfully attached native NVMe: {}", pci_addr);
-                            Ok(())
-                        }
-                        Err(nvme_e) => {
-                            println!("❌ [BDEV_CREATE] Both AIO and native NVMe failed - AIO: {}, NVMe: {}", e, nvme_e);
-                            Err(Status::internal(format!("Failed to create bdev: AIO failed ({}), NVMe failed ({})", e, nvme_e)))
-                        }
-                    }
-                } else {
-                    println!("❌ [BDEV_CREATE] Could not determine PCI address, only AIO failed: {}", e);
-                    Err(Status::internal(format!("Failed to create AIO bdev: {}", e)))
-                }
+                let error_msg = format!("Userspace NVMe attachment failed for {}: {}", pci_addr, e);
+                println!("❌ [USERSPACE_BDEV] {}", error_msg);
+                Err(Status::internal(error_msg))
             }
         }
+    }
+    
+    /// Test if driver unbinding is possible for a PCI device (controller-side validation)
+    /// Uses the same approach as the node agent for consistency
+    async fn test_driver_unbinding_capability_for_pci(&self, pci_addr: &str) -> Result<(), Status> {
+        println!("🔍 [CONTROLLER_UNBIND_TEST] Testing driver unbinding capability for PCI: {}", pci_addr);
+        
+        // Test 1: Check if basic driver management paths exist
+        let required_paths = [
+            "/sys/bus/pci/drivers_probe",
+            "/sys/bus/pci/devices",
+            "/sys/bus/pci/drivers",
+        ];
+        
+        for path in &required_paths {
+            if !std::path::Path::new(path).exists() {
+                return Err(Status::internal(format!("Required driver management path missing: {}", path)));
+            }
+        }
+        
+        // Test 2: Check if we have write access to drivers_probe
+        match tokio::fs::metadata("/sys/bus/pci/drivers_probe").await {
+            Ok(metadata) => {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.mode() & 0o200 == 0 {
+                    return Err(Status::internal("drivers_probe is not writable - insufficient permissions"));
+                }
+            }
+            Err(e) => {
+                return Err(Status::internal(format!("Cannot access drivers_probe: {}", e)));
+            }
+        }
+        
+        // Test 3: Check for userspace driver availability
+        if !self.test_userspace_driver_availability().await {
+            return Err(Status::internal("No userspace drivers available (vfio-pci, uio_pci_generic)"));
+        }
+        
+        // Test 4: Check device-specific driver_override path
+        let driver_override_path = format!("/sys/bus/pci/devices/{}/driver_override", pci_addr);
+        if !std::path::Path::new(&driver_override_path).exists() {
+            return Err(Status::internal(format!("driver_override not available for device {}", pci_addr)));
+        }
+        
+        match tokio::fs::read_to_string(&driver_override_path).await {
+            Ok(_) => {
+                println!("✅ [CONTROLLER_UNBIND_TEST] Driver unbinding capability verified for {}", pci_addr);
+                Ok(())
+            }
+            Err(e) => {
+                Err(Status::internal(format!("Cannot access driver_override on {}: {}", pci_addr, e)))
+            }
+        }
+    }
+    
+    /// Test if userspace drivers (vfio-pci, uio_pci_generic) are available
+    async fn test_userspace_driver_availability(&self) -> bool {
+        // Check for VFIO support (preferred)
+        if std::path::Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
+            println!("✅ [CONTROLLER_USERSPACE_TEST] vfio-pci driver available");
+            return true;
+        }
+        
+        // Check for UIO support (fallback)
+        if std::path::Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
+            println!("✅ [CONTROLLER_USERSPACE_TEST] uio_pci_generic driver available");
+            return true;
+        }
+        
+        // Try to load vfio-pci module
+        if let Ok(output) = tokio::process::Command::new("modinfo")
+            .arg("vfio-pci")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                println!("✅ [CONTROLLER_USERSPACE_TEST] vfio-pci module available (can be loaded)");
+                return true;
+            }
+        }
+        
+        // Try to load uio_pci_generic module
+        if let Ok(output) = tokio::process::Command::new("modinfo")
+            .arg("uio_pci_generic")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                println!("✅ [CONTROLLER_USERSPACE_TEST] uio_pci_generic module available (can be loaded)");
+                return true;
+            }
+        }
+        
+        println!("❌ [CONTROLLER_USERSPACE_TEST] No userspace drivers available (vfio-pci, uio_pci_generic)");
+        false
     }
     
     /// Query SPDK state for idempotent RAID operations

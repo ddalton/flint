@@ -50,6 +50,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cluster_id,
     );
     
+    // Perform startup validation to check driver unbinding capability
+    println!("🧪 [NODE_AGENT] Performing startup validation...");
+    if let Err(e) = agent.validate_driver_environment().await {
+        eprintln!("❌ [NODE_AGENT] Startup validation failed: {}", e);
+        eprintln!("💡 [NODE_AGENT] This environment may not support userspace SPDK operations");
+        eprintln!("📊 [NODE_AGENT] The pod will continue to start but storage operations may fail");
+        // Note: We continue starting but with warnings - this allows the pod to run
+        // and provide diagnostic information via its API
+    } else {
+        println!("✅ [NODE_AGENT] Startup validation passed - environment supports userspace SPDK");
+    }
+    
     println!("🎯 [NODE_AGENT] Starting API server and discovery loop...");
     
     // Start API server and discovery loop concurrently
