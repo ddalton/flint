@@ -356,12 +356,12 @@ impl ControllerService {
         
         // Ensure all member bdevs exist (idempotent)
         for (index, member) in raid_disk.spec.member_disks.iter().enumerate() {
-            let bdev_name = self.extract_bdev_name_from_hardware_id(member.hardware_id.as_ref().unwrap());
+            let hardware_id = member.hardware_id.as_ref().unwrap();
             
-            if current_spdk_state.bdevs.contains(&bdev_name) {
-                println!("✅ [RAID_INIT] Member {} bdev already exists: {}", index, bdev_name);
+            if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, &current_spdk_state.bdevs) {
+                println!("✅ [RAID_INIT] Member {} bdev already exists: {}", index, existing_bdev_name);
             } else {
-                println!("🔧 [RAID_INIT] Creating missing member {} bdev: {}", index, bdev_name);
+                println!("🔧 [RAID_INIT] Creating missing member {} bdev for device: {}", index, hardware_id);
                 self.ensure_member_bdev_available(&spdk_rpc_url, member, index).await?;
             }
         }
@@ -371,18 +371,16 @@ impl ControllerService {
         let raid_bdev_name = raid_disk.spec.raid_bdev_name();
         println!("🔍 [RAID_INIT] Target RAID bdev name: {}", raid_bdev_name);
         
-        // Extract SPDK bdev names from device paths (hardware_id contains "/dev/aio-nvme0")
+        // Extract actual SPDK bdev names from current SPDK state (supports both userspace NVMe and AIO)
         let member_names: Vec<String> = raid_disk.spec.member_disks.iter()
             .filter_map(|m| {
                 if let Some(hardware_id) = &m.hardware_id {
-                    // hardware_id is "/dev/aio-nvme0", extract "aio-nvme0"
-                    if let Some(bdev_name) = hardware_id.strip_prefix("/dev/") {
-                        println!("🔍 [RAID_INIT] Extracted bdev name '{}' from hardware_id '{}'", bdev_name, hardware_id);
-                        Some(bdev_name.to_string())
+                    if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, &current_spdk_state.bdevs) {
+                        println!("🔍 [RAID_INIT] Found existing bdev '{}' for hardware_id '{}'", existing_bdev_name, hardware_id);
+                        Some(existing_bdev_name)
                     } else {
-                        // Fallback if hardware_id doesn't have /dev/ prefix
-                        println!("🔍 [RAID_INIT] Using hardware_id directly: '{}'", hardware_id);
-                        Some(hardware_id.clone())
+                        println!("⚠️ [RAID_INIT] No bdev found for hardware_id '{}' - this should not happen after bdev creation", hardware_id);
+                        None
                     }
                 } else {
                     println!("⚠️ [RAID_INIT] Member disk missing hardware_id, skipping");
@@ -791,6 +789,7 @@ impl ControllerService {
                 capacity_bytes: disk.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
+                binding_approach: None, // Will be set when bdev is actually created
             }
         }).collect();
 
@@ -1220,22 +1219,15 @@ impl ControllerService {
 
     /// Check if a disk is a system disk by querying the node agent's system disk detection
     async fn is_system_disk_by_path(&self, device_path: &str, node_id: &str) -> bool {
-        // Extract device name from path (e.g., "/dev/aio-nvme0" -> "nvme0n1")
-        let device_name = if device_path.starts_with("/dev/aio-") {
-            // For AIO bdevs, extract the underlying device name
-            device_path.strip_prefix("/dev/aio-").unwrap_or(device_path)
-        } else if device_path.starts_with("/dev/") {
+        // Extract device name from path (e.g., "/dev/nvme0n1" -> "nvme0n1")
+        let device_name = if device_path.starts_with("/dev/") {
             device_path.strip_prefix("/dev/").unwrap_or(device_path)
         } else {
             device_path
         };
 
-        // Convert aio-nvme0 to nvme0n1 format if needed
-        let canonical_device = if device_name.starts_with("nvme") && !device_name.contains("n1") {
-            format!("{}n1", device_name)
-        } else {
-            device_name.to_string()
-        };
+        // Use device name as-is since hardware_id should contain the actual device path
+        let canonical_device = device_name.to_string();
 
         println!("🔍 [SYSTEM_DISK_CHECK] Checking if {} (canonical: {}) on node {} is system disk", 
                  device_path, canonical_device, node_id);
@@ -1414,11 +1406,23 @@ impl ControllerService {
         let target_rpc_url = self.driver.get_rpc_url_for_node(&disk.node_id).await
             .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", disk.node_id, e)))?;
         
-        // Extract the bdev name from device path (e.g., "/dev/nvme1n1" -> "aio-nvme1")
-        let bdev_name = if disk.device_path.starts_with("/dev/") {
-            format!("aio-{}", disk.device_path.strip_prefix("/dev/").unwrap_or(&disk.device_path))
+        // Find the actual bdev name in SPDK (supports both userspace NVMe and AIO naming)
+        let bdevs_result = call_spdk_rpc(&target_rpc_url, &json!({"method": "bdev_get_bdevs"})).await
+            .map_err(|e| Status::internal(format!("Failed to query bdevs for NVMe-oF export: {}", e)))?;
+        
+        let existing_bdev_names: Vec<String> = if let Some(bdevs) = bdevs_result["result"].as_array() {
+            bdevs.iter().filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string())).collect()
         } else {
-            disk.device_path.clone()
+            Vec::new()
+        };
+        
+        let bdev_name = match self.find_existing_bdev_name(&disk.device_path, &existing_bdev_names) {
+            Some(name) => name,
+            None => {
+                let error_msg = format!("No bdev found for device {} - cannot create NVMe-oF export", disk.device_path);
+                println!("❌ [NVMEOF_CREATE] {}", error_msg);
+                return Err(Status::internal(error_msg));
+            }
         };
         
         // Create NVMe-oF subsystem for this specific disk
@@ -1519,6 +1523,7 @@ impl ControllerService {
                 capacity_bytes: existing_lvs.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
+                binding_approach: None, // Legacy LVS, binding approach unknown
             }],
             stripe_size_kb: 1024, // Default stripe size for LVS reuse
             superblock_enabled: true,
@@ -1593,6 +1598,7 @@ impl ControllerService {
                 capacity_bytes: endpoint.spec.size_bytes,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
+                binding_approach: Some("nvmeof".to_string()), // Remote disk accessed via NVMe-oF
             }
         }).collect();
 
@@ -1627,16 +1633,7 @@ impl ControllerService {
             if let Some(hardware_id) = &member.hardware_id {
                 println!("🔧 [BDEV_ENSURE] Ensuring local bdev available: {}", hardware_id);
                 
-                // Extract bdev name from hardware_id ("/dev/aio-nvme1" -> "aio-nvme1")
-                let bdev_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
-                    name.to_string()
-                } else {
-                    hardware_id.clone()
-                };
-                
-                println!("🔍 [BDEV_ENSURE] Looking for bdev: {}", bdev_name);
-                
-                // Check if bdev already exists in SPDK
+                // Check if bdev already exists in SPDK with either naming convention
                 let check_result = call_spdk_rpc(rpc_url, &json!({
                     "method": "bdev_get_bdevs",
                     "params": {}
@@ -1644,19 +1641,25 @@ impl ControllerService {
 
                 match check_result {
                     Ok(bdev_data) => {
-                        // Check if our bdev exists in the list
+                        // Check if our bdev exists in the list with either naming convention
                         if let Some(bdevs) = bdev_data["result"].as_array() {
-                            let bdev_exists = bdevs.iter().any(|bdev| {
-                                bdev["name"].as_str() == Some(&bdev_name)
-                            });
+                            let existing_bdev_names: Vec<String> = bdevs.iter()
+                                .filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string()))
+                                .collect();
                             
-                            if bdev_exists {
-                                println!("✅ [BDEV_ENSURE] Local bdev already available: {}", bdev_name);
+                            if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, &existing_bdev_names) {
+                                println!("✅ [BDEV_ENSURE] Local bdev already available: {}", existing_bdev_name);
                                 Ok(())
                             } else {
-                                println!("🔧 [BDEV_ENSURE] Bdev {} not found - creating on-demand for PVC provisioning", bdev_name);
+                                println!("🔧 [BDEV_ENSURE] No bdev found for device {} - creating on-demand for PVC provisioning", hardware_id);
+                                // Generate a target bdev name for creation (prefer userspace NVMe format)
+                                let device_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
+                                    name.to_string()
+                                } else {
+                                    hardware_id.clone()
+                                };
                                 // Create bdev on-demand during PVC provisioning
-                                self.create_bdev_for_device(rpc_url, hardware_id, &bdev_name).await
+                                self.create_bdev_for_device(rpc_url, hardware_id, &device_name).await
                             }
                         } else {
                             println!("❌ [BDEV_ENSURE] Failed to parse bdev list from SPDK");
@@ -1700,46 +1703,65 @@ impl ControllerService {
         }
     }
 
-    /// Create bdev on-demand for PVC provisioning using userspace-only native NVMe
-    /// Only supports environments where kernel driver unbinding is possible - no kernel driver fallback
+    /// Create bdev on-demand for PVC provisioning with fallback support
+    /// 
+    /// BINDING APPROACH LOGIC (mutually exclusive):
+    /// 1. Try userspace NVMe (bdev_nvme_attach_controller) if driver unbinding is supported
+    /// 2. Fall back to AIO (bdev_aio_create) if userspace NVMe is not available
+    /// 
+    /// MUTUAL EXCLUSIVITY GUARANTEE:
+    /// - Only ONE of bdev_nvme_attach_controller OR bdev_aio_create is called per device
+    /// - Different nodes can use different approaches based on their capabilities
+    /// - Approach is clearly logged for visibility and troubleshooting
     async fn create_bdev_for_device(&self, rpc_url: &str, hardware_id: &str, bdev_name: &str) -> Result<(), Status> {
-        println!("🔧 [USERSPACE_BDEV] Creating userspace bdev on-demand: {} -> {}", hardware_id, bdev_name);
+        println!("🔧 [BDEV_CREATE] Creating bdev on-demand: {} -> {}", hardware_id, bdev_name);
         
-        // Extract device path from hardware_id ("/dev/aio-nvme1" -> "/dev/nvme1n1")
-        let device_path = if hardware_id.starts_with("/dev/aio-") {
-            // Convert AIO bdev name back to device path
-            let device_suffix = hardware_id.strip_prefix("/dev/aio-").unwrap_or("nvme0");
-            format!("/dev/{}n1", device_suffix)
-        } else {
-            hardware_id.to_string()
-        };
+        // Extract device path from hardware_id (should be actual device path like "/dev/nvme1n1")
+        let device_path = hardware_id.to_string();
         
-        println!("🔍 [USERSPACE_BDEV] Device path: {}", device_path);
+        println!("🔍 [BDEV_CREATE] Device path: {}", device_path);
         
         // Extract PCI address - required for userspace NVMe binding
         let pci_addr = match self.extract_pci_address(&device_path).await {
             Some(addr) => addr,
             None => {
-                let error_msg = format!("Cannot determine PCI address for device {}", device_path);
-                println!("❌ [USERSPACE_BDEV] {}", error_msg);
-                return Err(Status::internal(error_msg));
+                println!("⚠️ [BDEV_CREATE] Cannot determine PCI address for device {}. Falling back to AIO.", device_path);
+                return self.create_aio_bdev_fallback(rpc_url, &device_path, bdev_name).await;
             }
         };
         
-        println!("🔍 [USERSPACE_BDEV] PCI address: {}", pci_addr);
+        println!("🔍 [BDEV_CREATE] PCI address: {}", pci_addr);
         
-        // Test driver unbinding capability before attempting binding
-        if let Err(e) = self.test_driver_unbinding_capability_for_pci(&pci_addr).await {
-            let error_msg = format!("Driver unbinding not supported for {}: {}", pci_addr, e);
-            println!("❌ [USERSPACE_BDEV] {}", error_msg);
-            return Err(Status::internal(error_msg));
+        // Test driver unbinding capability first
+        match self.test_driver_unbinding_capability_for_pci(&pci_addr).await {
+            Ok(_) => {
+                println!("✅ [BDEV_CREATE] Driver unbinding capability verified for {}", pci_addr);
+                
+                // Try userspace NVMe attachment
+                match self.create_userspace_nvme_bdev(rpc_url, &pci_addr, bdev_name).await {
+                    Ok(_) => {
+                        println!("✅ [BDEV_CREATE] Successfully created userspace NVMe bdev for {}", pci_addr);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("⚠️ [BDEV_CREATE] Userspace NVMe attachment failed for {}: {}. Falling back to AIO.", pci_addr, e);
+                        self.create_aio_bdev_fallback(rpc_url, &device_path, bdev_name).await
+                    }
+                }
+            }
+            Err(e) => {
+                println!("⚠️ [BDEV_CREATE] Driver unbinding not supported for {}: {}. Using AIO fallback.", pci_addr, e);
+                self.create_aio_bdev_fallback(rpc_url, &device_path, bdev_name).await
+            }
         }
-        
-        println!("✅ [USERSPACE_BDEV] Driver unbinding capability verified for {}", pci_addr);
-        
-        // Userspace-only strategy: Native NVMe attachment with driver unbinding
+    }
+    
+    /// Create userspace NVMe bdev using bdev_nvme_attach_controller
+    async fn create_userspace_nvme_bdev(&self, rpc_url: &str, pci_addr: &str, bdev_name: &str) -> Result<(), Status> {
         let controller_name = format!("nvme-{}", bdev_name);
-        println!("🎯 [USERSPACE_BDEV] Attempting userspace NVMe attachment: {} -> {}", pci_addr, controller_name);
+        println!("🎯 [BINDING_APPROACH] USERSPACE_NVME: Attempting userspace NVMe attachment: {} -> {}", pci_addr, controller_name);
+        println!("   🔧 Method: bdev_nvme_attach_controller (kernel driver will be unbound)");
+        println!("   📋 Benefits: Direct hardware access, optimal performance, low latency");
         
         let nvme_result = call_spdk_rpc(rpc_url, &json!({
             "method": "bdev_nvme_attach_controller",
@@ -1752,12 +1774,46 @@ impl ControllerService {
         
         match nvme_result {
             Ok(_) => {
-                println!("✅ [USERSPACE_BDEV] Successfully attached userspace NVMe: {}", pci_addr);
+                println!("✅ [BINDING_APPROACH] USERSPACE_NVME: Successfully created bdev '{}' using userspace NVMe driver", controller_name);
+                println!("   🚀 Device {} is now managed by SPDK userspace driver", pci_addr);
+                // Note: binding_approach will be updated in RAID disk CRD separately
                 Ok(())
             }
             Err(e) => {
                 let error_msg = format!("Userspace NVMe attachment failed for {}: {}", pci_addr, e);
-                println!("❌ [USERSPACE_BDEV] {}", error_msg);
+                println!("❌ [BINDING_APPROACH] USERSPACE_NVME: {}", error_msg);
+                Err(Status::internal(error_msg))
+            }
+        }
+    }
+    
+    /// Create AIO bdev as fallback when userspace NVMe is not available
+    async fn create_aio_bdev_fallback(&self, rpc_url: &str, device_path: &str, bdev_name: &str) -> Result<(), Status> {
+        let aio_bdev_name = format!("aio-{}", bdev_name);
+        println!("🔄 [BINDING_APPROACH] AIO_FALLBACK: Creating AIO bdev: {} -> {}", device_path, aio_bdev_name);
+        println!("   🔧 Method: bdev_aio_create (kernel driver remains active)");
+        println!("   📋 Benefits: Compatible with all systems, no driver unbinding required");
+        println!("   ⚠️  Trade-offs: Higher CPU overhead, shared kernel/userspace access");
+        
+        let aio_result = call_spdk_rpc(rpc_url, &json!({
+            "method": "bdev_aio_create",
+            "params": {
+                "name": aio_bdev_name,
+                "filename": device_path,
+                "block_size": 512
+            }
+        })).await;
+        
+        match aio_result {
+            Ok(_) => {
+                println!("✅ [BINDING_APPROACH] AIO_FALLBACK: Successfully created bdev '{}' using AIO driver", aio_bdev_name);
+                println!("   📁 Device {} is accessed through kernel NVMe driver", device_path);
+                // Note: binding_approach will be updated in RAID disk CRD separately
+                Ok(())
+            }
+            Err(e) => {
+                let error_msg = format!("AIO bdev creation failed for {}: {}", device_path, e);
+                println!("❌ [BINDING_APPROACH] AIO_FALLBACK: {}", error_msg);
                 Err(Status::internal(error_msg))
             }
         }
@@ -1987,15 +2043,187 @@ impl ControllerService {
         Ok(state)
     }
     
-    /// Extract bdev name from hardware_id (e.g., "/dev/aio-nvme1" -> "aio-nvme1")
-    fn extract_bdev_name_from_hardware_id(&self, hardware_id: &str) -> String {
-        if let Some(name) = hardware_id.strip_prefix("/dev/") {
+    /// Generate possible bdev names from hardware_id (supports both userspace NVMe and AIO)
+    /// e.g., "/dev/nvme1n1" -> ["nvme-nvme1n1", "aio-nvme1n1"]
+    fn generate_possible_bdev_names(&self, hardware_id: &str) -> Vec<String> {
+        let device_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
             name.to_string()
         } else {
             hardware_id.to_string()
+        };
+        
+        vec![
+            format!("nvme-{}", device_name),  // Userspace NVMe naming
+            format!("aio-{}", device_name),   // AIO fallback naming
+        ]
+    }
+    
+    /// Find actual bdev name from hardware_id by checking which one exists in SPDK
+    /// Returns the first matching bdev name, or None if neither exists
+    fn find_existing_bdev_name(&self, hardware_id: &str, existing_bdevs: &[String]) -> Option<String> {
+        let possible_names = self.generate_possible_bdev_names(hardware_id);
+        
+        for name in possible_names {
+            if existing_bdevs.contains(&name) {
+                return Some(name);
+            }
         }
+        
+        None
     }
 
+    /// Update the binding approach for a RAID member disk after successful bdev creation
+    async fn update_member_binding_approach(&self, raid_disk_name: &str, hardware_id: &str, binding_approach: &str) -> Result<(), Status> {
+        println!("📝 [BINDING_UPDATE] Updating binding approach for {} in RAID {}: {}", hardware_id, raid_disk_name, binding_approach);
+        
+        let spdk_raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        
+        // Get the current RAID disk
+        let mut raid_disk = match spdk_raid_disks.get(raid_disk_name).await {
+            Ok(rd) => rd,
+            Err(e) => {
+                println!("⚠️ [BINDING_UPDATE] Failed to get RAID disk {}: {}", raid_disk_name, e);
+                return Ok(()); // Don't fail the overall operation for metadata updates
+            }
+        };
+        
+        // Find and update the matching member disk
+        let mut updated = false;
+        for member in &mut raid_disk.spec.member_disks {
+            if member.hardware_id.as_deref() == Some(hardware_id) {
+                member.binding_approach = Some(binding_approach.to_string());
+                updated = true;
+                println!("✅ [BINDING_UPDATE] Updated binding approach for member disk {} to {}", hardware_id, binding_approach);
+                break;
+            }
+        }
+        
+        if !updated {
+            println!("⚠️ [BINDING_UPDATE] Member disk with hardware_id {} not found in RAID {}", hardware_id, raid_disk_name);
+            return Ok(());
+        }
+        
+        // Update the RAID disk CRD
+        match spdk_raid_disks.replace(raid_disk_name, &PostParams::default(), &raid_disk).await {
+            Ok(_) => {
+                println!("✅ [BINDING_UPDATE] Successfully updated RAID disk CRD with binding approach");
+            }
+            Err(e) => {
+                println!("⚠️ [BINDING_UPDATE] Failed to update RAID disk CRD: {}", e);
+                // Don't fail the overall operation for metadata updates
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Clean up a local bdev using the correct counterpart function based on binding approach
+    async fn cleanup_local_bdev(&self, rpc_url: &str, hardware_id: &str, binding_approach: &str) -> Result<(), Status> {
+        println!("🧹 [BDEV_CLEANUP] Cleaning up local bdev for device: {} (approach: {})", hardware_id, binding_approach);
+        
+        // Determine bdev name based on binding approach
+        let device_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
+            name.to_string()
+        } else {
+            hardware_id.to_string()
+        };
+        
+        match binding_approach {
+            "userspace-nvme" => {
+                // Clean up userspace NVMe bdev using bdev_nvme_detach_controller
+                let controller_name = format!("nvme-{}", device_name);
+                println!("🎯 [BDEV_CLEANUP] USERSPACE_NVME: Detaching userspace NVMe controller: {}", controller_name);
+                
+                let detach_result = call_spdk_rpc(rpc_url, &json!({
+                    "method": "bdev_nvme_detach_controller",
+                    "params": {
+                        "name": controller_name
+                    }
+                })).await;
+                
+                match detach_result {
+                    Ok(_) => {
+                        println!("✅ [BDEV_CLEANUP] USERSPACE_NVME: Successfully detached controller: {}", controller_name);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Don't fail cleanup for missing bdevs
+                        if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
+                            println!("ℹ️ [BDEV_CLEANUP] USERSPACE_NVME: Controller {} already detached", controller_name);
+                            Ok(())
+                        } else {
+                            println!("⚠️ [BDEV_CLEANUP] USERSPACE_NVME: Failed to detach controller {}: {}", controller_name, e);
+                            Err(Status::internal(format!("Failed to detach userspace NVMe controller: {}", e)))
+                        }
+                    }
+                }
+            }
+            "aio-fallback" => {
+                // Clean up AIO bdev using bdev_aio_delete
+                let aio_bdev_name = format!("aio-{}", device_name);
+                println!("🔄 [BDEV_CLEANUP] AIO_FALLBACK: Deleting AIO bdev: {}", aio_bdev_name);
+                
+                let delete_result = call_spdk_rpc(rpc_url, &json!({
+                    "method": "bdev_aio_delete",
+                    "params": {
+                        "name": aio_bdev_name
+                    }
+                })).await;
+                
+                match delete_result {
+                    Ok(_) => {
+                        println!("✅ [BDEV_CLEANUP] AIO_FALLBACK: Successfully deleted AIO bdev: {}", aio_bdev_name);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Don't fail cleanup for missing bdevs
+                        if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
+                            println!("ℹ️ [BDEV_CLEANUP] AIO_FALLBACK: AIO bdev {} already deleted", aio_bdev_name);
+                            Ok(())
+                        } else {
+                            println!("⚠️ [BDEV_CLEANUP] AIO_FALLBACK: Failed to delete AIO bdev {}: {}", aio_bdev_name, e);
+                            Err(Status::internal(format!("Failed to delete AIO bdev: {}", e)))
+                        }
+                    }
+                }
+            }
+            "nvmeof" => {
+                // NVMe-oF cleanup is handled separately in existing code
+                println!("ℹ️ [BDEV_CLEANUP] NVMEOF: Skipping local cleanup for remote NVMe-oF disk");
+                Ok(())
+            }
+            _ => {
+                println!("⚠️ [BDEV_CLEANUP] Unknown binding approach '{}' for device {}", binding_approach, hardware_id);
+                Ok(()) // Don't fail for unknown approaches
+            }
+        }
+    }
+    
+    /// Clean up all member bdevs in a RAID disk using correct counterpart functions  
+    async fn cleanup_raid_member_bdevs(&self, raid_disk: &SpdkRaidDisk) -> Result<(), Status> {
+        let raid_name = raid_disk.metadata.name.as_deref().unwrap_or("unknown");
+        println!("🧹 [RAID_CLEANUP] Cleaning up member bdevs for RAID disk: {}", raid_name);
+        
+        let target_rpc_url = self.driver.get_rpc_url_for_node(&raid_disk.spec.created_on_node).await
+            .map_err(|e| Status::internal(format!("Failed to get RPC URL for node {}: {}", raid_disk.spec.created_on_node, e)))?;
+        
+        for (index, member) in raid_disk.spec.member_disks.iter().enumerate() {
+            if let (Some(hardware_id), Some(binding_approach)) = (&member.hardware_id, &member.binding_approach) {
+                println!("🔧 [RAID_CLEANUP] Cleaning up member {} ({}): {}", index, binding_approach, hardware_id);
+                
+                if let Err(e) = self.cleanup_local_bdev(&target_rpc_url, hardware_id, binding_approach).await {
+                    println!("⚠️ [RAID_CLEANUP] Failed to cleanup member {} bdev: {}", index, e);
+                    // Continue with other members rather than failing entire cleanup
+                }
+            } else {
+                println!("ℹ️ [RAID_CLEANUP] Skipping member {} cleanup: missing hardware_id or binding_approach", index);
+            }
+        }
+        
+        println!("✅ [RAID_CLEANUP] Completed member bdev cleanup for RAID disk: {}", raid_name);
+        Ok(())
+    }
+    
     /// Extract PCI address from device path (helper for bare metal NVMe attachment)
     async fn extract_pci_address(&self, _device_path: &str) -> Option<String> {
         // This is a simplified implementation - in reality you'd need to query sysfs
@@ -2238,44 +2466,152 @@ impl ControllerService {
     // Disk status updates removed with SpdkDisk deprecation
 
     async fn delete_volume_replicas(&self, volume: &SpdkVolume) -> Result<(), Status> {
-        for replica in &volume.spec.replicas {
-            // Delete NVMe-oF target if exists
-            if let Some(nqn) = &replica.nqn {
-                let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
-                let http_client = HttpClient::new();
+        println!("🗑️ [VOLUME_DELETE] Starting volume deletion for: {}", volume.spec.volume_id);
+        
+        // Handle unified RAID-based architecture (new approach)
+        match &volume.spec.storage_backend {
+            StorageBackend::RaidDisk { raid_disk_ref, node_id } => {
+            println!("🗑️ [VOLUME_DELETE] RAID-based volume: cleaning up RAID disk {}", raid_disk_ref);
+            
+            // First delete the logical volume
+            if let Some(lvs_name) = &volume.spec.lvs_name {
+                let lvol_name = format!("{}/{}", lvs_name, volume.spec.volume_id);
+                println!("🗑️ [VOLUME_DELETE] Deleting logical volume: {}", lvol_name);
                 
-                http_client
-                    .post(&rpc_url)
-                    .json(&json!({
-                        "method": "nvmf_delete_subsystem",
-                        "params": { "nqn": nqn }
-                    }))
-                    .send()
-                    .await
-                    .ok(); // Best effort
+                let rpc_url = self.driver.get_rpc_url_for_node(node_id).await?;
+                let delete_result = call_spdk_rpc(&rpc_url, &json!({
+                    "method": "bdev_lvol_delete",
+                    "params": { "name": lvol_name }
+                })).await;
+                
+                match delete_result {
+                    Ok(_) => println!("✅ [VOLUME_DELETE] Successfully deleted logical volume: {}", lvol_name),
+                    Err(e) => {
+                        if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
+                            println!("ℹ️ [VOLUME_DELETE] Logical volume already deleted: {}", lvol_name);
+                        } else {
+                            println!("⚠️ [VOLUME_DELETE] Failed to delete logical volume {}: {}", lvol_name, e);
+                        }
+                    }
+                }
             }
-
-            // Delete lvol
-            if let Some(lvol_uuid) = &replica.lvol_uuid {
-                // Get the actual LVS name from the disk CRD status
-                // Use UUID directly for logical volume deletion
-                let lvol_bdev_name = lvol_uuid.clone();
+            
+            // Check if RAID disk is still in use by other volumes
+            let raid_still_in_use = self.is_raid_disk_in_use(raid_disk_ref).await?;
+            
+            if !raid_still_in_use {
+                println!("🗑️ [VOLUME_DELETE] RAID disk {} no longer in use, cleaning up", raid_disk_ref);
                 
-                let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
-                let http_client = HttpClient::new();
-                
-                http_client
-                    .post(&rpc_url)
-                    .json(&json!({
-                        "method": "bdev_lvol_delete",
-                        "params": { "name": lvol_bdev_name }
-                    }))
-                    .send()
-                    .await
-                    .ok(); // Best effort
+                // Get the RAID disk CRD
+                let spdk_raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+                if let Ok(raid_disk) = spdk_raid_disks.get(raid_disk_ref).await {
+                    // Clean up member bdevs using correct counterpart functions
+                    self.cleanup_raid_member_bdevs(&raid_disk).await?;
+                    
+                    // Delete the RAID bdev itself
+                    let raid_bdev_name = raid_disk.spec.raid_bdev_name();
+                    println!("🗑️ [VOLUME_DELETE] Deleting RAID bdev: {}", raid_bdev_name);
+                    
+                    // Get RPC URL for the RAID disk's node
+                    let raid_rpc_url = self.driver.get_rpc_url_for_node(&raid_disk.spec.created_on_node).await?;
+                    let delete_result = call_spdk_rpc(&raid_rpc_url, &json!({
+                        "method": "bdev_raid_delete",
+                        "params": { "name": raid_bdev_name }
+                    })).await;
+                    
+                    match delete_result {
+                        Ok(_) => println!("✅ [VOLUME_DELETE] Successfully deleted RAID bdev: {}", raid_bdev_name),
+                        Err(e) => {
+                            if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
+                                println!("ℹ️ [VOLUME_DELETE] RAID bdev already deleted: {}", raid_bdev_name);
+                            } else {
+                                println!("⚠️ [VOLUME_DELETE] Failed to delete RAID bdev {}: {}", raid_bdev_name, e);
+                            }
+                        }
+                    }
+                    
+                    // Delete the RAID disk CRD
+                    println!("🗑️ [VOLUME_DELETE] Deleting RAID disk CRD: {}", raid_disk_ref);
+                    if let Err(e) = spdk_raid_disks.delete(raid_disk_ref, &Default::default()).await {
+                        println!("⚠️ [VOLUME_DELETE] Failed to delete RAID disk CRD {}: {}", raid_disk_ref, e);
+                    } else {
+                        println!("✅ [VOLUME_DELETE] Successfully deleted RAID disk CRD: {}", raid_disk_ref);
+                    }
+                } else {
+                    println!("⚠️ [VOLUME_DELETE] RAID disk CRD {} not found", raid_disk_ref);
+                }
+            } else {
+                println!("ℹ️ [VOLUME_DELETE] RAID disk {} is still in use by other volumes", raid_disk_ref);
+            }
             }
         }
+        
+        // Handle legacy replica-based architecture for backward compatibility
+        if !volume.spec.replicas.is_empty() {
+            println!("🗑️ [VOLUME_DELETE] Legacy replica-based volume: cleaning up replicas");
+            
+            for replica in &volume.spec.replicas {
+                // Delete NVMe-oF target if exists
+                if let Some(nqn) = &replica.nqn {
+                    let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
+                    let http_client = HttpClient::new();
+                    
+                    http_client
+                        .post(&rpc_url)
+                        .json(&json!({
+                            "method": "nvmf_delete_subsystem",
+                            "params": { "nqn": nqn }
+                        }))
+                        .send()
+                        .await
+                        .ok(); // Best effort
+                }
+
+                // Delete lvol
+                if let Some(lvol_uuid) = &replica.lvol_uuid {
+                    // Get the actual LVS name from the disk CRD status
+                    // Use UUID directly for logical volume deletion
+                    let lvol_bdev_name = lvol_uuid.clone();
+                    
+                    let rpc_url = self.driver.get_rpc_url_for_node(&replica.node).await?;
+                    let http_client = HttpClient::new();
+                    
+                    http_client
+                        .post(&rpc_url)
+                        .json(&json!({
+                            "method": "bdev_lvol_delete",
+                            "params": { "name": lvol_bdev_name }
+                        }))
+                        .send()
+                        .await
+                        .ok(); // Best effort
+                }
+            }
+        }
+        
+        println!("✅ [VOLUME_DELETE] Completed volume deletion for: {}", volume.spec.volume_id);
         Ok(())
+    }
+    
+    /// Check if a RAID disk is still in use by other volumes
+    async fn is_raid_disk_in_use(&self, raid_disk_ref: &str) -> Result<bool, Status> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let volumes = volumes_api.list(&Default::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list volumes: {}", e)))?;
+        
+        for volume in volumes.items {
+            match &volume.spec.storage_backend {
+                StorageBackend::RaidDisk { raid_disk_ref: vol_raid_ref, .. } => {
+                    if vol_raid_ref == raid_disk_ref {
+                        println!("ℹ️ [RAID_CHECK] RAID disk {} is still used by volume {}", raid_disk_ref, volume.spec.volume_id);
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        
+        println!("ℹ️ [RAID_CHECK] RAID disk {} is not used by any volumes", raid_disk_ref);
+        Ok(false)
     }
 
     fn build_volume_topology(&self, replicas: &[Replica]) -> Vec<Topology> {

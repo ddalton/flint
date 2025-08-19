@@ -70,36 +70,52 @@ pub async fn initialize_disk_blobstore(
 
     // Extract device name from path (e.g., "/dev/nvme0n1" -> "nvme0n1")
     let device_name = device_path.strip_prefix("/dev/").unwrap_or(device_path);
-    let bdev_name = format!("nvme-{}", device_name);
-
-    // Check if bdev exists in SPDK
+    
+    // Check if bdev exists in SPDK with either naming convention (userspace NVMe or AIO)
     let bdevs = call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_get_bdevs" })).await?;
     let Some(bdev_list) = bdevs["result"].as_array() else {
         return Err("Failed to get bdev list".into());
     };
 
-    let bdev_exists = bdev_list.iter().any(|b| b["name"].as_str() == Some(&bdev_name));
-    if !bdev_exists {
-        // Create AIO bdev for the device
-        println!("🔧 [DISK_INIT] Creating AIO bdev: {}", bdev_name);
+    let existing_bdev_names: Vec<String> = bdev_list.iter()
+        .filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string()))
+        .collect();
+    
+    // Check for both possible naming conventions
+    let possible_bdev_names = vec![
+        format!("nvme-{}", device_name),  // Userspace NVMe naming
+        format!("aio-{}", device_name),   // AIO fallback naming
+    ];
+    
+    let existing_bdev_name = possible_bdev_names.iter()
+        .find(|name| existing_bdev_names.contains(name));
+    
+    let bdev_name = if let Some(existing_name) = existing_bdev_name {
+        println!("✅ [DISK_INIT] Found existing bdev: {}", existing_name);
+        existing_name.clone()
+    } else {
+        // Create AIO bdev for the device (node agent always uses AIO for initialization)
+        let aio_bdev_name = format!("aio-{}", device_name);
+        println!("🔧 [DISK_INIT] Creating AIO bdev: {}", aio_bdev_name);
         let create_bdev = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
             "method": "bdev_aio_create",
             "params": {
-                "name": bdev_name,
+                "name": aio_bdev_name,
                 "filename": device_path
             }
         })).await;
 
         match create_bdev {
-            Ok(_) => println!("✅ [DISK_INIT] Created AIO bdev: {}", bdev_name),
+            Ok(_) => {
+                println!("✅ [DISK_INIT] Created AIO bdev: {}", aio_bdev_name);
+                aio_bdev_name
+            }
             Err(e) => {
                 println!("⚠️ [DISK_INIT] Failed to create AIO bdev: {}", e);
                 return Err(e);
             }
         }
-    } else {
-        println!("ℹ️ [DISK_INIT] Bdev already exists: {}", bdev_name);
-    }
+    };
 
     // Check for existing LVS
     if let Ok(resp) = call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_lvol_get_lvstores" })).await {

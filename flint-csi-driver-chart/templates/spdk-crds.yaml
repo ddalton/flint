@@ -344,6 +344,11 @@ spec:
                       type: string
                       nullable: true
                       description: "Last health check timestamp"
+                    binding_approach:
+                      type: string
+                      nullable: true
+                      enum: ["userspace-nvme", "aio-fallback", "nvmeof"]
+                      description: "Disk binding approach: userspace-nvme (bdev_nvme_attach_controller), aio-fallback (bdev_aio_create), or nvmeof (remote disk)"
                 description: "Array of member disks in the RAID"
               stripe_size_kb:
                 type: integer

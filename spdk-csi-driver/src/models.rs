@@ -113,6 +113,9 @@ pub struct RaidMemberDisk {
     pub capacity_bytes: i64,                     // Member disk capacity
     pub connected: bool,                         // Whether member is currently connected
     pub last_health_check: Option<String>,       // Last health check timestamp
+    
+    // Disk binding approach for local disks (tracks how the disk is attached to SPDK)
+    pub binding_approach: Option<String>,        // "userspace-nvme", "aio-fallback", or "nvmeof" for remote disks
 }
 
 // MemberDiskType enum removed - member disks are now just references to SpdkDisk CRDs
