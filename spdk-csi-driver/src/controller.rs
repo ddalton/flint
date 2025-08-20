@@ -181,14 +181,18 @@ impl ControllerService {
         println!("🔍 [RAID_PROVISION] Looking for RAID disk: {} replicas, {} bytes, RAID{}", 
                  num_replicas, required_capacity, raid_level);
 
-        // Step 1: Try to find an existing RAID disk that can accommodate the volume
-        if let Ok(existing_raid) = self.find_suitable_raid_disk(num_replicas, required_capacity, raid_level).await {
-            println!("✅ [RAID_PROVISION] Found existing suitable RAID disk: {}", 
+        // Step 1: Determine what disks we would use for a new RAID
+        let available_disks = self.query_node_available_disks("all-nodes", required_capacity).await?;
+        let selected_disks = self.select_raid_member_disks_with_reactive_nvmeof(&available_disks, num_replicas, "optimal-node").await?;
+        
+        // Step 2: Check if there's already a RAID disk using these exact disks
+        if let Ok(existing_raid) = self.find_raid_disk_for_disks(&selected_disks, num_replicas, raid_level).await {
+            println!("✅ [RAID_PROVISION] Found existing RAID disk using same disks: {}", 
                      existing_raid.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
             return Ok(existing_raid);
         }
 
-        println!("🔄 [RAID_PROVISION] No existing RAID disk found, attempting auto-creation...");
+        println!("🔄 [RAID_PROVISION] No existing RAID disk found for these disks, creating new one...");
 
         // Step 2: Auto-create a new RAID disk based on available resources
         match self.auto_create_raid_disk(num_replicas, required_capacity, raid_level).await {
@@ -242,49 +246,50 @@ impl ControllerService {
         Err(Status::resource_exhausted(enhanced_error_msg))
     }
 
-    /// Find an existing RAID disk that can accommodate a volume of given size
-    async fn find_suitable_raid_disk(
+    /// Find an existing RAID disk that uses the same disks we would use
+    async fn find_raid_disk_for_disks(
         &self,
+        candidate_disks: &[AvailableNvmeDisk],
         num_replicas: i32,
-        required_capacity: i64,
         raid_level: &str,
     ) -> Result<SpdkRaidDisk, Status> {
         let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let raid_disk_list = raid_disks.list(&ListParams::default()).await
             .map_err(|e| Status::internal(format!("Failed to list SpdkRaidDisks: {}", e)))?;
 
+        // Create a set of hardware IDs we're looking for
+        let target_hardware_ids: std::collections::HashSet<String> = candidate_disks.iter()
+            .take(num_replicas as usize)
+            .map(|disk| disk.device_path.clone())
+            .collect();
+
+        println!("🔍 [RAID_SEARCH] Looking for existing RAID disk using disks: {:?}", target_hardware_ids);
+
         for raid_disk in raid_disk_list.items {
-            // Check if this RAID disk matches our requirements
-            // Policy: members must reside on distinct nodes
-            let mut unique_nodes = std::collections::HashSet::new();
-            for m in &raid_disk.spec.member_disks {
-                unique_nodes.insert(m.node_id.clone());
+            // Check if this RAID disk uses the same disks we would use
+            if raid_disk.spec.raid_level != raid_level {
+                continue; // Skip if different RAID level
             }
 
-            let has_node_separation = if num_replicas > 1 {
-                unique_nodes.len() >= num_replicas as usize
-            } else { true };
+            let existing_hardware_ids: std::collections::HashSet<String> = raid_disk.spec.member_disks.iter()
+                .filter_map(|member| member.hardware_id.clone())
+                .collect();
 
-            // Check if RAID disk is in a usable state (initializing, bdev_created, online, or healthy)
-            let is_usable_state = raid_disk.status.as_ref().map_or(false, |status| {
-                matches!(status.state.as_str(), "initializing" | "bdev_created" | "online" | "healthy")
-            });
+            println!("🔍 [RAID_SEARCH] Checking RAID '{}' with disks: {:?}", 
+                     raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
+                     existing_hardware_ids);
 
-            if raid_disk.spec.num_member_disks >= num_replicas &&
-               raid_disk.spec.raid_level == raid_level &&
-               has_node_separation &&
-               is_usable_state {
-                
-                // For RAID disks that are still initializing or in bdev_created state,
-                // accept them if they match the disk requirements
-                println!("✅ [RAID_REUSE] Found existing RAID disk '{}' in state '{}' - reusing instead of creating duplicate", 
+            // If this RAID disk uses exactly the same disks, reuse it regardless of state
+            if existing_hardware_ids == target_hardware_ids {
+                let state = raid_disk.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown");
+                println!("✅ [RAID_REUSE] Found existing RAID disk '{}' using same disks (state: '{}') - reusing instead of creating duplicate", 
                          raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
-                         raid_disk.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"));
+                         state);
                 return Ok(raid_disk);
             }
         }
 
-        Err(Status::not_found("No suitable RAID disk found"))
+        Err(Status::not_found("No RAID disk found using the target disks"))
     }
 
     /// Create RAID disk from available local NVMe disks (preferred for performance)
