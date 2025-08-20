@@ -243,10 +243,19 @@ impl ControllerService {
             println!("💡 [REACTIVE_STORAGE] Reusing existing LVS instead of creating new RAID");
             let lvs_name = existing_lvs.device_path.strip_prefix("existing-lvs:").unwrap();
             
-            // Create a simplified "RAID disk" CRD pointing to existing LVS
-            let raid_disk = self.create_existing_lvs_raid_crd(existing_lvs, lvs_name).await?;
-            println!("✅ [REACTIVE_STORAGE] Successfully configured existing LVS for reuse");
-            return Ok(raid_disk);
+                    // Create a simplified "RAID disk" CRD pointing to existing LVS
+        match self.create_existing_lvs_raid_crd(existing_lvs, lvs_name).await {
+            Ok(raid_disk) => {
+                println!("✅ [REACTIVE_STORAGE] Successfully configured existing LVS for reuse");
+                return Ok(raid_disk);
+            }
+            Err(e) => {
+                println!("❌ [LVS_REUSE] Failed to create RAID CRD for existing LVS: {}", e);
+                println!("🔍 [LVS_REUSE] Error details: {:?}", e);
+                println!("⚠️ [LVS_REUSE] Falling back to new RAID creation due to CRD failure");
+                // Don't return error here - let it fall through to try creating new RAID
+            }
+        }
         }
         
         // Fallback: Create new RAID disk if no existing LVS available
@@ -1560,8 +1569,15 @@ impl ControllerService {
         // Create the CRD in Kubernetes
         let raids_api: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
+        println!("🔍 [LVS_REUSE_DEBUG] About to create RAID CRD in namespace: {}", self.driver.target_namespace);
+        println!("🔍 [LVS_REUSE_DEBUG] RAID CRD spec: {:#?}", raid_disk.spec);
+        
         let created_raid = raids_api.create(&kube::api::PostParams::default(), &raid_disk).await
-            .map_err(|e| Status::internal(format!("Failed to create RAID CRD for existing LVS: {}", e)))?;
+            .map_err(|e| {
+                println!("❌ [LVS_REUSE_DEBUG] Kubernetes API error: {}", e);
+                println!("🔍 [LVS_REUSE_DEBUG] Full error details: {:?}", e);
+                Status::internal(format!("Failed to create RAID CRD for existing LVS: {}", e))
+            })?;
         
         println!("✅ [LVS_REUSE] Successfully created RAID CRD for existing LVS: {}", raid_name);
         Ok(created_raid)
