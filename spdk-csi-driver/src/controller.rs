@@ -183,7 +183,23 @@ impl ControllerService {
 
         // Step 1: Determine what disks we would use for a new RAID
         let available_disks = self.find_available_local_nvme_disks(required_capacity).await?;
-        let selected_disks = self.select_raid_member_disks_with_reactive_nvmeof(&available_disks, num_replicas, "optimal-node").await?;
+        
+        // Step 1.5: Determine optimal node based on available disks (especially important for existing LVS)
+        let optimal_node = if available_disks.is_empty() {
+            return Err(Status::resource_exhausted("No available disks found"));
+        } else {
+            // For existing LVS reuse, use the node that has the LVS
+            // For new disk provisioning, select the optimal node
+            if available_disks.iter().any(|d| d.model == "existing-lvs") {
+                // Use the node with existing LVS
+                available_disks[0].node_id.clone()
+            } else {
+                // Use the existing optimal node selection logic
+                self.select_optimal_raid_node(&available_disks, num_replicas).await?
+            }
+        };
+        
+        let selected_disks = self.select_raid_member_disks_with_reactive_nvmeof(&available_disks, num_replicas, &optimal_node).await?;
         
         // Step 2: Check if there's already a RAID disk using these exact disks
         if let Ok(existing_raid) = self.find_raid_disk_for_disks(&selected_disks, num_replicas, raid_level).await {
@@ -1572,10 +1588,22 @@ impl ControllerService {
                         
                         println!("✅ [LVS_RESOLVE] Resolved '{}' -> '{}'", base_bdev, actual_device_path);
                         
-                        // Mark this node as having existing LVS capacity, but don't treat LVS as a "disk"
-                        // The LVS will be handled separately in RAID disk reuse logic
-                        println!("💡 [LVS_CAPACITY] Node {} has existing LVS '{}' with {}GB free capacity", 
-                               node, name, free_bytes / (1024 * 1024 * 1024));
+                        // Create AvailableNvmeDisk entry for the underlying disk so RAID matching can work
+                        let available_disk = AvailableNvmeDisk {
+                            node_id: node.to_string(),
+                            device_path: actual_device_path.clone(),
+                            serial_number: "unknown".to_string(), // We don't have this info from LVS
+                            wwn: None,
+                            model: "existing-lvs".to_string(), // Identify this as an existing LVS
+                            vendor: "unknown".to_string(),
+                            capacity: free_bytes as i64, // Use free capacity, not total disk capacity
+                            pci_address: base_bdev.to_string(), // Use base bdev name as identifier
+                        };
+                        
+                        available_storage.push(available_disk);
+                        
+                        println!("💡 [LVS_CAPACITY] Node {} has existing LVS '{}' with {}GB free capacity on disk {}", 
+                               node, name, free_bytes / (1024 * 1024 * 1024), actual_device_path);
                     } else {
                         println!("⚠️ [LVS_CHECK] LVS '{}' only has {}GB free (need {}GB)", 
                                name, free_bytes / (1024 * 1024 * 1024), min_capacity / (1024 * 1024 * 1024));
