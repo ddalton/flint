@@ -265,12 +265,21 @@ impl ControllerService {
                 unique_nodes.len() >= num_replicas as usize
             } else { true };
 
+            // Check if RAID disk is in a usable state (initializing, bdev_created, or online)
+            let is_usable_state = raid_disk.status.as_ref().map_or(false, |status| {
+                matches!(status.state.as_str(), "initializing" | "bdev_created" | "online")
+            });
+
             if raid_disk.spec.num_member_disks >= num_replicas &&
                raid_disk.spec.raid_level == raid_level &&
                has_node_separation &&
-               raid_disk.status.as_ref().map_or(false, |status| {
-                   raid_disk.spec.can_accommodate_volume(required_capacity, status)
-               }) {
+               is_usable_state {
+                
+                // For RAID disks that are still initializing or in bdev_created state,
+                // accept them if they match the disk requirements
+                println!("✅ [RAID_REUSE] Found existing RAID disk '{}' in state '{}' - reusing instead of creating duplicate", 
+                         raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
+                         raid_disk.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"));
                 return Ok(raid_disk);
             }
         }
@@ -589,8 +598,42 @@ impl ControllerService {
         // Update status to indicate we're using single-member approach
         self.update_raid_disk_status_bdev_created(raid_disk).await?;
         
-        // Create LVS directly on the single bdev (same as RAID LVS creation)
+        // Check if LVS already exists on this bdev before creating a new one
         let lvs_name = raid_disk.spec.lvs_name();
+        println!("🔍 [SINGLE_STORAGE] Checking for existing LVS on bdev: {}", bdev_name);
+        
+        // Query existing LVS stores to avoid duplicates
+        let lvs_query_result = call_spdk_rpc(spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores",
+            "params": {}
+        })).await;
+        
+        match lvs_query_result {
+            Ok(response) => {
+                if let Some(lvs_stores) = response["result"].as_array() {
+                    // Check if any existing LVS uses this bdev
+                    let existing_lvs = lvs_stores.iter().find(|lvs| 
+                        lvs["base_bdev"].as_str() == Some(bdev_name)
+                    );
+                    
+                    if let Some(existing) = existing_lvs {
+                        let existing_name = existing["name"].as_str().unwrap_or("unknown");
+                        println!("✅ [SINGLE_STORAGE] LVS already exists on bdev '{}': '{}' - reusing instead of creating duplicate", 
+                                 bdev_name, existing_name);
+                        
+                        // Update status to ready since LVS already exists
+                        self.update_raid_disk_status_to_ready(raid_disk).await?;
+                        return Ok(());
+                    }
+                }
+                println!("🔍 [SINGLE_STORAGE] No existing LVS found on bdev '{}' - proceeding with creation", bdev_name);
+            }
+            Err(e) => {
+                println!("⚠️ [SINGLE_STORAGE] Failed to query existing LVS (proceeding with creation): {}", e);
+            }
+        }
+        
+        // Create LVS only if none exists
         println!("🔍 [SINGLE_STORAGE] Creating LVS: {} on bdev: {}", lvs_name, bdev_name);
         
         let lvs_params = json!({
@@ -612,9 +655,26 @@ impl ControllerService {
         
         match lvs_create_result {
             Ok(Ok(response)) => {
+                // Check if the response indicates success or "already exists" error
+                if let Some(error) = response.get("error") {
+                    let error_code = error["code"].as_i64().unwrap_or(0);
+                    let error_message = error["message"].as_str().unwrap_or("");
+                    
+                    // SPDK error code -17 means "File exists" - treat as success
+                    if error_code == -17 || error_message.contains("exists") {
+                        println!("✅ [SINGLE_STORAGE] LVS already exists (concurrent creation) - treating as success: {}", lvs_name);
+                        self.update_raid_disk_status_to_ready(raid_disk).await?;
+                        return Ok(());
+                    } else {
+                        let error_msg = format!("SPDK returned error creating LVS: {} ({})", error_message, error_code);
+                        println!("❌ [SINGLE_STORAGE] {}", error_msg);
+                        self.update_raid_disk_status_failed(raid_disk, &error_msg).await?;
+                        return Err(Status::internal(error_msg));
+                    }
+                }
+                
                 println!("✅ [SINGLE_STORAGE] LVS created successfully: {}", lvs_name);
                 println!("🔍 [SINGLE_STORAGE] SPDK response: {}", response);
-                // Save SPDK configuration after LVS creation
                 
                 // Update RAID disk status to indicate it's ready (single-member)
                 self.update_raid_disk_status_to_ready(raid_disk).await?;
