@@ -13,6 +13,7 @@ use reqwest::Client as HttpClient;
 use serde_json::json;
 use spdk_csi_driver::models::*;
 use crate::node::call_spdk_rpc;
+use spdk_csi_driver::spdk_constants::*;
 
 /// Available NVMe disk information for automatic RAID creation
 #[derive(Debug, Clone)]
@@ -2185,7 +2186,7 @@ impl ControllerService {
     
     /// Create AIO bdev as fallback when userspace NVMe is not available
     async fn create_aio_bdev_fallback(&self, rpc_url: &str, device_path: &str, bdev_name: &str) -> Result<(), Status> {
-        let aio_bdev_name = format!("aio-{}", bdev_name);
+        let aio_bdev_name = format_aio_bdev_name(bdev_name);
         println!("🔄 [BINDING_APPROACH] AIO_FALLBACK: Creating AIO bdev: {} -> {}", device_path, aio_bdev_name);
         println!("   🔧 Method: bdev_aio_create (kernel driver remains active)");
         println!("   📋 Benefits: Compatible with all systems, no driver unbinding required");
@@ -2443,15 +2444,12 @@ impl ControllerService {
     /// Generate possible bdev names from hardware_id (supports both userspace NVMe and AIO)
     /// e.g., "/dev/nvme1n1" -> ["nvme-nvme1n1", "aio-nvme1n1"]
     fn generate_possible_bdev_names(&self, hardware_id: &str) -> Vec<String> {
-        let device_name = if let Some(name) = hardware_id.strip_prefix("/dev/") {
-            name.to_string()
-        } else {
-            hardware_id.to_string()
-        };
+        let device_name = extract_device_name(hardware_id);
         
+        // Use shared SPDK naming constants for consistency
         vec![
-            format!("nvme-{}", device_name),  // Userspace NVMe naming
-            format!("aio-{}", device_name),   // AIO fallback naming
+            format_nvme_bdev_name(&device_name),  // Userspace NVMe naming
+            format_aio_bdev_name(&device_name),   // AIO fallback naming
         ]
     }
     
@@ -2558,7 +2556,7 @@ impl ControllerService {
             }
             "aio-fallback" => {
                 // Clean up AIO bdev using bdev_aio_delete
-                let aio_bdev_name = format!("aio-{}", device_name);
+                let aio_bdev_name = format_aio_bdev_name(&device_name);
                 println!("🔄 [BDEV_CLEANUP] AIO_FALLBACK: Deleting AIO bdev: {}", aio_bdev_name);
                 
                 let delete_result = call_spdk_rpc(rpc_url, &json!({

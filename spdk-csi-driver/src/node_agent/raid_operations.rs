@@ -5,6 +5,7 @@
 
 use crate::node_agent::{NodeAgent, rpc_client::call_spdk_rpc};
 use crate::models::SpdkRaidDisk;
+use crate::spdk_constants::*;
 use serde_json::json;
 
 /// Initialize blobstore on a RAID device
@@ -83,8 +84,8 @@ pub async fn initialize_disk_blobstore(
     
     // Check for both possible naming conventions
     let possible_bdev_names = vec![
-        format!("nvme-{}", device_name),  // Userspace NVMe naming
-        format!("aio-{}", device_name),   // AIO fallback naming
+        format_nvme_bdev_name(&device_name),  // Userspace NVMe naming
+        format_aio_bdev_name(&device_name),   // AIO fallback naming
     ];
     
     let existing_bdev_name = possible_bdev_names.iter()
@@ -95,7 +96,7 @@ pub async fn initialize_disk_blobstore(
         existing_name.clone()
     } else {
         // Create AIO bdev for the device (node agent always uses AIO for initialization)
-        let aio_bdev_name = format!("aio-{}", device_name);
+        let aio_bdev_name = format_aio_bdev_name(&device_name);
         println!("🔧 [DISK_INIT] Creating AIO bdev: {}", aio_bdev_name);
         let create_bdev = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
             "method": "bdev_aio_create",
