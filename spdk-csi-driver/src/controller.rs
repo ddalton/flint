@@ -1618,7 +1618,9 @@ impl ControllerService {
                     });
                     
                     // Update the CRD status in Kubernetes
-                    match raids_api.replace_status(&raid_name, &kube::api::PostParams::default(), &existing_raid).await {
+                    match raids_api.replace_status(&raid_name, &kube::api::PostParams::default(), 
+                                                 serde_json::to_vec(&existing_raid)
+                                                     .map_err(|e| Status::internal(format!("Failed to serialize CRD: {}", e)))?).await {
                         Ok(_) => println!("✅ [LVS_REUSE_DEBUG] Successfully updated CRD status with LVS name"),
                         Err(e) => {
                             println!("⚠️ [LVS_REUSE_DEBUG] Failed to update CRD status (continuing anyway): {}", e);
