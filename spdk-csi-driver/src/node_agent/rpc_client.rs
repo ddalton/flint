@@ -63,12 +63,20 @@ async fn call_spdk_rpc_unix(
             .map_err(|e| format!("Failed to set socket read timeout: {}", e))?;
         
         // Create proper JSON-RPC 2.0 request (SPDK expects raw JSON, not HTTP)
-        let jsonrpc_request = serde_json::json!({
+        // CRITICAL: SPDK is strict about parameters - omit "params" field entirely if no parameters
+        let mut jsonrpc_request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": rpc_request["method"],
-            "params": rpc_request.get("params").unwrap_or(&serde_json::json!({})),
             "id": 1
         });
+        
+        // Only add "params" field if parameters are actually provided
+        if let Some(params) = rpc_request.get("params") {
+            // Only add params if it's not an empty object (SPDK returns "Invalid argument" for empty params)
+            if !params.is_null() && !(params.is_object() && params.as_object().unwrap().is_empty()) {
+                jsonrpc_request["params"] = params.clone();
+            }
+        }
         
         // Send raw JSON with newline (SPDK expects newline-delimited JSON)
         let message = format!("{}\n", jsonrpc_request.to_string());
@@ -166,12 +174,28 @@ async fn call_spdk_rpc_http(
     println!("🔍 [HTTP_RPC_DEBUG] Making HTTP request to: {}", spdk_rpc_url);
     println!("🔍 [HTTP_RPC_DEBUG] Request payload: {}", rpc_request);
     
+    // Apply same parameter filtering logic as Unix socket to avoid SPDK "Invalid argument" errors
+    let mut cleaned_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": rpc_request["method"],
+        "id": rpc_request.get("id").unwrap_or(&serde_json::json!(1))
+    });
+    
+    // Only add "params" field if parameters are actually provided and not empty
+    if let Some(params) = rpc_request.get("params") {
+        if !params.is_null() && !(params.is_object() && params.as_object().unwrap().is_empty()) {
+            cleaned_request["params"] = params.clone();
+        }
+    }
+    
+    println!("🔍 [HTTP_RPC_DEBUG] Cleaned request payload: {}", cleaned_request);
+    
     let client = reqwest::Client::new();
     
     let response = client
         .post(spdk_rpc_url)
         .header("Content-Type", "application/json")
-        .json(rpc_request)
+        .json(&cleaned_request)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;

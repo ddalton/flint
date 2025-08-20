@@ -1167,6 +1167,10 @@ impl ControllerService {
                     let device_path = format!("/dev/{}", name);
                     let is_system_disk = self.is_system_disk_by_path(&device_path, node).await;
                     
+                    // Available storage criteria:
+                    // - For unclaimed bdevs: standard availability check (new disk provisioning)
+                    // - For claimed bdevs: will be checked for LVS capacity in existing LVS flow
+                    // NOTE: Claimed bdevs with LVS are checked via check_existing_lvs_capacity()
                     let is_available_storage = !is_claimed && 
                                              supports_read && 
                                              supports_write && 
