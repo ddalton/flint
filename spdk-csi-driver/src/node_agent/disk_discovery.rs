@@ -268,7 +268,28 @@ impl NodeAgent {
             }
         }
         
-        // Method 3: Check if any partition is mounted on critical system paths
+        // Method 3: Check if any partition of this device is mounted anywhere (most reliable)
+        if let Ok(output) = Command::new("mount").output() {
+            let mount_output = String::from_utf8_lossy(&output.stdout);
+            // Look for any partition of this device (e.g., nvme0n1p1, nvme0n1p2, etc.)
+            for line in mount_output.lines() {
+                if line.contains(&format!("/dev/{}", raw_device_name)) {
+                    // Extract the mount point to see if it's a system-critical mount
+                    if let Some(parts) = line.split_whitespace().nth(2) {
+                        let mount_point = parts;
+                        // Critical system mount points that indicate this is a system disk
+                        let system_mounts = ["/", "/boot", "/var", "/usr", "/opt", "/home", "/tmp", "/etc"];
+                        if system_mounts.iter().any(|&sys_path| mount_point.starts_with(sys_path)) || 
+                           mount_point.contains("/etc") || mount_point.contains("/var") {
+                            println!("🚨 [ENHANCED_SYSTEM_CHECK] {} partition mounted at system path: {}", device_name, mount_point);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 4: Check if any partition is mounted on critical system paths (fallback)
         let critical_paths = ["/", "/boot", "/var", "/usr", "/opt", "/home", "/tmp"];
         for path in &critical_paths {
             if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
@@ -280,7 +301,7 @@ impl NodeAgent {
             }
         }
         
-        // Method 4: Check swap devices
+        // Method 5: Check swap devices
         if let Ok(output) = Command::new("swapon").args(["--show=NAME", "--noheadings"]).output() {
             let swap_devices = String::from_utf8_lossy(&output.stdout);
             if swap_devices.contains(raw_device_name) {
