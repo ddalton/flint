@@ -1329,39 +1329,105 @@ impl ControllerService {
                         println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] HTTP status: {}", status);
                         
                         if status.is_success() {
-                            match response.json::<serde_json::Value>().await {
+                            // Get response text first for detailed serialization debugging
+                            let response_text = response.text().await.unwrap_or_else(|_| "Failed to read response".to_string());
+                            println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Raw response text: '{}'", response_text);
+                            println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Response length: {} bytes", response_text.len());
+                            
+                            match serde_json::from_str::<serde_json::Value>(&response_text) {
                                 Ok(json_response) => {
-                                    println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] JSON response: {}", json_response);
-                                    let is_system = json_response["is_system_disk"].as_bool().unwrap_or(false);
-                                    println!("🔍 [SYSTEM_DISK_CHECK] Node {} reports {} is_system_disk: {}", 
-                                             node_id, canonical_device, is_system);
-                                    is_system
+                                    println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] JSON deserialization successful");
+                                    println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Parsed JSON: {}", json_response);
+                                    println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] JSON type: {}", 
+                                             if json_response.is_object() { "object" } 
+                                             else if json_response.is_array() { "array" }
+                                             else { "other" });
+                                    
+                                    if let Some(is_system_field) = json_response.get("is_system_disk") {
+                                        println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Found 'is_system_disk' field: {}", is_system_field);
+                                        let is_system = is_system_field.as_bool().unwrap_or_else(|| {
+                                            println!("⚠️ [SYSTEM_DISK_CHECK_DEBUG] 'is_system_disk' field is not boolean type, defaulting to false");
+                                            false
+                                        });
+                                        println!("🔍 [SYSTEM_DISK_CHECK] Node {} reports {} is_system_disk: {}", 
+                                                 node_id, canonical_device, is_system);
+                                        is_system
+                                    } else {
+                                        println!("⚠️ [SYSTEM_DISK_CHECK_DEBUG] 'is_system_disk' field not found in response");
+                                        println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Available fields: {:?}", 
+                                                 json_response.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                                        self.conservative_system_disk_detection(&canonical_device)
+                                    }
                                 }
                                 Err(e) => {
-                                    println!("⚠️ [SYSTEM_DISK_CHECK] Failed to parse JSON response from node {}: {}", node_id, e);
-                                    canonical_device.contains("nvme0") // Conservative fallback
+                                    println!("❌ [SYSTEM_DISK_CHECK_DEBUG] JSON deserialization failed: {}", e);
+                                    println!("❌ [SYSTEM_DISK_CHECK_DEBUG] Error type: {}", std::any::type_name_of_val(&e));
+                                    println!("❌ [SYSTEM_DISK_CHECK_DEBUG] Raw response was: '{}'", response_text);
+                                    println!("❌ [SYSTEM_DISK_CHECK_DEBUG] Falling back to conservative device detection");
+                                    self.conservative_system_disk_detection(&canonical_device)
                                 }
                             }
                         } else {
                             let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
                             println!("⚠️ [SYSTEM_DISK_CHECK] HTTP error {} from node {}: {}", status, node_id, error_text);
-                            canonical_device.contains("nvme0") // Conservative fallback
+                            println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Using conservative detection due to HTTP error");
+                            self.conservative_system_disk_detection(&canonical_device)
                         }
                     }
                     Err(e) => {
                         println!("⚠️ [SYSTEM_DISK_CHECK] Failed to query node {} for system disk status: {}", node_id, e);
-                        // CONSERVATIVE FALLBACK: Assume system disk if we can't verify
-                        // This prevents accidentally using system disks
-                        canonical_device.contains("nvme0") // nvme0n1 is typically system disk
+                        println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Using conservative detection due to HTTP request failure");
+                        self.conservative_system_disk_detection(&canonical_device)
                     }
                 }
             }
             Err(e) => {
                 println!("⚠️ [SYSTEM_DISK_CHECK] Failed to get RPC URL for node {}: {}", node_id, e);
-                // CONSERVATIVE FALLBACK: Assume system disk if we can't verify  
-                canonical_device.contains("nvme0") // nvme0n1 is typically system disk
+                println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Using conservative detection due to RPC URL failure");
+                self.conservative_system_disk_detection(&canonical_device)
             }
         }
+    }
+
+    /// Conservative system disk detection when API call fails
+    /// Uses multiple heuristics instead of hardcoded nvme0 check
+    fn conservative_system_disk_detection(&self, device_name: &str) -> bool {
+        let device_lower = device_name.to_lowercase();
+        
+        // Common system disk patterns across different platforms
+        let system_disk_patterns = [
+            "nvme0n1",     // AWS/Azure NVMe system disk 
+            "sda",         // Traditional SATA/SCSI system disk
+            "xvda",        // AWS Xen virtual disk
+            "vda",         // KVM/QEMU virtual disk
+            "disk0",       // Some virtualization platforms
+        ];
+        
+        // Check for partition indicators (likely system disk)
+        let partition_indicators = ["p1", "p2", "1", "2"];
+        
+        let has_system_pattern = system_disk_patterns.iter().any(|&pattern| {
+            device_lower.contains(pattern)
+        });
+        
+        let has_partition_indicator = partition_indicators.iter().any(|&indicator| {
+            device_lower.ends_with(indicator)
+        });
+        
+        let is_likely_system = has_system_pattern || has_partition_indicator;
+        
+        println!("🔍 [CONSERVATIVE_DETECTION] Device '{}' analysis:", device_name);
+        println!("  - System pattern match: {}", has_system_pattern);
+        println!("  - Partition indicator: {}", has_partition_indicator);
+        println!("  - Final decision: is_system_disk={}", is_likely_system);
+        
+        if is_likely_system {
+            println!("⚠️ [CONSERVATIVE_DETECTION] Marking {} as system disk (conservative)", device_name);
+        } else {
+            println!("✅ [CONSERVATIVE_DETECTION] Marking {} as non-system disk", device_name);
+        }
+        
+        is_likely_system
     }
 
     /// Check existing LVS for available capacity (reactive storage reuse)
