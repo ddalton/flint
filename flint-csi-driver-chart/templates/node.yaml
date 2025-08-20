@@ -20,43 +20,6 @@ spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
       securityContext: {}
-      initContainers:
-        - name: spdk-config-setup
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
-          imagePullPolicy: Always
-          command:
-            - /bin/sh
-            - -c
-            - |
-              echo "🔄 Setting up SPDK config for node: $NODE_ID"
-              
-              # Create the ConfigMap for this node if it doesn't exist
-              kubectl create configmap "spdk-config-${NODE_ID}" \
-                --namespace="$FLINT_NAMESPACE" \
-                --from-literal="spdk-config.json={\"subsystems\":[]}" \
-                --dry-run=client -o yaml | kubectl apply -f - || true
-              
-              # Copy the config if available
-              if kubectl get configmap "spdk-config-${NODE_ID}" -n "$FLINT_NAMESPACE" >/dev/null 2>&1; then
-                kubectl get configmap "spdk-config-${NODE_ID}" -n "$FLINT_NAMESPACE" \
-                  -o jsonpath='{.data.spdk-config\.json}' > /shared-config/spdk-config.json || \
-                  echo '{"subsystems":[]}' > /shared-config/spdk-config.json
-              else
-                echo '{"subsystems":[]}' > /shared-config/spdk-config.json
-              fi
-              
-              echo "✅ SPDK config ready: $(head -c 50 /shared-config/spdk-config.json)..."
-          env:
-            - name: NODE_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: FLINT_NAMESPACE
-              value: "{{ .Release.Namespace }}"
-          volumeMounts:
-            - name: spdk-config
-              mountPath: /shared-config
-
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
         # SPDK Target Container (v25.05.x)
@@ -361,5 +324,4 @@ spec:
           emptyDir: {}
         - name: spdk-config
           emptyDir: {}
-          # This volume is populated by the init container and shared 
-          # between containers for SPDK configuration
+          # SPDK configuration loaded via node-agent using Kubernetes API

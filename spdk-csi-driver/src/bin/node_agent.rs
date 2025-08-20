@@ -9,7 +9,7 @@ use kube::Client;
 use clap::{Arg, Command};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse command line arguments
     let matches = Command::new("node-agent")
         .version("1.0")
@@ -102,6 +102,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // and provide diagnostic information via its API
     } else {
         println!("✅ [NODE_AGENT] Startup validation passed - environment supports userspace SPDK");
+    }
+    
+    // Wait for SPDK to be ready before configuring
+    println!("⏳ [NODE_AGENT] Waiting for SPDK to be ready...");
+    if let Err(e) = spdk_csi_driver::node_agent::wait_for_spdk_ready(&agent).await {
+        eprintln!("❌ [NODE_AGENT] SPDK failed to become ready: {}", e);
+        return Err(e);
+    }
+    
+    // Configure SPDK storage
+    println!("🔧 [NODE_AGENT] Configuring SPDK storage...");
+    let config_loaded = agent.configure_spdk_from_configmap(&agent.target_namespace).await?;
+    
+    if !config_loaded {
+        println!("🔍 [NODE_AGENT] No ConfigMap found, performing auto-discovery...");
+        if let Err(e) = agent.auto_configure_spdk_storage().await {
+            eprintln!("⚠️ [NODE_AGENT] Auto-configuration failed: {}", e);
+            eprintln!("💡 [NODE_AGENT] Storage may not be available, but continuing startup...");
+        }
     }
     
     println!("🎯 [NODE_AGENT] Starting API server and discovery loop...");

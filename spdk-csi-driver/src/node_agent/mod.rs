@@ -9,8 +9,9 @@
 
 use kube::{Client, Api};
 use tokio::time::{Duration, interval};
+use k8s_openapi::api::core::v1::ConfigMap;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use anyhow::Result;
 
 use std::env;
@@ -91,6 +92,233 @@ impl NodeAgent {
         
         Err("No internal IP found for node".into())
     }
+
+    /// Load SPDK configuration from ConfigMap and apply via RPC
+    pub async fn configure_spdk_from_configmap(&self, namespace: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let configmap_name = format!("spdk-config-{}", self.node_name);
+        
+        println!("🔍 [SPDK_CONFIG] Looking for ConfigMap: {} in namespace: {}", configmap_name, namespace);
+        
+        match self.load_spdk_config_from_k8s(&configmap_name, namespace).await {
+            Ok(config) => {
+                println!("✅ [SPDK_CONFIG] Found ConfigMap, applying SPDK configuration...");
+                self.apply_spdk_config_via_rpc(config).await?;
+                println!("✅ [SPDK_CONFIG] SPDK configuration applied successfully");
+                Ok(true)
+            }
+            Err(e) => {
+                println!("ℹ️ [SPDK_CONFIG] No ConfigMap found ({}), will use auto-discovery", e);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Auto-discover and configure SPDK storage
+    pub async fn auto_configure_spdk_storage(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [SPDK_AUTO] Starting auto-discovery of NVMe devices...");
+        
+        let nvme_devices = self.discover_nvme_devices().await?;
+        
+        if nvme_devices.is_empty() {
+            println!("ℹ️ [SPDK_AUTO] No NVMe devices found for auto-configuration");
+            return Ok(());
+        }
+        
+        for device in nvme_devices {
+            println!("🔧 [SPDK_AUTO] Configuring device: {}", device.path);
+            
+            // Create AIO bdev
+            let bdev_name = format!("aio_{}", device.name);
+            self.create_aio_bdev(&bdev_name, &device.path).await?;
+            
+            // Check if LVS already exists, create if not
+            if !self.lvs_exists_for_bdev(&bdev_name).await? {
+                let lvs_name = format!("lvs_{}", device.name);
+                self.create_lvs(&bdev_name, &lvs_name).await?;
+                println!("✅ [SPDK_AUTO] Created LVS: {} on device: {}", lvs_name, device.path);
+            } else {
+                println!("ℹ️ [SPDK_AUTO] LVS already exists for device: {}", device.path);
+            }
+        }
+        
+        println!("✅ [SPDK_AUTO] Auto-configuration completed");
+        Ok(())
+    }
+
+    /// Load SPDK configuration from Kubernetes ConfigMap
+    async fn load_spdk_config_from_k8s(&self, configmap_name: &str, namespace: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let configmaps: Api<ConfigMap> = Api::namespaced(self.kube_client.clone(), namespace);
+        
+        let cm = configmaps.get(configmap_name).await
+            .map_err(|e| format!("Failed to get ConfigMap {}: {}", configmap_name, e))?;
+        
+        let config_json = cm.data
+            .and_then(|data| data.get("spdk-config.json").cloned())
+            .ok_or_else(|| "No spdk-config.json found in ConfigMap")?;
+        
+        let config: Value = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Invalid JSON in ConfigMap: {}", e))?;
+        
+        Ok(config)
+    }
+
+    /// Apply SPDK configuration via RPC calls
+    async fn apply_spdk_config_via_rpc(&self, config: Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Extract subsystems from config
+        let subsystems = config.get("subsystems")
+            .and_then(|s| s.as_array())
+            .ok_or("Invalid config format: missing subsystems array")?;
+        
+        for subsystem in subsystems {
+            if let Some(_subsystem_name) = subsystem.get("subsystem").and_then(|s| s.as_str()) {
+                if let Some(configs) = subsystem.get("config").and_then(|c| c.as_array()) {
+                    for config_item in configs {
+                        if let Some(method) = config_item.get("method").and_then(|m| m.as_str()) {
+                            println!("🔧 [SPDK_RPC] Applying: {}", method);
+                            
+                            let rpc_request = json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": method,
+                                "params": config_item.get("params").unwrap_or(&json!({}))
+                            });
+                            
+                            match rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
+                                Ok(response) => {
+                                    if response.get("error").is_some() {
+                                        println!("⚠️ [SPDK_RPC] Warning for {}: {:?}", method, response.get("error"));
+                                    } else {
+                                        println!("✅ [SPDK_RPC] Applied: {}", method);
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("❌ [SPDK_RPC] Failed to apply {}: {}", method, e);
+                                    // Continue with other configs rather than failing completely
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Discover available NVMe devices
+    async fn discover_nvme_devices(&self) -> Result<Vec<SimpleNvmeDevice>, Box<dyn std::error::Error + Send + Sync>> {
+        use std::path::Path;
+        use tokio::fs;
+        
+        let mut devices = Vec::new();
+        let dev_dir = Path::new("/dev");
+        
+        if let Ok(mut entries) = fs::read_dir(dev_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                
+                // Look for nvme devices (nvme0n1, nvme1n1, etc.)
+                if name.starts_with("nvme") && name.contains("n1") && !name.contains("p") {
+                    let path = entry.path();
+                    if let Ok(metadata) = fs::metadata(&path).await {
+                        devices.push(SimpleNvmeDevice {
+                            name: name.to_string(),
+                            path: path.to_string_lossy().to_string(),
+                            size: metadata.len(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        Ok(devices)
+    }
+
+    /// Create AIO bdev via RPC
+    async fn create_aio_bdev(&self, bdev_name: &str, device_path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let rpc_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "bdev_aio_create",
+            "params": {
+                "name": bdev_name,
+                "filename": device_path,
+                "block_size": 512,
+                "readonly": false,
+                "fallocate": false
+            }
+        });
+        
+        match rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
+            Ok(response) => {
+                if response.get("error").is_some() {
+                    return Err(format!("Failed to create AIO bdev {}: {:?}", bdev_name, response.get("error")).into());
+                }
+                println!("✅ [SPDK_RPC] Created AIO bdev: {}", bdev_name);
+                Ok(())
+            }
+            Err(e) => Err(format!("RPC call failed for bdev_aio_create: {}", e).into())
+        }
+    }
+
+    /// Create LVS (Logical Volume Store) via RPC
+    async fn create_lvs(&self, bdev_name: &str, lvs_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let rpc_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "bdev_lvol_create_lvstore",
+            "params": {
+                "bdev_name": bdev_name,
+                "lvs_name": lvs_name,
+                "cluster_sz": 1048576
+            }
+        });
+        
+        match rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
+            Ok(response) => {
+                if response.get("error").is_some() {
+                    return Err(format!("Failed to create LVS {}: {:?}", lvs_name, response.get("error")).into());
+                }
+                println!("✅ [SPDK_RPC] Created LVS: {}", lvs_name);
+                Ok(())
+            }
+            Err(e) => Err(format!("RPC call failed for bdev_lvol_create_lvstore: {}", e).into())
+        }
+    }
+
+    /// Check if LVS exists for a given bdev
+    async fn lvs_exists_for_bdev(&self, bdev_name: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let rpc_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "bdev_lvol_get_lvstores",
+            "params": {}
+        });
+        
+        match rpc_client::call_spdk_rpc(&self.spdk_rpc_url, &rpc_request).await {
+            Ok(response) => {
+                if let Some(result) = response.get("result").and_then(|r| r.as_array()) {
+                    for lvs in result {
+                        if let Some(base_bdev) = lvs.get("base_bdev").and_then(|b| b.as_str()) {
+                            if base_bdev == bdev_name {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            Err(e) => Err(format!("Failed to check LVS: {}", e).into())
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SimpleNvmeDevice {
+    name: String,
+    path: String,
+    size: u64,
 }
 
 /// Get Kubernetes cluster ID for cluster identification
