@@ -95,15 +95,20 @@ impl ControllerService {
         println!("🔧 [THIN_PROVISION] Creating thin-provisioned logical volume {} ({}GB) on LVS {}", 
                  volume_id, capacity / (1024 * 1024 * 1024), lvs_name);
 
+        // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+        let size_in_mib = (capacity + 1048575) / 1048576; // Round up to nearest MiB
+        
+        println!("🔍 [THIN_PROVISION_DEBUG] Converting size: {} bytes -> {} MiB", capacity, size_in_mib);
+        
         // Create thin-provisioned logical volume on the RAID disk's LVS
         let response = call_spdk_rpc(&spdk_rpc_url, &json!({
             "method": "bdev_lvol_create",
             "params": {
-                "lvol_name": volume_id,
-                "size": capacity,
                 "lvs_name": lvs_name,
-                "thin_provision": true,  // Enable thin provisioning for efficient storage usage
-                "clear_method": "none"   // Don't clear blocks on allocation for performance
+                "lvol_name": volume_id,
+                "size_in_mib": size_in_mib,     // SPDK expects size in MiB, not bytes
+                "thin_provision": true,         // Enable thin provisioning for efficient storage usage
+                "clear_method": "none"          // Don't clear blocks on allocation for performance
             }
         })).await
         .map_err(|e| Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)))?;

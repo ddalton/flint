@@ -178,15 +178,20 @@ pub async fn create_logical_volume(
         }
     }
 
+    // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+    let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
+    
+    println!("🔍 [RAID_OPERATIONS_DEBUG] Converting size: {} bytes -> {} MiB", size_bytes, size_in_mib);
+    
     // Create the logical volume
     let create_lvol = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
         "method": "bdev_lvol_create",
         "params": {
-            "lvol_name": lvol_name,
-            "size": size_bytes,
             "lvs_name": lvs_name,
-            "thin_provision": true,    // Enable thin provisioning for efficient storage usage
-            "clear_method": "none"     // Don't clear blocks on allocation for performance
+            "lvol_name": lvol_name,
+            "size_in_mib": size_in_mib,    // SPDK expects size in MiB, not bytes
+            "thin_provision": true,        // Enable thin provisioning for efficient storage usage
+            "clear_method": "none"         // Don't clear blocks on allocation for performance
         }
     })).await;
 

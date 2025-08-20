@@ -501,13 +501,17 @@ async fn apply_spdk_config_via_rpc(
             for lvol in &raid.lvstore.logical_volumes {
                 println!("📁 [CONFIG] Creating logical volume: {}", lvol.name);
                 
+                // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+                let size_in_mib = (lvol.size_bytes + 1048575) / 1048576; // Round up to nearest MiB
+                
                 let rpc_request = serde_json::json!({
                     "method": "bdev_lvol_create",
                     "params": {
-                        "lvol_name": lvol.name,
-                        "size": lvol.size_bytes,
                         "lvs_name": raid.lvstore.name,
-                        "thin_provision": lvol.thin_provision
+                        "lvol_name": lvol.name,
+                        "size_in_mib": size_in_mib,    // SPDK expects size in MiB, not bytes
+                        "thin_provision": lvol.thin_provision,
+                        "clear_method": "none"         // Add for consistency
                     }
                 });
                 
