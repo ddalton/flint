@@ -216,7 +216,7 @@ nodeResources:
     # 
     # Warning: "realtime" requires careful system tuning to avoid blocking other processes
     # Recommended: Start with "high", upgrade to "realtime" if needed
-    schedulingPolicy: "realtime"
+    schedulingPolicy: "default"
     
     # Advanced: Disable RT throttling for absolute zero context switches
     # Only use with "realtime" scheduling policy

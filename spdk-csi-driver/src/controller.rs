@@ -1511,7 +1511,7 @@ impl ControllerService {
         
         let raid_spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_name.clone(),
-            raid_level: "0".to_string(), // Single disk, no actual RAID
+            raid_level: "raid1".to_string(), // Use valid CRD value for single disk
             num_member_disks: 1,
             member_disks: vec![RaidMemberDisk {
                 member_index: 0,
