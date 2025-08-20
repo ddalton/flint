@@ -1245,19 +1245,53 @@ impl ControllerService {
         println!("🔍 [SYSTEM_DISK_CHECK] Checking if {} (canonical: {}) on node {} is system disk", 
                  device_path, canonical_device, node_id);
 
-        // Query the node agent via RPC to check if this is a system disk
+        // Query the node agent via HTTP REST API to check if this is a system disk
         match self.driver.get_rpc_url_for_node(node_id).await {
             Ok(rpc_url) => {
-                // Call a custom RPC method to check system disk status
-                // We'll add this RPC endpoint to the node agent
-                match call_spdk_rpc(&rpc_url.replace("/rpc", "/api/system-disk-check"), &json!({
+                // Replace /api/spdk/rpc with /api/system-disk-check/{device_name} for REST API call
+                let system_disk_check_url = rpc_url.replace("/api/spdk/rpc", &format!("/api/system-disk-check/{}", canonical_device));
+                println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Full URL: {}", system_disk_check_url);
+                
+                let request_body = json!({
                     "device_name": canonical_device
-                })).await {
+                });
+                println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] Request body: {}", request_body);
+                
+                // Use reqwest for proper REST API call instead of JSON-RPC wrapper
+                let client = reqwest::Client::new();
+                let response_result = client
+                    .post(&system_disk_check_url)
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+                    .send()
+                    .await;
+                    
+                println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] HTTP response result: {:?}", response_result);
+                
+                match response_result {
                     Ok(response) => {
-                        let is_system = response["is_system_disk"].as_bool().unwrap_or(false);
-                        println!("🔍 [SYSTEM_DISK_CHECK] Node {} reports {} is_system_disk: {}", 
-                                 node_id, canonical_device, is_system);
-                        is_system
+                        let status = response.status();
+                        println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] HTTP status: {}", status);
+                        
+                        if status.is_success() {
+                            match response.json::<serde_json::Value>().await {
+                                Ok(json_response) => {
+                                    println!("🔍 [SYSTEM_DISK_CHECK_DEBUG] JSON response: {}", json_response);
+                                    let is_system = json_response["is_system_disk"].as_bool().unwrap_or(false);
+                                    println!("🔍 [SYSTEM_DISK_CHECK] Node {} reports {} is_system_disk: {}", 
+                                             node_id, canonical_device, is_system);
+                                    is_system
+                                }
+                                Err(e) => {
+                                    println!("⚠️ [SYSTEM_DISK_CHECK] Failed to parse JSON response from node {}: {}", node_id, e);
+                                    canonical_device.contains("nvme0") // Conservative fallback
+                                }
+                            }
+                        } else {
+                            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                            println!("⚠️ [SYSTEM_DISK_CHECK] HTTP error {} from node {}: {}", status, node_id, error_text);
+                            canonical_device.contains("nvme0") // Conservative fallback
+                        }
                     }
                     Err(e) => {
                         println!("⚠️ [SYSTEM_DISK_CHECK] Failed to query node {} for system disk status: {}", node_id, e);
