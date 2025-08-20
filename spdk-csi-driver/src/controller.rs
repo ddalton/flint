@@ -181,6 +181,25 @@ impl ControllerService {
         println!("🔍 [RAID_PROVISION] Looking for RAID disk: {} replicas, {} bytes, RAID{}", 
                  num_replicas, required_capacity, raid_level);
 
+        // Step 0: PREVENT DUPLICATION - Check if any healthy RAID disk already exists
+        let client = self.driver.kube_client.clone();
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(client, "flint-system");
+        
+        let existing_raids = raid_disks.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list existing RAID disks: {}", e)))?;
+            
+        for raid_disk in existing_raids.items {
+            if let Some(status) = &raid_disk.status {
+                if matches!(status.state.as_str(), "online" | "healthy") {
+                    let raid_name = raid_disk.metadata.name.as_ref().map(|s| s.as_str()).unwrap_or("unknown");
+                    println!("✅ [DUPLICATION_PREVENTION] Found existing healthy RAID disk '{}' - reusing instead of creating duplicate", raid_name);
+                    return Ok(raid_disk);
+                }
+            }
+        }
+        
+        println!("🔍 [DUPLICATION_PREVENTION] No existing healthy RAID disks found - proceeding with creation");
+
         // Step 1: Determine what disks we would use for a new RAID
         let available_disks = self.find_available_local_nvme_disks(required_capacity).await?;
         
@@ -1298,24 +1317,29 @@ impl ControllerService {
                     // - For unclaimed bdevs: standard availability check (new disk provisioning)
                     // - For claimed bdevs: will be checked for LVS capacity in existing LVS flow
                     // NOTE: Claimed bdevs with LVS are checked via check_existing_lvs_capacity()
-                    // SIMPLIFIED LOGIC: Only use SPDK's authoritative 'claimed' field and system disk check
+                    // Extract device path for RAID membership check
+                    let actual_device_path = if let Some(filename) = bdev["driver_specific"]["aio"]["filename"].as_str() {
+                        filename.to_string()
+                    } else {
+                        // Skip bdevs without device paths (e.g., logical volumes)
+                        continue;
+                    };
+                    
+                    // Check if this disk is already a member of any existing RAID disk
+                    let is_raid_member = self.is_disk_raid_member(&actual_device_path).await.unwrap_or(false);
+                    
+                    // COMPREHENSIVE AVAILABILITY CHECK: SPDK claimed + system disk + RAID membership
                     let is_available_storage = !is_claimed && 
                                              supports_read && 
                                              supports_write && 
                                              capacity >= min_capacity as u64 && 
-                                             !is_system_disk; // EXCLUDE system disks from storage
+                                             !is_system_disk && 
+                                             !is_raid_member; // EXCLUDE disks already in RAID arrays
                     
-                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | system_disk: {} | available: {}", 
-                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_system_disk, is_available_storage);
+                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | system_disk: {} | raid_member: {} | available: {}", 
+                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_system_disk, is_raid_member, is_available_storage);
                     
                     if is_available_storage {
-                        // Extract the actual OS device path from SPDK bdev details
-                        let actual_device_path = if let Some(filename) = bdev["driver_specific"]["aio"]["filename"].as_str() {
-                            filename.to_string()
-                        } else {
-                            println!("❌ [BDEV_EVAL] Cannot determine actual device path for bdev '{}' - no AIO filename found", name);
-                            return Err(Status::internal(format!("Cannot determine device path for bdev '{}'", name)));
-                        };
                         
                         println!("✅ [BDEV_RESOLVE] Resolved bdev '{}' -> device path '{}'", name, actual_device_path);
                         
@@ -1356,6 +1380,29 @@ impl ControllerService {
             }
         }
         false
+    }
+
+    /// Check if a disk is already a member of any existing RAID disk
+    async fn is_disk_raid_member(&self, device_path: &str) -> Result<bool, Status> {
+        let client = self.driver.kube_client.clone();
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(client, "flint-system");
+        
+        let existing_raids = raid_disks.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list RAID disks for membership check: {}", e)))?;
+            
+        for raid_disk in existing_raids.items {
+            // Check all member disks in this RAID
+            for member in &raid_disk.spec.member_disks {
+                if member.hardware_id.as_ref().map(|id| id == device_path).unwrap_or(false) || 
+                   member.disk_ref == device_path {
+                    let raid_name = raid_disk.metadata.name.as_ref().map(|s| s.as_str()).unwrap_or("unknown");
+                    println!("🚫 [RAID_MEMBERSHIP] Disk {} is already a member of RAID disk '{}'", device_path, raid_name);
+                    return Ok(true);
+                }
+            }
+        }
+        
+        Ok(false)
     }
 
     /// Check if a disk is a system disk by querying the node agent's system disk detection
