@@ -1322,6 +1322,7 @@ impl ControllerService {
                                name, free_bytes / (1024 * 1024 * 1024));
                         
                         // Create a virtual "disk" representing this LVS capacity
+                        println!("🔍 [LVS_DEBUG] Creating virtual disk for LVS '{}' with base_bdev: '{}'", name, base_bdev);
                         available_storage.push(AvailableNvmeDisk {
                             node_id: node.to_string(),
                             device_path: format!("existing-lvs:{}", name),  // Special marker
@@ -1332,6 +1333,7 @@ impl ControllerService {
                             capacity: free_bytes as i64,
                             pci_address: base_bdev.to_string(),  // Store base bdev for reference
                         });
+                        println!("🔍 [LVS_DEBUG] Virtual disk pci_address set to: '{}'", base_bdev);
                     } else {
                         println!("⚠️ [LVS_CHECK] LVS '{}' only has {}GB free (need {}GB)", 
                                name, free_bytes / (1024 * 1024 * 1024), min_capacity / (1024 * 1024 * 1024));
@@ -1517,6 +1519,8 @@ impl ControllerService {
         
         let raid_name = format!("reuse-{}", lvs_name.replace("_", "-")); // Replace underscores for K8s name compliance
         println!("🔄 [LVS_REUSE] Creating RAID CRD for existing LVS: {} -> {}", lvs_name, raid_name);
+        println!("🔍 [LVS_REUSE_DEBUG] existing_lvs.pci_address (should be base bdev): '{}'", existing_lvs.pci_address);
+        println!("🔍 [LVS_REUSE_DEBUG] existing_lvs.device_path (marker): '{}'", existing_lvs.device_path);
         
         let raid_spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_name.clone(),
@@ -1526,7 +1530,7 @@ impl ControllerService {
                 member_index: 0,
                 node_id: existing_lvs.node_id.clone(),
                 disk_ref: existing_lvs.pci_address.clone(), // Base bdev name
-                hardware_id: Some(existing_lvs.pci_address.clone()),
+                hardware_id: Some(existing_lvs.pci_address.clone()), // Should be base bdev (e.g., aio_nvme1n1)
                 serial_number: Some(existing_lvs.serial_number.clone()),
                 wwn: existing_lvs.wwn.clone(),
                 model: Some(existing_lvs.model.clone()),
@@ -1572,12 +1576,22 @@ impl ControllerService {
         println!("🔍 [LVS_REUSE_DEBUG] About to create RAID CRD in namespace: {}", self.driver.target_namespace);
         println!("🔍 [LVS_REUSE_DEBUG] RAID CRD spec: {:#?}", raid_disk.spec);
         
-        let created_raid = raids_api.create(&kube::api::PostParams::default(), &raid_disk).await
-            .map_err(|e| {
+        let created_raid = match raids_api.create(&kube::api::PostParams::default(), &raid_disk).await {
+            Ok(raid) => {
+                println!("✅ [LVS_REUSE_DEBUG] Successfully created new RAID CRD");
+                raid
+            }
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("🔄 [LVS_REUSE_DEBUG] RAID CRD already exists, retrieving existing one");
+                raids_api.get(&raid_name).await
+                    .map_err(|e| Status::internal(format!("Failed to retrieve existing RAID CRD: {}", e)))?
+            }
+            Err(e) => {
                 println!("❌ [LVS_REUSE_DEBUG] Kubernetes API error: {}", e);
                 println!("🔍 [LVS_REUSE_DEBUG] Full error details: {:?}", e);
-                Status::internal(format!("Failed to create RAID CRD for existing LVS: {}", e))
-            })?;
+                return Err(Status::internal(format!("Failed to create RAID CRD for existing LVS: {}", e)));
+            }
+        };
         
         println!("✅ [LVS_REUSE] Successfully created RAID CRD for existing LVS: {}", raid_name);
         Ok(created_raid)
