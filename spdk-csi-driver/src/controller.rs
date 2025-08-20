@@ -798,7 +798,7 @@ impl ControllerService {
                 capacity_bytes: disk.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
-                binding_approach: None, // Will be set when bdev is actually created
+                binding_approach: Some("aio-fallback".to_string()), // Default to AIO fallback for local disks
             }
         }).collect();
 
@@ -1515,7 +1515,7 @@ impl ControllerService {
     async fn create_existing_lvs_raid_crd(&self, existing_lvs: &AvailableNvmeDisk, lvs_name: &str) -> Result<SpdkRaidDisk, Status> {
         use spdk_csi_driver::models::{SpdkRaidDisk, SpdkRaidDiskSpec, RaidMemberDisk};
         
-        let raid_name = format!("reuse-{}", lvs_name);
+        let raid_name = format!("reuse-{}", lvs_name.replace("_", "-")); // Replace underscores for K8s name compliance
         println!("🔄 [LVS_REUSE] Creating RAID CRD for existing LVS: {} -> {}", lvs_name, raid_name);
         
         let raid_spec = SpdkRaidDiskSpec {
@@ -1536,7 +1536,7 @@ impl ControllerService {
                 capacity_bytes: existing_lvs.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
-                binding_approach: None, // Legacy LVS, binding approach unknown
+                binding_approach: Some("aio-fallback".to_string()), // AIO bdev binding for existing LVS
             }],
             stripe_size_kb: 1024, // Default stripe size for LVS reuse
             superblock_enabled: true,
