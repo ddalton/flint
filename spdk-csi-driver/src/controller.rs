@@ -1592,8 +1592,41 @@ impl ControllerService {
             }
             Err(e) if e.to_string().contains("already exists") => {
                 println!("🔄 [LVS_REUSE_DEBUG] RAID CRD already exists, retrieving existing one");
-                raids_api.get(&raid_name).await
-                    .map_err(|e| Status::internal(format!("Failed to retrieve existing RAID CRD: {}", e)))?
+                let mut existing_raid = raids_api.get(&raid_name).await
+                    .map_err(|e| Status::internal(format!("Failed to retrieve existing RAID CRD: {}", e)))?;
+                
+                // Ensure the retrieved CRD has the correct status for existing LVS reuse
+                if existing_raid.status.is_none() || 
+                   existing_raid.status.as_ref().and_then(|s| s.lvs_name.as_ref()).is_none() {
+                    println!("🔧 [LVS_REUSE_DEBUG] Updating retrieved CRD status with existing LVS name: {}", lvs_name);
+                    existing_raid.status = Some(spdk_csi_driver::models::SpdkRaidDiskStatus {
+                        state: "online".to_string(),
+                        raid_bdev_name: Some(existing_lvs.pci_address.clone()),
+                        lvs_name: Some(lvs_name.to_string()),
+                        lvs_uuid: None,
+                        total_capacity_bytes: existing_lvs.capacity,
+                        usable_capacity_bytes: existing_lvs.capacity,
+                        used_capacity_bytes: 0,
+                        health_status: "healthy".to_string(),
+                        degraded: false,
+                        rebuild_progress: None,
+                        active_member_count: 1,
+                        failed_member_count: 0,
+                        last_checked: chrono::Utc::now().to_rfc3339(),
+                        created_at: Some(chrono::Utc::now().to_rfc3339()),
+                        raid_status: None,
+                    });
+                    
+                    // Update the CRD status in Kubernetes
+                    match raids_api.replace_status(&raid_name, &kube::api::PostParams::default(), &existing_raid).await {
+                        Ok(_) => println!("✅ [LVS_REUSE_DEBUG] Successfully updated CRD status with LVS name"),
+                        Err(e) => {
+                            println!("⚠️ [LVS_REUSE_DEBUG] Failed to update CRD status (continuing anyway): {}", e);
+                            // Don't fail the entire operation for status update failure
+                        }
+                    }
+                }
+                existing_raid
             }
             Err(e) => {
                 println!("❌ [LVS_REUSE_DEBUG] Kubernetes API error: {}", e);
