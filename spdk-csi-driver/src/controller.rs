@@ -1621,8 +1621,17 @@ impl ControllerService {
         let mut local_disks = Vec::new();
         let mut remote_disks = Vec::new();
         
-        // Separate local vs remote disks
+        // Separate local vs remote disks (with system disk protection)
         for disk in available_disks {
+            // CRITICAL SYSTEM DISK PROTECTION: Skip system disks entirely
+            let device_name = disk.device_path.strip_prefix("/dev/").unwrap_or(&disk.device_path);
+            
+            // Check if this is a system disk using controller's system disk detection
+            if self.is_system_disk_by_path(&disk.device_path, &disk.node_id).await {
+                println!("🚨 [SYSTEM_DISK_PROTECTION] SKIPPED: {} is a system disk - cannot use for RAID", disk.device_path);
+                continue; // Skip this disk entirely
+            }
+            
             if disk.node_id == optimal_node {
                 local_disks.push(disk.clone());
             } else {

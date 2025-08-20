@@ -209,6 +209,16 @@ impl SpdkNativeConfig {
                 
                 // Check if bdev already exists
                 if !current_bdevs.contains(&bdev_name) {
+                    // CRITICAL SYSTEM DISK PROTECTION: Check if this is a system disk
+                    let device_name = member.disk_ref.strip_prefix("/dev/").unwrap_or(&member.disk_ref);
+                    
+                    // Use comprehensive system disk check
+                    if self.is_system_disk(device_name).await {
+                        println!("🚨 [SYSTEM_DISK_PROTECTION] BLOCKED: {} is a system disk - cannot create AIO bdev", member.disk_ref);
+                        println!("🚨 [SYSTEM_DISK_PROTECTION] Skipping RAID member to prevent system corruption");
+                        continue; // Skip this member entirely
+                    }
+                    
                     // Create AIO bdev for this member disk
                     // Assuming disk_ref is like "/dev/nvme0n1"
                     println!("  Creating AIO bdev: {} for {}", bdev_name, member.disk_ref);
@@ -626,5 +636,87 @@ impl SpdkNativeConfig {
         }
 
         Err(format!("No SpdkRaidDisk found containing replica disk_ref: {}", disk_ref).into())
+    }
+
+    /// System disk detection - prevent using boot/system disks for SPDK storage
+    async fn is_system_disk(&self, device_name: &str) -> bool {
+        use std::process::Command;
+        
+        println!("🛡️ [SYSTEM_DISK_CHECK] Checking if {} is a system disk", device_name);
+        
+        // Convert SPDK bdev name to raw device name for mount checking
+        let raw_device_name = if device_name.starts_with("aio_") {
+            device_name.strip_prefix("aio_").unwrap_or(device_name)
+        } else {
+            device_name
+        };
+        
+        // Method 1: Check if it's mounted on root filesystem
+        if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
+            let root_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if root_source.contains(raw_device_name) {
+                println!("🚨 [SYSTEM_DISK_CHECK] {} is mounted as root filesystem", device_name);
+                return true;
+            }
+        }
+        
+        // Method 2: Check boot partitions (including EFI)
+        let boot_paths = ["/boot", "/boot/efi", "/efi"];
+        for boot_path in &boot_paths {
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", boot_path]).output() {
+                let boot_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if boot_source.contains(raw_device_name) {
+                    println!("🚨 [SYSTEM_DISK_CHECK] {} contains boot partition at {}", device_name, boot_path);
+                    return true;
+                }
+            }
+        }
+        
+        // Method 3: Check if any partition is mounted on critical system paths
+        let critical_paths = ["/", "/boot", "/var", "/usr", "/opt", "/home", "/tmp"];
+        for path in &critical_paths {
+            if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
+                let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if source.contains(raw_device_name) {
+                    println!("🚨 [SYSTEM_DISK_CHECK] {} is mounted on critical path {}", device_name, path);
+                    return true;
+                }
+            }
+        }
+        
+        // Method 4: Check swap devices
+        if let Ok(output) = Command::new("swapon").args(["--show=NAME", "--noheadings"]).output() {
+            let swap_devices = String::from_utf8_lossy(&output.stdout);
+            if swap_devices.contains(raw_device_name) {
+                println!("🚨 [SYSTEM_DISK_CHECK] {} is used as swap device", device_name);
+                return true;
+            }
+        }
+        
+        // Method 5: Check all partitions on this device for system use
+        if let Ok(output) = Command::new("lsblk")
+            .args(["-n", "-o", "NAME", "-r", &format!("/dev/{}", raw_device_name)])
+            .output()
+        {
+            let partitions = String::from_utf8_lossy(&output.stdout);
+            for line in partitions.lines() {
+                let partition = line.trim();
+                if !partition.is_empty() && partition != raw_device_name {
+                    // Check if this partition is mounted on critical paths
+                    for path in &critical_paths {
+                        if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
+                            let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            if source.contains(partition) {
+                                println!("🚨 [SYSTEM_DISK_CHECK] Partition {} of {} is mounted on critical path {}", partition, device_name, path);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("✅ [SYSTEM_DISK_CHECK] {} is safe for SPDK operations", device_name);
+        false
     }
 }
