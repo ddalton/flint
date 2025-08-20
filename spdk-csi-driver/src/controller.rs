@@ -1476,8 +1476,46 @@ impl ControllerService {
                         println!("✅ [LVS_CHECK] Found LVS '{}' with {}GB free capacity", 
                                name, free_bytes / (1024 * 1024 * 1024));
                         
+                        // Query bdev details to get the actual OS device path
+                        println!("🔍 [LVS_RESOLVE] Resolving actual device path for base_bdev: '{}'", base_bdev);
+                        let bdev_details_result = call_spdk_rpc(&spdk_rpc_url, &json!({
+                            "method": "bdev_get_bdevs",
+                            "params": {}
+                        })).await;
+                        
+                        let actual_device_path = match bdev_details_result {
+                            Ok(bdev_details) => {
+                                if let Some(bdevs) = bdev_details["result"].as_array() {
+                                    let mut found_path = None;
+                                    for bdev in bdevs {
+                                        if bdev["name"].as_str() == Some(base_bdev) {
+                                            if let Some(filename) = bdev["driver_specific"]["aio"]["filename"].as_str() {
+                                                found_path = Some(filename.to_string());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    match found_path {
+                                        Some(path) => path,
+                                        None => {
+                                            println!("❌ [LVS_RESOLVE] Failed to find bdev '{}' in SPDK bdev list", base_bdev);
+                                            return Err(Status::internal(format!("Cannot resolve device path for base bdev '{}'", base_bdev)));
+                                        }
+                                    }
+                                } else {
+                                    println!("❌ [LVS_RESOLVE] Invalid bdev list format from SPDK");
+                                    return Err(Status::internal("Invalid bdev list format from SPDK"));
+                                }
+                            }
+                            Err(e) => {
+                                println!("❌ [LVS_RESOLVE] Failed to query SPDK bdevs: {}", e);
+                                return Err(Status::internal(format!("Failed to query SPDK bdevs for device path resolution: {}", e)));
+                            }
+                        };
+                        
+                        println!("✅ [LVS_RESOLVE] Resolved '{}' -> '{}'", base_bdev, actual_device_path);
+                        
                         // Create a virtual "disk" representing this LVS capacity
-                        println!("🔍 [LVS_DEBUG] Creating virtual disk for LVS '{}' with base_bdev: '{}'", name, base_bdev);
                         available_storage.push(AvailableNvmeDisk {
                             node_id: node.to_string(),
                             device_path: format!("existing-lvs:{}", name),  // Special marker
@@ -1486,9 +1524,8 @@ impl ControllerService {
                             model: "Existing LVS".to_string(),
                             vendor: "SPDK".to_string(),
                             capacity: free_bytes as i64,
-                            pci_address: base_bdev.to_string(),  // Store base bdev for reference
+                            pci_address: actual_device_path,  // Store actual OS device path
                         });
-                        println!("🔍 [LVS_DEBUG] Virtual disk pci_address set to: '{}'", base_bdev);
                     } else {
                         println!("⚠️ [LVS_CHECK] LVS '{}' only has {}GB free (need {}GB)", 
                                name, free_bytes / (1024 * 1024 * 1024), min_capacity / (1024 * 1024 * 1024));
