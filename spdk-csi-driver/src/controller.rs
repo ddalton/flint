@@ -265,9 +265,9 @@ impl ControllerService {
                 unique_nodes.len() >= num_replicas as usize
             } else { true };
 
-            // Check if RAID disk is in a usable state (initializing, bdev_created, or online)
+            // Check if RAID disk is in a usable state (initializing, bdev_created, online, or healthy)
             let is_usable_state = raid_disk.status.as_ref().map_or(false, |status| {
-                matches!(status.state.as_str(), "initializing" | "bdev_created" | "online")
+                matches!(status.state.as_str(), "initializing" | "bdev_created" | "online" | "healthy")
             });
 
             if raid_disk.spec.num_member_disks >= num_replicas &&
