@@ -182,7 +182,7 @@ impl ControllerService {
                  num_replicas, required_capacity, raid_level);
 
         // Step 1: Determine what disks we would use for a new RAID
-        let available_disks = self.query_node_available_disks("all-nodes", required_capacity).await?;
+        let available_disks = self.find_available_local_nvme_disks(required_capacity).await?;
         let selected_disks = self.select_raid_member_disks_with_reactive_nvmeof(&available_disks, num_replicas, "optimal-node").await?;
         
         // Step 2: Check if there's already a RAID disk using these exact disks
