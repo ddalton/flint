@@ -1246,9 +1246,19 @@ impl ControllerService {
                              name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_system_disk, is_available_storage);
                     
                     if is_available_storage {
+                        // Extract the actual OS device path from SPDK bdev details
+                        let actual_device_path = if let Some(filename) = bdev["driver_specific"]["aio"]["filename"].as_str() {
+                            filename.to_string()
+                        } else {
+                            println!("❌ [BDEV_EVAL] Cannot determine actual device path for bdev '{}' - no AIO filename found", name);
+                            return Err(Status::internal(format!("Cannot determine device path for bdev '{}'", name)));
+                        };
+                        
+                        println!("✅ [BDEV_RESOLVE] Resolved bdev '{}' -> device path '{}'", name, actual_device_path);
+                        
                         let disk = AvailableNvmeDisk {
                             node_id: node.to_string(),
-                            device_path: format!("/dev/{}", name),
+                            device_path: actual_device_path,
                             serial_number: bdev["product_name"].as_str().unwrap_or("unknown").to_string(),
                             wwn: None,
                             model: bdev["product_name"].as_str().unwrap_or("unknown").to_string(),
