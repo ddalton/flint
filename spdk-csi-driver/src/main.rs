@@ -657,7 +657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if mode == "node" || mode == "all" {
         println!("Starting in Node mode...");
         
-        // First, try to load native SPDK configuration from ConfigMap
+        // Load SPDK configuration from Custom Resources
         let native_config = SpdkNativeConfig::new(
             driver.spdk_rpc_url.clone(),
             driver.node_id.clone(),
@@ -665,14 +665,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             driver.target_namespace.clone(),
         );
         
-        // Load existing SPDK configuration from ConfigMap if available
+        // Load SPDK configuration from Custom Resources (SpdkRaidDisk, SpdkVolume, SpdkSnapshot)
         let native_config_clone = native_config.clone();
         tokio::spawn(async move {
-            println!("🔄 [NATIVE_CONFIG] Attempting to restore SPDK configuration from ConfigMap");
-            match native_config_clone.load_from_configmap().await {
-                Ok(true) => println!("✅ [NATIVE_CONFIG] Successfully restored SPDK configuration"),
-                Ok(false) => println!("ℹ️ [NATIVE_CONFIG] No saved configuration found, starting fresh"),
-                Err(e) => println!("⚠️ [NATIVE_CONFIG] Failed to restore configuration: {}", e),
+            // Wait a bit for SPDK to be fully ready
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            
+            println!("🔄 [NATIVE_CONFIG] Loading SPDK configuration from Custom Resources");
+            match native_config_clone.load_config().await {
+                Ok(()) => println!("✅ [NATIVE_CONFIG] Successfully loaded SPDK configuration from CRDs"),
+                Err(e) => println!("⚠️ [NATIVE_CONFIG] Failed to load configuration from CRDs: {}", e),
             }
         });
         

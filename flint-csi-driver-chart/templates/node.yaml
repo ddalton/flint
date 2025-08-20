@@ -63,9 +63,6 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
-            - name: spdk-config
-              mountPath: /etc/spdk-config
-              readOnly: true
         # CSI Driver Container (Node Mode)
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
@@ -111,9 +108,6 @@ spec:
               mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
-            - name: spdk-config
-              mountPath: /etc/spdk-config
-              readOnly: true
         # Node Agent Container (Disk Management & API)
         - name: node-agent
           image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
@@ -187,9 +181,6 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
-            - name: spdk-config
-              mountPath: /etc/spdk-config
-              readOnly: true
         # CSI Node Agent Container (Legacy - both CSI + Disk Management)
         - name: node-agent
           image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
@@ -268,9 +259,6 @@ spec:
               mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
-            - name: spdk-config
-              mountPath: /etc/spdk-config
-              readOnly: true
         {{- end }}
         - name: node-driver-registrar
           image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
@@ -322,6 +310,3 @@ spec:
             medium: HugePages
         - name: spdk-socket
           emptyDir: {}
-        - name: spdk-config
-          emptyDir: {}
-          # SPDK configuration loaded via node-agent using Kubernetes API

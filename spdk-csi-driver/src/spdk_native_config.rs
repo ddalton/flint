@@ -1,16 +1,14 @@
-// spdk_native_config.rs - SPDK Native Configuration Management
-// Rust implementation of SPDK's save_config/load_config functionality
+// spdk_native_config.rs - SPDK Configuration from Custom Resources
+// Configures SPDK based on SpdkRaidDisk, SpdkVolume, and SpdkSnapshot CRDs
 
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
-use kube::api::{Api, PostParams};
+use std::collections::HashSet;
+use kube::api::{Api, ListParams};
 use kube::Client;
-use k8s_openapi::api::core::v1::ConfigMap;
-use std::collections::BTreeMap;
+use crate::models::{SpdkRaidDisk, SpdkVolume, SpdkSnapshot, StorageBackend, RaidMemberState, NvmeofEndpoint};
 
-
-/// SPDK Native Configuration Manager
-/// Implements save_config/load_config logic from SPDK's Python RPC script
+/// SPDK Configuration Manager based on Custom Resources
+/// Reads from SpdkRaidDisk, SpdkVolume, and SpdkSnapshot CRDs to configure SPDK
 #[derive(Clone)]
 pub struct SpdkNativeConfig {
     pub spdk_rpc_url: String,
@@ -29,7 +27,7 @@ impl SpdkNativeConfig {
         }
     }
 
-    /// Simple RPC call to SPDK - avoiding complex imports
+    /// Simple RPC call to SPDK
     async fn call_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let client = reqwest::Client::new();
         let response = client
@@ -39,308 +37,565 @@ impl SpdkNativeConfig {
             .await?;
         
         let result: Value = response.json().await?;
+        
+        // Check for RPC error
+        if let Some(error) = result.get("error") {
+            return Err(format!("RPC error: {}", error).into());
+        }
+        
         Ok(result)
     }
 
-    /// Save current SPDK configuration using native save_config logic
-    /// Equivalent to SPDK's Python save_config() function
-    pub async fn save_config(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        println!("📸 [NATIVE_SAVE] Capturing SPDK configuration for node: {}", self.node_id);
+    /// Configure SPDK based on Custom Resources
+    /// This is the main entry point that reads CRDs and configures SPDK accordingly
+    pub async fn load_config(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🚀 [CRD_CONFIG] Configuring SPDK from Custom Resources for node: {}", self.node_id);
 
-        // Step 1: Get all subsystems (equivalent to framework_get_subsystems)
-        let subsystems_response = self.call_rpc(&json!({
-            "method": "framework_get_subsystems",
-            "params": {}
-        })).await?;
+        // Step 1: Initialize SPDK framework if needed
+        self.initialize_spdk_framework().await?;
 
-        let subsystems_list = subsystems_response["result"].as_array()
-            .ok_or("Invalid framework_get_subsystems response")?;
+        // Step 2: Discovery - get device information from Custom Resources
+        let _discovered_devices = self.get_node_devices_from_crds().await?;
 
-        // Step 2: Build dependency map (like Python implementation)
-        let mut dependencies: HashMap<String, HashSet<String>> = HashMap::new();
-        for subsystem in subsystems_list {
-            let name = subsystem["subsystem"].as_str()
-                .ok_or("Missing subsystem name")?;
-            
-            let mut deps = HashSet::new();
-            deps.insert(name.to_string());
-            
-            if let Some(depends_on) = subsystem["depends_on"].as_array() {
-                for dep in depends_on {
-                    if let Some(dep_name) = dep.as_str() {
-                        if let Some(dep_set) = dependencies.get(dep_name) {
-                            deps.extend(dep_set.clone());
-                        }
-                    }
-                }
-            }
-            
-            dependencies.insert(name.to_string(), deps);
-        }
+        // Step 3: Get current state of SPDK
+        let current_bdevs = self.get_current_bdevs().await?;
+        let current_lvstores = self.get_current_lvstores().await?;
+        let current_nvmf_subsystems = self.get_current_nvmf_subsystems().await?;
 
-        // Step 3: Get configuration for each subsystem
-        let mut config = json!({
-            "subsystems": []
-        });
+        // Step 4: Configure RAID disks from SpdkRaidDisk CRDs
+        self.configure_raid_disks(&current_bdevs).await?;
 
-        for subsystem in subsystems_list {
-            let subsystem_name = subsystem["subsystem"].as_str()
-                .ok_or("Missing subsystem name")?;
+        // Step 5: Configure volumes from SpdkVolume CRDs
+        self.configure_volumes(&current_lvstores).await?;
 
-            println!("🔧 [NATIVE_SAVE] Getting config for subsystem: {}", subsystem_name);
+        // Step 6: Configure snapshots from SpdkSnapshot CRDs
+        self.configure_snapshots().await?;
 
-            // Get subsystem configuration (equivalent to framework_get_config)
-            let config_response = self.call_rpc(&json!({
-                "method": "framework_get_config", 
-                "params": {
-                    "name": subsystem_name
-                }
-            })).await?;
+        // Step 7: Configure NVMe-oF subsystems if needed
+        self.configure_nvmeof_subsystems(&current_nvmf_subsystems).await?;
 
-            let subsystem_config = config_response["result"].clone();
-
-            // Only include subsystems with non-empty configuration
-            if let Some(config_array) = subsystem_config.as_array() {
-                if !config_array.is_empty() {
-                    config["subsystems"].as_array_mut().unwrap().push(json!({
-                        "subsystem": subsystem_name,
-                        "config": subsystem_config
-                    }));
-                    
-                    println!("✅ [NATIVE_SAVE] Captured {} config items for {}", 
-                             config_array.len(), subsystem_name);
-                }
-            }
-        }
-
-        println!("✅ [NATIVE_SAVE] Successfully captured SPDK configuration");
-        Ok(config)
+        println!("✅ [CRD_CONFIG] SPDK configuration from CRDs completed");
+        Ok(())
     }
 
-    /// Load SPDK configuration using native load_config logic
-    /// Equivalent to SPDK's Python load_config() function
-    pub async fn load_config(&self, config: &Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 [NATIVE_LOAD] Loading SPDK configuration for node: {}", self.node_id);
-
-        let subsystems = config["subsystems"].as_array()
-            .ok_or("Invalid config format: missing subsystems")?;
-
-        if subsystems.is_empty() {
-            println!("ℹ️ [NATIVE_LOAD] No subsystems to configure, calling framework_start_init");
-            
-            self.call_rpc(&json!({
-                "method": "framework_start_init",
-                "params": {}
-            })).await?;
-            
-            return Ok(());
-        }
-
-        // Step 1: Validate all methods exist (like Python implementation)
-        let allowed_methods_response = self.call_rpc(&json!({
-            "method": "rpc_get_methods",
-            "params": {
-                "include_aliases": false
+    /// Initialize SPDK framework
+    async fn initialize_spdk_framework(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [INIT] Initializing SPDK framework");
+        
+        // Try to call framework_start_init
+        match self.call_rpc(&json!({
+            "method": "framework_start_init",
+            "params": {}
+        })).await {
+            Ok(_) => println!("✅ [INIT] SPDK framework initialized"),
+            Err(e) => {
+                // This might fail if already initialized, which is fine
+                println!("ℹ️ [INIT] Framework init returned: {} (may already be initialized)", e);
             }
+        }
+        
+        Ok(())
+    }
+
+    /// Get current bdevs in SPDK
+    async fn get_current_bdevs(&self) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Getting current bdevs");
+        
+        let response = self.call_rpc(&json!({
+            "method": "bdev_get_bdevs",
+            "params": {}
         })).await?;
+        
+        let mut bdev_names = HashSet::new();
+        if let Some(bdevs) = response["result"].as_array() {
+            for bdev in bdevs {
+                if let Some(name) = bdev["name"].as_str() {
+                    bdev_names.insert(name.to_string());
+                }
+            }
+            println!("📦 [DISCOVERY] Found {} existing bdevs", bdev_names.len());
+        }
+        
+        Ok(bdev_names)
+    }
 
-        let allowed_methods: HashSet<String> = allowed_methods_response["result"].as_array()
-            .ok_or("Invalid rpc_get_methods response")?
-            .iter()
-            .filter_map(|method| method.as_str())
-            .map(|s| s.to_string())
-            .collect();
+    /// Get current lvol stores in SPDK
+    async fn get_current_lvstores(&self) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Getting current lvol stores");
+        
+        let response = self.call_rpc(&json!({
+            "method": "bdev_lvol_get_lvstores",
+            "params": {}
+        })).await?;
+        
+        let mut lvs_names = HashSet::new();
+        if let Some(stores) = response["result"].as_array() {
+            for store in stores {
+                if let Some(name) = store["name"].as_str() {
+                    lvs_names.insert(name.to_string());
+                }
+            }
+            println!("📦 [DISCOVERY] Found {} existing lvol stores", lvs_names.len());
+        }
+        
+        Ok(lvs_names)
+    }
 
-        // Validate all methods in config are known
-        for subsystem in subsystems {
-            if let Some(config_items) = subsystem["config"].as_array() {
-                for item in config_items {
-                    if let Some(method) = item["method"].as_str() {
-                        if !allowed_methods.contains(method) {
-                            return Err(format!("Unknown method in config: {}", method).into());
-                        }
+    /// Get current NVMe-oF subsystems
+    async fn get_current_nvmf_subsystems(&self) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Getting current NVMe-oF subsystems");
+        
+        let response = self.call_rpc(&json!({
+            "method": "nvmf_get_subsystems",
+            "params": {}
+        })).await?;
+        
+        let mut nqns = HashSet::new();
+        if let Some(subsystems) = response["result"].as_array() {
+            for subsystem in subsystems {
+                if let Some(nqn) = subsystem["nqn"].as_str() {
+                    // Skip discovery subsystem
+                    if nqn != "nqn.2014-08.org.nvmexpress.discovery" {
+                        nqns.insert(nqn.to_string());
                     }
                 }
             }
+            println!("📦 [DISCOVERY] Found {} existing NVMe-oF subsystems", nqns.len());
         }
+        
+        Ok(nqns)
+    }
 
-        // Step 2: Apply configuration iteratively (like Python implementation)
-        let mut remaining_subsystems: Vec<Value> = subsystems.iter().cloned().collect();
-
-        while !remaining_subsystems.is_empty() {
-            // Get currently allowed methods
-            let current_methods_response = self.call_rpc(&json!({
-                "method": "rpc_get_methods",
-                "params": {
-                    "current": true,
-                    "include_aliases": false
+    /// Configure RAID disks based on SpdkRaidDisk CRDs
+    async fn configure_raid_disks(&self, current_bdevs: &HashSet<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [RAID_CONFIG] Configuring RAID disks from CRDs");
+        
+        let raid_disks_api: Api<SpdkRaidDisk> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let lp = ListParams::default();
+        let raid_disks = raid_disks_api.list(&lp).await?;
+        
+        for raid_disk in raid_disks.items {
+            // Only process RAID disks for this node
+            if raid_disk.spec.created_on_node != self.node_id {
+                continue;
+            }
+            
+            let raid_disk_id = &raid_disk.spec.raid_disk_id;
+            let raid_bdev_name = format!("raid_{}", raid_disk_id);
+            
+            // Check if RAID bdev already exists
+            if current_bdevs.contains(&raid_bdev_name) {
+                println!("ℹ️ [RAID_CONFIG] RAID bdev {} already exists", raid_bdev_name);
+                continue;
+            }
+            
+            println!("🔨 [RAID_CONFIG] Creating RAID disk: {}", raid_disk_id);
+            
+            // First, create AIO bdevs for each member disk
+            let mut base_bdevs = Vec::new();
+            for member in &raid_disk.spec.member_disks {
+                // Skip failed members
+                if matches!(member.state, RaidMemberState::Failed) {
+                    println!("⚠️ [RAID_CONFIG] Skipping failed member disk: {}", member.disk_ref);
+                    continue;
                 }
-            })).await?;
-
-            let current_methods: HashSet<String> = current_methods_response["result"].as_array()
-                .ok_or("Invalid current methods response")?
-                .iter()
-                .filter_map(|method| method.as_str())
-                .map(|s| s.to_string())
-                .collect();
-
-            let mut progress_made = false;
-
-            // Try to apply configurations that are currently allowed
-            for subsystem in &mut remaining_subsystems {
-                if let Some(config_items) = subsystem["config"].as_array_mut() {
-                    let mut items_to_remove = Vec::new();
+                
+                // Only process members on this node
+                if member.node_id != self.node_id {
+                    continue;
+                }
+                
+                let bdev_name = format!("aio_{}", member.disk_ref.replace("/", "_").replace("dev_", ""));
+                
+                // Check if bdev already exists
+                if !current_bdevs.contains(&bdev_name) {
+                    // Create AIO bdev for this member disk
+                    // Assuming disk_ref is like "/dev/nvme0n1"
+                    println!("  Creating AIO bdev: {} for {}", bdev_name, member.disk_ref);
                     
-                    for (index, item) in config_items.iter().enumerate() {
-                        if let Some(method) = item["method"].as_str() {
-                            if current_methods.contains(method) {
-                                println!("🔧 [NATIVE_LOAD] Applying: {}", method);
+                    let create_aio = json!({
+                        "method": "bdev_aio_create",
+                        "params": {
+                            "name": bdev_name.clone(),
+                            "filename": member.disk_ref.clone(),
+                            "block_size": 512
+                        }
+                    });
+                    
+                    match self.call_rpc(&create_aio).await {
+                        Ok(_) => {
+                            println!("  ✅ Created AIO bdev: {}", bdev_name);
+                            base_bdevs.push(bdev_name);
+                        },
+                        Err(e) => {
+                            println!("  ⚠️ Failed to create AIO bdev {}: {}", bdev_name, e);
+                        }
+                    }
+                } else {
+                    base_bdevs.push(bdev_name);
+                }
+            }
+            
+            // Create RAID bdev if we have enough members
+            if base_bdevs.len() >= raid_disk.spec.num_member_disks as usize {
+                println!("  Creating RAID{} bdev: {} with {} members", 
+                    raid_disk.spec.raid_level, raid_bdev_name, base_bdevs.len());
+                
+                let create_raid = json!({
+                    "method": "bdev_raid_create",
+                    "params": {
+                        "name": raid_bdev_name.clone(),
+                        "raid_level": raid_disk.spec.raid_level.clone(),
+                        "base_bdevs": base_bdevs,
+                        "strip_size_kb": raid_disk.spec.stripe_size_kb,
+                        "superblock": raid_disk.spec.superblock_enabled
+                    }
+                });
+                
+                match self.call_rpc(&create_raid).await {
+                    Ok(_) => {
+                        println!("  ✅ Created RAID bdev: {}", raid_bdev_name);
+                        
+                        // Create lvol store on the RAID bdev if specified in status
+                        if let Some(status) = &raid_disk.status {
+                            if let Some(lvs_name) = &status.lvs_name {
+                                println!("  📦 Creating LVS: {} on RAID bdev: {}", lvs_name, raid_bdev_name);
+                                self.create_lvol_store(&raid_bdev_name, lvs_name).await?;
                                 
-                                // Execute the RPC call
-                                let result = self.call_rpc(item).await;
-                                
-                                match result {
-                                    Ok(_) => {
-                                        println!("✅ [NATIVE_LOAD] Successfully applied: {}", method);
-                                        items_to_remove.push(index);
-                                        progress_made = true;
-                                    },
-                                    Err(e) => {
-                                        println!("⚠️ [NATIVE_LOAD] Failed to apply {}: {}", method, e);
-                                        // Continue with other methods
+                                // If LVS UUID is specified in status, we could validate it matches
+                                if let Some(expected_uuid) = &status.lvs_uuid {
+                                    println!("    Expected LVS UUID: {}", expected_uuid);
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("  ⚠️ Failed to create RAID bdev {}: {}", raid_bdev_name, e);
+                    }
+                }
+            } else {
+                println!("  ⚠️ Not enough healthy members for RAID disk {}", raid_disk_id);
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Create lvol store if it doesn't exist
+    async fn create_lvol_store(&self, bdev_name: &str, lvs_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("  📦 Creating lvol store: {} on bdev: {}", lvs_name, bdev_name);
+        
+        let create_lvs = json!({
+            "method": "bdev_lvol_create_lvstore",
+            "params": {
+                "bdev_name": bdev_name,
+                "lvs_name": lvs_name
+            }
+        });
+        
+        match self.call_rpc(&create_lvs).await {
+            Ok(response) => {
+                if let Some(uuid) = response["result"].as_str() {
+                    println!("  ✅ Created lvol store: {} (UUID: {})", lvs_name, uuid);
+                }
+            },
+            Err(e) => {
+                // Might already exist
+                println!("  ℹ️ Lvol store creation returned: {}", e);
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Configure volumes based on SpdkVolume CRDs
+    async fn configure_volumes(&self, current_lvstores: &HashSet<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [VOLUME_CONFIG] Configuring volumes from CRDs");
+        
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let lp = ListParams::default();
+        let volumes = volumes_api.list(&lp).await?;
+        
+        for volume in volumes.items {
+            // Only process volumes for this node
+            let node_id = match &volume.spec.storage_backend {
+                StorageBackend::RaidDisk { node_id, .. } => node_id,
+            };
+            
+            if node_id != &self.node_id {
+                continue;
+            }
+            
+            let volume_id = &volume.spec.volume_id;
+            let lvol_name = format!("lvol_{}", volume_id);
+            
+            println!("📀 [VOLUME_CONFIG] Processing volume: {}", volume_id);
+            
+            // Get the lvs_name from the volume spec
+            if let Some(lvs_name) = &volume.spec.lvs_name {
+                // Check if lvol already exists
+                let check_lvol = json!({
+                    "method": "bdev_lvol_get_lvols",
+                    "params": {
+                        "lvs_name": lvs_name
+                    }
+                });
+                
+                match self.call_rpc(&check_lvol).await {
+                    Ok(response) => {
+                        let mut lvol_exists = false;
+                        if let Some(lvols) = response["result"].as_array() {
+                            for lvol in lvols {
+                                if let Some(name) = lvol["name"].as_str() {
+                                    if name == lvol_name {
+                                        lvol_exists = true;
+                                        println!("  ℹ️ Lvol {} already exists", lvol_name);
+                                        break;
                                     }
                                 }
                             }
                         }
-                    }
-                    
-                    // Remove successfully applied items (in reverse order to maintain indices)
-                    for &index in items_to_remove.iter().rev() {
-                        config_items.remove(index);
-                    }
-                }
-            }
-
-            // Remove subsystems with no remaining configuration
-            remaining_subsystems.retain(|subsystem| {
-                if let Some(config_items) = subsystem["config"].as_array() {
-                    !config_items.is_empty()
-                } else {
-                    false
-                }
-            });
-
-            // Call framework_start_init if available
-            if current_methods.contains("framework_start_init") {
-                println!("🚀 [NATIVE_LOAD] Calling framework_start_init");
-                
-                let _ = self.call_rpc(&json!({
-                    "method": "framework_start_init",
-                    "params": {}
-                })).await;
-                
-                progress_made = true;
-            }
-
-            // If no progress was made, exit to avoid infinite loop
-            if !progress_made {
-                if !remaining_subsystems.is_empty() {
-                    println!("⚠️ [NATIVE_LOAD] Some configurations could not be applied - RPC state may have moved past applicable window");
-                }
-                break;
-            }
-        }
-
-        println!("✅ [NATIVE_LOAD] SPDK configuration loading completed");
-        Ok(())
-    }
-
-    /// Save configuration to Kubernetes ConfigMap
-    pub async fn save_to_configmap(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Get current SPDK configuration
-        let config = self.save_config().await?;
-        let config_json = serde_json::to_string_pretty(&config)?;
-
-        println!("💾 [CONFIGMAP] Saving {} bytes of SPDK config to ConfigMap", config_json.len());
-
-        let config_maps: Api<ConfigMap> = Api::namespaced(self.kube_client.clone(), &self.namespace);
-        let config_map_name = format!("spdk-native-config-{}", self.node_id);
-
-        let mut data = BTreeMap::new();
-        data.insert("spdk-config.json".to_string(), config_json);
-        data.insert("saved-at".to_string(), chrono::Utc::now().to_rfc3339());
-        data.insert("node-id".to_string(), self.node_id.clone());
-
-        let config_map = ConfigMap {
-            metadata: kube::api::ObjectMeta {
-                name: Some(config_map_name.clone()),
-                namespace: Some(self.namespace.clone()),
-                labels: Some({
-                    let mut labels = BTreeMap::new();
-                    labels.insert("app".to_string(), "spdk-csi-driver".to_string());
-                    labels.insert("component".to_string(), "native-config".to_string());
-                    labels.insert("node".to_string(), self.node_id.clone());
-                    labels
-                }),
-                ..Default::default()
-            },
-            data: Some(data),
-            ..Default::default()
-        };
-
-        // Replace or create ConfigMap
-        match config_maps.replace(&config_map_name, &PostParams::default(), &config_map).await {
-            Ok(_) => println!("✅ [CONFIGMAP] Updated ConfigMap: {}", config_map_name),
-            Err(_) => {
-                config_maps.create(&PostParams::default(), &config_map).await?;
-                println!("✅ [CONFIGMAP] Created ConfigMap: {}", config_map_name);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Load configuration from Kubernetes ConfigMap
-    pub async fn load_from_configmap(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        let config_maps: Api<ConfigMap> = Api::namespaced(self.kube_client.clone(), &self.namespace);
-        let config_map_name = format!("spdk-native-config-{}", self.node_id);
-
-        match config_maps.get_opt(&config_map_name).await? {
-            Some(config_map) => {
-                if let Some(data) = config_map.data {
-                    if let Some(config_json) = data.get("spdk-config.json") {
-                        println!("📋 [CONFIGMAP] Found saved configuration ({} bytes)", config_json.len());
-
-                        let config: Value = serde_json::from_str(config_json)?;
-                        self.load_config(&config).await?;
-
-                        println!("✅ [CONFIGMAP] Successfully restored SPDK configuration");
-                        return Ok(true);
+                        
+                        if !lvol_exists {
+                            // Create the lvol
+                            println!("  Creating lvol: {} in lvs: {}", lvol_name, lvs_name);
+                            
+                            let create_lvol = json!({
+                                "method": "bdev_lvol_create",
+                                "params": {
+                                    "lvs_name": lvs_name,
+                                    "lvol_name": lvol_name.clone(),
+                                    "size_in_mib": volume.spec.size_bytes / (1024 * 1024)
+                                }
+                            });
+                            
+                            match self.call_rpc(&create_lvol).await {
+                                Ok(response) => {
+                                    if let Some(uuid) = response["result"].as_str() {
+                                        println!("  ✅ Created lvol: {} (UUID: {})", lvol_name, uuid);
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("  ⚠️ Failed to create lvol {}: {}", lvol_name, e);
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("  ⚠️ Failed to check lvols: {}", e);
                     }
                 }
-                println!("⚠️ [CONFIGMAP] ConfigMap exists but missing config data");
-                Ok(false)
-            },
-            None => {
-                println!("ℹ️ [CONFIGMAP] No saved configuration found");
-                Ok(false)
             }
         }
-    }
-
-    /// Start periodic configuration saving (every 5 minutes)
-    pub async fn start_periodic_save(&self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
         
-        loop {
-            interval.tick().await;
+        Ok(())
+    }
+
+    /// Configure snapshots based on SpdkSnapshot CRDs
+    async fn configure_snapshots(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [SNAPSHOT_CONFIG] Configuring snapshots from CRDs");
+        
+        let snapshots_api: Api<SpdkSnapshot> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let lp = ListParams::default();
+        let snapshots = snapshots_api.list(&lp).await?;
+        
+        for snapshot in snapshots.items {
+            let snapshot_id = &snapshot.spec.snapshot_id;
+            println!("📸 [SNAPSHOT_CONFIG] Processing snapshot: {}", snapshot_id);
             
-            println!("⏰ [PERIODIC_SAVE] Running 5-minute SPDK config save");
-            
-            match self.save_to_configmap().await {
-                Ok(_) => println!("✅ [PERIODIC_SAVE] Successfully saved SPDK configuration"),
-                Err(e) => println!("⚠️ [PERIODIC_SAVE] Failed to save configuration: {}", e),
+            // Process replica snapshots for this node
+            for replica_snapshot in &snapshot.spec.replica_snapshots {
+                if replica_snapshot.node_id != self.node_id {
+                    continue;
+                }
+                
+                if let Some(lvs_name) = &replica_snapshot.lvs_name {
+                    let snapshot_name = format!("snapshot_{}", snapshot_id);
+                    
+                    // Check if snapshot already exists
+                    let check_snapshot = json!({
+                        "method": "bdev_lvol_get_lvols",
+                        "params": {
+                            "lvs_name": lvs_name
+                        }
+                    });
+                    
+                    match self.call_rpc(&check_snapshot).await {
+                        Ok(response) => {
+                            let mut snapshot_exists = false;
+                            if let Some(lvols) = response["result"].as_array() {
+                                for lvol in lvols {
+                                    if let Some(name) = lvol["name"].as_str() {
+                                        if name == snapshot_name {
+                                            snapshot_exists = true;
+                                            println!("  ℹ️ Snapshot {} already exists", snapshot_name);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if !snapshot_exists && replica_snapshot.parent_lvol_name.is_some() {
+                                // Create the snapshot
+                                let parent_name = replica_snapshot.parent_lvol_name.as_ref().unwrap();
+                                println!("  Creating snapshot: {} from parent: {}", snapshot_name, parent_name);
+                                
+                                let create_snapshot = json!({
+                                    "method": "bdev_lvol_snapshot",
+                                    "params": {
+                                        "lvol_name": format!("{}/{}", lvs_name, parent_name),
+                                        "snapshot_name": snapshot_name.clone()
+                                    }
+                                });
+                                
+                                match self.call_rpc(&create_snapshot).await {
+                                    Ok(_) => {
+                                        println!("  ✅ Created snapshot: {}", snapshot_name);
+                                    },
+                                    Err(e) => {
+                                        println!("  ⚠️ Failed to create snapshot {}: {}", snapshot_name, e);
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            println!("  ⚠️ Failed to check snapshots: {}", e);
+                        }
+                    }
+                }
             }
         }
+        
+        Ok(())
+    }
+
+    /// Configure NVMe-oF subsystems for volumes
+    async fn configure_nvmeof_subsystems(&self, current_nvmf_subsystems: &HashSet<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [NVMF_CONFIG] Configuring NVMe-oF subsystems");
+        
+        // Get volumes that need NVMe-oF export
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let lp = ListParams::default();
+        let volumes = volumes_api.list(&lp).await?;
+        
+        for volume in volumes.items {
+            // Only process volumes for this node
+            let node_id = match &volume.spec.storage_backend {
+                StorageBackend::RaidDisk { node_id, .. } => node_id,
+            };
+            
+            if node_id != &self.node_id {
+                continue;
+            }
+            
+            // Check if NVMe-oF is configured for this volume
+            if volume.spec.nvmeof_transport.is_some() {
+                let nqn = format!("nqn.2023-01.io.flint:volume.{}", volume.spec.volume_id);
+                
+                if !current_nvmf_subsystems.contains(&nqn) {
+                    println!("  Creating NVMe-oF subsystem: {}", nqn);
+                    
+                    // Create NVMe-oF subsystem
+                    let create_subsystem = json!({
+                        "method": "nvmf_create_subsystem",
+                        "params": {
+                            "nqn": nqn.clone(),
+                            "allow_any_host": true,
+                            "serial_number": format!("FLINT{}", volume.spec.volume_id)
+                        }
+                    });
+                    
+                    match self.call_rpc(&create_subsystem).await {
+                        Ok(_) => {
+                            println!("  ✅ Created NVMe-oF subsystem: {}", nqn);
+                            
+                            // Add namespace to the subsystem
+                            let lvol_name = format!("lvol_{}", volume.spec.volume_id);
+                            if let Some(lvs_name) = &volume.spec.lvs_name {
+                                let add_ns = json!({
+                                    "method": "nvmf_subsystem_add_ns",
+                                    "params": {
+                                        "nqn": nqn.clone(),
+                                        "namespace": {
+                                            "bdev_name": format!("{}/{}", lvs_name, lvol_name)
+                                        }
+                                    }
+                                });
+                                
+                                match self.call_rpc(&add_ns).await {
+                                    Ok(_) => {
+                                        println!("  ✅ Added namespace to subsystem");
+                                    },
+                                    Err(e) => {
+                                        println!("  ⚠️ Failed to add namespace: {}", e);
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            println!("  ⚠️ Failed to create NVMe-oF subsystem: {}", e);
+                        }
+                    }
+                } else {
+                    println!("  ℹ️ NVMe-oF subsystem {} already exists", nqn);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Get device information from Custom Resources for this node
+    /// This replaces physical scanning since all device info is in the CRDs
+    pub async fn get_node_devices_from_crds(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DISCOVERY] Getting device information from Custom Resources for node: {}", self.node_id);
+        
+        let mut discovered_devices = Vec::new();
+        
+        // Get RAID disks for this node
+        let raid_disks_api: Api<SpdkRaidDisk> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let lp = ListParams::default();
+        let raid_disks = raid_disks_api.list(&lp).await?;
+        
+        for raid_disk in raid_disks.items {
+            // Only process RAID disks for this node
+            if raid_disk.spec.created_on_node != self.node_id {
+                continue;
+            }
+            
+            println!("📦 [DISCOVERY] RAID Disk: {} (Level: {})", 
+                raid_disk.spec.raid_disk_id, raid_disk.spec.raid_level);
+            
+            if let Some(status) = &raid_disk.status {
+                if let Some(raid_bdev_name) = &status.raid_bdev_name {
+                    discovered_devices.push(raid_bdev_name.clone());
+                    println!("  - RAID bdev: {}", raid_bdev_name);
+                }
+                
+                if let Some(lvs_name) = &status.lvs_name {
+                    println!("  - LVS: {} (UUID: {})", 
+                        lvs_name, 
+                        status.lvs_uuid.as_deref().unwrap_or("unknown"));
+                }
+            }
+            
+            // List member disks for this node
+            for member in &raid_disk.spec.member_disks {
+                if member.node_id == self.node_id {
+                    println!("  - Member disk: {} (State: {:?})", 
+                        member.disk_ref, member.state);
+                    
+                    // Show NVMe-oF endpoint info if available
+                    println!("    Endpoint: {}://{}", 
+                        member.nvmeof_endpoint.transport, 
+                        member.nvmeof_endpoint.address);
+                }
+            }
+        }
+        
+        println!("✅ [DISCOVERY] Found {} RAID devices for node {}", 
+            discovered_devices.len(), self.node_id);
+        
+        Ok(discovered_devices)
     }
 }

@@ -105,20 +105,10 @@ echo "RPC Socket: /var/tmp/spdk.sock"\n\
 # Ensure clean RPC socket\n\
 rm -f /var/tmp/spdk.sock\n\
 \n\
-# Create SPDK configuration file\n\
-echo "Creating SPDK configuration file..."\n\
-\n\
-# Try to load config from ConfigMap (mounted by Kubernetes)\n\
-SPDK_CONFIG_FILE="/etc/spdk-config/spdk-config.json"\n\
-if [ -f "$SPDK_CONFIG_FILE" ]; then\n\
-    echo "Loading SPDK configuration from ConfigMap: $SPDK_CONFIG_FILE"\n\
-    cp "$SPDK_CONFIG_FILE" /tmp/spdk_config.json\n\
-    echo "SPDK config loaded from ConfigMap: $(head -n 3 /tmp/spdk_config.json)..."\n\
-else\n\
-    echo "No ConfigMap found, creating empty SPDK configuration"\n\
-    echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
-    echo "Note: Configuration will be applied via RPC after startup"\n\
-fi\n\
+# Create empty SPDK configuration file\n\
+echo "Creating empty SPDK configuration file..."\n\
+echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
+echo "Note: Configuration will be loaded from Custom Resources via RPC after startup"\n\
 \n\
 # Verify config file was created\n\
 if [ ! -f /tmp/spdk_config.json ]; then\n\
