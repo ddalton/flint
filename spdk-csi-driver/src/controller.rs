@@ -304,25 +304,7 @@ impl ControllerService {
         // Step 1: Find available local NVMe disks across cluster nodes
         let available_storage = self.find_available_local_nvme_disks(required_capacity).await?;
         
-        // Check if we found existing LVS to reuse (reactive approach)
-        if let Some(existing_lvs) = available_storage.iter().find(|d| d.device_path.starts_with("existing-lvs:")) {
-            println!("💡 [REACTIVE_STORAGE] Reusing existing LVS instead of creating new RAID");
-            let lvs_name = existing_lvs.device_path.strip_prefix("existing-lvs:").unwrap();
-            
-                    // Create a simplified "RAID disk" CRD pointing to existing LVS
-        match self.create_existing_lvs_raid_crd(existing_lvs, lvs_name).await {
-            Ok(raid_disk) => {
-                println!("✅ [REACTIVE_STORAGE] Successfully configured existing LVS for reuse");
-                return Ok(raid_disk);
-            }
-            Err(e) => {
-                println!("❌ [LVS_REUSE] Failed to create RAID CRD for existing LVS: {}", e);
-                println!("🔍 [LVS_REUSE] Error details: {:?}", e);
-                println!("⚠️ [LVS_REUSE] Falling back to new RAID creation due to CRD failure");
-                // Don't return error here - let it fall through to try creating new RAID
-            }
-        }
-        }
+        // Note: Existing LVS will be handled by RAID disk reuse logic, not disk selection
         
         // Fallback: Create new RAID disk if no existing LVS available
         if available_storage.len() < num_replicas as usize {
@@ -1590,17 +1572,10 @@ impl ControllerService {
                         
                         println!("✅ [LVS_RESOLVE] Resolved '{}' -> '{}'", base_bdev, actual_device_path);
                         
-                        // Create a virtual "disk" representing this LVS capacity
-                        available_storage.push(AvailableNvmeDisk {
-                            node_id: node.to_string(),
-                            device_path: format!("existing-lvs:{}", name),  // Special marker
-                            serial_number: format!("lvs-{}", name),
-                            wwn: None,
-                            model: "Existing LVS".to_string(),
-                            vendor: "SPDK".to_string(),
-                            capacity: free_bytes as i64,
-                            pci_address: actual_device_path,  // Store actual OS device path
-                        });
+                        // Mark this node as having existing LVS capacity, but don't treat LVS as a "disk"
+                        // The LVS will be handled separately in RAID disk reuse logic
+                        println!("💡 [LVS_CAPACITY] Node {} has existing LVS '{}' with {}GB free capacity", 
+                               node, name, free_bytes / (1024 * 1024 * 1024));
                     } else {
                         println!("⚠️ [LVS_CHECK] LVS '{}' only has {}GB free (need {}GB)", 
                                name, free_bytes / (1024 * 1024 * 1024), min_capacity / (1024 * 1024 * 1024));
