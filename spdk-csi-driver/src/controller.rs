@@ -81,7 +81,16 @@ impl ControllerService {
     ) -> Result<String, Status> {
         let target_node = &raid_disk.spec.created_on_node;
         let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
-        let lvs_name = raid_disk.spec.lvs_name();
+        
+        // Use status LVS name if available (for existing LVS reuse), otherwise generate from spec
+        let lvs_name = raid_disk.status
+            .as_ref()
+            .and_then(|status| status.lvs_name.clone())
+            .unwrap_or_else(|| raid_disk.spec.lvs_name());
+        
+        println!("🔍 [THIN_PROVISION_DEBUG] Using LVS name: '{}' (from {} field)", 
+                 lvs_name, 
+                 if raid_disk.status.as_ref().and_then(|s| s.lvs_name.as_ref()).is_some() { "status" } else { "spec" });
 
         println!("🔧 [THIN_PROVISION] Creating thin-provisioned logical volume {} ({}GB) on LVS {}", 
                  volume_id, capacity / (1024 * 1024 * 1024), lvs_name);
