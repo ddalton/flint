@@ -2612,16 +2612,7 @@ impl ControllerService {
             raid_status: None,
             nvmeof_targets: vec![],
             ublk_device: None,
-            nvme_device: Some(NvmeClientDevice {
-                device_path: format!("/dev/nvme-{}", lvol_uuid),
-                nqn: format!("nqn.2016-06.io.spdk:vol-{}", volume_id),
-                transport: self.driver.nvmeof_transport.clone(),
-                target_addr: raid_disk.spec.created_on_node.clone(),
-                target_port: self.driver.nvmeof_target_port,
-                connected_at: chrono::Utc::now().to_rfc3339(),
-                node: raid_disk.spec.created_on_node.clone(),
-                controller_id: Some(format!("flint-{}", volume_id)),
-            }),
+            nvme_device: None, // NVMe-oF export handled by node agent during ublk device creation
             scheduled_node: Some(raid_disk.spec.created_on_node.clone()),
             has_local_replica: true,
             scheduling_policy: Some("local-preferred".to_string()),
