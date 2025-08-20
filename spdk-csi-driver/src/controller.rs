@@ -1225,7 +1225,7 @@ impl ControllerService {
                     let is_claimed = bdev["claimed"].as_bool().unwrap_or(true);
                     let supports_read = bdev["supported_io_types"]["read"].as_bool().unwrap_or(false);
                     let supports_write = bdev["supported_io_types"]["write"].as_bool().unwrap_or(false);
-                    let is_in_use = self.is_bdev_in_use(node, name).await;
+                    // REMOVED: Redundant is_bdev_in_use check - SPDK's 'claimed' field is authoritative
                     
                     // Check if this is a system disk (should be excluded from storage)
                     let device_path = format!("/dev/{}", name);
@@ -1235,15 +1235,15 @@ impl ControllerService {
                     // - For unclaimed bdevs: standard availability check (new disk provisioning)
                     // - For claimed bdevs: will be checked for LVS capacity in existing LVS flow
                     // NOTE: Claimed bdevs with LVS are checked via check_existing_lvs_capacity()
+                    // SIMPLIFIED LOGIC: Only use SPDK's authoritative 'claimed' field and system disk check
                     let is_available_storage = !is_claimed && 
                                              supports_read && 
                                              supports_write && 
                                              capacity >= min_capacity as u64 && 
-                                             !is_in_use &&
                                              !is_system_disk; // EXCLUDE system disks from storage
                     
-                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | in_use: {} | system_disk: {} | available: {}", 
-                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_in_use, is_system_disk, is_available_storage);
+                    println!("🔍 [BDEV_EVAL] Device: {} | capacity: {}GB | claimed: {} | read: {} | write: {} | system_disk: {} | available: {}", 
+                             name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_system_disk, is_available_storage);
                     
                     if is_available_storage {
                         let disk = AvailableNvmeDisk {

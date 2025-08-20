@@ -237,12 +237,20 @@ impl NodeAgent {
     pub async fn enhanced_system_disk_check(&self, device_name: &str) -> bool {
         println!("🛡️ [ENHANCED_SYSTEM_CHECK] Checking if {} is a system disk", device_name);
         
+        // Convert SPDK bdev name to raw device name for mount checking
+        let raw_device_name = if device_name.starts_with("aio_") {
+            device_name.strip_prefix("aio_").unwrap_or(device_name)
+        } else {
+            device_name
+        };
+        println!("🔍 [ENHANCED_SYSTEM_CHECK] Mapped device name: {} -> {}", device_name, raw_device_name);
+        
         // Method 1: Check if it's mounted on root filesystem
         if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
             let root_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
             println!("🔍 [ENHANCED_SYSTEM_CHECK] Root filesystem source: {}", root_source);
             
-            if root_source.contains(device_name) {
+            if root_source.contains(raw_device_name) {
                 println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is mounted as root filesystem", device_name);
                 return true;
             }
@@ -253,7 +261,7 @@ impl NodeAgent {
         for boot_path in &boot_paths {
             if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", boot_path]).output() {
                 let boot_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if boot_source.contains(device_name) {
+                if boot_source.contains(raw_device_name) {
                     println!("🚨 [ENHANCED_SYSTEM_CHECK] {} contains boot partition at {}", device_name, boot_path);
                     return true;
                 }
@@ -265,7 +273,7 @@ impl NodeAgent {
         for path in &critical_paths {
             if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", path]).output() {
                 let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if source.contains(device_name) {
+                if source.contains(raw_device_name) {
                     println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is mounted on critical path {}", device_name, path);
                     return true;
                 }
@@ -275,7 +283,7 @@ impl NodeAgent {
         // Method 4: Check swap devices
         if let Ok(output) = Command::new("swapon").args(["--show=NAME", "--noheadings"]).output() {
             let swap_devices = String::from_utf8_lossy(&output.stdout);
-            if swap_devices.contains(device_name) {
+            if swap_devices.contains(raw_device_name) {
                 println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is used as swap device", device_name);
                 return true;
             }
