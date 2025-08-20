@@ -20,7 +20,7 @@ use identity::IdentityService;
 use driver::SpdkCsiDriver;
 
 // Import config sync functionality
-
+use spdk_csi_driver::spdk_native_config::SpdkNativeConfig;
 
 // Use the CSI protobuf types from lib.rs instead of duplicating them
 // This avoids the tonic::include_proto! macro issue
@@ -657,23 +657,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if mode == "node" || mode == "all" {
         println!("Starting in Node mode...");
         
-        // Initialize SPDK configuration from SpdkConfig CRD
+        // First, try to load native SPDK configuration from ConfigMap
+        let native_config = SpdkNativeConfig::new(
+            driver.spdk_rpc_url.clone(),
+            driver.node_id.clone(),
+            driver.kube_client.clone(),
+            driver.target_namespace.clone(),
+        );
+        
+        // Load existing SPDK configuration from ConfigMap if available
+        let native_config_clone = native_config.clone();
+        tokio::spawn(async move {
+            println!("🔄 [NATIVE_CONFIG] Attempting to restore SPDK configuration from ConfigMap");
+            match native_config_clone.load_from_configmap().await {
+                Ok(true) => println!("✅ [NATIVE_CONFIG] Successfully restored SPDK configuration"),
+                Ok(false) => println!("ℹ️ [NATIVE_CONFIG] No saved configuration found, starting fresh"),
+                Err(e) => println!("⚠️ [NATIVE_CONFIG] Failed to restore configuration: {}", e),
+            }
+        });
+        
+        // Initialize SPDK configuration from SpdkConfig CRD (legacy path)
         let config_driver = driver.clone();
         tokio::spawn(async move {
+            // Wait for native config to load first
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             if let Err(e) = initialize_spdk_from_config(config_driver).await {
                 eprintln!("❌ [STARTUP] Failed to initialize SPDK from config: {}", e);
             }
         });
         
-        // Start periodic SPDK state reconciliation for state drift prevention
-        let _reconcile_driver = driver.clone();
-        tokio::spawn(async move {
-            // Wait a bit longer before starting reconciliation to ensure SPDK is fully initialized
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            println!("🔄 [RECONCILE] Starting periodic SPDK state reconciliation");
-            
-            // Periodic SPDK config save could be added here if needed
-        });
+        // Note: Periodic saves removed - configuration is now saved immediately after each SPDK state change
         
         router = router.add_service(NodeServer::new(node_service));
     }

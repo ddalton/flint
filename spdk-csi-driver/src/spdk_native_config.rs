@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 /// SPDK Native Configuration Manager
 /// Implements save_config/load_config logic from SPDK's Python RPC script
+#[derive(Clone)]
 pub struct SpdkNativeConfig {
     pub spdk_rpc_url: String,
     pub node_id: String,

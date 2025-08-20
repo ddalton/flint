@@ -53,6 +53,25 @@ impl ControllerService {
         Self { driver }
     }
 
+    /// Helper function to save SPDK configuration after any SPDK state change
+    async fn save_spdk_config_after_change(&self, operation: &str) {
+        let native_config = spdk_csi_driver::spdk_native_config::SpdkNativeConfig::new(
+            self.driver.spdk_rpc_url.clone(),
+            self.driver.node_id.clone(),
+            self.driver.kube_client.clone(),
+            self.driver.target_namespace.clone(),
+        );
+        let operation = operation.to_string(); // Clone the string to avoid lifetime issues
+        
+        tokio::spawn(async move {
+            println!("💾 [CONFIG_SAVE] Saving SPDK configuration after {}", operation);
+            match native_config.save_to_configmap().await {
+                Ok(_) => println!("✅ [CONFIG_SAVE] Configuration saved successfully after {}", operation),
+                Err(e) => println!("⚠️ [CONFIG_SAVE] Failed to save configuration after {}: {}", operation, e),
+            }
+        });
+    }
+
     /// Get count of available healthy RAID disks (online and healthy)
     async fn get_available_disk_count(&self) -> Result<usize, Box<dyn std::error::Error>> {
         let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
@@ -101,7 +120,7 @@ impl ControllerService {
         println!("🔍 [THIN_PROVISION_DEBUG] Converting size: {} bytes -> {} MiB", capacity, size_in_mib);
         
         // Create thin-provisioned logical volume on the RAID disk's LVS
-        let response = call_spdk_rpc(&spdk_rpc_url, &json!({
+        let response = match call_spdk_rpc(&spdk_rpc_url, &json!({
             "method": "bdev_lvol_create",
             "params": {
                 "lvs_name": lvs_name,
@@ -110,8 +129,45 @@ impl ControllerService {
                 "thin_provision": true,         // Enable thin provisioning for efficient storage usage
                 "clear_method": "none"          // Don't clear blocks on allocation for performance
             }
-        })).await
-        .map_err(|e| Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)))?;
+        })).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let error_str = e.to_string();
+                // Check if the error is "File exists" (code -17)
+                if error_str.contains("code\":-17") || error_str.contains("File exists") {
+                    println!("ℹ️ [IDEMPOTENT] Volume {} already exists, checking existing volume", volume_id);
+                    
+                    // Get information about the existing volume
+                    let existing_lvol = call_spdk_rpc(&spdk_rpc_url, &json!({
+                        "method": "bdev_lvol_get_lvols",
+                        "params": {
+                            "name": volume_id
+                        }
+                    })).await
+                    .map_err(|e| Status::internal(format!("Failed to get existing lvol info: {}", e)))?;
+                    
+                    // Extract UUID from the existing volume
+                    if let Some(lvols) = existing_lvol["result"].as_array() {
+                        if let Some(first_lvol) = lvols.first() {
+                            if let Some(uuid) = first_lvol["uuid"].as_str() {
+                                println!("✅ [IDEMPOTENT] Found existing volume {} with UUID: {}", volume_id, uuid);
+                                // Return a response that mimics the create response
+                                json!({ "uuid": uuid })
+                            } else {
+                                return Err(Status::internal("Existing lvol missing UUID"));
+                            }
+                        } else {
+                            return Err(Status::internal("No lvol found with the given name"));
+                        }
+                    } else {
+                        return Err(Status::internal("Invalid response format from bdev_lvol_get_lvols"));
+                    }
+                } else {
+                    // Other errors should still be propagated
+                    return Err(Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)));
+                }
+            }
+        };
 
         let lvol_uuid = response["uuid"].as_str()
             .ok_or_else(|| Status::internal("SPDK response missing lvol UUID"))?
@@ -452,6 +508,8 @@ impl ControllerService {
             Ok(Ok(response)) => {
                 println!("✅ [RAID_INIT] RAID bdev created: {}", raid_bdev_name);
                 println!("🔍 [RAID_INIT] SPDK response: {}", response);
+                // Save SPDK configuration after RAID creation
+                self.save_spdk_config_after_change("RAID bdev creation").await;
                 self.update_raid_disk_status_bdev_created(raid_disk).await?;
             }
             Ok(Err(e)) => {
@@ -525,6 +583,8 @@ impl ControllerService {
             Ok(response) => {
                 println!("✅ [RAID_INIT] LVS created with thin provisioning: {}", lvs_name);
                 println!("🔍 [RAID_INIT] LVS creation response: {}", response);
+                // Save SPDK configuration after LVS creation
+                self.save_spdk_config_after_change("LVS creation").await;
                 
                 // Update RAID disk status to indicate it's ready
                 println!("🔧 [RAID_INIT] Updating RAID disk status to ready...");
@@ -574,6 +634,8 @@ impl ControllerService {
             Ok(Ok(response)) => {
                 println!("✅ [SINGLE_STORAGE] LVS created successfully: {}", lvs_name);
                 println!("🔍 [SINGLE_STORAGE] SPDK response: {}", response);
+                // Save SPDK configuration after LVS creation
+                self.save_spdk_config_after_change("single-member LVS creation").await;
                 
                 // Update RAID disk status to indicate it's ready (single-member)
                 self.update_raid_disk_status_to_ready(raid_disk).await?;
@@ -1859,6 +1921,8 @@ impl ControllerService {
             Ok(_) => {
                 println!("✅ [BINDING_APPROACH] USERSPACE_NVME: Successfully created bdev '{}' using userspace NVMe driver", controller_name);
                 println!("   🚀 Device {} is now managed by SPDK userspace driver", pci_addr);
+                // Save SPDK configuration after bdev creation
+                self.save_spdk_config_after_change("userspace NVMe bdev creation").await;
                 // Note: binding_approach will be updated in RAID disk CRD separately
                 Ok(())
             }
@@ -1891,6 +1955,8 @@ impl ControllerService {
             Ok(_) => {
                 println!("✅ [BINDING_APPROACH] AIO_FALLBACK: Successfully created bdev '{}' using AIO driver", aio_bdev_name);
                 println!("   📁 Device {} is accessed through kernel NVMe driver", device_path);
+                // Save SPDK configuration after bdev creation
+                self.save_spdk_config_after_change("AIO bdev creation").await;
                 // Note: binding_approach will be updated in RAID disk CRD separately
                 Ok(())
             }
@@ -2227,6 +2293,8 @@ impl ControllerService {
                 match detach_result {
                     Ok(_) => {
                         println!("✅ [BDEV_CLEANUP] USERSPACE_NVME: Successfully detached controller: {}", controller_name);
+                        // Save SPDK configuration after bdev detach
+                        self.save_spdk_config_after_change("userspace NVMe bdev detach").await;
                         Ok(())
                     }
                     Err(e) => {
@@ -2256,6 +2324,8 @@ impl ControllerService {
                 match delete_result {
                     Ok(_) => {
                         println!("✅ [BDEV_CLEANUP] AIO_FALLBACK: Successfully deleted AIO bdev: {}", aio_bdev_name);
+                        // Save SPDK configuration after AIO bdev deletion
+                        self.save_spdk_config_after_change("AIO bdev deletion").await;
                         Ok(())
                     }
                     Err(e) => {
@@ -2568,7 +2638,11 @@ impl ControllerService {
                 })).await;
                 
                 match delete_result {
-                    Ok(_) => println!("✅ [VOLUME_DELETE] Successfully deleted logical volume: {}", lvol_name),
+                    Ok(_) => {
+                        println!("✅ [VOLUME_DELETE] Successfully deleted logical volume: {}", lvol_name);
+                        // Save SPDK configuration after logical volume deletion
+                        self.save_spdk_config_after_change("logical volume deletion").await;
+                    }
                     Err(e) => {
                         if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
                             println!("ℹ️ [VOLUME_DELETE] Logical volume already deleted: {}", lvol_name);
@@ -2603,7 +2677,11 @@ impl ControllerService {
                     })).await;
                     
                     match delete_result {
-                        Ok(_) => println!("✅ [VOLUME_DELETE] Successfully deleted RAID bdev: {}", raid_bdev_name),
+                        Ok(_) => {
+                            println!("✅ [VOLUME_DELETE] Successfully deleted RAID bdev: {}", raid_bdev_name);
+                            // Save SPDK configuration after RAID bdev deletion
+                            self.save_spdk_config_after_change("RAID bdev deletion").await;
+                        }
                         Err(e) => {
                             if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
                                 println!("ℹ️ [VOLUME_DELETE] RAID bdev already deleted: {}", raid_bdev_name);
@@ -2747,7 +2825,21 @@ impl Controller for ControllerService {
             Ok(spdk_volume) => {
                 println!("✅ [CSI_CONTROLLER] Volume provisioned successfully: {}", volume_name);
                 
-                // SPDK configuration auto-save could be added here if needed
+                // Save SPDK configuration after successful volume creation
+                let native_config = spdk_csi_driver::spdk_native_config::SpdkNativeConfig::new(
+                    self.driver.spdk_rpc_url.clone(),
+                    self.driver.node_id.clone(),
+                    self.driver.kube_client.clone(),
+                    self.driver.target_namespace.clone(),
+                );
+                
+                tokio::spawn(async move {
+                    println!("💾 [NATIVE_CONFIG] Saving SPDK configuration after volume creation");
+                    match native_config.save_to_configmap().await {
+                        Ok(_) => println!("✅ [NATIVE_CONFIG] Configuration saved successfully"),
+                        Err(e) => println!("⚠️ [NATIVE_CONFIG] Failed to save configuration: {}", e),
+                    }
+                });
                 
                 let accessible_topology = self.build_volume_topology(&spdk_volume.spec.replicas);
 
