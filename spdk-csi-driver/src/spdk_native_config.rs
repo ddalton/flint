@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use kube::api::{Api, ListParams};
 use kube::Client;
-use crate::models::{SpdkRaidDisk, SpdkVolume, SpdkSnapshot, StorageBackend, RaidMemberState, NvmeofEndpoint};
+use crate::models::{SpdkRaidDisk, SpdkVolume, SpdkSnapshot, StorageBackend, RaidMemberState};
 
 /// SPDK Configuration Manager based on Custom Resources
 /// Reads from SpdkRaidDisk, SpdkVolume, and SpdkSnapshot CRDs to configure SPDK
@@ -309,7 +309,7 @@ impl SpdkNativeConfig {
     }
 
     /// Configure volumes based on SpdkVolume CRDs
-    async fn configure_volumes(&self, current_lvstores: &HashSet<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn configure_volumes(&self, _current_lvstores: &HashSet<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [VOLUME_CONFIG] Configuring volumes from CRDs");
         
         let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), &self.namespace);
@@ -405,11 +405,19 @@ impl SpdkNativeConfig {
             
             // Process replica snapshots for this node
             for replica_snapshot in &snapshot.spec.replica_snapshots {
-                if replica_snapshot.node_id != self.node_id {
+                if replica_snapshot.node_name != self.node_id {
                     continue;
                 }
                 
-                if let Some(lvs_name) = &replica_snapshot.lvs_name {
+                // Extract LVS name from the SpdkRaidDisk that contains this replica
+                let lvs_name = match self.find_lvs_name_for_replica(&replica_snapshot.disk_ref).await {
+                    Ok(name) => name,
+                    Err(e) => {
+                        eprintln!("⚠️ [SNAPSHOT_CONFIG] Failed to find LVS name for replica {}: {}", replica_snapshot.disk_ref, e);
+                        continue; // Skip this replica snapshot
+                    }
+                };
+                {
                     let snapshot_name = format!("snapshot_{}", snapshot_id);
                     
                     // Check if snapshot already exists
@@ -435,9 +443,9 @@ impl SpdkNativeConfig {
                                 }
                             }
                             
-                            if !snapshot_exists && replica_snapshot.parent_lvol_name.is_some() {
+                            if !snapshot_exists {
                                 // Create the snapshot
-                                let parent_name = replica_snapshot.parent_lvol_name.as_ref().unwrap();
+                                let parent_name = &replica_snapshot.source_lvol_bdev;
                                 println!("  Creating snapshot: {} from parent: {}", snapshot_name, parent_name);
                                 
                                 let create_snapshot = json!({
@@ -588,7 +596,7 @@ impl SpdkNativeConfig {
                     // Show NVMe-oF endpoint info if available
                     println!("    Endpoint: {}://{}", 
                         member.nvmeof_endpoint.transport, 
-                        member.nvmeof_endpoint.address);
+                        member.nvmeof_endpoint.target_addr);
                 }
             }
         }
@@ -597,5 +605,26 @@ impl SpdkNativeConfig {
             discovered_devices.len(), self.node_id);
         
         Ok(discovered_devices)
+    }
+
+    /// Find the LVS name for a replica by looking up the SpdkRaidDisk it belongs to
+    async fn find_lvs_name_for_replica(&self, disk_ref: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let raid_disks_api: Api<SpdkRaidDisk> = Api::namespaced(self.kube_client.clone(), &self.namespace);
+        let raid_disks = raid_disks_api.list(&ListParams::default()).await?;
+
+        // Search through all RAID disks to find the one that references this disk
+        for raid_disk in &raid_disks.items {
+            // Check if any member disk references this disk_ref
+            for member in &raid_disk.spec.member_disks {
+                if member.disk_ref == disk_ref {
+                    // Found the RAID disk that contains this replica
+                    let lvs_name = raid_disk.spec.lvs_name();
+                    println!("🔍 [LVS_LOOKUP] Found LVS '{}' for replica '{}'", lvs_name, disk_ref);
+                    return Ok(lvs_name);
+                }
+            }
+        }
+
+        Err(format!("No SpdkRaidDisk found containing replica disk_ref: {}", disk_ref).into())
     }
 }

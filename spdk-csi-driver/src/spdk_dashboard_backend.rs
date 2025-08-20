@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
 use kube::{Client, Api, api::ListParams};
-use spdk_csi_driver::models::{NvmeofDisk, NvmeofDiskSpec, NvmeofDiskStatus, SpdkRaidDisk, SpdkRaidDiskStatus};
+use spdk_csi_driver::models::{SpdkRaidDisk, SpdkRaidDiskStatus};
 use chrono::{Utc, DateTime};
 use std::env;
 use spdk_csi_driver::*;
@@ -582,21 +582,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(get_volume_spdk_details)
         )
         .or(
-            // POST /api/nvmeofdisks (create or update a remote NvmeofDisk)
-            warp::path("nvmeofdisks")
+            // POST /api/nvmeof-endpoints (create single-member RAID for NVMe-oF endpoint)
+            warp::path("nvmeof-endpoints")
                 .and(warp::post())
                 .and(warp::body::json())
                 .and(state_filter.clone())
-                .and_then(create_or_update_nvmeofdisk)
-        )
-        .or(
-            // PUT /api/nvmeofdisks/{name}
-            warp::path("nvmeofdisks")
-                .and(warp::path::param::<String>())
-                .and(warp::put())
-                .and(warp::body::json())
-                .and(state_filter.clone())
-                .and_then(update_nvmeofdisk)
+                .and_then(create_or_update_nvmeof_endpoint)
         )
         .or(
             warp::path("volumes")
@@ -723,21 +714,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(delete_raw_spdk_volume)
         )
         .or(
-            // POST /api/nvmeofdisks (create or update a remote NvmeofDisk)
-            warp::path("nvmeofdisks")
+            // POST /api/nvmeof-endpoints (create single-member RAID for NVMe-oF endpoint)
+            warp::path("nvmeof-endpoints")
                 .and(warp::post())
                 .and(warp::body::json())
                 .and(state_filter.clone())
-                .and_then(create_or_update_nvmeofdisk)
-        )
-        .or(
-            // PUT /api/nvmeofdisks/{name}
-            warp::path("nvmeofdisks")
-                .and(warp::path::param::<String>())
-                .and(warp::put())
-                .and(warp::body::json())
-                .and(state_filter.clone())
-                .and_then(update_nvmeofdisk)
+                .and_then(create_or_update_nvmeof_endpoint)
         )
         .or(
             // DELETE /api/volumes/orphaned - Delete orphaned SPDK logical volumes (legacy endpoint)
@@ -893,7 +875,7 @@ async fn create_raid_disk(req: CreateRaidDiskRequest, state: AppState) -> Result
 }
 
 #[derive(Deserialize, Clone)]
-struct NvmeofDiskCreateRequest {
+struct NvmeofEndpointCreateRequest {
     name: String,
     is_remote: bool,
     node_id: Option<String>,
@@ -910,18 +892,36 @@ struct NvmeofDiskCreateRequest {
     hardware_id: Option<String>,
 }
 
-async fn create_or_update_nvmeofdisk(req: NvmeofDiskCreateRequest, state: AppState) -> Result<impl Reply, Rejection> {
-    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-    let spec = NvmeofDiskSpec {
-        is_remote: req.is_remote,
-        node_id: req.node_id.clone(),
+async fn create_or_update_nvmeof_endpoint(req: NvmeofEndpointCreateRequest, state: AppState) -> Result<impl Reply, Rejection> {
+    use spdk_csi_driver::models::{
+        SpdkRaidDisk, SpdkRaidDiskSpec, RaidMemberDisk, NvmeofEndpoint, RaidMemberState
+    };
+    
+    let raid_api: Api<SpdkRaidDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    
+    // Find the optimal node to assign this NVMe-oF endpoint using load balancing
+    let assigned_node = find_optimal_node_for_nvmeof_endpoint(&state).await
+        .map_err(|e| {
+            eprintln!("Failed to find optimal node for NVMe-oF endpoint: {}", e);
+            warp::reject()
+        })?;
+    
+    println!("🎯 [LOAD_BALANCE] Assigning NVMe-oF endpoint '{}' to node: {}", req.name, assigned_node);
+    
+    // Create a single-member RAID disk (RAID-1 with one member) to represent this NVMe-oF endpoint
+    let raid_disk_id = format!("nvmeof_{}", req.name);
+    let raid_name = format!("raid-nvmeof-{}", req.name);
+    
+    let member_disk = RaidMemberDisk {
+        member_index: 0,
+        node_id: assigned_node.clone(), // Node that will manage this NVMe-oF endpoint
+        disk_ref: req.name.clone(),
         hardware_id: req.hardware_id.clone(),
         serial_number: req.serial_number.clone(),
         wwn: None,
         model: req.model.clone(),
         vendor: req.vendor.clone(),
-        size_bytes: req.size_bytes,
-        nvmeof_endpoint: spdk_csi_driver::models::NvmeofEndpoint {
+        nvmeof_endpoint: NvmeofEndpoint {
             nqn: req.nqn.clone(),
             target_addr: req.target_addr.clone(),
             target_port: req.target_port,
@@ -929,190 +929,112 @@ async fn create_or_update_nvmeofdisk(req: NvmeofDiskCreateRequest, state: AppSta
             created_at: Some(Utc::now().to_rfc3339()),
             active: true,
         },
-        credential_secret_name: req.credential_secret_name.clone(),
-        credential_secret_namespace: req.credential_secret_namespace.clone(),
+        state: RaidMemberState::Online,
+        capacity_bytes: req.size_bytes,
+        connected: false, // Will be connected when first used
+        last_health_check: Some(Utc::now().to_rfc3339()),
+        binding_approach: Some("nvmeof".to_string()), // Always NVMe-oF for external endpoints
+    };
+    
+    let spec = SpdkRaidDiskSpec {
+        raid_disk_id: raid_disk_id.clone(),
+        raid_level: "1".to_string(), // Single-member RAID-1 for consistency with multi-member RAIDs
+        num_member_disks: 1,
+        member_disks: vec![member_disk],
+        stripe_size_kb: 64, // Default stripe size
+        superblock_enabled: true,
+        created_on_node: assigned_node.clone(), // Node that will manage this RAID disk
+        min_capacity_bytes: req.size_bytes,
+        auto_rebuild: false, // Single member, no rebuild needed
     };
 
-    let mut resource = NvmeofDisk::new(&req.name, spec);
-    resource.status = Some(NvmeofDiskStatus {
-        healthy: true,
-        endpoint_validated: true,
-        available_bytes: req.size_bytes,
-        last_checked: Utc::now().to_rfc3339(),
-        message: Some("Created via dashboard backend".to_string()),
-        consecutive_failures: 0,
-        last_successful_check: Some(Utc::now().to_rfc3339()),
-        failure_reason: None,
-    });
-
-    let _pp = kube::api::PostParams::default();
+    let resource = SpdkRaidDisk::new_with_metadata(&raid_name, spec, &state.target_namespace);
+    
     let patch_params = kube::api::PatchParams::apply("dashboard");
     let patch = kube::api::Patch::Apply(&resource);
 
-    match api.patch(&req.name, &patch_params, &patch).await {
-        Ok(obj) => Ok(warp::reply::json(&json!({"status":"ok","name": obj.metadata.name})) ),
+    match raid_api.patch(&raid_name, &patch_params, &patch).await {
+        Ok(obj) => Ok(warp::reply::json(&json!({
+            "status":"ok",
+            "name": obj.metadata.name, 
+            "type": "external_nvmeof_endpoint",
+            "assigned_node": assigned_node
+        })) ),
         Err(e) => {
-            eprintln!("NvmeofDisk create/update failed: {}", e);
+            eprintln!("SpdkRaidDisk (NVMe-oF endpoint) create/update failed: {}", e);
             Err(warp::reject())
         }
     }
 }
 
-#[derive(Deserialize, Clone)]
-struct NvmeofDiskUpdateRequest {
-    size_bytes: Option<i64>,
-    nqn: Option<String>,
-    target_addr: Option<String>,
-    target_port: Option<u16>,
-    transport: Option<String>,
-    healthy: Option<bool>,
-}
-
-async fn update_nvmeofdisk(name: String, req: NvmeofDiskUpdateRequest, state: AppState) -> Result<impl Reply, Rejection> {
-    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-
-    let current = api.get(&name).await.map_err(|_| warp::reject())?;
-    let mut spec = current.spec.clone();
-    if let Some(sz) = req.size_bytes { spec.size_bytes = sz; }
-    if let Some(nqn) = req.nqn { spec.nvmeof_endpoint.nqn = nqn; }
-    if let Some(addr) = req.target_addr { spec.nvmeof_endpoint.target_addr = addr; }
-    if let Some(port) = req.target_port { spec.nvmeof_endpoint.target_port = port; }
-    if let Some(tr) = req.transport { spec.nvmeof_endpoint.transport = tr; }
-
-    let mut status = current.status.unwrap_or_default();
-    let current_time = Utc::now().to_rfc3339();
+/// Find the optimal node to assign a new NVMe-oF endpoint using load balancing
+async fn find_optimal_node_for_nvmeof_endpoint(state: &AppState) -> Result<String, Box<dyn std::error::Error>> {
+    use k8s_openapi::api::core::v1::Pod;
     
-    // Enhanced failure tracking logic
-    if let Some(h) = req.healthy {
-        let was_healthy = status.healthy;
-        status.healthy = h;
+    // Step 1: Discover available SPDK nodes by finding running node agent pods
+    let pods_api: Api<Pod> = Api::all(state.kube_client.clone());
+    let lp = kube::api::ListParams::default().labels("app=flint-csi-node");
+    let pods = pods_api.list(&lp).await?;
+    
+    if pods.items.is_empty() {
+        return Err("No SPDK node agent pods found".into());
+    }
+    
+    // Step 2: Get list of available nodes
+    let available_nodes: Vec<String> = pods.items
+        .into_iter()
+        .filter_map(|pod| {
+            pod.spec?.node_name
+        })
+        .collect();
+    
+    if available_nodes.is_empty() {
+        return Err("No available nodes found".into());
+    }
+    
+    println!("🔍 [LOAD_BALANCE] Found {} available nodes: {:?}", available_nodes.len(), available_nodes);
+    
+    // Step 3: Count existing NVMe-oF RAID disks per node for load balancing
+    let raid_api: Api<SpdkRaidDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
+    let raid_disks = raid_api.list(&kube::api::ListParams::default()).await?;
+    
+    let mut node_nvmeof_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    
+    // Initialize all available nodes with count 0
+    for node in &available_nodes {
+        node_nvmeof_count.insert(node.clone(), 0);
+    }
+    
+    // Count existing NVMe-oF endpoints (single-member RAIDs with NVMe-oF binding)
+    for raid_disk in &raid_disks.items {
+        let node = &raid_disk.spec.created_on_node;
+        let is_nvmeof_endpoint = raid_disk.spec.num_member_disks == 1 
+            && raid_disk.spec.member_disks.first()
+                .map(|m| m.binding_approach.as_ref().map(|b| b == "nvmeof").unwrap_or(false))
+                .unwrap_or(false);
         
-        if h && !was_healthy {
-            // Recovery: reset failure tracking
-            status.consecutive_failures = 0;
-            status.last_successful_check = Some(current_time.clone());
-            status.failure_reason = None;
-            println!("✅ [NVMEOF_HEALTH] {} recovered after {} consecutive failures", name, status.consecutive_failures);
-        } else if !h && was_healthy {
-            // New failure: start tracking
-            status.consecutive_failures = 1;
-            status.failure_reason = Some("External NVMe-oF endpoint unreachable".to_string());
-            println!("⚠️ [NVMEOF_HEALTH] {} failed (failure #{})", name, status.consecutive_failures);
-        } else if !h && !was_healthy {
-            // Continued failure: increment counter
-            status.consecutive_failures += 1;
-            println!("❌ [NVMEOF_HEALTH] {} still failing (failure #{})", name, status.consecutive_failures);
-            
-            // Update failure reason based on streak
-            if status.consecutive_failures >= 3 {
-                status.failure_reason = Some("Persistent external NVMe-oF connectivity issues - check network and storage system".to_string());
-            }
+        if is_nvmeof_endpoint && available_nodes.contains(node) {
+            *node_nvmeof_count.entry(node.clone()).or_insert(0) += 1;
         }
     }
     
-    status.last_checked = current_time;
-
-    let patch = json!({
-        "spec": spec,
-        "status": status,
-    });
-
-    match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await {
-        Ok(obj) => Ok(warp::reply::json(&json!({"status":"ok","name": obj.metadata.name})) ),
-        Err(e) => {
-            eprintln!("NvmeofDisk update failed: {}", e);
-            Err(warp::reject())
-        }
-    }
+    println!("📊 [LOAD_BALANCE] Current NVMe-oF endpoint distribution: {:?}", node_nvmeof_count);
+    
+    // Step 4: Find node with fewest NVMe-oF endpoints
+    let optimal_node = node_nvmeof_count
+        .into_iter()
+        .min_by_key(|(_, count)| *count)
+        .map(|(node, count)| {
+            println!("🎯 [LOAD_BALANCE] Selected node '{}' with {} existing NVMe-oF endpoints", node, count);
+            node
+        })
+        .ok_or("No optimal node found")?;
+    
+    Ok(optimal_node)
 }
 
-/// Enhanced external NVMe-oF health check with failure tracking
-async fn check_external_nvmeof_health(
-    disk_name: &str,
-    endpoint: &NvmeofEndpoint, 
-    state: &AppState
-) -> bool {
-    println!("🔍 [EXTERNAL_HEALTH] Checking external NVMe-oF health for: {}", disk_name);
-    
-    // Step 1: Basic network connectivity test
-    let network_reachable = test_network_connectivity(&endpoint.target_addr, endpoint.target_port).await;
-    if !network_reachable {
-        println!("❌ [EXTERNAL_HEALTH] Network connectivity failed for {}:{}", endpoint.target_addr, endpoint.target_port);
-        update_nvmeofdisk_health(disk_name, false, Some("Network connectivity failed".to_string()), state).await;
-        return false;
-    }
-    
-    // Step 2: NVMe-oF specific validation would go here
-    // For now, if network is reachable, consider it healthy
-    update_nvmeofdisk_health(disk_name, true, None, state).await;
-    true
-}
+// Legacy NvmeofDisk functions removed - functionality replaced by single-member SpdkRaidDisk creation
 
-/// Test basic network connectivity to external endpoint
-async fn test_network_connectivity(target_addr: &str, target_port: u16) -> bool {
-    use std::time::Duration;
-    use tokio::net::TcpStream;
-    use tokio::time::timeout;
-    
-    let address = format!("{}:{}", target_addr, target_port);
-    
-    match timeout(Duration::from_secs(5), TcpStream::connect(&address)).await {
-        Ok(Ok(_)) => {
-            println!("✅ [NETWORK] Connection successful to {}", address);
-            true
-        }
-        Ok(Err(e)) => {
-            println!("❌ [NETWORK] Connection failed to {}: {}", address, e);
-            false
-        }
-        Err(_) => {
-            println!("⏰ [NETWORK] Connection timeout to {}", address);
-            false
-        }
-    }
-}
-
-/// Update NvmeofDisk health status with failure tracking
-async fn update_nvmeofdisk_health(
-    disk_name: &str,
-    healthy: bool,
-    failure_reason: Option<String>,
-    state: &AppState,
-) {
-    let api: Api<NvmeofDisk> = Api::namespaced(state.kube_client.clone(), &state.target_namespace);
-    
-    if let Ok(current) = api.get(disk_name).await {
-        let mut status = current.status.unwrap_or_default();
-        let current_time = Utc::now().to_rfc3339();
-        let was_healthy = status.healthy;
-        
-        status.healthy = healthy;
-        status.last_checked = current_time.clone();
-        
-        if healthy && !was_healthy {
-            // Recovery
-            let prev_failures = status.consecutive_failures;
-            status.consecutive_failures = 0;
-            status.last_successful_check = Some(current_time);
-            status.failure_reason = None;
-            println!("✅ [RECOVERY] {} recovered after {} failures", disk_name, prev_failures);
-        } else if !healthy {
-            // Failure
-            if was_healthy {
-                status.consecutive_failures = 1;
-            } else {
-                status.consecutive_failures += 1;
-            }
-            status.failure_reason = failure_reason;
-            println!("❌ [FAILURE] {} failure #{}: {:?}", disk_name, status.consecutive_failures, status.failure_reason);
-        }
-        
-        let patch = json!({ "status": status });
-        if let Err(e) = api.patch_status(disk_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(patch)).await {
-            eprintln!("Failed to update NvmeofDisk {} status: {}", disk_name, e);
-        }
-    }
-}
 
 /// Discovers SPDK nodes by finding running node_agent pods via the Kubernetes API.
 async fn discover_spdk_nodes(client: &Client) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
