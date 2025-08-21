@@ -56,6 +56,20 @@ pub async fn initialize_blobstore_on_device(agent: &NodeAgent, raid: &SpdkRaidDi
     }
 
     println!("✅ [SPDK_INIT] Successfully created LVS '{}' on RAID bdev '{}'", lvs_name, raid_bdev_name);
+    
+    // Save SPDK configuration after LVS creation
+    println!("💾 [SPDK_INIT] Saving SPDK configuration...");
+    let save_start = std::time::Instant::now();
+    match call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_nvme_save_config" })).await {
+        Ok(_) => {
+            let save_duration = save_start.elapsed();
+            println!("✅ [SPDK_INIT] Configuration saved in {:.2}ms", save_duration.as_millis());
+        }
+        Err(e) => {
+            println!("⚠️ [SPDK_INIT] Failed to save config: {} (non-fatal)", e);
+        }
+    }
+    
     Ok(())
 }
 
@@ -141,7 +155,18 @@ pub async fn initialize_disk_blobstore(
     match create_lvs {
         Ok(_) => {
             println!("✅ [DISK_INIT] Successfully created LVS '{}' on bdev '{}'", lvs_name, bdev_name);
-            // SPDK configuration auto-save could be added here if needed
+            // Save SPDK configuration after LVS creation
+            println!("💾 [DISK_INIT] Saving SPDK configuration...");
+            let save_start = std::time::Instant::now();
+            match call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_nvme_save_config" })).await {
+                Ok(_) => {
+                    let save_duration = save_start.elapsed();
+                    println!("✅ [DISK_INIT] Configuration saved in {:.2}ms", save_duration.as_millis());
+                }
+                Err(e) => {
+                    println!("⚠️ [DISK_INIT] Failed to save config: {} (non-fatal)", e);
+                }
+            }
         }
         Err(e) => {
             // Check if it's an "already exists" error
@@ -195,7 +220,8 @@ pub async fn create_logical_volume(
             let full_lvol_name = format!("{}/{}", lvs_name, lvol_name);
             println!("✅ [LVOL] Successfully created logical volume: {}", full_lvol_name);
             
-            // SPDK configuration auto-save could be added here if needed
+            // Note: No save_config needed for logical volumes - they're ephemeral and tied to PVCs
+            // bdev_get_bdevs can retrieve them dynamically
             
             Ok(full_lvol_name)
         }
@@ -229,7 +255,7 @@ pub async fn delete_logical_volume(
     match delete_lvol {
         Ok(_) => {
             println!("✅ [LVOL] Successfully deleted logical volume: {}", lvol_name);
-            // SPDK configuration auto-save could be added here if needed
+            // Note: No save_config needed for logical volume deletion - they're ephemeral
         }
         Err(e) => {
             if e.to_string().contains("not found") || e.to_string().contains("does not exist") {
@@ -277,7 +303,18 @@ pub async fn create_raid_bdev(
     match create_raid {
         Ok(_) => {
             println!("✅ [RAID] Successfully created RAID bdev: {}", raid_name);
-            // SPDK configuration auto-save could be added here if needed
+            // Save SPDK configuration after RAID creation
+            println!("💾 [RAID] Saving SPDK configuration...");
+            let save_start = std::time::Instant::now();
+            match call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_nvme_save_config" })).await {
+                Ok(_) => {
+                    let save_duration = save_start.elapsed();
+                    println!("✅ [RAID] Configuration saved in {:.2}ms", save_duration.as_millis());
+                }
+                Err(e) => {
+                    println!("⚠️ [RAID] Failed to save config: {} (non-fatal)", e);
+                }
+            }
         }
         Err(e) => {
             if e.to_string().contains("exists") {
@@ -309,7 +346,18 @@ pub async fn delete_raid_bdev(
     match delete_raid {
         Ok(_) => {
             println!("✅ [RAID] Successfully deleted RAID bdev: {}", raid_name);
-            // SPDK configuration auto-save could be added here if needed
+            // Save SPDK configuration after RAID deletion
+            println!("💾 [RAID] Saving SPDK configuration...");
+            let save_start = std::time::Instant::now();
+            match call_spdk_rpc(&agent.spdk_rpc_url, &json!({ "method": "bdev_nvme_save_config" })).await {
+                Ok(_) => {
+                    let save_duration = save_start.elapsed();
+                    println!("✅ [RAID] Configuration saved in {:.2}ms", save_duration.as_millis());
+                }
+                Err(e) => {
+                    println!("⚠️ [RAID] Failed to save config: {} (non-fatal)", e);
+                }
+            }
         }
         Err(e) => {
             if e.to_string().contains("not found") || e.to_string().contains("does not exist") {

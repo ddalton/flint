@@ -54,8 +54,8 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
     
     println!("✅ [DISCOVERY] Found {} NVMe device(s) on node: {}", discovered_devices.len(), agent.node_name);
     for device in &discovered_devices {
-        println!("📀 [DISCOVERY] Device: {} ({}) - PCIe: {}, Size: {}GB", 
-                 device.controller_id, device.model, device.pcie_addr, 
+        println!("📀 [DISCOVERY] Device: {} ({}) - Serial: {}, PCIe: {}, Size: {}GB", 
+                 device.controller_id, device.model, device.serial_number, device.pcie_addr, 
                  device.capacity / (1024 * 1024 * 1024));
     }
 
@@ -67,24 +67,42 @@ pub async fn discover_and_update_local_disks(agent: &NodeAgent) -> Result<(), Bo
     
     println!("✅ [DISCOVERY] Deduplicated to {} unique devices", unique_devices.len());
     
-    // ❌ AUTOMATIC BINDING REMOVED: Disks are only bound during PV provisioning
-    // This ensures:
-    // - No unnecessary driver binding during discovery
-    // - Reduced conflicts with unused drives  
-    // - Binding only when storage is actually needed
-    // - Safer operation that doesn't interfere with system stability
+    // Get current SPDK bdevs to understand what's already added
+    let current_bdevs = agent.get_current_spdk_bdevs().await?;
+    println!("📊 [DISCOVERY] Current SPDK bdevs: {:?}", current_bdevs);
     
-    println!("📋 [DISCOVERY] Discovered {} devices for inventory (binding only during PV provisioning)", unique_devices.len());
-    
-    // Perform health monitoring and create alerts for operator review  
-    println!("🏥 [DISCOVERY] Running health checks and alert generation...");
+    // Process each discovered device
     for (_, device) in &unique_devices {
-        if let Err(e) = crate::node_agent::health_monitor::check_device_health(agent, device).await {
-            println!("⚠️ [DISCOVERY] Health check failed for device {}: {}", device.controller_id, e);
+        // Check if device is already in SPDK (by serial number)
+        if agent.is_device_in_spdk(&current_bdevs, &device.serial_number).await {
+            println!("✅ [DISCOVERY] Device {} (Serial: {}) already in SPDK", 
+                     device.device_path, device.serial_number);
+            continue;
+        }
+        
+        // Check if device is a system disk - NEVER add system disks to SPDK
+        if agent.comprehensive_system_disk_check(&device.pcie_addr, &device.device_path).await {
+            println!("🚨 [DISCOVERY] Skipping system disk: {} (Serial: {})", 
+                     device.device_path, device.serial_number);
+            continue;
+        }
+        
+        // Add device to SPDK using appropriate method
+        println!("🔧 [DISCOVERY] Adding device {} to SPDK", device.device_path);
+        if let Err(e) = agent.add_device_to_spdk(device).await {
+            println!("⚠️ [DISCOVERY] Failed to add device {} to SPDK: {}", device.device_path, e);
         }
     }
     
-    println!("✅ [DISCOVERY] Disk discovery and health monitoring completed successfully for node: {}", agent.node_name);
+    // Remove devices from SPDK that are no longer discovered
+    agent.cleanup_removed_devices(&unique_devices, &current_bdevs).await?;
+    
+    // Save SPDK configuration after changes
+    if let Err(e) = agent.save_spdk_config().await {
+        println!("⚠️ [DISCOVERY] Failed to save SPDK config: {}", e);
+    }
+    
+    println!("✅ [DISCOVERY] Disk discovery completed successfully for node: {}", agent.node_name);
     Ok(())
 }
 
@@ -882,6 +900,155 @@ impl NodeAgent {
     }
     
 
+    
+    /// Add device to SPDK using bdev_nvme_attach_controller or bdev_aio_create
+    pub async fn add_device_to_spdk(&self, device: &NvmeDevice) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [SPDK_ADD] Adding device {} to SPDK", device.device_path);
+        
+        // Test if we can unbind the kernel driver
+        let can_unbind = self.test_driver_unbinding_capability(&device.pcie_addr).await?;
+        
+        if can_unbind {
+            // Use userspace NVMe driver (preferred for performance)
+            println!("🚀 [SPDK_ADD] Using bdev_nvme_attach_controller for device {}", device.device_path);
+            
+            let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_nvme_attach_controller",
+                "params": {
+                    "name": format!("nvme-{}", device.serial_number),
+                    "trtype": "PCIe",
+                    "traddr": device.pcie_addr
+                }
+            })).await;
+            
+            match response {
+                Ok(_) => {
+                    println!("✅ [SPDK_ADD] Successfully attached {} using userspace NVMe driver", device.device_path);
+                }
+                Err(e) => {
+                    println!("⚠️ [SPDK_ADD] Failed to attach using userspace driver: {}", e);
+                    return Err(e);
+                }
+            }
+        } else {
+            // Fallback to AIO (for environments like AWS EC2 that don't support unbinding)
+            println!("🔄 [SPDK_ADD] Using bdev_aio_create fallback for device {}", device.device_path);
+            
+            let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_aio_create",
+                "params": {
+                    "name": format!("aio-{}", device.serial_number),
+                    "filename": device.device_path
+                }
+            })).await;
+            
+            match response {
+                Ok(_) => {
+                    println!("✅ [SPDK_ADD] Successfully added {} using AIO fallback", device.device_path);
+                }
+                Err(e) => {
+                    println!("⚠️ [SPDK_ADD] Failed to add using AIO: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get current SPDK bdevs
+    pub async fn get_current_spdk_bdevs(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_get_bdevs"
+        })).await?;
+        
+        let mut bdev_names = Vec::new();
+        if let Some(bdevs) = response["result"].as_array() {
+            for bdev in bdevs {
+                if let Some(name) = bdev["name"].as_str() {
+                    bdev_names.push(name.to_string());
+                }
+            }
+        }
+        
+        Ok(bdev_names)
+    }
+    
+    /// Check if device is already in SPDK by serial number
+    pub async fn is_device_in_spdk(&self, current_bdevs: &[String], serial_number: &str) -> bool {
+        current_bdevs.iter().any(|bdev| 
+            bdev.contains(serial_number) || 
+            bdev == &format!("nvme-{}", serial_number) || 
+            bdev == &format!("aio-{}", serial_number)
+        )
+    }
+    
+    /// Cleanup devices that are no longer discovered
+    pub async fn cleanup_removed_devices(
+        &self,
+        discovered_devices: &std::collections::HashMap<String, NvmeDevice>,
+        current_bdevs: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧹 [CLEANUP] Checking for devices to remove from SPDK");
+        
+        for bdev_name in current_bdevs {
+            // Extract serial number from bdev name
+            let serial = if let Some(s) = bdev_name.strip_prefix("nvme-") {
+                s
+            } else if let Some(s) = bdev_name.strip_prefix("aio-") {
+                s
+            } else {
+                continue; // Not a disk bdev
+            };
+            
+            // Check if this device is still discovered
+            let still_exists = discovered_devices.values().any(|d| d.serial_number == serial);
+            
+            if !still_exists {
+                println!("🗑️ [CLEANUP] Removing {} from SPDK (no longer discovered)", bdev_name);
+                
+                let _ = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                    "method": "bdev_nvme_detach_controller",
+                    "params": {
+                        "name": bdev_name
+                    }
+                })).await;
+                
+                // Also try AIO delete if it was an AIO device
+                let _ = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                    "method": "bdev_aio_delete",
+                    "params": {
+                        "name": bdev_name
+                    }
+                })).await;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Save SPDK configuration to ConfigMap
+    pub async fn save_spdk_config(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("💾 [SAVE_CONFIG] Saving SPDK configuration");
+        
+        let save_start = std::time::Instant::now();
+        let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+            "method": "bdev_nvme_save_config"
+        })).await;
+        
+        match response {
+            Ok(_) => {
+                let save_duration = save_start.elapsed();
+                println!("✅ [SAVE_CONFIG] SPDK configuration saved successfully in {:.2}ms", save_duration.as_millis());
+                Ok(())
+            }
+            Err(e) => {
+                let save_duration = save_start.elapsed();
+                println!("⚠️ [SAVE_CONFIG] Failed to save SPDK config after {:.2}ms: {}", save_duration.as_millis(), e);
+                Err(e)
+            }
+        }
+    }
     
     /// Create Kubernetes event for unsupported storage setup
     async fn create_unsupported_storage_event(&self, device: &NvmeDevice, reason: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

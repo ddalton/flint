@@ -8,7 +8,7 @@
 // - Health monitoring and status tracking
 
 use kube::{Client, Api};
-use tokio::time::{Duration, interval};
+use tokio::time::Duration;
 
 use serde_json::json;
 use anyhow::Result;
@@ -29,6 +29,8 @@ pub use nvmeof_manager::{manage_nvmeof_exports_intelligently, repair_spdkraiddis
 pub use http_api::start_api_server;
 pub use raid_operations::initialize_blobstore_on_device;
 pub use health_monitor::check_device_health;
+
+// Export the main functions for the binary - defined below
 // Removed re-export to prevent confusion - use direct imports instead
 
 // Core dependencies - FlintDiskMetadata and models only used in specific modules
@@ -192,23 +194,49 @@ pub async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-/// Main discovery loop - runs periodically to discover and update disk status
-pub async fn run_discovery_loop(agent: NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut interval = interval(Duration::from_secs(agent.discovery_interval));
+/// Reconcile SPDK state on startup - understand what bdevs and LVS already exist
+pub async fn reconcile_spdk_state_on_startup(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [STARTUP_RECONCILE] Starting SPDK state reconciliation on node: {}", agent.node_name);
     
-    // Run initial discovery immediately
-    if let Err(e) = discover_and_update_local_disks(&agent).await {
-        eprintln!("Initial disk discovery failed: {}", e);
+    // Wait for SPDK to be ready first
+    if let Err(e) = wait_for_spdk_ready(agent).await {
+        println!("⚠️ [STARTUP_RECONCILE] SPDK not ready, skipping reconciliation: {}", e);
+        return Ok(()); // Non-fatal - discovery will handle this later
     }
     
-    loop {
-        interval.tick().await;
-        
-        if let Err(e) = discover_and_update_local_disks(&agent).await {
-            eprintln!("Disk discovery failed: {}", e);
+    // Query current bdevs
+    match agent.get_current_spdk_bdevs().await {
+        Ok(bdevs) => {
+            println!("📊 [STARTUP_RECONCILE] Found {} existing bdevs in SPDK:", bdevs.len());
+            for bdev in &bdevs {
+                println!("   📀 [STARTUP_RECONCILE] Existing bdev: {}", bdev);
+            }
+        }
+        Err(e) => {
+            println!("⚠️ [STARTUP_RECONCILE] Failed to query existing bdevs: {}", e);
         }
     }
+    
+    // Query current LVS stores  
+    if let Ok(response) = rpc_client::call_spdk_rpc(&agent.spdk_rpc_url, &json!({"method": "bdev_lvol_get_lvstores"})).await {
+        if let Some(lvstores) = response["result"].as_array() {
+            println!("📊 [STARTUP_RECONCILE] Found {} existing LVS stores:", lvstores.len());
+            for lvs in lvstores {
+                if let Some(name) = lvs["name"].as_str() {
+                    println!("   🗄️ [STARTUP_RECONCILE] Existing LVS: {}", name);
+                }
+            }
+        }
+    }
+    
+    println!("✅ [STARTUP_RECONCILE] SPDK state reconciliation completed");
+    Ok(())
 }
+
+// Removed run_discovery_loop - now using event-driven architecture
+// Disk discovery happens:
+// 1. Once on startup (reconcile_spdk_state_on_startup)
+// 2. On-demand during PVC provisioning (via controller)
 
 /// Perform graceful shutdown of node agent
 pub async fn perform_graceful_shutdown(_agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

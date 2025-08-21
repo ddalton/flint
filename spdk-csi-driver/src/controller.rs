@@ -201,9 +201,20 @@ impl ControllerService {
         let raid_disk_list = raid_disks.list(&ListParams::default()).await
             .map_err(|e| Status::internal(format!("Failed to list SpdkRaidDisks: {}", e)))?;
 
+        println!("🔍 [RAID_SEARCH] Searching for suitable RAID disk among {} existing resources", raid_disk_list.items.len());
+
         for raid_disk in raid_disk_list.items {
+            // Skip external disks for local provisioning
+            if let Some(labels) = &raid_disk.metadata.labels {
+                if labels.get("flint.csi.storage.io/external") == Some(&"true".to_string()) {
+                    println!("🌐 [RAID_SEARCH] Skipping external RAID disk: {}", 
+                             raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                    continue;
+                }
+            }
+
             // Check if this RAID disk matches our requirements
-            // Policy: members must reside on distinct nodes
+            // Policy: members must reside on distinct nodes for multi-replica
             let mut unique_nodes = std::collections::HashSet::new();
             for m in &raid_disk.spec.member_disks {
                 unique_nodes.insert(m.node_id.clone());
@@ -212,17 +223,28 @@ impl ControllerService {
             let has_node_separation = if num_replicas > 1 {
                 unique_nodes.len() >= num_replicas as usize
             } else { true };
+            
+            let raid_level_matches = if num_replicas == 1 {
+                // For single replica, accept both "single" and "1" raid levels
+                raid_disk.spec.raid_level == raid_level || 
+                raid_disk.spec.raid_level == "single"
+            } else {
+                raid_disk.spec.raid_level == raid_level
+            };
 
             if raid_disk.spec.num_member_disks >= num_replicas &&
-               raid_disk.spec.raid_level == raid_level &&
+               raid_level_matches &&
                has_node_separation &&
                raid_disk.status.as_ref().map_or(false, |status| {
                    raid_disk.spec.can_accommodate_volume(required_capacity, status)
                }) {
+                println!("✅ [RAID_SEARCH] Found suitable RAID disk: {}", 
+                         raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
                 return Ok(raid_disk);
             }
         }
 
+        println!("❌ [RAID_SEARCH] No suitable RAID disk found");
         Err(Status::not_found("No suitable RAID disk found"))
     }
 
@@ -651,6 +673,24 @@ impl ControllerService {
     async fn find_available_local_nvme_disks(&self, min_capacity: i64) -> Result<Vec<AvailableNvmeDisk>, Status> {
         println!("🔍 [DISK_DISCOVERY] Searching for available storage capacity (min {}GB)", 
                  min_capacity / (1024 * 1024 * 1024));
+        
+        // Check if existing SpdkRaidDisk resources already exist for discovered disks
+        println!("📋 [DISK_DISCOVERY] Checking existing SpdkRaidDisk resources first");
+        let raid_disks: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let existing_raids = raid_disks.list(&ListParams::default()).await
+            .map_err(|e| Status::internal(format!("Failed to list SpdkRaidDisks: {}", e)))?;
+        
+        // Collect deviceids (serial numbers) of disks already tracked by SpdkRaidDisk
+        let mut tracked_deviceids = std::collections::HashSet::new();
+        for raid in existing_raids.items {
+            if let Some(labels) = &raid.metadata.labels {
+                if let Some(deviceid) = labels.get("flint.csi.storage.io/deviceid") {
+                    tracked_deviceids.insert(deviceid.clone());
+                    println!("📦 [DISK_DISCOVERY] Device {} already tracked by SpdkRaidDisk", deviceid);
+                }
+            }
+        }
+        
         println!("💡 [DISK_DISCOVERY] Checking for existing LVS with free space before creating new disks");
 
         let mut available_disks = Vec::new();
@@ -672,7 +712,20 @@ impl ControllerService {
         println!("🔄 [DISK_DISCOVERY] No existing LVS found with sufficient space, searching for new disks");
         for node in nodes {
             match self.query_node_available_disks(&node, min_capacity).await {
-                Ok(mut node_disks) => available_disks.append(&mut node_disks),
+                Ok(node_disks) => {
+                    // Filter out disks that are already tracked by SpdkRaidDisk
+                    let untracked_disks: Vec<AvailableNvmeDisk> = node_disks.into_iter()
+                        .filter(|disk| {
+                            if tracked_deviceids.contains(&disk.serial_number) {
+                                println!("🚫 [DISK_DISCOVERY] Skipping already tracked disk: {}", disk.serial_number);
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
+                    available_disks.extend(untracked_disks);
+                },
                 Err(e) => println!("⚠️ [DISK_DISCOVERY] Failed to query node {}: {}", node, e),
             }
         }
@@ -814,7 +867,20 @@ impl ControllerService {
             auto_rebuild: true,
         };
 
-        let mut raid_disk = SpdkRaidDisk::new_with_metadata(&raid_id, spec, &self.driver.target_namespace);
+        // Determine deviceid - serial number of the locally attached disk
+        let local_disk = selected_disks.iter()
+            .find(|d| d.node_id == target_node)
+            .ok_or_else(|| Status::internal("No local disk found on target node"))?;
+        let deviceid = Some(local_disk.serial_number.clone());
+
+        // Create the SpdkRaidDisk with proper labels
+        let mut raid_disk = SpdkRaidDisk::new_with_labels(
+            &raid_id, 
+            spec, 
+            &self.driver.target_namespace,
+            deviceid,  // Serial number of local disk
+            false,     // Not an external disk
+        );
         
         // Set initial status for new RAID disk
         raid_disk.status = Some(SpdkRaidDiskStatus {
@@ -1668,7 +1734,14 @@ impl ControllerService {
             auto_rebuild: true,
         };
 
-        let mut raid_disk = SpdkRaidDisk::new_with_metadata(&raid_id, spec, &self.driver.target_namespace);
+        // For external NVMe-oF endpoints, no local disk deviceid
+        let mut raid_disk = SpdkRaidDisk::new_with_labels(
+            &raid_id, 
+            spec, 
+            &self.driver.target_namespace,
+            None,  // No local disk for external endpoints
+            true,  // This is an external disk
+        );
         raid_disk.status = Some(SpdkRaidDiskStatus::default());
 
         // Create the CRD in Kubernetes

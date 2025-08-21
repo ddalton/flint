@@ -3,7 +3,7 @@
 // This is the main binary entry point for the SPDK node agent.
 // The actual implementation is in the spdk_csi_driver::node_agent module.
 
-use spdk_csi_driver::node_agent::{NodeAgent, start_api_server, run_discovery_loop};
+use spdk_csi_driver::node_agent::{NodeAgent, start_api_server, reconcile_spdk_state_on_startup, discover_and_update_local_disks};
 use std::env;
 use kube::Client;
 use clap::{Arg, Command};
@@ -104,26 +104,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("✅ [NODE_AGENT] Startup validation passed - environment supports userspace SPDK");
     }
     
-    println!("🎯 [NODE_AGENT] Starting API server and discovery loop...");
+    println!("🎯 [NODE_AGENT] Starting event-driven node agent...");
     
-    // Start API server and discovery loop concurrently
+    // Step 1: Discover and add local disks to SPDK (once only)
+    println!("🔍 [NODE_AGENT] Running initial disk discovery...");
+    if let Err(e) = discover_and_update_local_disks(&agent).await {
+        eprintln!("⚠️ [NODE_AGENT] Initial disk discovery failed: {}", e);
+    }
+    
+    // Step 2: Reconcile SPDK state after disk discovery (once only)
+    println!("🔄 [NODE_AGENT] Reconciling SPDK state after disk discovery...");
+    if let Err(e) = reconcile_spdk_state_on_startup(&agent).await {
+        eprintln!("⚠️ [NODE_AGENT] SPDK state reconciliation failed: {}", e);
+    }
+    
+    // Start API server (event-driven architecture)
+    println!("🌐 [NODE_AGENT] Starting API server for event-driven operations...");
     let api_task = tokio::spawn(start_api_server(agent.clone()));
-    let discovery_task = tokio::spawn(run_discovery_loop(agent.clone()));
     
-    // Wait for either task to complete (or both)
-    tokio::select! {
-        result = api_task => {
-            match result {
-                Ok(_) => println!("✅ [NODE_AGENT] API server completed"),
-                Err(e) => eprintln!("❌ [NODE_AGENT] API server failed: {}", e),
-            }
-        }
-        result = discovery_task => {
-            match result {
-                Ok(_) => println!("✅ [NODE_AGENT] Discovery loop completed"),
-                Err(e) => eprintln!("❌ [NODE_AGENT] Discovery loop failed: {}", e),
-            }
-        }
+    // Wait for API server (no periodic discovery loop)
+    match api_task.await {
+        Ok(_) => println!("✅ [NODE_AGENT] API server completed"),
+        Err(e) => eprintln!("❌ [NODE_AGENT] API server failed: {}", e),
     }
     
     println!("🛑 [NODE_AGENT] Node agent shutting down");

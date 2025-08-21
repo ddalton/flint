@@ -155,6 +155,67 @@ impl SpdkRaidDisk {
             status: None,
         }
     }
+    
+    /// Create a new SpdkRaidDisk with labels for deviceid and external
+    pub fn new_with_labels(
+        name: &str,
+        spec: SpdkRaidDiskSpec,
+        namespace: &str,
+        deviceid: Option<String>,
+        external: bool,
+    ) -> Self {
+        use kube::api::ObjectMeta;
+        use std::collections::BTreeMap;
+        
+        let mut labels = BTreeMap::new();
+        
+        // Add deviceid label if provided (serial number of the local disk)
+        if let Some(id) = deviceid {
+            labels.insert("flint.csi.storage.io/deviceid".to_string(), id);
+        }
+        
+        // Add external label (boolean)
+        labels.insert("flint.csi.storage.io/external".to_string(), external.to_string());
+        
+        SpdkRaidDisk {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec,
+            status: None,
+        }
+    }
+}
+
+impl SpdkRaidDiskSpec {
+    /// Get the LVS name for this RAID disk
+    pub fn lvs_name(&self) -> String {
+        format!("lvs-{}", self.raid_disk_id)
+    }
+    
+    /// Get the RAID bdev name for this RAID disk
+    pub fn raid_bdev_name(&self) -> String {
+        if self.raid_level == "single" {
+            // For single disk, use the disk's bdev name directly
+            if let Some(member) = self.member_disks.first() {
+                member.disk_ref.clone()
+            } else {
+                format!("bdev-{}", self.raid_disk_id)
+            }
+        } else {
+            // For RAID configurations
+            format!("raid-{}", self.raid_disk_id)
+        }
+    }
+    
+    /// Check if volume can be accommodated
+    pub fn can_accommodate_volume(&self, required_bytes: i64, status: &SpdkRaidDiskStatus) -> bool {
+        let available = status.usable_capacity_bytes - status.used_capacity_bytes;
+        available >= required_bytes && status.state == "online" && !status.degraded
+    }
 }
 
 impl RaidBdevConfig {
@@ -408,34 +469,7 @@ impl SpdkConfigSpec {
     }
 }
 
-impl SpdkRaidDiskSpec {
-    /// Generate LVS name for this RAID disk
-    /// Format: lvs_raid_{raid_disk_id}
-    pub fn lvs_name(&self) -> String {
-        format!("lvs_raid_{}", self.raid_disk_id)
-    }
-    
-    /// Generate RAID bdev name for SPDK
-    /// Format: raid_{raid_disk_id}
-    pub fn raid_bdev_name(&self) -> String {
-        format!("raid_{}", self.raid_disk_id)
-    }
-    
-    /// Check if this RAID disk can accommodate a volume of given size
-    pub fn can_accommodate_volume(&self, required_bytes: i64, current_status: &SpdkRaidDiskStatus) -> bool {
-        current_status.state == "online" &&
-        !current_status.degraded &&
-        (current_status.usable_capacity_bytes - current_status.used_capacity_bytes) >= required_bytes
-    }
-    
-    /// Get all member disks - they are all just references to SpdkDisk CRDs now
-    /// The actual disk type (local/remote) is determined by looking up the SpdkDisk CRD
-    pub fn get_all_members(&self) -> &Vec<RaidMemberDisk> {
-        &self.member_disks
-    }
-    
-    // Removed: member disk refs helper (no longer applicable since members embed NvmeofEndpoint)
-}
+// Removed duplicate impl block - methods already defined above
 
 // ============================================================================
 // SPDK VOLUME RELATED STRUCTURES
