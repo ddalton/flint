@@ -24,6 +24,7 @@ spec:
             - volume_id
             - size_bytes
             - num_replicas
+            - storage_backend
             - replicas
             - write_ordering_enabled
             - raid_auto_rebuild
@@ -35,6 +36,30 @@ spec:
                 format: int64
               num_replicas:
                 type: integer
+              # Unified storage backend reference
+              storage_backend:
+                type: object
+                description: "Storage backend reference (RAID disk or single disk)"
+                required:
+                - type
+                properties:
+                  type:
+                    type: string
+                    enum: ["raiddisk"]
+                    description: "Type of storage backend"
+                  raid_disk_ref:
+                    type: string
+                    description: "Reference to SpdkRaidDisk CRD (when type is raiddisk)"
+                  node_id:
+                    type: string
+                    description: "Node where storage backend is located"
+              # Logical volume information
+              lvol_uuid:
+                type: string
+                description: "UUID of the logical volume"
+              lvs_name:
+                type: string
+                description: "Name of the LVS containing this volume"
               # SPDK volume management fields
               primary_lvol_uuid:
                 type: string

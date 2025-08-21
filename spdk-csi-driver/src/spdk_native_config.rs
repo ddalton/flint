@@ -351,8 +351,12 @@ impl SpdkNativeConfig {
                     }
                 });
                 
+                println!("🔍 [CONFIG_DEBUG] Calling bdev_lvol_get_lvols for LVS: {}", lvs_name);
+                println!("🔍 [CONFIG_DEBUG] Request payload: {}", serde_json::to_string_pretty(&check_lvol).unwrap_or_else(|_| "Failed to serialize".to_string()));
+                
                 match self.call_rpc(&check_lvol).await {
                     Ok(response) => {
+                        println!("✅ [CONFIG_DEBUG] bdev_lvol_get_lvols response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Failed to serialize response".to_string()));
                         let mut lvol_exists = false;
                         if let Some(lvols) = response["result"].as_array() {
                             for lvol in lvols {
@@ -392,6 +396,7 @@ impl SpdkNativeConfig {
                         }
                     },
                     Err(e) => {
+                        println!("❌ [CONFIG_DEBUG] bdev_lvol_get_lvols failed with error: {}", e);
                         println!("  ⚠️ Failed to check lvols: {}", e);
                     }
                 }

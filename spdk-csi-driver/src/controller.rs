@@ -121,13 +121,23 @@ impl ControllerService {
                     println!("ℹ️ [IDEMPOTENT] Volume {} already exists, checking existing volume", volume_id);
                     
                     // Get information about the existing volume
-                    let existing_lvol = call_spdk_rpc(&spdk_rpc_url, &json!({
+                    let lvol_request = json!({
                         "method": "bdev_lvol_get_lvols",
                         "params": {
                             "name": volume_id
                         }
-                    })).await
-                    .map_err(|e| Status::internal(format!("Failed to get existing lvol info: {}", e)))?;
+                    });
+                    
+                    println!("🔍 [LVOL_DEBUG] Calling bdev_lvol_get_lvols for volume: {}", volume_id);
+                    println!("🔍 [LVOL_DEBUG] Request payload: {}", serde_json::to_string_pretty(&lvol_request).unwrap_or_else(|_| "Failed to serialize".to_string()));
+                    
+                    let existing_lvol = call_spdk_rpc(&spdk_rpc_url, &lvol_request).await
+                    .map_err(|e| {
+                        println!("❌ [LVOL_DEBUG] bdev_lvol_get_lvols failed with error: {}", e);
+                        Status::internal(format!("Failed to get existing lvol info: {}", e))
+                    })?;
+                    
+                    println!("✅ [LVOL_DEBUG] bdev_lvol_get_lvols response: {}", serde_json::to_string_pretty(&existing_lvol).unwrap_or_else(|_| "Failed to serialize response".to_string()));
                     
                     // Extract UUID from the existing volume
                     if let Some(lvols) = existing_lvol["result"].as_array() {
