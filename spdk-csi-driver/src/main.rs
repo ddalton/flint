@@ -79,64 +79,6 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
     Ok("flint-system".to_string())
 }
 
-/// Initialize SPDK from SpdkConfig CRD at startup
-async fn initialize_spdk_from_config(driver: Arc<SpdkCsiDriver>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use spdk_csi_driver::models::SpdkConfig;
-    use kube::api::Api;
-
-    println!("🔄 [STARTUP] Initializing SPDK from SpdkConfig CRD...");
-    
-    // Wait a bit for SPDK to be ready
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    
-    let spdk_configs: Api<SpdkConfig> = Api::namespaced(driver.kube_client.clone(), &driver.target_namespace);
-    let config_name = format!("{}-config", driver.node_id);
-    
-    // Try to load existing SpdkConfig
-    match spdk_configs.get_opt(&config_name).await? {
-        Some(config) => {
-            println!("✅ [STARTUP] Found SpdkConfig CRD: {}", config_name);
-            
-            // Skip if in maintenance mode
-            if config.spec.maintenance_mode {
-                println!("⚠️ [STARTUP] Node is in maintenance mode - skipping SPDK initialization");
-                return Ok(());
-            }
-            
-            // SPDK configuration auto-save could be added here if needed
-            
-            // Smart validation - only when needed to prevent conflicts
-            let safe_config = if should_perform_validation(&config.spec, &driver).await? {
-                validate_config_with_fast_checks(&config.spec, &driver).await?
-            } else {
-                config.spec.clone()
-            };
-            
-            // Apply the validated configuration to running SPDK via RPC
-            apply_spdk_config_via_rpc(&driver, &safe_config).await?;
-            
-            // SPDK status sync to CRD could be added here if needed
-            
-            println!("✅ [STARTUP] SPDK initialized successfully from SpdkConfig");
-        }
-        None => {
-            println!("ℹ️ [STARTUP] No SpdkConfig found for node {} - SPDK will start with empty config", driver.node_id);
-            
-            // Create empty ConfigMap for SPDK startup
-            let _empty_config = spdk_csi_driver::models::SpdkConfigSpec {
-                node_id: driver.node_id.clone(),
-                maintenance_mode: false,
-                last_config_save: Some(chrono::Utc::now().to_rfc3339()),
-                raid_bdevs: vec![],
-                nvmeof_subsystems: vec![],
-            };
-            
-            // SPDK empty config save could be added here if needed
-        }
-    }
-    
-    Ok(())
-}
 
 /// Check if validation should be performed based on conditions
 /// 
@@ -678,15 +620,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
         
-        // Initialize SPDK configuration from SpdkConfig CRD (legacy path)
-        let config_driver = driver.clone();
-        tokio::spawn(async move {
-            // Wait for native config to load first
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            if let Err(e) = initialize_spdk_from_config(config_driver).await {
-                eprintln!("❌ [STARTUP] Failed to initialize SPDK from config: {}", e);
-            }
-        });
+        // SPDK configuration is now handled entirely by native CRD-based approach
+        // No legacy SpdkConfig initialization needed
         
         // Note: Periodic saves removed - configuration is now saved immediately after each SPDK state change
         
