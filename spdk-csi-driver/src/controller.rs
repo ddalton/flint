@@ -152,9 +152,24 @@ impl ControllerService {
             }
         };
 
-        let lvol_uuid = response["uuid"].as_str()
-            .ok_or_else(|| Status::internal("SPDK response missing lvol UUID"))?
-            .to_string();
+        // Debug: Log the raw response structure
+        println!("🔍 [THIN_PROVISION_DEBUG] Raw SPDK response: {}", response);
+        
+        // The response from bdev_lvol_create is just a UUID string in the "result" field
+        let lvol_uuid = if let Some(uuid_str) = response["result"].as_str() {
+            // Direct UUID string in result
+            uuid_str.to_string()
+        } else if let Some(uuid_str) = response["uuid"].as_str() {
+            // Fallback for potential object response
+            uuid_str.to_string()
+        } else {
+            println!("❌ [THIN_PROVISION_DEBUG] Failed to parse UUID from response: {}", response);
+            println!("   Expected response[\"result\"] to be a UUID string");
+            return Err(Status::internal(format!(
+                "SPDK response missing lvol UUID. Response: {}",
+                response
+            )));
+        };
 
         println!("✅ [THIN_PROVISION] Created thin-provisioned lvol {} (UUID: {}) on RAID disk LVS {}", 
                  volume_id, lvol_uuid, lvs_name);
