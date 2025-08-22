@@ -103,6 +103,14 @@ pub async fn start_api_server(agent: NodeAgent) {
                 .and(agent_filter.clone())
                 .and_then(check_system_disk_status)
         )
+        .or(
+            // Get free disks inventory
+            warp::path("free-disks")
+                .and(warp::get())
+                .and(warp::query::<FreeDisksQuery>())
+                .and(agent_filter.clone())
+                .and_then(get_free_disks_handler)
+        )
     );
 
     let routes = api.with(cors);
@@ -135,6 +143,28 @@ pub struct ProcessedDisk {
     pub success: bool,
     pub message: String,
     pub driver: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct FreeDisksQuery {
+    #[serde(default)]
+    pub min_capacity_gb: Option<u64>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FreeDiskInfo {
+    pub serial_number: String,
+    pub device_path: String,
+    pub capacity_gb: u64,
+    pub model: String,
+    pub status: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FreeDisksResponse {
+    pub success: bool,
+    pub free_disks: Vec<FreeDiskInfo>,
+    pub total_count: usize,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -609,5 +639,49 @@ impl NodeAgent {
         
         println!("✅ [SETUP] Disk setup completed: {}", pci_addr);
         Ok(())
+    }
+}
+
+/// Handler for GET /free-disks - returns inventory of free disks
+async fn get_free_disks_handler(
+    query: FreeDisksQuery,
+    agent: NodeAgent,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("📊 [API] Getting free disks inventory");
+    
+    let min_capacity_bytes = query.min_capacity_gb
+        .map(|gb| gb * 1024 * 1024 * 1024)  // Convert GB to bytes
+        .unwrap_or(0);
+    
+    match agent.get_free_disks(min_capacity_bytes as i64).await {
+        Ok(free_disks) => {
+            let disk_info: Vec<FreeDiskInfo> = free_disks.into_iter().map(|disk| {
+                FreeDiskInfo {
+                    serial_number: disk.serial_number,
+                    device_path: disk.device_path,
+                    capacity_gb: disk.capacity_bytes as u64 / (1024 * 1024 * 1024),
+                    model: disk.model,
+                    status: format!("{:?}", disk.status),
+                }
+            }).collect();
+            
+            let response = FreeDisksResponse {
+                success: true,
+                total_count: disk_info.len(),
+                free_disks: disk_info,
+            };
+            
+            println!("✅ [API] Returned {} free disks", response.total_count);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            eprintln!("❌ [API] Failed to get free disks: {}", e);
+            let response = FreeDisksResponse {
+                success: false,
+                total_count: 0,
+                free_disks: vec![],
+            };
+            Ok(warp::reply::json(&response))
+        }
     }
 }
