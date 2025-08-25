@@ -3043,9 +3043,44 @@ impl ControllerService {
                 // Handle "AlreadyExists" - this is expected for idempotent operations
                 println!("🔍 [CRD_DEBUG] SpdkVolume CRD already exists, checking compatibility...");
                 
+                // First, try to get the raw JSON to see what we're dealing with
+                println!("🔍 [SERIALIZATION_DEBUG] Attempting to get existing SpdkVolume: {}", volume_id);
+                println!("🔍 [SERIALIZATION_DEBUG] Using CRD API for namespace: {}", self.driver.target_namespace);
+                
+                // Get raw resource first for debugging
+                use kube::api::DynamicObject;
+                let dynamic_api: kube::Api<DynamicObject> = kube::Api::namespaced_with(
+                    self.driver.kube_client.clone(), 
+                    &self.driver.target_namespace,
+                    &kube::api::ApiResource {
+                        group: "flint.csi.storage.io".to_string(),
+                        version: "v1".to_string(),
+                        kind: "SpdkVolume".to_string(),
+                        plural: "spdkvolumes".to_string(),
+                    }
+                );
+                
+                match dynamic_api.get(volume_id).await {
+                    Ok(raw_object) => {
+                        println!("✅ [SERIALIZATION_DEBUG] Got raw SpdkVolume, attempting to inspect structure:");
+                        if let Ok(json_str) = serde_json::to_string_pretty(&raw_object) {
+                            println!("🔍 [SERIALIZATION_DEBUG] Raw existing SpdkVolume JSON:");
+                            println!("{}", json_str);
+                        } else {
+                            println!("❌ [SERIALIZATION_DEBUG] Failed to serialize raw object to JSON");
+                        }
+                        
+                        // Now try to deserialize using our typed API
+                        println!("🔍 [SERIALIZATION_DEBUG] Now attempting typed deserialization...");
+                    },
+                    Err(raw_error) => {
+                        println!("❌ [SERIALIZATION_DEBUG] Failed to get raw SpdkVolume: {}", raw_error);
+                    }
+                }
+                
                 match crd_api.get(volume_id).await {
                     Ok(existing_volume) => {
-                        println!("✅ [CRD_DEBUG] Found existing SpdkVolume CRD");
+                        println!("✅ [CRD_DEBUG] Successfully deserialized existing SpdkVolume CRD");
                         
                         // Validate that existing volume is compatible
                         if existing_volume.spec.size_bytes == spdk_volume.spec.size_bytes &&
@@ -3068,7 +3103,27 @@ impl ControllerService {
                         }
                     },
                     Err(get_error) => {
-                        println!("❌ [CRD_DEBUG] Failed to get existing SpdkVolume for compatibility check: {}", get_error);
+                        println!("❌ [SERIALIZATION_DEBUG] Typed deserialization failed!");
+                        println!("   Error type: {:?}", std::any::type_name_of_val(&get_error));
+                        println!("   Error details: {}", get_error);
+                        
+                        // Check if it's a serde error and extract more info
+                        if let kube::Error::SerdeError(serde_error) = &get_error {
+                            println!("🔍 [SERIALIZATION_DEBUG] Detailed serde error:");
+                            println!("   Message: {}", serde_error);
+                            println!("   Column: {}", serde_error.column());
+                            println!("   Line: {}", serde_error.line());
+                        }
+                        
+                        // For now, since this is a compatibility check and we have schema mismatch,
+                        // let's delete the old incompatible resource and let the creation succeed
+                        println!("💡 [SERIALIZATION_DEBUG] Attempting to delete old incompatible SpdkVolume...");
+                        if let Err(delete_error) = crd_api.delete(volume_id, &kube::api::DeleteParams::default()).await {
+                            println!("⚠️ [SERIALIZATION_DEBUG] Failed to delete old SpdkVolume: {}", delete_error);
+                        } else {
+                            println!("✅ [SERIALIZATION_DEBUG] Deleted old incompatible SpdkVolume");
+                        }
+                        
                         return Err(Status::internal(format!("Failed to validate existing SpdkVolume: {}", get_error)));
                     }
                 }
