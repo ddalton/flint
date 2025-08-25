@@ -27,6 +27,7 @@ spec:
             - replicas
             - write_ordering_enabled
             - raid_auto_rebuild
+            - storage_backend
             properties:
               volume_id:
                 type: string
@@ -35,6 +36,24 @@ spec:
                 format: int64
               num_replicas:
                 type: integer
+              # Storage backend configuration (RAID disk reference)
+              storage_backend:
+                type: object
+                description: "Storage backend configuration (RAID or single disk)"
+                properties:
+                  RaidDisk:
+                    type: object
+                    description: "RAID disk backend configuration"
+                    required:
+                    - raid_disk_ref
+                    - node_id
+                    properties:
+                      raid_disk_ref:
+                        type: string
+                        description: "Reference to the SpdkRaidDisk CRD name"
+                      node_id:
+                        type: string
+                        description: "Node where the RAID disk is created"
               # SPDK volume management fields
               primary_lvol_uuid:
                 type: string
