@@ -40,20 +40,19 @@ spec:
               storage_backend:
                 type: object
                 description: "Storage backend configuration (RAID or single disk)"
+                required:
+                - type
                 properties:
-                  RaidDisk:
-                    type: object
-                    description: "RAID disk backend configuration"
-                    required:
-                    - raid_disk_ref
-                    - node_id
-                    properties:
-                      raid_disk_ref:
-                        type: string
-                        description: "Reference to the SpdkRaidDisk CRD name"
-                      node_id:
-                        type: string
-                        description: "Node where the RAID disk is created"
+                  type:
+                    type: string
+                    description: "Type of storage backend"
+                    enum: ["raiddisk"]
+                  raid_disk_ref:
+                    type: string
+                    description: "Reference to the SpdkRaidDisk CRD name"
+                  node_id:
+                    type: string
+                    description: "Node where the RAID disk is created"
               # SPDK volume management fields
               primary_lvol_uuid:
                 type: string
