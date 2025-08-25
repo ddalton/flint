@@ -1986,26 +1986,10 @@ impl ControllerService {
             auto_rebuild: true,
         };
         
-        let mut raid_disk = SpdkRaidDisk::new(&raid_name, raid_spec);
+        let raid_disk = SpdkRaidDisk::new(&raid_name, raid_spec);
         
-        // Set status to indicate this is reusing existing LVS
-        raid_disk.status = Some(spdk_csi_driver::models::SpdkRaidDiskStatus {
-            state: "online".to_string(), // Skip bdev_created since LVS already exists
-            raid_bdev_name: Some(existing_lvs.pci_address.clone()), // Base bdev
-            lvs_name: Some(lvs_name.to_string()),
-            lvs_uuid: None,
-            total_capacity_bytes: existing_lvs.capacity,
-            usable_capacity_bytes: existing_lvs.capacity,
-            used_capacity_bytes: 0,
-            health_status: "healthy".to_string(),
-            degraded: false,
-            rebuild_progress: None,
-            active_member_count: 1,
-            failed_member_count: 0,
-            last_checked: chrono::Utc::now().to_rfc3339(),
-            created_at: Some(chrono::Utc::now().to_rfc3339()),
-            raid_status: None,
-        });
+        // Note: Don't set status here - Kubernetes doesn't allow setting .status via API
+        // The controller will detect this RAID disk and set the status appropriately
         
         // Create the CRD in Kubernetes
         let raids_api: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
