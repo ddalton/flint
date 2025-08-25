@@ -225,27 +225,205 @@ impl ControllerService {
             } else { true };
             
             let raid_level_matches = if num_replicas == 1 {
-                // For single replica, accept both "single" and "1" raid levels
+                // For single replica, accept both "single", "1", and "raid1" raid levels
                 raid_disk.spec.raid_level == raid_level || 
-                raid_disk.spec.raid_level == "single"
+                raid_disk.spec.raid_level == "single" ||
+                raid_disk.spec.raid_level == "raid1"
             } else {
                 raid_disk.spec.raid_level == raid_level
             };
 
             if raid_disk.spec.num_member_disks >= num_replicas &&
                raid_level_matches &&
-               has_node_separation &&
-               raid_disk.status.as_ref().map_or(false, |status| {
-                   raid_disk.spec.can_accommodate_volume(required_capacity, status)
-               }) {
-                println!("✅ [RAID_SEARCH] Found suitable RAID disk: {}", 
-                         raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
-                return Ok(raid_disk);
+               has_node_separation {
+                
+                if let Some(status) = &raid_disk.status {
+                    // Check if RAID is operational and has capacity
+                    if matches!(status.state.as_str(), "online" | "degraded") && 
+                       raid_disk.spec.can_accommodate_volume(required_capacity, status) {
+                        println!("✅ [RAID_SEARCH] Found operational RAID disk: {} with available capacity", 
+                                 raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                        return Ok(raid_disk);
+                    }
+                    // For initializing RAID disks, try to complete initialization
+                    else if status.state == "initializing" && status.total_capacity_bytes >= required_capacity {
+                        println!("🔄 [RAID_SEARCH] Found initializing RAID disk: {} - attempting to complete initialization", 
+                                 raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                        
+                        // Try to initialize this RAID disk
+                        if let Ok(initialized_raid) = self.try_complete_raid_initialization(&raid_disk).await {
+                            if let Some(init_status) = &initialized_raid.status {
+                                if initialized_raid.spec.can_accommodate_volume(required_capacity, init_status) {
+                                    println!("✅ [RAID_SEARCH] Successfully initialized RAID disk: {}", 
+                                             initialized_raid.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                                    return Ok(initialized_raid);
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but insufficient capacity or wrong state (available: {}GB, required: {}GB, state: {})",
+                                 raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
+                                 (status.usable_capacity_bytes - status.used_capacity_bytes) / (1024*1024*1024),
+                                 required_capacity / (1024*1024*1024),
+                                 status.state);
+                    }
+                } else {
+                    println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but has no status information", 
+                             raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                }
             }
         }
 
         println!("❌ [RAID_SEARCH] No suitable RAID disk found");
         Err(Status::not_found("No suitable RAID disk found"))
+    }
+
+    /// Try to complete initialization of a RAID disk that's stuck in initializing state
+    async fn try_complete_raid_initialization(&self, raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidDisk, Status> {
+        println!("🔄 [RAID_INIT_COMPLETE] Attempting to complete initialization for RAID: {}", 
+                 raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+        
+        // Use existing SPDK bdev (device is already available)
+        let raid_disk_clone = raid_disk.clone();
+        match self.initialize_raid_disk_with_existing_bdev(&raid_disk_clone).await {
+            Ok(initialized_raid) => {
+                println!("✅ [RAID_INIT_COMPLETE] Successfully completed RAID initialization");
+                Ok(initialized_raid)
+            }
+            Err(e) => {
+                println!("❌ [RAID_INIT_COMPLETE] Failed to complete RAID initialization: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Initialize RAID disk using existing SPDK bdev (for device reuse)
+    async fn initialize_raid_disk_with_existing_bdev(&self, raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidDisk, Status> {
+        let target_node = &raid_disk.spec.created_on_node;
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
+        
+        // For single replica, use the existing bdev directly instead of creating RAID
+        if raid_disk.spec.num_member_disks == 1 {
+            if let Some(member) = raid_disk.spec.member_disks.first() {
+                let bdev_name = &member.disk_ref; // This is the SPDK bdev name
+                println!("🔄 [RAID_INIT_EXISTING] Using existing bdev {} for single replica RAID", bdev_name);
+                
+                // Create LVS directly on the existing bdev
+                let lvs_name = raid_disk.spec.lvs_name();
+                return self.create_lvs_on_existing_bdev(&spdk_rpc_url, bdev_name, &lvs_name, raid_disk).await;
+            }
+        }
+        
+        // For multi-replica, proceed with standard RAID initialization
+        self.initialize_raid_bdev_and_lvs(raid_disk).await?;
+        
+        // Return the updated RAID disk after initialization
+        self.update_raid_disk_status_operational(raid_disk).await
+    }
+
+    /// Create LVS on existing SPDK bdev 
+    async fn create_lvs_on_existing_bdev(
+        &self, 
+        spdk_rpc_url: &str, 
+        bdev_name: &str, 
+        lvs_name: &str, 
+        raid_disk: &SpdkRaidDisk
+    ) -> Result<SpdkRaidDisk, Status> {
+        println!("💾 [LVS_EXISTING] Creating LVS {} on existing bdev {}", lvs_name, bdev_name);
+        
+        // Check if LVS already exists
+        let existing_lvs_result = call_spdk_rpc(spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores"
+        })).await;
+        
+        let lvs_exists = if let Ok(lvs_data) = &existing_lvs_result {
+            if let Some(lvs_array) = lvs_data["result"].as_array() {
+                lvs_array.iter().any(|lvs| {
+                    lvs["name"].as_str() == Some(lvs_name) ||
+                    lvs["base_bdev"].as_str() == Some(bdev_name)
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
+        if !lvs_exists {
+            // Create LVS on existing bdev
+            let lvs_params = json!({
+                "method": "bdev_lvol_create_lvstore",
+                "params": {
+                    "bdev_name": bdev_name,
+                    "lvs_name": lvs_name,
+                    "cluster_sz": 1048576  // 1MB clusters for thin provisioning
+                }
+            });
+            
+            println!("🔍 [LVS_EXISTING] LVS creation RPC: {}", lvs_params);
+            call_spdk_rpc(spdk_rpc_url, &lvs_params).await
+                .map_err(|e| Status::internal(format!("Failed to create LVS on existing bdev: {}", e)))?;
+        }
+        
+        // Update RAID disk status to operational
+        self.update_raid_disk_status_operational(raid_disk).await
+    }
+
+    /// Update RAID disk status to operational after successful LVS creation
+    async fn update_raid_disk_status_operational(&self, raid_disk: &SpdkRaidDisk) -> Result<SpdkRaidDisk, Status> {
+        let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
+        let target_node = &raid_disk.spec.created_on_node;
+        let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
+        let lvs_name = raid_disk.spec.lvs_name();
+        
+        // Get LVS capacity information
+        let mut total_capacity = 0i64;
+        let mut usable_capacity = 0i64;
+        
+        if let Ok(lvs_info) = call_spdk_rpc(&spdk_rpc_url, &json!({
+            "method": "bdev_lvol_get_lvstores",
+            "params": {}
+        })).await {
+            if let Some(lvs_array) = lvs_info["result"].as_array() {
+                if let Some(lvs) = lvs_array.iter().find(|l| l["name"].as_str() == Some(&lvs_name)) {
+                    if let (Some(total_clusters), Some(cluster_size)) = (
+                        lvs["total_data_clusters"].as_u64(),
+                        lvs["cluster_size"].as_u64()
+                    ) {
+                        total_capacity = (total_clusters * cluster_size) as i64;
+                        usable_capacity = total_capacity; // Initially all capacity is available
+                    }
+                }
+            }
+        }
+        
+        // Update status to operational
+        let mut status = raid_disk.status.clone().unwrap_or_default();
+        status.state = "online".to_string();
+        status.health_status = "healthy".to_string();
+        status.degraded = false;
+        status.lvs_name = Some(lvs_name);
+        status.total_capacity_bytes = total_capacity;
+        status.usable_capacity_bytes = usable_capacity;
+        status.used_capacity_bytes = 0; // No volumes yet
+        status.active_member_count = raid_disk.spec.num_member_disks as u32;
+        status.failed_member_count = 0;
+        status.last_checked = chrono::Utc::now().to_rfc3339();
+        
+        let patch = json!({ "status": status });
+        let updated_raid = raids.patch_status(
+            &raid_disk.metadata.name.as_ref().unwrap(),
+            &PatchParams::default(),
+            &Patch::Merge(patch)
+        ).await
+        .map_err(|e| Status::internal(format!("Failed to update RAID disk status to operational: {}", e)))?;
+
+        println!("✅ [RAID_STATUS] Updated RAID disk {} to operational with {}GB capacity", 
+                 raid_disk.metadata.name.as_ref().unwrap(),
+                 total_capacity / (1024*1024*1024));
+        
+        Ok(updated_raid)
     }
 
     /// Create RAID disk from available local NVMe disks (preferred for performance)
@@ -1257,15 +1435,30 @@ impl ControllerService {
                              name, capacity / (1024*1024*1024), is_claimed, supports_read, supports_write, is_in_use, is_system_disk, is_available_storage);
                     
                     if is_available_storage {
+                        // Extract actual device path from SPDK bdev driver_specific info
+                        let actual_device_path = if let Some(driver_specific) = bdev.get("driver_specific") {
+                            if let Some(aio_info) = driver_specific.get("aio") {
+                                if let Some(filename) = aio_info.get("filename").and_then(|f| f.as_str()) {
+                                    filename.to_string()
+                                } else {
+                                    format!("/dev/{}", name) // Fallback
+                                }
+                            } else {
+                                format!("/dev/{}", name) // Fallback for non-AIO
+                            }
+                        } else {
+                            format!("/dev/{}", name) // Fallback
+                        };
+                        
                         let disk = AvailableNvmeDisk {
                             node_id: node.to_string(),
-                            device_path: format!("/dev/{}", name),
+                            device_path: actual_device_path,
                             serial_number: bdev["product_name"].as_str().unwrap_or("unknown").to_string(),
                             wwn: None,
                             model: bdev["product_name"].as_str().unwrap_or("unknown").to_string(),
                             vendor: "Intel".to_string(), // Default for NVMe
                             capacity: capacity as i64,
-                            pci_address: format!("{}:00.0", available_disks.len()), // Placeholder PCI address
+                            pci_address: name.to_string(), // Store SPDK bdev name for reference
                         };
                         available_disks.push(disk);
                     }
