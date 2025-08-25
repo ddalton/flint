@@ -255,18 +255,50 @@ impl NodeAgent {
     pub async fn enhanced_system_disk_check(&self, device_name: &str) -> bool {
         println!("🛡️ [ENHANCED_SYSTEM_CHECK] Checking if {} is a system disk", device_name);
         
-        // Method 1: Check if it's mounted on root filesystem
+        // CRITICAL: Container-aware system disk detection
+        // In containers, findmnt shows 'overlay' for root, but we need to check actual partitions
+        
+        // Method 1: Check if any partitions have system mount points using lsblk
+        if let Ok(output) = Command::new("lsblk")
+            .args(["-J", "-o", "NAME,MOUNTPOINT", &format!("/dev/{}", device_name)])
+            .output()
+        {
+            let lsblk_output = String::from_utf8_lossy(&output.stdout);
+            println!("🔍 [ENHANCED_SYSTEM_CHECK] lsblk output for {}: {}", device_name, lsblk_output);
+            
+            if let Ok(lsblk_data) = serde_json::from_str::<serde_json::Value>(&lsblk_output) {
+                if let Some(blockdevices) = lsblk_data["blockdevices"].as_array() {
+                    for device in blockdevices {
+                        // Check the main device and its children (partitions)
+                        if self.check_mountpoints_for_system_use(device, device_name).await {
+                            return true;
+                        }
+                        
+                        // Check partitions
+                        if let Some(children) = device["children"].as_array() {
+                            for child in children {
+                                if self.check_mountpoints_for_system_use(child, device_name).await {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 2: Check if it's mounted on root filesystem (fallback for non-container environments)
         if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", "/"]).output() {
             let root_source = String::from_utf8_lossy(&output.stdout).trim().to_string();
             println!("🔍 [ENHANCED_SYSTEM_CHECK] Root filesystem source: {}", root_source);
             
-            if root_source.contains(device_name) {
+            if !root_source.contains("overlay") && root_source.contains(device_name) {
                 println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is mounted as root filesystem", device_name);
                 return true;
             }
         }
         
-        // Method 2: Check boot partitions (including EFI)
+        // Method 3: Check boot partitions (including EFI)
         let boot_paths = ["/boot", "/boot/efi", "/efi"];
         for boot_path in &boot_paths {
             if let Ok(output) = Command::new("findmnt").args(["-n", "-o", "SOURCE", boot_path]).output() {
@@ -296,6 +328,66 @@ impl NodeAgent {
             if swap_devices.contains(device_name) {
                 println!("🚨 [ENHANCED_SYSTEM_CHECK] {} is used as swap device", device_name);
                 return true;
+            }
+        }
+        
+        false
+    }
+
+    /// Check if device/partition mountpoints indicate system use (container-aware)
+    async fn check_mountpoints_for_system_use(&self, device_json: &serde_json::Value, device_name: &str) -> bool {
+        if let Some(mountpoints) = device_json["mountpoint"].as_array() {
+            for mountpoint in mountpoints {
+                if let Some(mount_str) = mountpoint.as_str() {
+                    if mount_str.is_empty() || mount_str == "null" {
+                        continue;
+                    }
+                    
+                    println!("🔍 [MOUNTPOINT_CHECK] Found mountpoint for {}: {}", device_name, mount_str);
+                    
+                    // System-critical mount patterns (including container-mounted host paths)
+                    let system_patterns = [
+                        "/",
+                        "/boot", "/boot/efi", "/efi",
+                        "/var", "/var/log", "/var/lib", "/var/tmp",
+                        "/usr", "/usr/local", "/usr/bin", "/usr/lib",
+                        "/opt",
+                        "/home",
+                        "/tmp",
+                        "/etc", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts",
+                        "/dev/termination-log",
+                        "/root",
+                        "/sys", "/proc"
+                    ];
+                    
+                    for pattern in &system_patterns {
+                        if mount_str.starts_with(pattern) || mount_str == *pattern {
+                            println!("🚨 [MOUNTPOINT_CHECK] SYSTEM DISK DETECTED - {} mounted at {}", device_name, mount_str);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Also check single mountpoint (non-array format)
+        if let Some(mount_str) = device_json["mountpoint"].as_str() {
+            if !mount_str.is_empty() && mount_str != "null" {
+                println!("🔍 [MOUNTPOINT_CHECK] Found single mountpoint for {}: {}", device_name, mount_str);
+                
+                let system_patterns = [
+                    "/", "/boot", "/boot/efi", "/efi", "/var", "/var/log", "/var/lib", "/var/tmp",
+                    "/usr", "/usr/local", "/usr/bin", "/usr/lib", "/opt", "/home", "/tmp",
+                    "/etc", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", "/dev/termination-log",
+                    "/root", "/sys", "/proc"
+                ];
+                
+                for pattern in &system_patterns {
+                    if mount_str.starts_with(pattern) || mount_str == *pattern {
+                        println!("🚨 [MOUNTPOINT_CHECK] SYSTEM DISK DETECTED - {} mounted at {}", device_name, mount_str);
+                        return true;
+                    }
+                }
             }
         }
         
