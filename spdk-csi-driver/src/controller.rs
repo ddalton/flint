@@ -105,17 +105,68 @@ impl ControllerService {
         println!("🔍 [THIN_PROVISION_DEBUG] Size conversion: {} bytes -> {} MiB", capacity, size_in_mib);
 
         // Create thin-provisioned logical volume on the RAID disk's LVS
-        let response = call_spdk_rpc(&spdk_rpc_url, &lvol_request).await
-        .map_err(|e| Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)))?;
-
-        println!("🔍 [THIN_PROVISION_DEBUG] SPDK Response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Invalid JSON".to_string()));
-
-        // SPDK returns the UUID in the "result" field for bdev_lvol_create
-        let lvol_uuid = response["result"].as_str()
-            .ok_or_else(|| Status::internal("SPDK response missing lvol UUID in result field"))?
-            .to_string();
-
-        println!("🔍 [THIN_PROVISION_DEBUG] Extracted lvol UUID: {}", lvol_uuid);
+        let response = call_spdk_rpc(&spdk_rpc_url, &lvol_request).await;
+        
+        let lvol_uuid = match response {
+            Ok(response) => {
+                println!("🔍 [THIN_PROVISION_DEBUG] SPDK Response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Invalid JSON".to_string()));
+                
+                // SPDK returns the UUID in the "result" field for bdev_lvol_create
+                let lvol_uuid = response["result"].as_str()
+                    .ok_or_else(|| Status::internal("SPDK response missing lvol UUID in result field"))?
+                    .to_string();
+                
+                println!("🔍 [THIN_PROVISION_DEBUG] Extracted lvol UUID: {}", lvol_uuid);
+                lvol_uuid
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                // Check if logical volume already exists (File exists error)
+                if error_msg.contains("File exists") || error_msg.contains("already exists") {
+                    println!("ℹ️ [THIN_PROVISION] Logical volume {} already exists, finding existing volume", volume_id);
+                    
+                    // Query existing bdevs to find the logical volume
+                    let bdevs_response = call_spdk_rpc(&spdk_rpc_url, &json!({
+                        "method": "bdev_get_bdevs"
+                    })).await
+                    .map_err(|e| Status::internal(format!("Failed to query existing bdevs: {}", e)))?;
+                    
+                    if let Some(bdevs) = bdevs_response["result"].as_array() {
+                        // Look for logical volume with matching name pattern (either direct name or lvs_name/volume_id format)
+                        for bdev in bdevs {
+                            if let Some(bdev_name) = bdev["name"].as_str() {
+                                let expected_lvol_name = format!("{}/{}", lvs_name, volume_id);
+                                if bdev_name == volume_id || bdev_name == expected_lvol_name {
+                                    let size_gb = if let (Some(num_blocks), Some(block_size)) = 
+                                        (bdev["num_blocks"].as_u64(), bdev["block_size"].as_u64()) {
+                                        (num_blocks * block_size) / (1024 * 1024 * 1024)
+                                    } else { 0 };
+                                    
+                                    println!("✅ [THIN_PROVISION] Found existing logical volume: {} ({}GB)", bdev_name, size_gb);
+                                    return Ok(bdev_name.to_string());
+                                }
+                                
+                                // Also check if this might be a UUID-named logical volume of the right size
+                                if let (Some(num_blocks), Some(block_size)) = 
+                                    (bdev["num_blocks"].as_u64(), bdev["block_size"].as_u64()) {
+                                    let bdev_size_bytes = num_blocks * block_size;
+                                    let expected_size_tolerance = capacity as u64 / 10; // 10% tolerance
+                                    
+                                    if (bdev_size_bytes as i64 - capacity as i64).abs() <= expected_size_tolerance as i64 {
+                                        println!("✅ [THIN_PROVISION] Found existing logical volume by size match: {} ({}GB)", bdev_name, bdev_size_bytes / (1024 * 1024 * 1024));
+                                        return Ok(bdev_name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    return Err(Status::internal("Logical volume exists but could not be found in bdev list"));
+                } else {
+                    return Err(Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)));
+                }
+            }
+        };
 
         println!("✅ [THIN_PROVISION] Created thin-provisioned lvol {} (UUID: {}) on RAID disk LVS {}", 
                  volume_id, lvol_uuid, lvs_name);
