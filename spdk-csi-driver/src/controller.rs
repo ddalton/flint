@@ -3117,15 +3117,30 @@ impl ControllerService {
                         }
                         
                         // For now, since this is a compatibility check and we have schema mismatch,
-                        // let's delete the old incompatible resource and let the creation succeed
+                        // let's delete the old incompatible resource and retry creation
                         println!("💡 [SERIALIZATION_DEBUG] Attempting to delete old incompatible SpdkVolume...");
                         if let Err(delete_error) = crd_api.delete(volume_id, &kube::api::DeleteParams::default()).await {
                             println!("⚠️ [SERIALIZATION_DEBUG] Failed to delete old SpdkVolume: {}", delete_error);
+                            return Err(Status::internal(format!("Failed to delete incompatible SpdkVolume: {}", delete_error)));
                         } else {
                             println!("✅ [SERIALIZATION_DEBUG] Deleted old incompatible SpdkVolume");
+                            
+                            // Wait a moment for the deletion to propagate
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            
+                            // Retry creation now that the old resource is gone
+                            println!("🔄 [SERIALIZATION_DEBUG] Retrying SpdkVolume creation after deletion...");
+                            match crd_api.create(&PostParams::default(), &spdk_volume).await {
+                                Ok(created_volume) => {
+                                    println!("✅ [SERIALIZATION_DEBUG] Successfully created SpdkVolume after cleanup: {}", created_volume.metadata.name.as_deref().unwrap_or("unknown"));
+                                    return Ok(created_volume);
+                                },
+                                Err(retry_error) => {
+                                    println!("❌ [SERIALIZATION_DEBUG] Failed to create SpdkVolume even after cleanup: {}", retry_error);
+                                    return Err(Status::internal(format!("Failed to create SpdkVolume after cleanup: {}", retry_error)));
+                                }
+                            }
                         }
-                        
-                        return Err(Status::internal(format!("Failed to validate existing SpdkVolume: {}", get_error)));
                     }
                 }
             },
