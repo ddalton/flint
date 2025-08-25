@@ -81,7 +81,29 @@ impl ControllerService {
     ) -> Result<String, Status> {
         let target_node = &raid_disk.spec.created_on_node;
         let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
-        let lvs_name = raid_disk.spec.lvs_name();
+        
+        // For reuse RAID disks, use the actual LVS name from status, not the computed one
+        let lvs_name = if let Some(raid_name) = &raid_disk.metadata.name {
+            if raid_name.starts_with("reuse-") {
+                // For reuse RAID disks, get the actual LVS name from status
+                if let Some(status) = &raid_disk.status {
+                    if let Some(actual_lvs_name) = &status.lvs_name {
+                        println!("🔍 [LVS_NAME_DEBUG] Using actual LVS name from status: {}", actual_lvs_name);
+                        actual_lvs_name.clone()
+                    } else {
+                        println!("⚠️ [LVS_NAME_DEBUG] Reuse RAID disk has no LVS name in status, falling back to computed");
+                        raid_disk.spec.lvs_name()
+                    }
+                } else {
+                    println!("⚠️ [LVS_NAME_DEBUG] Reuse RAID disk has no status, falling back to computed");
+                    raid_disk.spec.lvs_name()
+                }
+            } else {
+                raid_disk.spec.lvs_name()
+            }
+        } else {
+            raid_disk.spec.lvs_name()
+        };
 
         println!("🔧 [THIN_PROVISION] Creating thin-provisioned logical volume {} ({}GB) on LVS {}", 
                  volume_id, capacity / (1024 * 1024 * 1024), lvs_name);
@@ -516,7 +538,54 @@ impl ControllerService {
         let raids: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let target_node = &raid_disk.spec.created_on_node;
         let spdk_rpc_url = self.driver.get_rpc_url_for_node(target_node).await?;
-        let lvs_name = raid_disk.spec.lvs_name();
+        
+        // For reuse RAID disks, find the actual LVS name from SPDK instead of computing it
+        let lvs_name = if let Some(raid_name) = &raid_disk.metadata.name {
+            if raid_name.starts_with("reuse-") {
+                println!("🔍 [LVS_DISCOVER] Reuse RAID disk detected - finding actual LVS name from SPDK");
+                
+                // Try to find the actual LVS name from SPDK
+                let mut found_lvs_name: Option<String> = None;
+                
+                // Get the base bdev name from the first member
+                if let Some(first_member) = raid_disk.spec.member_disks.first() {
+                    let base_bdev = &first_member.disk_ref;
+                    println!("🔍 [LVS_DISCOVER] Looking for LVS using base bdev: {}", base_bdev);
+                    
+                    // Query SPDK to find LVS that uses this base bdev
+                    if let Ok(lvs_info) = call_spdk_rpc(&spdk_rpc_url, &json!({
+                        "method": "bdev_lvol_get_lvstores",
+                        "params": {}
+                    })).await {
+                        if let Some(lvs_array) = lvs_info["result"].as_array() {
+                            for lvs in lvs_array {
+                                if let Some(lvs_base_bdev) = lvs["base_bdev"].as_str() {
+                                    if lvs_base_bdev == base_bdev {
+                                        if let Some(actual_lvs_name) = lvs["name"].as_str() {
+                                            println!("✅ [LVS_DISCOVER] Found actual LVS name: {}", actual_lvs_name);
+                                            found_lvs_name = Some(actual_lvs_name.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Use found LVS name or fall back to computed
+                if let Some(actual_name) = found_lvs_name {
+                    actual_name
+                } else {
+                    println!("⚠️ [LVS_DISCOVER] Could not find actual LVS name, falling back to computed");
+                    raid_disk.spec.lvs_name()
+                }
+            } else {
+                raid_disk.spec.lvs_name()
+            }
+        } else {
+            raid_disk.spec.lvs_name()
+        };
         
         // Get LVS capacity information
         let mut total_capacity = 0i64;
@@ -1995,6 +2064,7 @@ impl ControllerService {
         println!("🔍 [LVS_REUSE_DEBUG]   device_path: {}", existing_lvs.device_path);
         println!("🔍 [LVS_REUSE_DEBUG]   pci_address: {}", existing_lvs.pci_address);
         println!("🔍 [LVS_REUSE_DEBUG]   serial_number: {}", existing_lvs.serial_number);
+        println!("🔍 [LVS_REUSE_DEBUG]   actual_lvs_name: {}", lvs_name);
         
         let raid_spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_name.clone(),
