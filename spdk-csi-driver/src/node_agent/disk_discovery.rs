@@ -1013,35 +1013,56 @@ impl NodeAgent {
                 }
             })).await;
             
+            println!("🔍 [SPDK_ADD_DEBUG] Userspace driver response: {:?}", response);
+            
             match response {
-                Ok(_) => {
-                    println!("✅ [SPDK_ADD] Successfully attached {} using userspace NVMe driver", device.device_path);
-                    return Ok(());
+                Ok(json_response) => {
+                    // Check if the JSON response contains an error
+                    if let Some(error) = json_response.get("error") {
+                        println!("⚠️ [SPDK_ADD] Userspace driver failed with error: {}. Falling back to AIO.", error);
+                        // Continue to AIO fallback
+                    } else {
+                        println!("✅ [SPDK_ADD] Successfully attached {} using userspace NVMe driver", device.device_path);
+                        return Ok(());
+                    }
                 }
                 Err(e) => {
-                    println!("⚠️ [SPDK_ADD] Failed to attach using userspace driver: {}. Falling back to AIO.", e);
-                    // Don't return error - continue to AIO fallback
+                    println!("⚠️ [SPDK_ADD] RPC call failed for userspace driver: {}. Falling back to AIO.", e);
+                    // Continue to AIO fallback
                 }
             }
         }
         
         // Fallback to AIO (for environments like AWS EC2 that don't support unbinding, or when userspace fails)
         println!("🔄 [SPDK_ADD] Using bdev_aio_create fallback for device {}", device.device_path);
+        println!("🔍 [SPDK_ADD_DEBUG] AIO bdev name: aio-{}, filename: {}", device.serial_number, device.device_path);
         
-        let response = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+        let aio_request = json!({
             "method": "bdev_aio_create",
             "params": {
                 "name": format!("aio-{}", device.serial_number),
                 "filename": device.device_path
             }
-        })).await;
+        });
+        
+        println!("🔍 [SPDK_ADD_DEBUG] AIO request: {}", aio_request);
+        
+        let response = call_spdk_rpc(&self.spdk_rpc_url, &aio_request).await;
+        
+        println!("🔍 [SPDK_ADD_DEBUG] AIO response: {:?}", response);
         
         match response {
-            Ok(_) => {
-                println!("✅ [SPDK_ADD] Successfully added {} using AIO fallback", device.device_path);
+            Ok(json_response) => {
+                // Check if the JSON response contains an error
+                if let Some(error) = json_response.get("error") {
+                    println!("⚠️ [SPDK_ADD] AIO creation failed with error: {}", error);
+                    return Err(format!("AIO bdev creation failed: {}", error).into());
+                } else {
+                    println!("✅ [SPDK_ADD] Successfully added {} using AIO fallback", device.device_path);
+                }
             }
             Err(e) => {
-                println!("⚠️ [SPDK_ADD] Failed to add using AIO: {}", e);
+                println!("⚠️ [SPDK_ADD] AIO RPC call failed: {}", e);
                 return Err(e);
             }
         }
