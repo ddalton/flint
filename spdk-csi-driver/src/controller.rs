@@ -110,9 +110,12 @@ impl ControllerService {
 
         println!("🔍 [THIN_PROVISION_DEBUG] SPDK Response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Invalid JSON".to_string()));
 
-        let lvol_uuid = response["uuid"].as_str()
-            .ok_or_else(|| Status::internal("SPDK response missing lvol UUID"))?
+        // SPDK returns the UUID in the "result" field for bdev_lvol_create
+        let lvol_uuid = response["result"].as_str()
+            .ok_or_else(|| Status::internal("SPDK response missing lvol UUID in result field"))?
             .to_string();
+
+        println!("🔍 [THIN_PROVISION_DEBUG] Extracted lvol UUID: {}", lvol_uuid);
 
         println!("✅ [THIN_PROVISION] Created thin-provisioned lvol {} (UUID: {}) on RAID disk LVS {}", 
                  volume_id, lvol_uuid, lvs_name);
