@@ -10,7 +10,7 @@ use reqwest::Client as HttpClient;
 use serde_json::json;
 use std::os::unix::net::UnixStream;
 use std::io::{Write, Read};
-use spdk_csi_driver::models::{NvmeClientDevice, UblkDevice, UblkDeviceInfo};
+use spdk_csi_driver::models::{NvmeClientDevice, UblkDevice, UblkDeviceInfo, SpdkVolume};
 
 #[derive(Clone)]
 pub struct SpdkCsiDriver {
@@ -512,40 +512,49 @@ impl SpdkCsiDriver {
             return Err("ublk device not found".into());
         }
         
-        // Get device information
-        let device_info = self.get_ublk_device_info(ublk_id).await?;
+        // Get bdev name from volume CRD (more reliable than SPDK RPC)
+        let bdev_name = match self.get_volume_bdev_name(volume_id).await {
+            Ok(name) => name,
+            Err(e) => {
+                println!("⚠️ [UBLK_FIND] Could not get bdev name from volume CRD: {}, using volume_id as fallback", e);
+                volume_id.to_string()
+            }
+        };
+        
+        println!("✅ [UBLK_FIND] Found ublk device {} for volume {} (bdev: {})", expected_device_path, volume_id, bdev_name);
         
         Ok(UblkDevice {
             id: ublk_id,
             device_path: expected_device_path,
             volume_id: volume_id.to_string(),
-            bdev_name: device_info.bdev_name,
-            queue_depth: device_info.queue_depth,
-            block_size: device_info.block_size,
+            bdev_name,
+            queue_depth: 128, // Default queue depth
+            block_size: 512, // Default block size  
             created_at: chrono::Utc::now().to_rfc3339(),
         })
     }
     
-    /// Get ublk device information from SPDK
-    async fn get_ublk_device_info(&self, ublk_id: u32) -> Result<UblkDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
-        let http_client = reqwest::Client::new();
+    /// Get bdev name from volume CRD (bypasses unreliable SPDK RPC)
+    async fn get_volume_bdev_name(&self, volume_id: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let volumes_api: Api<SpdkVolume> = Api::namespaced(self.kube_client.clone(), &self.target_namespace);
+        let volume = volumes_api.get(volume_id).await?;
         
+        if let Some(lvol_uuid) = &volume.spec.lvol_uuid {
+            Ok(lvol_uuid.clone())
+        } else {
+            Err("Volume has no lvol_uuid".into())
+        }
+    }
+    
+    /// Get ublk device information from SPDK (using Unix socket RPC)
+    async fn get_ublk_device_info(&self, ublk_id: u32) -> Result<UblkDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
         let rpc_request = serde_json::json!({
             "method": "ublk_get_disks",
             "params": {}
         });
         
-        let response = http_client
-            .post(&self.spdk_rpc_url)
-            .json(&rpc_request)
-            .send()
-            .await?;
-        
-        if !response.status().is_success() {
-            return Err("Failed to get ublk device list".into());
-        }
-        
-        let response_json: serde_json::Value = response.json().await?;
+        // Use the working Unix socket RPC method instead of HTTP client
+        let response_json = self.call_spdk_rpc(&rpc_request).await?;
         
         if let Some(error) = response_json.get("error") {
             return Err(format!("ublk_get_disks failed: {}", error).into());
