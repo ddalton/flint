@@ -30,9 +30,9 @@ struct AvailableNvmeDisk {
 /// SPDK state information for idempotent operations
 #[derive(Debug, Default)]
 struct SpdkRaidState {
-    pub bdevs: Vec<String>,        // All available bdevs
-    pub raid_bdevs: Vec<String>,   // RAID bdevs specifically
-    pub lvs_stores: Vec<LvsState>, // LVS information
+    pub bdevs: Vec<serde_json::Value>, // All available bdevs (full JSON objects)
+    pub raid_bdevs: Vec<String>,       // RAID bdevs specifically
+    pub lvs_stores: Vec<LvsState>,     // LVS information
 }
 
 #[derive(Debug)]
@@ -203,7 +203,8 @@ impl ControllerService {
 
         println!("🔍 [RAID_SEARCH] Searching for suitable RAID disk among {} existing resources", raid_disk_list.items.len());
 
-        for raid_disk in raid_disk_list.items {
+        // Phase 1: Look for RAID disks that are operational and ready
+        for raid_disk in &raid_disk_list.items {
             // Skip external disks for local provisioning
             if let Some(labels) = &raid_disk.metadata.labels {
                 if labels.get("flint.csi.storage.io/external") == Some(&"true".to_string()) {
@@ -243,7 +244,7 @@ impl ControllerService {
                        raid_disk.spec.can_accommodate_volume(required_capacity, status) {
                         println!("✅ [RAID_SEARCH] Found operational RAID disk: {} with available capacity", 
                                  raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
-                        return Ok(raid_disk);
+                        return Ok(raid_disk.clone());
                     }
                     // For initializing RAID disks, try to complete initialization
                     else if status.state == "initializing" && status.total_capacity_bytes >= required_capacity {
@@ -271,6 +272,63 @@ impl ControllerService {
                 } else {
                     println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but has no status information", 
                              raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                }
+            }
+        }
+
+        // Phase 2: Look for ANY RAID disk using the same device (even if not perfectly suitable)
+        // This prevents creating multiple RAID disks on the same physical device
+        println!("🔍 [RAID_SEARCH] Phase 2: Looking for any RAID disk using the same device to prevent duplicates");
+        
+        for raid_disk in &raid_disk_list.items {
+            // Skip external disks
+            if let Some(labels) = &raid_disk.metadata.labels {
+                if labels.get("flint.csi.storage.io/external") == Some(&"true".to_string()) {
+                    continue;
+                }
+            }
+
+            // Check if this RAID disk uses the same device by matching serial number labels
+            if let Some(labels) = &raid_disk.metadata.labels {
+                if let Some(existing_device_id) = labels.get("flint.csi.storage.io/deviceid") {
+                    // For single replica, we expect AIO_disk as the device identifier
+                    if existing_device_id == "AIO_disk" {
+                        println!("🔄 [RAID_SEARCH] Found existing RAID disk on same device: {} (state: {})", 
+                                 raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
+                                 raid_disk.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"));
+                        
+                        // Reuse this RAID disk regardless of state
+                        if let Some(status) = &raid_disk.status {
+                            match status.state.as_str() {
+                                "online" | "degraded" => {
+                                    println!("✅ [RAID_SEARCH] Reusing operational RAID disk on same device");
+                                    return Ok(raid_disk.clone());
+                                }
+                                "initializing" => {
+                                    println!("🔄 [RAID_SEARCH] Found initializing RAID disk on same device - attempting to complete initialization");
+                                    if let Ok(initialized_raid) = self.try_complete_raid_initialization(&raid_disk).await {
+                                        println!("✅ [RAID_SEARCH] Successfully completed initialization of existing RAID disk");
+                                        return Ok(initialized_raid);
+                                    } else {
+                                        println!("⚠️ [RAID_SEARCH] Failed to complete initialization, but still reusing existing RAID disk");
+                                        return Ok(raid_disk.clone());
+                                    }
+                                }
+                                "failed" => {
+                                    println!("⚠️ [RAID_SEARCH] Found failed RAID disk on same device - attempting recovery");
+                                    // Could add recovery logic here, but for now just reuse
+                                    return Ok(raid_disk.clone());
+                                }
+                                _ => {
+                                    println!("ℹ️ [RAID_SEARCH] Found RAID disk on same device in state '{}' - reusing anyway", status.state);
+                                    return Ok(raid_disk.clone());
+                                }
+                            }
+                        } else {
+                            println!("ℹ️ [RAID_SEARCH] Found RAID disk on same device with no status - reusing anyway");
+                            return Ok(raid_disk.clone());
+                        }
+                    }
                 }
             }
         }
@@ -1733,19 +1791,19 @@ impl ControllerService {
         let bdevs_result = call_spdk_rpc(&target_rpc_url, &json!({"method": "bdev_get_bdevs"})).await
             .map_err(|e| Status::internal(format!("Failed to query bdevs for NVMe-oF export: {}", e)))?;
         
-        let existing_bdev_names: Vec<String> = if let Some(bdevs) = bdevs_result["result"].as_array() {
-            bdevs.iter().filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string())).collect()
-        } else {
-            Vec::new()
-        };
-        
-        let bdev_name = match self.find_existing_bdev_name(&disk.device_path, &existing_bdev_names) {
-            Some(name) => name,
-            None => {
-                let error_msg = format!("No bdev found for device {} - cannot create NVMe-oF export", disk.device_path);
-                println!("❌ [NVMEOF_CREATE] {}", error_msg);
-                return Err(Status::internal(error_msg));
+        let bdev_name = if let Some(bdevs) = bdevs_result["result"].as_array() {
+            match self.find_existing_bdev_name(&disk.device_path, bdevs) {
+                Some(name) => name,
+                None => {
+                    let error_msg = format!("No bdev found for device {} - cannot create NVMe-oF export", disk.device_path);
+                    println!("❌ [NVMEOF_CREATE] {}", error_msg);
+                    return Err(Status::internal(error_msg));
+                }
             }
+        } else {
+            let error_msg = "Failed to parse bdev list for NVMe-oF export".to_string();
+            println!("❌ [NVMEOF_CREATE] {}", error_msg);
+            return Err(Status::internal(error_msg));
         };
         
         // Create NVMe-oF subsystem for this specific disk
@@ -1980,11 +2038,7 @@ impl ControllerService {
                     Ok(bdev_data) => {
                         // Check if our bdev exists in the list with either naming convention
                         if let Some(bdevs) = bdev_data["result"].as_array() {
-                            let existing_bdev_names: Vec<String> = bdevs.iter()
-                                .filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string()))
-                                .collect();
-                            
-                            if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, &existing_bdev_names) {
+                            if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, bdevs) {
                                 println!("✅ [BDEV_ENSURE] Local bdev already available: {}", existing_bdev_name);
                                 Ok(())
                             } else {
@@ -2330,18 +2384,25 @@ impl ControllerService {
         let bdevs_result = call_spdk_rpc(rpc_url, &json!({"method": "bdev_get_bdevs"})).await
             .map_err(|e| Status::internal(format!("Failed to query bdevs: {}", e)))?;
         
-        let bdevs: Vec<String> = if let Some(bdev_array) = bdevs_result["result"].as_array() {
-            bdev_array.iter()
-                .filter_map(|b| b["name"].as_str().map(|s| s.to_string()))
-                .collect()
+        let bdevs: Vec<serde_json::Value> = if let Some(bdev_array) = bdevs_result["result"].as_array() {
+            bdev_array.clone()
         } else {
             Vec::new()
         };
         
         // Filter RAID bdevs (those created by bdev_raid_create)
         let raid_bdevs: Vec<String> = bdevs.iter()
-            .filter(|name| name.starts_with("raid_") || name.contains("raid"))
-            .cloned()
+            .filter_map(|bdev| {
+                if let Some(name) = bdev["name"].as_str() {
+                    if name.starts_with("raid_") || name.contains("raid") {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
             .collect();
         
         // Query LVS stores
@@ -2395,17 +2456,38 @@ impl ControllerService {
         ]
     }
     
-    /// Find actual bdev name from hardware_id by checking which one exists in SPDK
-    /// Returns the first matching bdev name, or None if neither exists
-    fn find_existing_bdev_name(&self, hardware_id: &str, existing_bdevs: &[String]) -> Option<String> {
+    /// Find actual bdev name from hardware_id by matching device path in SPDK state
+    /// Returns the first matching bdev name, or None if no bdev points to this device
+    fn find_existing_bdev_name(&self, hardware_id: &str, spdk_bdevs: &[serde_json::Value]) -> Option<String> {
+        // First try the traditional name-based approach for backwards compatibility
+        let existing_bdev_names: Vec<String> = spdk_bdevs.iter()
+            .filter_map(|bdev| bdev["name"].as_str().map(|s| s.to_string()))
+            .collect();
+            
         let possible_names = self.generate_possible_bdev_names(hardware_id);
-        
-        for name in possible_names {
-            if existing_bdevs.contains(&name) {
-                return Some(name);
+        for name in &possible_names {
+            if existing_bdev_names.contains(name) {
+                return Some(name.clone());
             }
         }
         
+        // If name-based lookup fails, search by device path (for UUID-named bdevs)
+        for bdev in spdk_bdevs {
+            if let Some(driver_specific) = bdev.get("driver_specific") {
+                if let Some(aio) = driver_specific.get("aio") {
+                    if let Some(filename) = aio.get("filename").and_then(|f| f.as_str()) {
+                        if filename == hardware_id {
+                            if let Some(bdev_name) = bdev.get("name").and_then(|n| n.as_str()) {
+                                println!("✅ [BDEV_DISCOVERY] Found bdev '{}' for device '{}' by path matching", bdev_name, hardware_id);
+                                return Some(bdev_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("❌ [BDEV_DISCOVERY] No bdev found for device '{}' (tried names: {:?})", hardware_id, possible_names);
         None
     }
 
