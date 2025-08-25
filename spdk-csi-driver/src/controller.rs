@@ -86,18 +86,29 @@ impl ControllerService {
         println!("🔧 [THIN_PROVISION] Creating thin-provisioned logical volume {} ({}GB) on LVS {}", 
                  volume_id, capacity / (1024 * 1024 * 1024), lvs_name);
 
-        // Create thin-provisioned logical volume on the RAID disk's LVS
-        let response = call_spdk_rpc(&spdk_rpc_url, &json!({
+        // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+        let size_in_mib = (capacity + 1048575) / 1048576; // Round up to nearest MiB
+        
+        let lvol_request = json!({
             "method": "bdev_lvol_create",
             "params": {
-                "lvol_name": volume_id,
-                "size": capacity,
                 "lvs_name": lvs_name,
+                "lvol_name": volume_id,
+                "size_in_mib": size_in_mib,
                 "thin_provision": true,  // Enable thin provisioning for efficient storage usage
                 "clear_method": "none"   // Don't clear blocks on allocation for performance
             }
-        })).await
+        });
+
+        println!("🔍 [THIN_PROVISION_DEBUG] SPDK RPC URL: {}", spdk_rpc_url);
+        println!("🔍 [THIN_PROVISION_DEBUG] Request JSON: {}", serde_json::to_string_pretty(&lvol_request).unwrap_or_else(|_| "Invalid JSON".to_string()));
+        println!("🔍 [THIN_PROVISION_DEBUG] Size conversion: {} bytes -> {} MiB", capacity, size_in_mib);
+
+        // Create thin-provisioned logical volume on the RAID disk's LVS
+        let response = call_spdk_rpc(&spdk_rpc_url, &lvol_request).await
         .map_err(|e| Status::internal(format!("Failed to create thin-provisioned lvol on RAID disk: {}", e)))?;
+
+        println!("🔍 [THIN_PROVISION_DEBUG] SPDK Response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Invalid JSON".to_string()));
 
         let lvol_uuid = response["uuid"].as_str()
             .ok_or_else(|| Status::internal("SPDK response missing lvol UUID"))?

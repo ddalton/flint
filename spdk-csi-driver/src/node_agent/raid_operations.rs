@@ -203,17 +203,25 @@ pub async fn create_logical_volume(
         }
     }
 
-    // Create the logical volume
-    let create_lvol = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
+    // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
+    let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
+    
+    let lvol_request = json!({
         "method": "bdev_lvol_create",
         "params": {
-            "lvol_name": lvol_name,
-            "size": size_bytes,
             "lvs_name": lvs_name,
+            "lvol_name": lvol_name,
+            "size_in_mib": size_in_mib,
             "thin_provision": true,    // Enable thin provisioning for efficient storage usage
             "clear_method": "none"     // Don't clear blocks on allocation for performance
         }
-    })).await;
+    });
+
+    println!("🔍 [LVOL_DEBUG] Request JSON: {}", serde_json::to_string_pretty(&lvol_request).unwrap_or_else(|_| "Invalid JSON".to_string()));
+    println!("🔍 [LVOL_DEBUG] Size conversion: {} bytes -> {} MiB", size_bytes, size_in_mib);
+
+    // Create the logical volume
+    let create_lvol = call_spdk_rpc(&agent.spdk_rpc_url, &lvol_request).await;
 
     match create_lvol {
         Ok(_response) => {
