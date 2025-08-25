@@ -2579,7 +2579,7 @@ impl ControllerService {
         self.validate_volume_request(volume_id, capacity, num_replicas).await?;
         
         // Unified RAID-based provisioning: always RAID1
-        let desired_raid_level = "1";
+        let desired_raid_level = "raid1";  // Fixed: match existing RAID disk format
         let (storage_backend, lvol_uuid, lvs_name, raid_disk) = {
             let raid_disk = self.find_or_create_raid_disk(num_replicas, capacity, desired_raid_level).await?;
             let lvol_uuid = self.create_volume_lvol_on_raid(&raid_disk, capacity, volume_id).await?;
