@@ -1035,7 +1035,7 @@ impl ControllerService {
 
         let spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_id.clone(),
-            raid_level: format!("raid{}", raid_level),  // Changed from "1" to "raid1" per schema
+            raid_level: raid_level.to_string(),  // raid_level is already "raid1", no need for format
             num_member_disks: member_disks.len() as i32,
             member_disks,
             stripe_size_kb: 1024, // 1MB default stripe size
