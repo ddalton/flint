@@ -851,7 +851,7 @@ impl ControllerService {
                 capacity_bytes: disk.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
-                binding_approach: None, // Will be set when bdev is actually created
+                binding_approach: Some("aio-fallback".to_string()), // AIO bdev supports non-NVMe devices via kernel drivers
             }
         }).collect();
 
@@ -1636,7 +1636,7 @@ impl ControllerService {
                 capacity_bytes: existing_lvs.capacity,
                 connected: true,
                 last_health_check: Some(chrono::Utc::now().to_rfc3339()),
-                binding_approach: None, // Legacy LVS, binding approach unknown
+                binding_approach: Some("aio-fallback".to_string()), // Default to AIO for legacy LVS
             }],
             stripe_size_kb: 1024, // Default stripe size for LVS reuse
             superblock_enabled: true,

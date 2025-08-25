@@ -864,7 +864,7 @@ async fn create_raid_disk(req: CreateRaidDiskRequest, state: AppState) -> Result
             capacity_bytes: 0, // Will be populated when actual disk is connected
             connected: false,
             last_health_check: None,
-            binding_approach: None, // Will be set when bdev is actually created
+            binding_approach: Some("aio-fallback".to_string()), // Default AIO approach for dashboard backend
         }
     }).collect();
 

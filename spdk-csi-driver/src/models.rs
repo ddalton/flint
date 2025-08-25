@@ -140,6 +140,46 @@ pub struct SpdkRaidDiskStatus {
     pub raid_status: Option<RaidStatus>,         // Detailed RAID status from SPDK
 }
 
+/// Sanitize a string to be a valid Kubernetes label value
+/// Kubernetes label values must:
+/// - Start and end with alphanumeric characters
+/// - Middle can contain alphanumeric, '-', '_', '.'
+/// - Max 63 characters
+/// - Regex: (([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?
+fn sanitize_k8s_label_value(input: &str) -> String {
+    if input.is_empty() {
+        return "unknown".to_string();
+    }
+    
+    // Replace invalid characters with underscores
+    let mut sanitized = input.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect::<String>();
+    
+    // Ensure it starts with alphanumeric
+    if !sanitized.chars().next().unwrap_or('_').is_alphanumeric() {
+        sanitized = format!("x{}", sanitized);
+    }
+    
+    // Ensure it ends with alphanumeric
+    if !sanitized.chars().last().unwrap_or('_').is_alphanumeric() {
+        sanitized.push('x');
+    }
+    
+    // Truncate to 63 characters max, ensuring still ends with alphanumeric
+    if sanitized.len() > 63 {
+        sanitized = sanitized.chars().take(62).collect::<String>();
+        if !sanitized.chars().last().unwrap_or('_').is_alphanumeric() {
+            sanitized.push('x');
+        }
+    }
+    
+    sanitized
+}
+
 impl SpdkRaidDisk {
     /// Create a new SpdkRaidDisk with metadata
     pub fn new_with_metadata(name: &str, spec: SpdkRaidDiskSpec, namespace: &str) -> Self {
@@ -171,7 +211,8 @@ impl SpdkRaidDisk {
         
         // Add deviceid label if provided (serial number of the local disk)
         if let Some(id) = deviceid {
-            labels.insert("flint.csi.storage.io/deviceid".to_string(), id);
+            let sanitized_id = sanitize_k8s_label_value(&id);
+            labels.insert("flint.csi.storage.io/deviceid".to_string(), sanitized_id);
         }
         
         // Add external label (boolean)
