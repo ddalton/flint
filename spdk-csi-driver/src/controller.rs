@@ -1277,19 +1277,36 @@ impl ControllerService {
         Ok(available_disks)
     }
 
-    /// Check if a bdev is currently in use by any RAID or volume
+    /// Check if a bdev is currently in use by any ACTIVE/OPERATIONAL RAID or volume
     async fn is_bdev_in_use(&self, _node: &str, bdev_name: &str) -> bool {
-        // Query existing RAID disks to see if this bdev is used as a member
+        // Query existing RAID disks to see if this bdev is used as a member in OPERATIONAL raids
         let raids_api: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         if let Ok(raids) = raids_api.list(&ListParams::default()).await {
             for raid in raids.items {
-                for member in &raid.spec.member_disks {
-                    if let Some(hardware_id) = &member.hardware_id {
-                        if hardware_id.contains(bdev_name) {
-                            return true;
+                // Only consider RAID disks that are operational (not initializing/failed)
+                let is_operational = if let Some(status) = &raid.status {
+                    matches!(status.state.as_str(), "online" | "degraded") && status.active_member_count > 0
+                } else {
+                    false
+                };
+                
+                // Only check members if the RAID is operational
+                if is_operational {
+                    for member in &raid.spec.member_disks {
+                        if let Some(hardware_id) = &member.hardware_id {
+                            if hardware_id.contains(bdev_name) {
+                                println!("🔒 [BDEV_IN_USE] Device {} is in use by operational RAID: {}", 
+                                         bdev_name, raid.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                                return true;
+                            }
                         }
                     }
+                } else {
+                    println!("🔄 [BDEV_AVAILABLE] RAID {} is not operational (state: {:?}), device {} remains available", 
+                             raid.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
+                             raid.status.as_ref().map(|s| &s.state),
+                             bdev_name);
                 }
             }
         }
