@@ -84,25 +84,69 @@ impl ControllerService {
         
         // For reuse RAID disks, use the actual LVS name from status, not the computed one
         let lvs_name = if let Some(raid_name) = &raid_disk.metadata.name {
+            println!("🔍 [LVS_NAME_DEBUG] Processing RAID disk: {}", raid_name);
             if raid_name.starts_with("reuse-") {
+                println!("🔍 [LVS_NAME_DEBUG] Detected reuse RAID disk, checking status for actual LVS name");
                 // For reuse RAID disks, get the actual LVS name from status
                 if let Some(status) = &raid_disk.status {
+                    println!("🔍 [LVS_NAME_DEBUG] RAID disk has status: {:?}", status.lvs_name);
                     if let Some(actual_lvs_name) = &status.lvs_name {
                         println!("🔍 [LVS_NAME_DEBUG] Using actual LVS name from status: {}", actual_lvs_name);
-                        actual_lvs_name.clone()
+                        
+                        // Double-check: query SPDK to verify this LVS actually exists
+                        println!("🔍 [LVS_NAME_DEBUG] Verifying LVS {} exists in SPDK...", actual_lvs_name);
+                        if let Ok(lvs_info) = call_spdk_rpc(&spdk_rpc_url, &json!({
+                            "method": "bdev_lvol_get_lvstores",
+                            "params": {}
+                        })).await {
+                            if let Some(lvs_array) = lvs_info["result"].as_array() {
+                                let existing_lvs_names: Vec<String> = lvs_array.iter()
+                                    .filter_map(|lvs| lvs["name"].as_str().map(|s| s.to_string()))
+                                    .collect();
+                                println!("🔍 [LVS_NAME_DEBUG] SPDK has these LVS stores: {:?}", existing_lvs_names);
+                                
+                                if existing_lvs_names.contains(actual_lvs_name) {
+                                    println!("✅ [LVS_NAME_DEBUG] Confirmed: LVS {} exists in SPDK", actual_lvs_name);
+                                    actual_lvs_name.clone()
+                                } else {
+                                    println!("❌ [LVS_NAME_DEBUG] ERROR: LVS {} NOT found in SPDK! Using first available LVS", actual_lvs_name);
+                                    if let Some(first_lvs) = existing_lvs_names.first() {
+                                        println!("🔧 [LVS_NAME_DEBUG] Fallback: Using first LVS: {}", first_lvs);
+                                        first_lvs.clone()
+                                    } else {
+                                        println!("⚠️ [LVS_NAME_DEBUG] No LVS found in SPDK, using status name anyway");
+                                        actual_lvs_name.clone()
+                                    }
+                                }
+                            } else {
+                                println!("⚠️ [LVS_NAME_DEBUG] Failed to query SPDK LVS, using status name anyway");
+                                actual_lvs_name.clone()
+                            }
+                        } else {
+                            println!("⚠️ [LVS_NAME_DEBUG] SPDK RPC call failed, using status name anyway");
+                            actual_lvs_name.clone()
+                        }
                     } else {
                         println!("⚠️ [LVS_NAME_DEBUG] Reuse RAID disk has no LVS name in status, falling back to computed");
-                        raid_disk.spec.lvs_name()
+                        let computed = raid_disk.spec.lvs_name();
+                        println!("🔍 [LVS_NAME_DEBUG] Computed LVS name: {}", computed);
+                        computed
                     }
                 } else {
                     println!("⚠️ [LVS_NAME_DEBUG] Reuse RAID disk has no status, falling back to computed");
-                    raid_disk.spec.lvs_name()
+                    let computed = raid_disk.spec.lvs_name();
+                    println!("🔍 [LVS_NAME_DEBUG] Computed LVS name: {}", computed);
+                    computed
                 }
             } else {
-                raid_disk.spec.lvs_name()
+                let computed = raid_disk.spec.lvs_name();
+                println!("🔍 [LVS_NAME_DEBUG] Normal RAID disk, using computed LVS name: {}", computed);
+                computed
             }
         } else {
-            raid_disk.spec.lvs_name()
+            let computed = raid_disk.spec.lvs_name();
+            println!("🔍 [LVS_NAME_DEBUG] No RAID name, using computed LVS name: {}", computed);
+            computed
         };
 
         println!("🔧 [THIN_PROVISION] Creating thin-provisioned logical volume {} ({}GB) on LVS {}", 
@@ -383,7 +427,28 @@ impl ControllerService {
 
         // Phase 2: Look for ANY RAID disk using the same device (even if not perfectly suitable)
         // This prevents creating multiple RAID disks on the same physical device
-        println!("🔍 [RAID_SEARCH] Phase 2: Looking for any RAID disk using the same device to prevent duplicates");
+        println!("🔍 [RAID_SEARCH] Phase 2: Looking for RAID disks using currently available devices to prevent duplicates");
+        
+        // First, discover what devices are currently available for provisioning
+        let available_devices = match self.find_available_local_nvme_disks(required_capacity).await {
+            Ok(devices) => devices,
+            Err(e) => {
+                println!("⚠️ [RAID_SEARCH] Could not discover available devices: {}", e);
+                return Err(Status::not_found("No suitable RAID disk found"));
+            }
+        };
+        
+        // Collect the serial numbers of currently available devices
+        let mut available_device_serials = std::collections::HashSet::new();
+        for device in &available_devices {
+            available_device_serials.insert(device.serial_number.clone());
+            println!("📀 [RAID_SEARCH] Available device serial: {}", device.serial_number);
+        }
+        
+        if available_device_serials.is_empty() {
+            println!("❌ [RAID_SEARCH] No available devices found for provisioning");
+            return Err(Status::not_found("No available devices for RAID provisioning"));
+        }
         
         for raid_disk in &raid_disk_list.items {
             // Skip external disks
@@ -393,12 +458,13 @@ impl ControllerService {
                 }
             }
 
-            // Check if this RAID disk uses the same device by matching serial number labels
+            // Check if this RAID disk uses one of the currently available devices
             if let Some(labels) = &raid_disk.metadata.labels {
                 if let Some(existing_device_id) = labels.get("flint.csi.storage.io/deviceid") {
-                    // For single replica, we expect AIO_disk as the device identifier
-                    if existing_device_id == "AIO_disk" {
-                        println!("🔄 [RAID_SEARCH] Found existing RAID disk on same device: {} (state: {})", 
+                    // Check if this deviceid matches any of our available devices
+                    if available_device_serials.contains(existing_device_id) {
+                        println!("🎯 [RAID_SEARCH] Found existing RAID disk using available device serial {}: {} (state: {})", 
+                                 existing_device_id,
                                  raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()),
                                  raid_disk.status.as_ref().map(|s| s.state.as_str()).unwrap_or("unknown"));
                         
@@ -575,10 +641,13 @@ impl ControllerService {
                 
                 // Use found LVS name or fall back to computed
                 if let Some(actual_name) = found_lvs_name {
+                    println!("🎯 [LVS_DISCOVER] Will use discovered LVS name: {}", actual_name);
                     actual_name
                 } else {
                     println!("⚠️ [LVS_DISCOVER] Could not find actual LVS name, falling back to computed");
-                    raid_disk.spec.lvs_name()
+                    let computed = raid_disk.spec.lvs_name();
+                    println!("🔍 [LVS_DISCOVER] Computed fallback LVS name: {}", computed);
+                    computed
                 }
             } else {
                 raid_disk.spec.lvs_name()
@@ -586,6 +655,8 @@ impl ControllerService {
         } else {
             raid_disk.spec.lvs_name()
         };
+        
+        println!("🎯 [LVS_DISCOVER] Final LVS name for RAID status: {}", lvs_name);
         
         // Get LVS capacity information
         let mut total_capacity = 0i64;
@@ -1865,10 +1936,44 @@ impl ControllerService {
                         println!("🔍 [LVS_REUSE_DEBUG]   LVS name: {}", name);
                         println!("🔍 [LVS_REUSE_DEBUG]   Base bdev: {}", base_bdev);
                         println!("🔍 [LVS_REUSE_DEBUG]   Device path (marker): existing-lvs:{}", name);
+                        
+                        // Get the ACTUAL device serial number from the base bdev, not a fake LVS-based one
+                        let mut actual_serial_number = format!("unknown-{}", base_bdev); // Fallback
+                        
+                        // Extract the REAL hardware serial number from the base bdev name
+                        // Pattern: aio-{hardware_serial} -> extract {hardware_serial}
+                        if base_bdev.starts_with("aio-") {
+                            actual_serial_number = base_bdev.strip_prefix("aio-").unwrap_or(&base_bdev).to_string();
+                            println!("✅ [LVS_REUSE_DEBUG] Extracted REAL hardware serial from bdev name: {} -> {}", base_bdev, actual_serial_number);
+                        } else {
+                            // Query SPDK to get more details if needed
+                            if let Ok(bdev_info) = call_spdk_rpc(&spdk_rpc_url, &json!({
+                                "method": "bdev_get_bdevs",
+                                "params": {}
+                            })).await {
+                                if let Some(bdevs) = bdev_info["result"].as_array() {
+                                    for bdev in bdevs {
+                                        if let Some(bdev_name) = bdev["name"].as_str() {
+                                            if bdev_name == base_bdev {
+                                                // Use the bdev UUID as fallback
+                                                if let Some(uuid) = bdev.get("uuid").and_then(|u| u.as_str()) {
+                                                    actual_serial_number = uuid.to_string();
+                                                    println!("✅ [LVS_REUSE_DEBUG] Using bdev UUID as serial: {}", actual_serial_number);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        println!("🔍 [LVS_REUSE_DEBUG]   REAL serial number: {}", actual_serial_number);
+                        
                         available_storage.push(AvailableNvmeDisk {
                             node_id: node.to_string(),
                             device_path: format!("existing-lvs:{}", name),  // Special marker
-                            serial_number: format!("lvs-{}", name),
+                            serial_number: actual_serial_number,  // ✅ Use REAL device serial, not fake LVS name
                             wwn: None,
                             model: "Existing LVS".to_string(),
                             vendor: "SPDK".to_string(),
