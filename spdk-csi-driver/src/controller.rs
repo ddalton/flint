@@ -335,7 +335,8 @@ impl ControllerService {
                                  status.state);
                     }
                 } else {
-                    let raid_name = raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string());
+                    let unknown_name = "unknown".to_string();
+                    let raid_name = raid_disk.metadata.name.as_ref().unwrap_or(&unknown_name);
                     println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but has no status information", raid_name);
                     
                     // Special handling for reuse-lvs-* disks that represent existing LVS
@@ -717,11 +718,7 @@ impl ControllerService {
                 
                 // Check if this bdev already has an LVS (for existing LVS reuse)
                 let lvs_exists = current_spdk_state.lvs_stores.iter().any(|lvs| {
-                    if let Some(base_bdev) = lvs.get("base_bdev").and_then(|b| b.as_str()) {
-                        base_bdev == existing_bdev_name
-                    } else {
-                        false
-                    }
+                    lvs.base_bdev == existing_bdev_name
                 });
                 
                 if lvs_exists {
@@ -729,7 +726,7 @@ impl ControllerService {
                     println!("🚀 [RAID_INIT] Skipping RAID/LVS creation and proceeding to operational status");
                     
                     // Update RAID disk status to operational since LVS already exists
-                    self.update_raid_disk_status_operational(raid_disk, &existing_bdev_name, &current_spdk_state.lvs_stores).await?;
+                    self.update_raid_disk_status_operational(raid_disk).await?;
                     return Ok(());
                 }
             } else {
