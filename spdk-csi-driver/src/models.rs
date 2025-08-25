@@ -537,9 +537,13 @@ pub struct SpdkVolumeSpec {
     pub nvmeof_target_port: Option<u16>,
     
     // Legacy replica-based architecture (deprecated, for backward compatibility during migration)
+    #[serde(default)]
     pub replicas: Vec<Replica>,
+    #[serde(default)]
     pub primary_lvol_uuid: Option<String>,
+    #[serde(default)]
     pub write_ordering_enabled: bool,
+    #[serde(default)]
     pub raid_auto_rebuild: bool,
     
     // Scheduling and optimization fields
