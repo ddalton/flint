@@ -3055,6 +3055,7 @@ impl ControllerService {
                     &kube::api::ApiResource {
                         group: "flint.csi.storage.io".to_string(),
                         version: "v1".to_string(),
+                        api_version: "flint.csi.storage.io/v1".to_string(),
                         kind: "SpdkVolume".to_string(),
                         plural: "spdkvolumes".to_string(),
                     }
