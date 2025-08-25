@@ -1755,6 +1755,10 @@ impl ControllerService {
                                name, free_bytes / (1024 * 1024 * 1024));
                         
                         // Create a virtual "disk" representing this LVS capacity
+                        println!("🔍 [LVS_REUSE_DEBUG] Creating AvailableNvmeDisk for existing LVS:");
+                        println!("🔍 [LVS_REUSE_DEBUG]   LVS name: {}", name);
+                        println!("🔍 [LVS_REUSE_DEBUG]   Base bdev: {}", base_bdev);
+                        println!("🔍 [LVS_REUSE_DEBUG]   Device path (marker): existing-lvs:{}", name);
                         available_storage.push(AvailableNvmeDisk {
                             node_id: node.to_string(),
                             device_path: format!("existing-lvs:{}", name),  // Special marker
@@ -1950,6 +1954,10 @@ impl ControllerService {
         
         let raid_name = format!("reuse-{}", lvs_name);
         println!("🔄 [LVS_REUSE] Creating RAID CRD for existing LVS: {} -> {}", lvs_name, raid_name);
+        println!("🔍 [LVS_REUSE_DEBUG] AvailableNvmeDisk values:");
+        println!("🔍 [LVS_REUSE_DEBUG]   device_path: {}", existing_lvs.device_path);
+        println!("🔍 [LVS_REUSE_DEBUG]   pci_address: {}", existing_lvs.pci_address);
+        println!("🔍 [LVS_REUSE_DEBUG]   serial_number: {}", existing_lvs.serial_number);
         
         let raid_spec = SpdkRaidDiskSpec {
             raid_disk_id: raid_name.clone(),
@@ -1959,7 +1967,7 @@ impl ControllerService {
                 member_index: 0,
                 node_id: existing_lvs.node_id.clone(),
                 disk_ref: existing_lvs.pci_address.clone(), // Base bdev name
-                hardware_id: Some(existing_lvs.pci_address.clone()),
+                hardware_id: Some(existing_lvs.pci_address.clone()),  // This should be the real base bdev name
                 serial_number: Some(existing_lvs.serial_number.clone()),
                 wwn: existing_lvs.wwn.clone(),
                 model: Some(existing_lvs.model.clone()),
