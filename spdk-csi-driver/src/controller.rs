@@ -335,8 +335,25 @@ impl ControllerService {
                                  status.state);
                     }
                 } else {
-                    println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but has no status information", 
-                             raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string()));
+                    let raid_name = raid_disk.metadata.name.as_ref().unwrap_or(&"unknown".to_string());
+                    println!("⚠️ [RAID_SEARCH] RAID disk {} matches criteria but has no status information", raid_name);
+                    
+                    // Special handling for reuse-lvs-* disks that represent existing LVS
+                    if raid_name.starts_with("reuse-lvs-") {
+                        println!("💡 [RAID_SEARCH] Found reuse-lvs disk without status - attempting to initialize it");
+                        
+                        // Try to initialize this reuse-lvs RAID disk
+                        if let Ok(initialized_raid) = self.try_complete_raid_initialization(&raid_disk).await {
+                            if let Some(init_status) = &initialized_raid.status {
+                                if initialized_raid.spec.can_accommodate_volume(required_capacity, init_status) {
+                                    println!("✅ [RAID_SEARCH] Successfully initialized reuse-lvs RAID disk: {}", raid_name);
+                                    return Ok(initialized_raid);
+                                }
+                            }
+                        } else {
+                            println!("⚠️ [RAID_SEARCH] Failed to initialize reuse-lvs disk {}, but continuing search", raid_name);
+                        }
+                    }
                 }
             }
         }
@@ -690,8 +707,31 @@ impl ControllerService {
         for (index, member) in raid_disk.spec.member_disks.iter().enumerate() {
             let hardware_id = member.hardware_id.as_ref().unwrap();
             
+            println!("🔍 [RAID_INIT_DEBUG] Member {} details:", index);
+            println!("🔍 [RAID_INIT_DEBUG]   hardware_id: {}", hardware_id);
+            println!("🔍 [RAID_INIT_DEBUG]   disk_ref: {}", member.disk_ref);
+            println!("🔍 [RAID_INIT_DEBUG]   node_id: {}", member.node_id);
+            
             if let Some(existing_bdev_name) = self.find_existing_bdev_name(hardware_id, &current_spdk_state.bdevs) {
                 println!("✅ [RAID_INIT] Member {} bdev already exists: {}", index, existing_bdev_name);
+                
+                // Check if this bdev already has an LVS (for existing LVS reuse)
+                let lvs_exists = current_spdk_state.lvs_stores.iter().any(|lvs| {
+                    if let Some(base_bdev) = lvs.get("base_bdev").and_then(|b| b.as_str()) {
+                        base_bdev == existing_bdev_name
+                    } else {
+                        false
+                    }
+                });
+                
+                if lvs_exists {
+                    println!("💡 [RAID_INIT] Bdev {} already has LVS - this is an existing LVS reuse scenario", existing_bdev_name);
+                    println!("🚀 [RAID_INIT] Skipping RAID/LVS creation and proceeding to operational status");
+                    
+                    // Update RAID disk status to operational since LVS already exists
+                    self.update_raid_disk_status_operational(raid_disk, &existing_bdev_name, &current_spdk_state.lvs_stores).await?;
+                    return Ok(());
+                }
             } else {
                 println!("🔧 [RAID_INIT] Creating missing member {} bdev for device: {}", index, hardware_id);
                 self.ensure_member_bdev_available(&spdk_rpc_url, member, index).await?;
@@ -1991,11 +2031,28 @@ impl ControllerService {
         // Note: Don't set status here - Kubernetes doesn't allow setting .status via API
         // The controller will detect this RAID disk and set the status appropriately
         
-        // Create the CRD in Kubernetes
+        // Create the CRD in Kubernetes (idempotent)
         let raids_api: Api<SpdkRaidDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         
         println!("🔍 [LVS_REUSE_DEBUG] About to create RAID CRD in namespace: {}", self.driver.target_namespace);
         println!("🔍 [LVS_REUSE_DEBUG] RAID CRD spec: {:#?}", raid_disk.spec);
+        
+        // Check if RAID disk already exists (idempotent creation)
+        match raids_api.get(&raid_name).await {
+            Ok(existing_raid) => {
+                println!("✅ [LVS_REUSE] RAID disk {} already exists, reusing it", raid_name);
+                println!("🔍 [LVS_REUSE_DEBUG] Existing RAID status: {:?}", existing_raid.status);
+                return Ok(existing_raid);
+            }
+            Err(kube::Error::Api(kube::core::ErrorResponse { code: 404, .. })) => {
+                println!("🔍 [LVS_REUSE] RAID disk {} doesn't exist, creating new one", raid_name);
+                // Continue with creation
+            }
+            Err(e) => {
+                println!("❌ [LVS_REUSE] Error checking existing RAID disk: {}", e);
+                return Err(Status::internal(format!("Failed to check existing RAID CRD: {}", e)));
+            }
+        }
         
         let created_raid = raids_api.create(&kube::api::PostParams::default(), &raid_disk).await
             .map_err(|e| {
