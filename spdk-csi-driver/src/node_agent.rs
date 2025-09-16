@@ -1643,8 +1643,14 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
         }
     })).await;
     
-    if kernel_result.is_ok() {
-        return Ok(true);
+    if let Ok(response) = kernel_result {
+        // Check if bdev actually exists in the response
+        if let Some(bdevs) = response["result"].as_array() {
+            if !bdevs.is_empty() {
+                println!("✅ [HEALTH_CHECK] Found kernel bdev: {}", kernel_bdev_name);
+                return Ok(true);
+            }
+        }
     }
     
     // Try direct controller bdev for userspace devices
@@ -1655,9 +1661,18 @@ async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<b
         }
     })).await;
     
-    if direct_result.is_ok() {
-        return Ok(true);
+    if let Ok(response) = direct_result {
+        // Check if bdev actually exists in the response
+        if let Some(bdevs) = response["result"].as_array() {
+            if !bdevs.is_empty() {
+                println!("✅ [HEALTH_CHECK] Found direct bdev: {}", direct_bdev_name);
+                return Ok(true);
+            }
+        }
     }
+    
+    println!("⚠️ [HEALTH_CHECK] No accessible bdev found for device: {} (tried {} and {})", 
+             device.controller_id, kernel_bdev_name, direct_bdev_name);
     
     // Additional health checks could be added here
     // - SMART data analysis
