@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     libgrpc++-dev \
     protobuf-compiler-grpc \
+    # Boost libraries for Crow
+    libboost-all-dev \
     # Additional build tools
     python3 \
     python3-pip \
