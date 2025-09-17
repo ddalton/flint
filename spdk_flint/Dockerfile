@@ -42,18 +42,7 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ulfius from source (for latest version)
-RUN git clone https://github.com/babelouest/ulfius.git /tmp/ulfius && \
-    cd /tmp/ulfius && \
-    git checkout v2.7.15 && \
-    mkdir build && cd build && \
-    cmake .. && \
-    make && \
-    make install && \
-    ldconfig && \
-    rm -rf /tmp/ulfius
-
-# Install Orcania (Ulfius dependency)
+# Install Orcania (Ulfius dependency) - must be installed first
 RUN git clone https://github.com/babelouest/orcania.git /tmp/orcania && \
     cd /tmp/orcania && \
     git checkout v2.3.3 && \
@@ -64,7 +53,7 @@ RUN git clone https://github.com/babelouest/orcania.git /tmp/orcania && \
     ldconfig && \
     rm -rf /tmp/orcania
 
-# Install Yder (Ulfius dependency)
+# Install Yder (Ulfius dependency) - must be installed before Ulfius
 RUN git clone https://github.com/babelouest/yder.git /tmp/yder && \
     cd /tmp/yder && \
     git checkout v1.4.20 && \
@@ -74,6 +63,17 @@ RUN git clone https://github.com/babelouest/yder.git /tmp/yder && \
     make install && \
     ldconfig && \
     rm -rf /tmp/yder
+
+# Install Ulfius from source (for latest version)
+RUN git clone https://github.com/babelouest/ulfius.git /tmp/ulfius && \
+    cd /tmp/ulfius && \
+    git checkout v2.7.15 && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/ulfius
 
 # Build and install SPDK
 RUN git clone --depth 1 --branch v${SPDK_VERSION} https://github.com/spdk/spdk /tmp/spdk && \
