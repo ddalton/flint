@@ -1,289 +1,206 @@
-# SPDK Flint Node Agent
+# SPDK Flint Node Agent - Pure C Implementation
 
-**High-Performance Storage Node Agent with Embedded SPDK**
+## Overview
 
-A C++ implementation of the SPDK CSI node agent with embedded SPDK for ultra-low latency storage operations. This replaces the Rust node agent with direct SPDK C API calls for maximum performance.
+This is a pure C implementation of the SPDK Flint Node Agent using the Ulfius web framework. This version replaces the C++ implementation to provide better integration with SPDK libraries and eliminate C++ linking complications.
 
-## 🏗️ Architecture Overview
+## Key Features
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    SPDK Flint Node Agent                   │
-│                     (C++ + Embedded SPDK)                  │
-├─────────────────────────────────────────────────────────────┤
-│  HTTP API Server    │  Disk Discovery   │  Health Monitor   │
-│  - LVol Store Ops   │  - Device Enum    │  - Real-time     │
-│  - Disk Setup       │  - Auto Config    │  - Callbacks     │
-│  - Block Devices    │  - K8s Integration│  - Status API     │
-├─────────────────────────────────────────────────────────────┤
-│                    Direct SPDK C API Calls                 │
-│  ┌─────────────────┬─────────────────┬─────────────────┐   │
-│  │ LVol Store Ops  │ Block Device    │ NVMe Controller │   │
-│  │ - Create/Delete │ - AIO/uring     │ - Attach/Detach │   │
-│  │ - Query/List    │ - Enumeration   │ - Discovery     │   │
-│  │ - Health Check  │ - Statistics    │ - Health Mon.   │   │
-│  └─────────────────┴─────────────────┴─────────────────┘   │
-├─────────────────────────────────────────────────────────────┤
-│                    SPDK Reactor Framework                   │
-│  - Async Operations  - Event Loop  - Thread Management     │
-├─────────────────────────────────────────────────────────────┤
-│                    Storage Hardware                         │
-│  - NVMe PCIe Devices  - Kernel Devices  - Network Storage  │
-└─────────────────────────────────────────────────────────────┘
-```
+- **Pure C Implementation**: No C++ dependencies, links directly with SPDK
+- **Ulfius Framework**: Lightweight, efficient HTTP server framework for C
+- **Direct SPDK Integration**: Uses SPDK's JSON-RPC client library directly
+- **RESTful API**: Compatible with the original C++ API endpoints
+- **Minimal Dependencies**: Only requires Ulfius, Jansson (JSON), and SPDK libraries
 
-### **vs Rust Implementation**
+## Architecture Changes
 
-| Aspect | Rust (spdk-csi-driver) | C++ (spdk_flint) |
-|--------|------------------------|------------------|
-| **Architecture** | RPC Client → SPDK Process | Embedded SPDK Process |
-| **Latency** | ~500μs per operation | ~50μs per operation |
-| **Throughput** | Limited by RPC serialization | Direct memory access |
-| **Monitoring** | Polling-based (30s intervals) | Real-time callbacks |
-| **Memory** | Multiple copies (JSON → Socket) | Zero-copy operations |
-| **Error Handling** | Generic RPC errors | Detailed SPDK error codes |
+### From C++ to C
 
-## 🚀 Key Features
+| Component | C++ Version | C Version |
+|-----------|------------|-----------|
+| HTTP Server | Crow (C++) | Ulfius (C) |
+| JSON Handling | nlohmann::json | Jansson |
+| Logging | spdlog | Simple stdio macros |
+| SPDK Interface | Custom RPC wrapper | Direct spdk_jsonrpc_client |
+| Build System | CMake | Make |
 
-### **Ultra-Low Latency Operations**
-- **Direct SPDK C API calls** - No RPC overhead
-- **Async reactor framework** - Non-blocking operations  
-- **Zero-copy data paths** - Direct memory access
-- **Real-time callbacks** - Immediate error/health notifications
+## API Endpoints
 
-### **Comprehensive Node Agent Functionality**
-- **Disk Discovery & Setup** - Automatic device detection and configuration
-- **LVol Store Management** - Create, delete, and monitor logical volume stores
-- **Block Device Operations** - AIO, uring, and NVMe device management
-- **Health Monitoring** - Real-time device status and error detection
-- **Kubernetes Integration** - Custom resource management and status updates
+The C implementation maintains the same API endpoints:
 
-### **Production-Ready**
-- **Extensive Logging** - Structured logging with configurable levels
-- **Error Recovery** - Robust error handling and recovery mechanisms  
-- **Resource Management** - Proper cleanup and resource lifecycle management
-- **Signal Handling** - Graceful shutdown via SPDK framework
+- `GET /api/disks/uninitialized` - Discover uninitialized disks
+- `POST /api/disks/setup` - Setup disks for SPDK
+- `GET /api/lvs` - List logical volume stores
+- `POST /api/lvs` - Create logical volume store
+- `GET /api/bdevs` - List block devices
+- `GET /api/status` - Service status
+- `GET /health` - Health check
+- `GET /ready` - Readiness check
+- `GET /version` - Version information
 
-## 🔧 Direct SPDK C API Implementation
+## Building
 
-### **LVol Store Operations**
-```cpp
-// Replace: "bdev_lvol_get_lvstores" RPC
-→ vbdev_lvol_store_first() / vbdev_lvol_store_next()
-→ spdk_bs_get_cluster_count() / spdk_bs_free_cluster_count()
+### Prerequisites
 
-// Replace: "bdev_lvol_create_lvstore" RPC  
-→ vbdev_lvs_create_ext() with async callback
-→ Direct cluster size and clear method control
-
-// Replace: "bdev_lvol_delete_lvstore" RPC
-→ vbdev_get_lvol_store_by_uuid_xor_name()
-→ vbdev_lvs_destruct() with async callback
-```
-
-### **Block Device Operations**
-```cpp
-// Replace: "bdev_get_bdevs" RPC
-→ spdk_bdev_first() / spdk_bdev_next()
-→ Direct access to bdev properties and statistics
-
-// Replace: "bdev_aio_create" RPC
-→ create_aio_bdev() with full parameter control
-→ Block size, read-only, fallocate options
-
-// Replace: "bdev_uring_create" RPC  
-→ create_uring_bdev() with direct configuration
-→ Optimal for high-performance kernel device access
-```
-
-### **NVMe Controller Management**
-```cpp
-// Replace: "bdev_nvme_get_controllers" RPC
-→ nvme_bdev_ctrlr_first() / nvme_bdev_ctrlr_next()
-→ Direct controller enumeration and status
-
-// Replace: "bdev_nvme_attach_controller" RPC
-→ Direct SPDK NVMe attach with full parameter control
-→ PCIe, transport type, addressing, multipath support
-```
-
-## 📊 Performance Benefits
-
-### **Latency Improvements**
-- **LVS Operations**: 500μs → 50μs (**10× faster**)
-- **Device Discovery**: 2ms → 50μs (**40× faster**)
-- **Batch Operations**: N×500μs → 100μs (**N×5 faster**)
-- **Health Monitoring**: 30s polling → Immediate callbacks (**∞× faster**)
-
-### **Memory Efficiency**
-- **Zero JSON serialization** - Direct struct access
-- **No socket I/O overhead** - Direct function calls
-- **Reduced memory copies** - SPDK memory domains
-- **Lower memory fragmentation** - Consistent allocator usage
-
-### **Real-Time Capabilities**  
-- **Immediate error detection** - Hardware callback registration
-- **Sub-millisecond response** - Direct SPDK reactor integration
-- **Custom QoS policies** - Access to internal SPDK features
-- **Advanced monitoring** - Real-time I/O statistics and health data
-
-## 🛠️ Usage
-
-### **Basic Usage**
 ```bash
-# Start SPDK Flint Node Agent (default mode)
+# Install Ulfius and dependencies
+sudo apt-get install libulfius-dev libjansson-dev
+
+# Or build from source for latest versions
+git clone https://github.com/babelouest/ulfius.git
+cd ulfius && mkdir build && cd build
+cmake .. && make && sudo make install
+```
+
+### Build with Make
+
+```bash
+# Build the node agent
+make
+
+# Build with debug symbols
+make debug
+
+# Build optimized release version
+make release
+
+# Check dependencies
+make check-deps
+```
+
+### Build with Docker
+
+```bash
+# Build the Docker image
+docker build -f Dockerfile.c -t spdk-flint-node-agent:c .
+
+# Run the container
+docker run -d \
+  --name spdk-flint \
+  --privileged \
+  -p 8090:8090 \
+  -p 9809:9809 \
+  -e NODE_ID=node-1 \
+  -e SPDK_RPC_SOCKET=/var/tmp/spdk.sock \
+  spdk-flint-node-agent:c
+```
+
+## Configuration
+
+The node agent can be configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_ID` | node-1 | Node identifier |
+| `NODE_AGENT_PORT` | 8090 | API server port |
+| `HEALTH_PORT` | 9809 | Health check port |
+| `TARGET_NAMESPACE` | flint-system | Kubernetes namespace |
+| `SPDK_RPC_SOCKET` | /var/tmp/spdk.sock | SPDK RPC socket path |
+| `DISCOVERY_INTERVAL` | 30 | Disk discovery interval (seconds) |
+| `LOG_LEVEL` | info | Log level (debug, info, warn, error) |
+
+## Running
+
+```bash
+# Run with defaults
 ./spdk_flint
 
-# Start with debug logging
-./spdk_flint --log-level debug
+# Run with custom configuration
+NODE_AGENT_PORT=8080 LOG_LEVEL=debug ./spdk_flint
 
-# Use configuration file
-./spdk_flint --config /etc/spdk/spdk.conf
+# Run with custom SPDK socket
+./spdk_flint --rpc-socket /tmp/custom_spdk.sock
 ```
 
-### **Environment Variables**
+## Testing
+
 ```bash
-# Node identification
-export NODE_ID="worker-node-1"
-export CSI_MODE="node-agent"  # Only supported mode
+# Test health endpoint
+curl http://localhost:9809/health
 
-# Network configuration  
-export HEALTH_PORT=9809
-export NODE_AGENT_PORT=8090
+# Get version
+curl http://localhost:9809/version | jq .
 
-# Kubernetes integration
-export TARGET_NAMESPACE="flint-system"
+# Get service status
+curl http://localhost:8090/api/status | jq .
 
-# SPDK configuration
-export DISK_DISCOVERY_INTERVAL=300
-export AUTO_INITIALIZE_BLOBSTORE=true
-export SPDK_CONFIG_FILE="/etc/spdk/spdk.conf"
+# List block devices
+curl http://localhost:8090/api/bdevs | jq .
+
+# Discover disks
+curl http://localhost:8090/api/disks/uninitialized | jq .
 ```
 
-### **API Endpoints**
+## Benefits of C Implementation
 
-#### **Disk Management**
+1. **Direct SPDK Integration**: Links directly with SPDK libraries without C++ name mangling issues
+2. **Lower Memory Footprint**: No C++ STL overhead
+3. **Simpler Build Process**: Make instead of CMake reduces complexity
+4. **Better Performance**: Direct function calls to SPDK without wrapper overhead
+5. **Easier Debugging**: Simpler call stacks without C++ abstractions
+6. **Portable**: Pure C code is more portable across different environments
+
+## Migration from C++ Version
+
+The C version maintains API compatibility with the C++ version. To migrate:
+
+1. Stop the C++ version: `systemctl stop spdk-flint`
+2. Build and install the C version: `make && sudo make install`
+3. Update any systemd service files to use the new binary
+4. Start the C version: `systemctl start spdk-flint`
+
+The configuration and API remain the same, so no changes are needed in clients.
+
+## Code Structure
+
+```
+src/
+├── node_agent.c      # Main implementation file
+include/
+├── node_agent.h      # Public header with API definitions
+Makefile             # Build configuration
+Dockerfile.c         # Docker build for C version
+```
+
+## Development
+
 ```bash
-# Get uninitialized disks
-curl http://localhost:8090/api/disks/uninitialized
+# Format code
+make format
 
-# Setup disks for SPDK
-curl -X POST http://localhost:8090/api/disks/setup \
-  -H "Content-Type: application/json" \
-  -d '{"pci_addresses": ["0000:01:00.0", "0000:02:00.0"]}'
+# Run static analysis
+make analyze
+
+# Run with valgrind for memory debugging
+valgrind --leak-check=full ./spdk_flint
 ```
 
-#### **LVol Store Operations**
+## Troubleshooting
+
+### SPDK RPC Connection Issues
+
+If the node agent cannot connect to SPDK:
+
+1. Verify SPDK is running: `spdk_tgt`
+2. Check socket path: `ls -la /var/tmp/spdk.sock`
+3. Verify permissions: Socket should be accessible by the user
+4. Test RPC manually: `spdk-rpc.py bdev_get_bdevs`
+
+### Missing Libraries
+
+If you get library errors:
+
 ```bash
-# List LVol stores
-curl http://localhost:8090/api/lvs
+# Check for missing libraries
+ldd spdk_flint
 
-# Create LVol store
-curl -X POST http://localhost:8090/api/lvs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "bdev_name": "kernel_nvme1n1",
-    "lvs_name": "lvs_worker1_nvme1n1", 
-    "clear_method": "unmap",
-    "cluster_sz": 4194304
-  }'
+# Install missing dependencies
+sudo apt-get install libulfius-dev libjansson-dev
+
+# Update library cache
+sudo ldconfig
 ```
 
-#### **Block Device Operations**
-```bash
-# List all block devices
-curl http://localhost:8090/api/bdevs
+## License
 
-# Health check
-curl http://localhost:8090/health
-```
-
-## 🏗️ Integration with Hybrid Architecture
-
-### **Deployment Model**
-```yaml
-# Node Agent: C++ with Embedded SPDK (this project)
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: spdk-flint-node-agent
-spec:
-  template:
-    spec:
-      containers:
-      - name: node-agent
-        image: spdk-flint:latest
-        env:
-        - name: CSI_MODE
-          value: "node-agent"
-        - name: NODE_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-
-# Other Services: Rust with RPC Clients (spdk-csi-driver)
----
-apiVersion: apps/v1  
-kind: Deployment
-metadata:
-  name: spdk-csi-controller
-spec:
-  template:
-    spec:
-      containers:
-      - name: controller
-        image: spdk-csi-driver:latest
-        env:
-        - name: SPDK_RPC_URL
-          value: "http://spdk-flint-node-agent:8090"
-```
-
-### **Communication Flow**
-```
-┌─────────────────┐    RPC     ┌─────────────────┐
-│ Controller      │ ────────── │ Node Agent      │
-│ (Rust)          │   Calls    │ (C++ + SPDK)    │
-│                 │            │                 │
-│ Dashboard       │ ────────── │ Direct Hardware │
-│ (Rust)          │   Queries  │ Access          │
-└─────────────────┘            └─────────────────┘
-```
-
-## 🔧 Build Requirements
-
-### **Dependencies**
-- **SPDK 25.05.x** - Built with ublk, uring, AIO support
-- **C++17 Compiler** - GCC 9+ or Clang 10+
-- **CMake 3.16+** - Build system
-- **Libraries**: gRPC, spdlog, Crow (HTTP), nlohmann/json
-
-### **SPDK Build Configuration**
-```bash
-# SPDK must be built with these features
-./configure \
-  --with-ublk \
-  --with-uring \
-  --disable-tests \
-  --disable-unit-tests \
-  --without-shared
-```
-
-## 🎯 Benefits Summary
-
-✅ **10-100× lower latency** for storage operations  
-✅ **Real-time callbacks** for immediate failure detection  
-✅ **Zero-copy operations** with direct memory access  
-✅ **Advanced SPDK features** not available via RPC  
-✅ **Batch operations** for improved throughput  
-✅ **Memory efficiency** with no JSON overhead  
-✅ **Production-ready** with comprehensive error handling  
-
-The embedded SPDK approach transforms the node agent from a simple RPC client into a **high-performance, real-time storage controller** with microsecond response times and immediate hardware failure detection.
-
-## 🚀 Performance Monitoring
-
-The node agent provides real-time performance metrics and health monitoring through direct SPDK integration, enabling immediate response to storage events and optimal resource utilization.
-
----
-
-**Note**: This implementation represents the **node agent** component only. Other CSI services (controller, dashboard) continue to use the Rust implementation with RPC calls to this node agent for optimal architecture separation. 
+Same as the original SPDK Flint project.

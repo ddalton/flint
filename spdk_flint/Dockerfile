@@ -1,133 +1,169 @@
-# Single-stage Dockerfile for SPDK Flint C++ Application
-# Simplified version without separate runtime image
+# SPDK Flint Node Agent - Pure C Docker Build
+#
+# Multi-stage build for the C implementation with Ulfius framework
 
-FROM ubuntu:24.04
+# Stage 1: Base image with SPDK and dependencies
+FROM ubuntu:22.04 AS base
 
-# Install all dependencies (build and runtime)
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SPDK_VERSION=23.09
+
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     # Build tools
-    build-essential \
+    gcc \
+    g++ \
+    make \
     cmake \
     pkg-config \
-    git \
-    wget \
-    curl \
-    patchelf \
+    autoconf \
+    automake \
+    libtool \
     # SPDK dependencies
     libaio-dev \
     libssl-dev \
     libnuma-dev \
-    libpciaccess-dev \
     libcunit1-dev \
-    libncurses5-dev \
-    liburing-dev \
-    libfuse3-dev \
     uuid-dev \
-    # C++ dependencies
-    libspdlog-dev \
-    libprotobuf-dev \
-    protobuf-compiler \
-    libgrpc++-dev \
-    protobuf-compiler-grpc \
-    # Boost libraries for Crow
-    libboost-all-dev \
-    # Additional build tools
+    libiscsi-dev \
     python3 \
     python3-pip \
-    python3-pyelftools \
-    nasm \
-    autoconf \
-    automake \
-    libtool \
-    meson \
-    # Runtime utilities
-    nvme-cli \
-    util-linux \
-    e2fsprogs \
-    xfsprogs \
-    mount \
-    pciutils \
-    ca-certificates \
-    kmod \
-    # Networking
-    iproute2 \
-    iptables \
+    # Ulfius dependencies
+    libmicrohttpd-dev \
+    libjansson-dev \
+    libcurl4-gnutls-dev \
+    libgnutls28-dev \
+    libgcrypt20-dev \
+    # Utilities
+    git \
+    wget \
+    curl \
+    vim \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up working directory
-WORKDIR /workspace
-
-# Clone and build SPDK
-RUN git clone https://github.com/spdk/spdk.git && \
-    cd spdk && \
-    git checkout v25.05.x && \
-    git submodule update --init --recursive && \
-    ./configure --with-ublk --disable-tests --disable-unit-tests && \
-    make -j$(nproc) && \
-    make install
-
-# Install Crow web framework (header-only)
-RUN git clone https://github.com/CrowCpp/Crow.git && \
-    cd Crow && \
-    git checkout v1.0+5 && \
+# Install Ulfius from source (for latest version)
+RUN git clone https://github.com/babelouest/ulfius.git /tmp/ulfius && \
+    cd /tmp/ulfius && \
+    git checkout v2.7.15 && \
     mkdir build && cd build && \
-    cmake .. -DCROW_BUILD_EXAMPLES=OFF -DCROW_BUILD_TESTS=OFF && \
+    cmake .. && \
+    make && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/ulfius
+
+# Install Orcania (Ulfius dependency)
+RUN git clone https://github.com/babelouest/orcania.git /tmp/orcania && \
+    cd /tmp/orcania && \
+    git checkout v2.3.3 && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/orcania
+
+# Install Yder (Ulfius dependency)
+RUN git clone https://github.com/babelouest/yder.git /tmp/yder && \
+    cd /tmp/yder && \
+    git checkout v1.4.20 && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/yder
+
+# Build and install SPDK
+RUN git clone --depth 1 --branch v${SPDK_VERSION} https://github.com/spdk/spdk /tmp/spdk && \
+    cd /tmp/spdk && \
+    git submodule update --init && \
+    ./scripts/pkgdep.sh --rdma && \
+    ./configure --with-rdma --with-shared \
+        --with-crypto --with-vhost --with-virtio \
+        --disable-tests --disable-unit-tests --disable-examples && \
     make -j$(nproc) && \
-    make install
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/spdk
 
-# Copy source code
-COPY . /workspace/spdk_flint/
+# Stage 2: Build the node agent
+FROM base AS builder
 
-# Build the C++ application
-WORKDIR /workspace/spdk_flint
-RUN mkdir -p build && cd build && \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr/local && \
-    make -j$(nproc) && \
-    make install
+WORKDIR /app
 
-# Run tests to ensure everything works
-RUN cd build && ctest --output-on-failure || true
+# Copy source files
+COPY src/main.c src/
+COPY include/node_agent.h include/
+COPY Makefile .
 
-# Create necessary directories
-RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
+# Build the node agent
+RUN make clean && make release
 
-# Create runtime user
-RUN useradd -m -u 1001 spdk_flint
+# Stage 3: Runtime image
+FROM ubuntu:22.04
 
-# Set up library paths
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    # Required libraries
+    libaio1 \
+    libnuma1 \
+    libssl3 \
+    libmicrohttpd12 \
+    libjansson4 \
+    libcurl4-gnutls \
+    libgnutls30 \
+    uuid-runtime \
+    # Utilities
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy SPDK libraries from builder
+COPY --from=builder /usr/local/lib/libspdk*.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/librte*.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libisal*.so* /usr/local/lib/
+
+# Copy Ulfius and dependencies from builder
+COPY --from=builder /usr/local/lib/libulfius.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/liborcania.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libyder.so* /usr/local/lib/
+
+# Copy the built binary
+COPY --from=builder /app/spdk_flint /usr/local/bin/spdk_flint
+
+# Update library cache
 RUN ldconfig
 
-# Create health check script for node-agent
-RUN echo '#!/bin/bash\n\
-# Health check script for node-agent mode\n\
-# Check node agent API health\n\
-curl -f http://localhost:${NODE_AGENT_PORT:-8090}/health || exit 1\n\
-' > /usr/local/bin/health-check.sh && chmod +x /usr/local/bin/health-check.sh
+# Create non-root user
+RUN useradd -m -s /bin/bash spdk && \
+    mkdir -p /var/tmp /var/log/spdk && \
+    chown -R spdk:spdk /var/tmp /var/log/spdk
 
-# Set default environment variables for node-agent
-ENV CSI_MODE=node-agent
+# Expose ports
+EXPOSE 8090 9809
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:9809/health || exit 1
+
+# Run as non-root user
+USER spdk
+
+# Default environment variables
+ENV NODE_ID=node-1
 ENV LOG_LEVEL=info
-ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock
-ENV CSI_ENDPOINT=unix:///csi/csi.sock
-ENV NVMEOF_TRANSPORT=tcp
-ENV NVMEOF_TARGET_PORT=4420
 ENV HEALTH_PORT=9809
 ENV NODE_AGENT_PORT=8090
+ENV TARGET_NAMESPACE=flint-system
+ENV SPDK_RPC_SOCKET=/var/tmp/spdk.sock
+ENV DISCOVERY_INTERVAL=30
 
-# Expose ports for node-agent mode
-EXPOSE 4420 8090 9809
-
-# Health check (adapts based on mode)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD /usr/local/bin/health-check.sh
-
-# Use non-root user for security
-USER spdk_flint
-
-# Entrypoint for node-agent with embedded SPDK
+# Entry point
 ENTRYPOINT ["/usr/local/bin/spdk_flint"]
 
-# Default to node-agent mode
-CMD ["--mode", "node-agent"]
+# Default command (can be overridden)
+CMD []
