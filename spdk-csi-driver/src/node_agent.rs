@@ -1413,13 +1413,6 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
         needs_update = true;
     }
     
-    // Update health status
-    let is_healthy = check_device_health(agent, device).await.unwrap_or(false);
-    if updated_status.healthy != is_healthy {
-        updated_status.healthy = is_healthy;
-        needs_update = true;
-    }
-    
     // Check if device path or nvme_controller_id need updating due to device name changes
     let current_device_path = format!("/dev/{}", device.controller_id);
     let current_controller_id = device.controller_id.clone();
@@ -1470,6 +1463,14 @@ async fn update_existing_disk_resource(agent: &NodeAgent, disk: &SpdkDisk, devic
         Err(e) => {
             println!("⚠️ [STATE_SYNC] Failed to fetch reconciled status: {}", e);
         }
+    }
+    
+    // MOVED: Update health status AFTER reconciliation to prevent overwriting
+    let is_healthy = check_device_health(agent, device).await.unwrap_or(false);
+    if updated_status.healthy != is_healthy {
+        println!("🔄 [HEALTH_UPDATE] Health status changed from {} to {}", updated_status.healthy, is_healthy);
+        updated_status.healthy = is_healthy;
+        needs_update = true;
     }
     
     if needs_update {
