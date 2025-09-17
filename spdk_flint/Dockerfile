@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
     libprotobuf-dev \
     protobuf-compiler \
     libgrpc++-dev \
-    grpc-tools \
+    protobuf-compiler-grpc \
     # Additional build tools
     python3 \
     python3-pyelftools \
