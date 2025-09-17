@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
     libcurl4-gnutls-dev \
     libgnutls28-dev \
     libgcrypt20-dev \
+    libsystemd-dev \
     # Utilities
     git \
     wget \
