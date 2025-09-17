@@ -113,7 +113,7 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     libmicrohttpd12 \
     libjansson4 \
-    libcurl4-gnutls \
+    libcurl4 \
     libgnutls30 \
     uuid-runtime \
     # Utilities
