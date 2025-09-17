@@ -190,6 +190,7 @@ set(LIB_SOURCES
     src/app.cpp
     src/logging.cpp
     src/spdk/spdk_wrapper.cpp
+    src/spdk/rpc_client.cpp
     src/utils/config.cpp
     src/utils/kube_client.cpp
     src/utils/disk_manager.cpp
@@ -198,14 +199,11 @@ set(LIB_SOURCES
     # ${CSI_GRPC_CPP_FILE}
     # TODO: Add these files as they are implemented:
     # src/csi/identity_service.cpp
-    # src/csi/controller_service.cpp
     # src/csi/node_service.cpp
     # src/spdk/volume_manager.cpp
     # src/spdk/raid_manager.cpp
     # src/spdk/nvmeof_manager.cpp
-    # src/dashboard/dashboard_service.cpp
     # src/node_agent/node_agent.cpp
-    # src/controller_operator/controller_operator.cpp
 )
 
 # Create shared library from main application code

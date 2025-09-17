@@ -95,35 +95,25 @@ RUN useradd -m -u 1001 spdk_flint
 # Set up library paths
 RUN ldconfig
 
-# Create health check script
+# Create health check script for node-agent
 RUN echo '#!/bin/bash\n\
-# Health check script that works for all modes\n\
-case "${CSI_MODE:-all}" in\n\
-    "dashboard-backend")\n\
-        curl -f http://localhost:${DASHBOARD_PORT:-8080}/health || exit 1\n\
-        ;;\n\
-    "node-agent")\n\
-        curl -f http://localhost:${NODE_AGENT_PORT:-8090}/health || exit 1\n\
-        ;;\n\
-    *)\n\
-        curl -f http://localhost:${HEALTH_PORT:-9809}/healthz || exit 1\n\
-        ;;\n\
-esac\n\
+# Health check script for node-agent mode\n\
+# Check node agent API health\n\
+curl -f http://localhost:${NODE_AGENT_PORT:-8090}/health || exit 1\n\
 ' > /usr/local/bin/health-check.sh && chmod +x /usr/local/bin/health-check.sh
 
-# Set default environment variables
-ENV CSI_MODE=all
+# Set default environment variables for node-agent
+ENV CSI_MODE=node-agent
 ENV LOG_LEVEL=info
 ENV SPDK_RPC_URL=unix:///var/tmp/spdk.sock
 ENV CSI_ENDPOINT=unix:///csi/csi.sock
 ENV NVMEOF_TRANSPORT=tcp
 ENV NVMEOF_TARGET_PORT=4420
-ENV DASHBOARD_PORT=8080
 ENV HEALTH_PORT=9809
 ENV NODE_AGENT_PORT=8090
 
-# Expose ports for different modes
-EXPOSE 4420 8080 8090 9809
+# Expose ports for node-agent mode
+EXPOSE 4420 8090 9809
 
 # Health check (adapts based on mode)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
@@ -132,8 +122,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Use non-root user for security
 USER spdk_flint
 
-# Single entrypoint that handles all modes
+# Entrypoint for node-agent with embedded SPDK
 ENTRYPOINT ["/usr/local/bin/spdk_flint"]
 
-# Default to help mode for debugging
-CMD ["--help"]
+# Default to node-agent mode
+CMD ["--mode", "node-agent"]

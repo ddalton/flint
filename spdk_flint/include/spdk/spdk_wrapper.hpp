@@ -78,6 +78,7 @@ using LvolStoreCreateCallback = std::function<void(const std::string& uuid, int 
 using LvolStoreDeleteCallback = std::function<void(int error)>;
 using BdevCreateCallback = std::function<void(const std::string& bdev_name, int error)>;
 using NvmeAttachCallback = std::function<void(const std::vector<std::string>& bdev_names, int error)>;
+using UblkCallback = std::function<void(const std::string& device_path, int error)>;
 
 // Data structures for return values
 struct LvolStoreInfo {
@@ -107,6 +108,13 @@ struct NvmeControllerInfo {
     std::string traddr;
     std::string state;
     std::vector<std::string> bdevs;
+};
+
+struct UblkDiskInfo {
+    int ublk_id;
+    std::string bdev_name;
+    std::string device_path;
+    bool active;
 };
 
 // SPDK wrapper class - Node Agent functionality only
@@ -200,6 +208,38 @@ public:
     // Process control
     void stopApplicationAsync(std::function<void(int)> callback = nullptr);
 
+    // ===== UBLK RPC OPERATIONS (via RPC client) =====
+
+    // Initialize ublk target (must be called once before using ublk devices)
+    bool ensureUblkTarget();
+
+    // Create a ublk device for a bdev
+    std::string createUblkDevice(int ublk_id, const std::string& bdev_name);
+
+    // Delete a ublk device
+    bool deleteUblkDevice(int ublk_id);
+
+    // Get list of ublk devices
+    std::vector<UblkDiskInfo> getUblkDevices();
+
+    // Async ublk operations
+    void createUblkDeviceAsync(int ublk_id, const std::string& bdev_name, UblkCallback callback = nullptr);
+    void deleteUblkDeviceAsync(int ublk_id, std::function<void(int)> callback = nullptr);
+
+    // ===== VOLUME OPERATIONS (via RPC for CSI) =====
+
+    // Create logical volume (for CSI CreateVolume)
+    std::string createVolume(const std::string& lvs_name, const std::string& volume_name, uint64_t size_bytes);
+
+    // Delete logical volume (for CSI DeleteVolume)
+    bool deleteVolume(const std::string& volume_name);
+
+    // Resize logical volume (for CSI ExpandVolume)
+    bool resizeVolume(const std::string& volume_name, uint64_t new_size_bytes);
+
+    // Get volume info
+    std::optional<BdevInfo> getVolumeInfo(const std::string& volume_name);
+
     // Event handling and threading
     void processEvents();
     void runEventLoop();
@@ -214,23 +254,28 @@ private:
     // Internal helper methods
     static SpdkError convertErrno(int err);
     static void throwOnError(int rc, const std::string& operation);
-    
+
     // Internal data members
     std::string config_file_;
     struct spdk_app_opts* opts_;
     std::atomic<bool> event_loop_running_{false};
     std::atomic<bool> shutdown_requested_{false};
-    
+
+    // RPC client for ublk and volume operations
+    class RpcClient;
+    std::unique_ptr<RpcClient> rpc_client_;
+    std::atomic<bool> ublk_target_initialized_{false};
+
     // Callback management for async operations
     struct CallbackContext {
         uint64_t id;
         std::function<void()> cleanup;
     };
-    
+
     std::mutex callback_mutex_;
     std::map<uint64_t, CallbackContext> pending_callbacks_;
     std::atomic<uint64_t> next_callback_id_{1};
-    
+
     uint64_t registerCallback(std::function<void()> cleanup);
     void unregisterCallback(uint64_t callback_id);
 };

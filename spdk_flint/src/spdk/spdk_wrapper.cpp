@@ -1,4 +1,5 @@
 #include "spdk/spdk_wrapper.hpp"
+#include "spdk/rpc_client.hpp"
 // Undefine syslog macros that conflict with our logging system
 #ifdef LOG_DEBUG
 #undef LOG_DEBUG
@@ -86,11 +87,14 @@ void SpdkWrapper::throwOnError(int rc, const std::string& operation) {
 }
 
 // Constructor/Destructor
-SpdkWrapper::SpdkWrapper(const std::string& config_file) 
+SpdkWrapper::SpdkWrapper(const std::string& config_file)
     : config_file_(config_file) {
     spdk_flint::logger()->info("[SPDK] Creating SPDK wrapper for Node Agent");
     spdk_flint::logger()->debug("[SPDK] Configuration file: '{}'", config_file_.empty() ? "none" : config_file_);
     spdk_flint::logger()->debug("[SPDK] Thread ID: {}", spdk_flint::current_thread_id());
+
+    // Initialize RPC client for ublk and volume operations
+    rpc_client_ = std::make_unique<RpcClient>("/var/tmp/spdk.sock");
 }
 
 SpdkWrapper::~SpdkWrapper() {
@@ -1351,6 +1355,272 @@ void SpdkWrapper::unregisterCallback(uint64_t callback_id) {
     } else {
         spdk_flint::logger()->warn("[SPDK] Attempted to unregister non-existent callback #{}", callback_id);
     }
+}
+
+// ===== UBLK RPC OPERATIONS IMPLEMENTATION =====
+
+bool SpdkWrapper::ensureUblkTarget() {
+    if (ublk_target_initialized_.load()) {
+        spdk_flint::logger()->debug("[SPDK] Ublk target already initialized");
+        return true;
+    }
+
+    spdk_flint::logger()->info("[SPDK] Initializing ublk target");
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            spdk_flint::logger()->error("[SPDK] Failed to connect to SPDK RPC socket");
+            return false;
+        }
+    }
+
+    try {
+        rpc_client_->createUblkTarget();
+        ublk_target_initialized_.store(true);
+        spdk_flint::logger()->info("[SPDK] Ublk target initialized successfully");
+        return true;
+    } catch (const std::exception& e) {
+        // Check if error is because target already exists
+        std::string error_msg = e.what();
+        if (error_msg.find("already exists") != std::string::npos ||
+            error_msg.find("File exists") != std::string::npos) {
+            spdk_flint::logger()->info("[SPDK] Ublk target already exists, continuing");
+            ublk_target_initialized_.store(true);
+            return true;
+        }
+        spdk_flint::logger()->error("[SPDK] Failed to create ublk target: {}", e.what());
+        return false;
+    }
+}
+
+std::string SpdkWrapper::createUblkDevice(int ublk_id, const std::string& bdev_name) {
+    spdk_flint::logger()->info("[SPDK] Creating ublk device: id={}, bdev={}", ublk_id, bdev_name);
+
+    // Ensure ublk target is initialized
+    if (!ensureUblkTarget()) {
+        throw std::runtime_error("Failed to ensure ublk target is initialized");
+    }
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            throw std::runtime_error("Failed to connect to SPDK RPC socket");
+        }
+    }
+
+    try {
+        auto result = rpc_client_->startUblkDisk(ublk_id, bdev_name);
+        std::string device_path = "/dev/ublkb" + std::to_string(ublk_id);
+
+        // Wait for device to appear
+        int max_retries = 30;
+        for (int i = 0; i < max_retries; i++) {
+            struct stat st;
+            if (stat(device_path.c_str(), &st) == 0) {
+                spdk_flint::logger()->info("[SPDK] Ublk device created successfully: {}", device_path);
+                return device_path;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        spdk_flint::logger()->warn("[SPDK] Ublk device created but not yet visible: {}", device_path);
+        return device_path;
+
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to create ublk device: {}", e.what());
+        throw;
+    }
+}
+
+bool SpdkWrapper::deleteUblkDevice(int ublk_id) {
+    spdk_flint::logger()->info("[SPDK] Deleting ublk device: id={}", ublk_id);
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            spdk_flint::logger()->error("[SPDK] Failed to connect to SPDK RPC socket");
+            return false;
+        }
+    }
+
+    try {
+        rpc_client_->stopUblkDisk(ublk_id);
+
+        // Wait for device to disappear
+        std::string device_path = "/dev/ublkb" + std::to_string(ublk_id);
+        int max_retries = 30;
+        for (int i = 0; i < max_retries; i++) {
+            struct stat st;
+            if (stat(device_path.c_str(), &st) != 0) {
+                spdk_flint::logger()->info("[SPDK] Ublk device deleted successfully: {}", device_path);
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        spdk_flint::logger()->warn("[SPDK] Ublk device deleted but still visible: {}", device_path);
+        return true;
+
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to delete ublk device: {}", e.what());
+        return false;
+    }
+}
+
+std::vector<UblkDiskInfo> SpdkWrapper::getUblkDevices() {
+    spdk_flint::logger()->debug("[SPDK] Getting ublk devices");
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            spdk_flint::logger()->error("[SPDK] Failed to connect to SPDK RPC socket");
+            return {};
+        }
+    }
+
+    std::vector<UblkDiskInfo> devices;
+
+    try {
+        auto result = rpc_client_->getUblkDisks();
+
+        if (result.is_array()) {
+            for (const auto& disk : result) {
+                UblkDiskInfo info;
+                info.ublk_id = disk.value("id", -1);
+                info.bdev_name = disk.value("bdev_name", "");
+                info.device_path = "/dev/ublkb" + std::to_string(info.ublk_id);
+
+                // Check if device exists
+                struct stat st;
+                info.active = (stat(info.device_path.c_str(), &st) == 0);
+
+                devices.push_back(info);
+            }
+        }
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to get ublk devices: {}", e.what());
+    }
+
+    return devices;
+}
+
+void SpdkWrapper::createUblkDeviceAsync(int ublk_id, const std::string& bdev_name, UblkCallback callback) {
+    std::thread([this, ublk_id, bdev_name, callback]() {
+        try {
+            std::string device_path = createUblkDevice(ublk_id, bdev_name);
+            if (callback) {
+                callback(device_path, 0);
+            }
+        } catch (const std::exception& e) {
+            spdk_flint::logger()->error("[SPDK] Async ublk device creation failed: {}", e.what());
+            if (callback) {
+                callback("", -1);
+            }
+        }
+    }).detach();
+}
+
+void SpdkWrapper::deleteUblkDeviceAsync(int ublk_id, std::function<void(int)> callback) {
+    std::thread([this, ublk_id, callback]() {
+        bool success = deleteUblkDevice(ublk_id);
+        if (callback) {
+            callback(success ? 0 : -1);
+        }
+    }).detach();
+}
+
+// ===== VOLUME OPERATIONS IMPLEMENTATION =====
+
+std::string SpdkWrapper::createVolume(const std::string& lvs_name, const std::string& volume_name, uint64_t size_bytes) {
+    spdk_flint::logger()->info("[SPDK] Creating volume: lvs={}, name={}, size={}", lvs_name, volume_name, size_bytes);
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            throw std::runtime_error("Failed to connect to SPDK RPC socket");
+        }
+    }
+
+    try {
+        auto result = rpc_client_->createLvolBdev(lvs_name, volume_name, size_bytes);
+        std::string uuid = result.value("uuid", "");
+        spdk_flint::logger()->info("[SPDK] Volume created successfully: name={}, uuid={}", volume_name, uuid);
+        return uuid;
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to create volume: {}", e.what());
+        throw;
+    }
+}
+
+bool SpdkWrapper::deleteVolume(const std::string& volume_name) {
+    spdk_flint::logger()->info("[SPDK] Deleting volume: {}", volume_name);
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            return false;
+        }
+    }
+
+    try {
+        rpc_client_->deleteBdev(volume_name);
+        spdk_flint::logger()->info("[SPDK] Volume deleted successfully: {}", volume_name);
+        return true;
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to delete volume: {}", e.what());
+        return false;
+    }
+}
+
+bool SpdkWrapper::resizeVolume(const std::string& volume_name, uint64_t new_size_bytes) {
+    spdk_flint::logger()->info("[SPDK] Resizing volume: name={}, new_size={}", volume_name, new_size_bytes);
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            return false;
+        }
+    }
+
+    try {
+        rpc_client_->resizeLvolBdev(volume_name, new_size_bytes);
+        spdk_flint::logger()->info("[SPDK] Volume resized successfully: {}", volume_name);
+        return true;
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to resize volume: {}", e.what());
+        return false;
+    }
+}
+
+std::optional<BdevInfo> SpdkWrapper::getVolumeInfo(const std::string& volume_name) {
+    spdk_flint::logger()->debug("[SPDK] Getting volume info: {}", volume_name);
+
+    if (!rpc_client_->isConnected()) {
+        if (!rpc_client_->connect()) {
+            return std::nullopt;
+        }
+    }
+
+    try {
+        auto bdevs = rpc_client_->getBdevs(volume_name);
+
+        if (bdevs.is_array() && !bdevs.empty()) {
+            auto& bdev = bdevs[0];
+            BdevInfo info;
+            info.name = bdev.value("name", "");
+            info.uuid = bdev.value("uuid", "");
+            info.product_name = bdev.value("product_name", "");
+            info.block_size = bdev.value("block_size", 512);
+            info.num_blocks = bdev.value("num_blocks", 0);
+            info.claimed = bdev.value("claimed", false);
+
+            if (bdev.contains("aliases") && bdev["aliases"].is_array()) {
+                for (const auto& alias : bdev["aliases"]) {
+                    info.aliases.push_back(alias.get<std::string>());
+                }
+            }
+
+            return info;
+        }
+    } catch (const std::exception& e) {
+        spdk_flint::logger()->error("[SPDK] Failed to get volume info: {}", e.what());
+    }
+
+    return std::nullopt;
 }
 
 } // namespace spdk
