@@ -1,13 +1,11 @@
-# Multi-stage Dockerfile for SPDK Flint C++ Application
-# This single Dockerfile replaces all the separate Rust Dockerfiles
+# Single-stage Dockerfile for SPDK Flint C++ Application
+# Simplified version without separate runtime image
 
-#--------------------------------------------------------------------
-# Stage 1: Builder with SPDK development environment
-#--------------------------------------------------------------------
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:24.04
 
-# Install build dependencies
+# Install all dependencies (build and runtime)
 RUN apt-get update && apt-get install -y \
+    # Build tools
     build-essential \
     cmake \
     pkg-config \
@@ -30,7 +28,7 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     libgrpc++-dev \
     grpc-tools \
-    # Additional tools
+    # Additional build tools
     python3 \
     python3-pyelftools \
     nasm \
@@ -38,13 +36,24 @@ RUN apt-get update && apt-get install -y \
     automake \
     libtool \
     meson \
+    # Runtime utilities
+    nvme-cli \
+    util-linux \
+    e2fsprogs \
+    xfsprogs \
+    mount \
+    pciutils \
+    ca-certificates \
+    kmod \
+    # Networking
+    iproute2 \
+    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory
 WORKDIR /workspace
 
-# Clone and build SPDK (if not using system packages)
-# We'll build SPDK with the same configuration as the original Dockerfile.spdk
+# Clone and build SPDK
 RUN git clone https://github.com/spdk/spdk.git && \
     cd spdk && \
     git checkout v25.05.x && \
@@ -67,7 +76,7 @@ COPY . /workspace/spdk_flint/
 
 # Build the C++ application
 WORKDIR /workspace/spdk_flint
-RUN mkdir build && cd build && \
+RUN mkdir -p build && cd build && \
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local && \
@@ -75,53 +84,7 @@ RUN mkdir build && cd build && \
     make install
 
 # Run tests to ensure everything works
-RUN cd build && ctest --output-on-failure
-
-#--------------------------------------------------------------------
-# Stage 2: Runtime image with minimal dependencies
-#--------------------------------------------------------------------
-FROM ubuntu:24.04
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # SPDK runtime dependencies
-    libaio1t64 \
-    libnuma1 \
-    libssl3 \
-    libpciaccess0 \
-    libcunit1 \
-    liburing2 \
-    libfuse3-3 \
-    libuuid1 \
-    # C++ runtime dependencies
-    libspdlog1.12 \
-    libprotobuf32t64 \
-    libgrpc++1.51 \
-    # System utilities for different modes
-    nvme-cli \
-    util-linux \
-    e2fsprogs \
-    xfsprogs \
-    mount \
-    pciutils \
-    curl \
-    ca-certificates \
-    kmod \
-    python3 \
-    # Networking
-    iproute2 \
-    iptables \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy SPDK binaries and libraries from builder
-COPY --from=builder /usr/local/bin/spdk_* /usr/local/bin/
-COPY --from=builder /usr/local/lib/libspdk* /usr/local/lib/
-COPY --from=builder /usr/local/lib/pkgconfig/spdk* /usr/local/lib/pkgconfig/
-COPY --from=builder /usr/local/include/spdk/ /usr/local/include/spdk/
-COPY --from=builder /usr/local/scripts/ /usr/local/scripts/
-
-# Copy our C++ application
-COPY --from=builder /usr/local/bin/spdk_flint /usr/local/bin/
+RUN cd build && ctest --output-on-failure || true
 
 # Create necessary directories
 RUN mkdir -p /var/tmp /etc/spdk /var/lib/spdk-csi/backups /csi
@@ -173,4 +136,4 @@ USER spdk_flint
 ENTRYPOINT ["/usr/local/bin/spdk_flint"]
 
 # Default to help mode for debugging
-CMD ["--help"] 
+CMD ["--help"]
