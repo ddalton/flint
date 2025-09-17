@@ -20,7 +20,7 @@ class NodeAgentService;
 
 // Application modes - spdk_flint only supports NODE_AGENT
 enum class AppMode {
-    NODE_AGENT  // Only supported mode - embedded SPDK for node operations
+    NODE_AGENT  // Only supported mode - SPDK RPC client for node operations
 };
 
 // Application configuration
@@ -37,13 +37,14 @@ struct AppConfig {
     // Kubernetes integration
     std::string target_namespace = "flint-system";
     
-    // SPDK configuration (embedded)
+    // SPDK configuration (RPC)
+    std::string spdk_rpc_socket = "/var/tmp/spdk.sock";
     uint32_t discovery_interval = 300; // seconds
     bool auto_initialize_blobstore = true;
     std::string backup_path = "/var/lib/spdk-csi/backups";
 };
 
-// Main application class - Node Agent with embedded SPDK only
+// Main application class - Node Agent with SPDK RPC client
 class Application {
 public:
     explicit Application(const AppConfig& config);

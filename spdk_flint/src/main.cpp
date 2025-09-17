@@ -11,12 +11,12 @@
 static std::unique_ptr<spdk_flint::Application> g_app;
 
 void printUsage() {
-    std::cout << "SPDK Flint Node Agent - High-Performance Storage Node Agent with Embedded SPDK\n\n";
+    std::cout << "SPDK Flint Node Agent - High-Performance Storage Node Agent with SPDK RPC Interface\n\n";
     std::cout << "Usage: spdk_flint [OPTIONS]\n\n";
     std::cout << "OPTIONS:\n";
     std::cout << "  --mode <mode>        Operating mode (only 'node-agent' supported)\n";
     std::cout << "  --log-level <level>  Log level (debug, info, warn, error)\n";
-    std::cout << "  --config <file>      SPDK configuration file (optional)\n";
+    std::cout << "  --rpc-socket <path>  SPDK RPC socket path (default: /var/tmp/spdk.sock)\n";
     std::cout << "  --help, -h           Show this help message\n";
     std::cout << "  --version, -v        Show version information\n\n";
     std::cout << "ENVIRONMENT VARIABLES:\n";
@@ -26,20 +26,20 @@ void printUsage() {
     std::cout << "  HEALTH_PORT          Health check port (default: 9809)\n";
     std::cout << "  NODE_AGENT_PORT      Node agent API port (default: 8090)\n";
     std::cout << "  TARGET_NAMESPACE     Kubernetes namespace (default: flint-system)\n";
-    std::cout << "  SPDK_CONFIG_FILE     SPDK configuration file\n\n";
+    std::cout << "  SPDK_RPC_SOCKET      SPDK RPC socket path\n\n";
     std::cout << "EXAMPLES:\n";
-    std::cout << "  spdk_flint                     # Start in node-agent mode\n";
-    std::cout << "  spdk_flint --log-level debug   # Start with debug logging\n";
-    std::cout << "  CSI_MODE=node-agent spdk_flint # Start via environment variable\n\n";
-    std::cout << "NOTE: spdk_flint only supports node-agent mode with embedded SPDK.\n";
-    std::cout << "      Other CSI services (controller, dashboard) use Rust RPC clients.\n";
+    std::cout << "  spdk_flint                         # Start in node-agent mode\n";
+    std::cout << "  spdk_flint --log-level debug       # Start with debug logging\n";
+    std::cout << "  CSI_MODE=node-agent spdk_flint     # Start via environment variable\n\n";
+    std::cout << "NOTE: spdk_flint connects to an external SPDK target via RPC.\n";
+    std::cout << "      Ensure the SPDK target is running and accessible.\n";
 }
 
 void printVersion() {
     std::cout << "SPDK Flint Node Agent\n";
     std::cout << "Version: 1.0.0\n";
-    std::cout << "SPDK Version: 25.05.x\n";
-    std::cout << "Architecture: Node Agent with Embedded SPDK\n";
+    std::cout << "SPDK Integration: RPC Interface\n";
+    std::cout << "Architecture: Node Agent with SPDK RPC Client\n";
     std::cout << "Build: " << __DATE__ << " " << __TIME__ << "\n";
 }
 
@@ -48,7 +48,7 @@ int main(int argc, char* argv[]) {
     
     std::string mode;
     std::string log_level = "info";
-    std::string config_file;
+    std::string rpc_socket;
     
     std::cout << "SPDK Flint Node Agent - Starting up...\n";
     std::cout << "Process ID: " << getpid() << ", Thread ID: " << std::this_thread::get_id() << "\n";
@@ -73,8 +73,8 @@ int main(int argc, char* argv[]) {
             mode = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
             log_level = argv[++i];
-        } else if (arg == "--config" && i + 1 < argc) {
-            config_file = argv[++i];
+        } else if (arg == "--rpc-socket" && i + 1 < argc) {
+            rpc_socket = argv[++i];
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
             printUsage();
@@ -96,7 +96,7 @@ int main(int argc, char* argv[]) {
     spdk_flint::logger()->debug("[MAIN] Command line arguments parsed:");
     spdk_flint::logger()->debug("[MAIN]   --mode: '{}'", mode.empty() ? "not specified" : mode);
     spdk_flint::logger()->debug("[MAIN]   --log-level: '{}'", log_level);
-    spdk_flint::logger()->debug("[MAIN]   --config: '{}'", config_file.empty() ? "not specified" : config_file);
+    spdk_flint::logger()->debug("[MAIN]   --rpc-socket: '{}'", rpc_socket.empty() ? "not specified" : rpc_socket);
     
     try {
         // Load configuration from environment and command line
@@ -108,9 +108,9 @@ int main(int argc, char* argv[]) {
             spdk_flint::logger()->debug("[MAIN] Overriding mode from command line: '{}'", mode);
             config.mode = spdk_flint::parseAppMode(mode);
         }
-        if (!config_file.empty()) {
-            spdk_flint::logger()->debug("[MAIN] Overriding config file from command line: '{}'", config_file);
-            config.config_file = config_file;
+        if (!rpc_socket.empty()) {
+            spdk_flint::logger()->debug("[MAIN] Overriding RPC socket from command line: '{}'", rpc_socket);
+            config.spdk_rpc_socket = rpc_socket;
         }
         
         // Validate that we're in node-agent mode
@@ -141,11 +141,11 @@ int main(int argc, char* argv[]) {
         spdk_flint::logger()->info("[MAIN] Total startup time: {} ms", startup_duration.count());
         spdk_flint::logger()->info("[MAIN] ========================================");
         spdk_flint::logger()->info("[MAIN] SPDK Flint Node Agent is now running");
-        spdk_flint::logger()->info("[MAIN] Services: HTTP API, Health monitoring, Disk discovery");
-        spdk_flint::logger()->info("[MAIN] Entering SPDK event loop - blocking until shutdown");
+        spdk_flint::logger()->info("[MAIN] Services: HTTP API, Health monitoring, SPDK RPC client");
+        spdk_flint::logger()->info("[MAIN] Entering application event loop - blocking until shutdown");
         spdk_flint::logger()->info("[MAIN] ========================================");
         
-        // Run the application - this will block until SPDK shuts down
+        // Run the application - this will block until shutdown
         int exit_code = g_app->run();
         
         auto total_runtime = std::chrono::duration_cast<std::chrono::seconds>(

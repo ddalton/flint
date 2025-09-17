@@ -59,41 +59,7 @@ find_package(Threads REQUIRED)
 pkg_check_modules(CURL REQUIRED libcurl)
 find_package(OpenSSL REQUIRED)
 
-# Manual SPDK detection (pkg-config files not available)
-# Based on debugging output, these libraries exist in /usr/local/lib/
-# SPDK library discovery is done individually below for better control
-
-set(SPDK_INCLUDE_DIRS /usr/local/include)
-
-# Add SPDK source include directory for internal headers (Docker build)
-set(SPDK_INTERNAL_SEARCH_PATHS 
-    "/workspace/spdk/include"
-    "/workspace/spdk" 
-    "/workspace/spdk/module"
-    "/usr/local/include"
-)
-
-foreach(search_path ${SPDK_INTERNAL_SEARCH_PATHS})
-    if(EXISTS "${search_path}/spdk_internal/lvolstore.h")
-        list(APPEND SPDK_INCLUDE_DIRS ${search_path})
-        message(STATUS "Found SPDK internal headers: ${search_path}/spdk_internal/")
-        break()
-    endif()
-endforeach()
-
-# Also search for module headers needed for complete struct definitions
-set(SPDK_MODULE_SEARCH_PATHS 
-    "/workspace/spdk"
-    "/usr/local/include"
-)
-
-foreach(search_path ${SPDK_MODULE_SEARCH_PATHS})
-    if(EXISTS "${search_path}/module")
-        list(APPEND SPDK_INCLUDE_DIRS ${search_path})
-        message(STATUS "Found SPDK module headers: ${search_path}/module/")
-        break()
-    endif()
-endforeach()
+# SPDK integration via RPC - no direct library dependencies needed
 
 # Find Crow (header-only, will be downloaded if not found)
 find_path(CROW_INCLUDE_DIR 
@@ -157,7 +123,6 @@ endif()
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/proto
-    ${SPDK_INCLUDE_DIRS}
 )
 
 # Generate protobuf and gRPC files
@@ -216,7 +181,6 @@ add_executable(spdk_flint src/main.cpp)
 target_include_directories(spdk_flint_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${GENERATED_PROTOBUF_PATH}
-    ${SPDK_INCLUDE_DIRS}
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
     ${spdlog_INCLUDE_DIRS}
@@ -227,7 +191,6 @@ target_include_directories(spdk_flint_lib PUBLIC
 target_include_directories(spdk_flint PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${GENERATED_PROTOBUF_PATH}
-    ${SPDK_INCLUDE_DIRS}
     ${gRPC_INCLUDE_DIRS}
     ${Protobuf_INCLUDE_DIRS}
     ${spdlog_INCLUDE_DIRS}
@@ -239,12 +202,8 @@ target_include_directories(spdk_flint PRIVATE
 # Simplified SPDK and DPDK library linking
 # Based on the Dockerfile.base build, SPDK libraries are in /usr/local/lib/
 
-# Core system libraries needed by SPDK
+# Core system libraries
 set(SYSTEM_LIBS
-    dl
-    rt
-    numa
-    uuid
     pthread
     ssl
     crypto
@@ -252,51 +211,8 @@ set(SYSTEM_LIBS
     c
 )
 
-# Static linking configuration
-set(CMAKE_FIND_LIBRARY_SUFFIXES .a .so)  # Prefer static libraries
+# Standard linking configuration
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
-
-# Try to find DPDK via pkg-config first
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(DPDK QUIET libdpdk)
-    if(DPDK_FOUND)
-        message(STATUS "Found DPDK via pkg-config: ${DPDK_LIBRARIES}")
-    endif()
-endif()
-
-# Fallback: try to find DPDK library manually
-if(NOT DPDK_FOUND)
-    find_library(DPDK_LIBRARY NAMES dpdk libdpdk 
-        PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
-        DOC "DPDK library")
-    if(DPDK_LIBRARY)
-        set(DPDK_LIBRARIES ${DPDK_LIBRARY})
-        message(STATUS "Found DPDK library: ${DPDK_LIBRARY}")
-    else()
-        message(WARNING "DPDK library not found - may cause linking issues")
-    endif()
-endif()
-
-# Find AIO library (different names possible)
-find_library(AIO_LIBRARY NAMES aio libaio 
-    PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
-    DOC "AIO library")
-if(AIO_LIBRARY)
-    message(STATUS "Found AIO library: ${AIO_LIBRARY}")
-else()
-    message(WARNING "AIO library not found - may cause linking issues")
-endif()
-
-# Find uring library (different names possible)  
-find_library(URING_LIBRARY NAMES uring liburing
-    PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib
-    DOC "uring library")
-if(URING_LIBRARY)
-    message(STATUS "Found uring library: ${URING_LIBRARY}")
-else()
-    message(WARNING "uring library not found - may cause linking issues")
-endif()
 
 # Link libraries for spdk_flint_lib
 target_link_libraries(spdk_flint_lib
@@ -308,135 +224,16 @@ target_link_libraries(spdk_flint_lib
     ${CURL_LIBRARIES}
 )
 
-# Static linking approach - link ALL SPDK and DPDK libraries at once
-# Find all SPDK static libraries (exclude unit test libraries)
-file(GLOB ALL_SPDK_LIBS "/usr/local/lib/libspdk*.a")
-# Remove unit test and mock libraries
-list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*ut_mock.*")
-list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*unit.*")
-list(FILTER ALL_SPDK_LIBS EXCLUDE REGEX ".*test.*")
-message(STATUS "Found SPDK libraries: ${ALL_SPDK_LIBS}")
-
-# Find DPDK libraries - SPDK builds its own internal DPDK, so look there first
-# SPDK's internal DPDK should contain the rte_pci_* functions we need
-file(GLOB ALL_DPDK_LIBS 
-    # SPDK's internal DPDK libraries (built during SPDK compilation)
-    "/workspace/spdk/dpdk/build/lib/librte*.a"
-    "/workspace/spdk/build/lib/librte*.a" 
-    "/workspace/spdk/lib/librte*.a"
-    # Also check installed locations from SPDK build
-    "/usr/local/lib/librte*.a"
-    "/usr/local/lib/libdpdk*.a"
-    # System DPDK as fallback (though SPDK uses its own)
-    "/usr/lib/x86_64-linux-gnu/libdpdk*.a" 
-    "/usr/lib/x86_64-linux-gnu/librte*.a"
-)
-message(STATUS "Found DPDK libraries: ${ALL_DPDK_LIBS}")
-
-# Note: We don't use system pkg-config for DPDK since SPDK builds its own version
-
-# Find ISA-L libraries - SPDK builds these internally, so check SPDK build dirs too
-file(GLOB ALL_ISAL_LIBS 
-    "/usr/local/lib/libisal*.a" 
-    "/usr/lib/x86_64-linux-gnu/libisal*.a"
-    "/usr/lib/libisal*.a"
-    "/lib/x86_64-linux-gnu/libisal*.a"
-    # Also look for ISA-L-crypto
-    "/usr/local/lib/libisal_crypto*.a"
-    "/usr/lib/x86_64-linux-gnu/libisal_crypto*.a"
-    "/usr/lib/libisal_crypto*.a"
-    # SPDK might have built ISA-L internally - check SPDK directories
-    "/workspace/spdk/isa-l/.libs/libisal.a"
-    "/workspace/spdk/isa-l-crypto/.libs/libisal_crypto.a"
-    "/workspace/spdk/build/lib/libisal*.a"
-    "/workspace/spdk/lib/libisal*.a"
-    # Alternative naming patterns
-    "/usr/local/lib/libisa-l*.a"
-    "/usr/lib/x86_64-linux-gnu/libisa-l*.a"
-)
-message(STATUS "Found ISA-L libraries: ${ALL_ISAL_LIBS}")
-
-# If no ISA-L libraries found, try to find them via pkg-config
-if(NOT ALL_ISAL_LIBS)
-    find_package(PkgConfig QUIET)
-    if(PKG_CONFIG_FOUND)
-        pkg_check_modules(ISAL QUIET libisal)
-        if(ISAL_FOUND)
-            list(APPEND ALL_ISAL_LIBS ${ISAL_LIBRARIES})
-            message(STATUS "Found ISA-L via pkg-config: ${ISAL_LIBRARIES}")
-        endif()
-    endif()
-endif()
-
-# ISA-L might be embedded in SPDK libraries, so let's also check for that
-if(NOT ALL_ISAL_LIBS)
-    message(STATUS "No separate ISA-L libraries found - ISA-L symbols may be embedded in SPDK libraries")
-endif()
-
-# Link everything statically with whole-archive to include all symbols
-# Use aggressive linking to resolve embedded symbols
-target_link_libraries(spdk_flint_lib
-    # First pass: Link all libraries with --whole-archive
-    -Wl,--start-group
-    -Wl,--whole-archive
-    ${ALL_SPDK_LIBS}
-    ${ALL_DPDK_LIBS}
-    ${ALL_ISAL_LIBS}
-    -Wl,--no-whole-archive
-    # Second pass: Link again to resolve any circular dependencies or embedded symbols
-    ${ALL_SPDK_LIBS}
-    ${ALL_DPDK_LIBS}
-    ${ALL_ISAL_LIBS}
-    -Wl,--end-group
-)
+# No SPDK static libraries needed - using RPC interface only
 
 # Link system libraries
 target_link_libraries(spdk_flint_lib ${SYSTEM_LIBS})
 
-# Link AIO and uring libraries if found
-if(AIO_LIBRARY)
-    target_link_libraries(spdk_flint_lib ${AIO_LIBRARY})
-endif()
-if(URING_LIBRARY)
-    target_link_libraries(spdk_flint_lib ${URING_LIBRARY})
-endif()
+# No additional SPDK/DPDK/ISA-L libraries needed for RPC approach
 
-# Add fallback linking for ISA-L if static libraries weren't found
-if(NOT ALL_ISAL_LIBS)
-    message(WARNING "No ISA-L static libraries found, trying shared libraries")
-    find_library(ISAL_SHARED NAMES isal libisal PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
-    find_library(ISAL_CRYPTO_SHARED NAMES isal_crypto libisal_crypto PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
-    if(ISAL_SHARED)
-        target_link_libraries(spdk_flint_lib ${ISAL_SHARED})
-        message(STATUS "Linked shared ISA-L library: ${ISAL_SHARED}")
-    endif()
-    if(ISAL_CRYPTO_SHARED)
-        target_link_libraries(spdk_flint_lib ${ISAL_CRYPTO_SHARED})
-        message(STATUS "Linked shared ISA-L-crypto library: ${ISAL_CRYPTO_SHARED}")
-    endif()
-else()
-    # Even if we found ISA-L static libs, also try to add system ISA-L in case SPDK's internal version is incomplete
-    find_library(SYSTEM_ISAL NAMES isal libisal PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
-    find_library(SYSTEM_ISAL_CRYPTO NAMES isal_crypto libisal_crypto PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib /usr/lib)
-    if(SYSTEM_ISAL)
-        target_link_libraries(spdk_flint_lib ${SYSTEM_ISAL})
-        message(STATUS "Added system ISA-L library: ${SYSTEM_ISAL}")
-    endif()
-    if(SYSTEM_ISAL_CRYPTO)
-        target_link_libraries(spdk_flint_lib ${SYSTEM_ISAL_CRYPTO})
-        message(STATUS "Added system ISA-L-crypto library: ${SYSTEM_ISAL_CRYPTO}")
-    endif()
-endif()
-
-# SPDK builds its own DPDK internally, so DPDK libraries should be found above
-if(NOT ALL_DPDK_LIBS)
-    message(WARNING "No DPDK libraries found - this may cause PCI function linking issues")
-    message(STATUS "SPDK should have built internal DPDK libraries during compilation")
-endif()
-
-# Set linker flags for static linking
+# Standard linker flags
 set_target_properties(spdk_flint_lib PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -Wl,--copy-dt-needed-entries"
+    LINK_FLAGS "-Wl,--no-as-needed"
 )
 
 # Link libraries for the main executable
@@ -445,9 +242,9 @@ target_link_libraries(spdk_flint
     ${CMAKE_DL_LIBS}
 )
 
-# Set linker flags for main executable  
+# Set linker flags for main executable
 set_target_properties(spdk_flint PROPERTIES
-    LINK_FLAGS "-Wl,--no-as-needed -Wl,--allow-multiple-definition -static-libgcc -static-libstdc++"
+    LINK_FLAGS "-Wl,--no-as-needed -static-libgcc -static-libstdc++"
 )
 
 # Link Crow (FetchContent or manually found)
@@ -469,10 +266,7 @@ if(TARGET kubernetes-client-cpp)
     target_link_libraries(spdk_flint kubernetes-client-cpp)
 endif()
 
-# Compiler definitions
-target_compile_definitions(spdk_flint PRIVATE
-    ${SPDK_CFLAGS_OTHER}
-)
+# Compiler definitions (none needed for RPC approach)
 
 # Tests
 add_subdirectory(test)

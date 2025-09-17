@@ -839,13 +839,13 @@ void Application::initializeComponents() {
     auto start_time = std::chrono::steady_clock::now();
     logger()->info("[APP] Initializing SPDK Flint Node Agent components");
     
-    // Initialize SPDK wrapper with embedded SPDK
-    logger()->debug("[APP] Creating embedded SPDK wrapper");
-    spdk_wrapper_ = std::make_shared<spdk_flint::spdk::SpdkWrapper>(config_.config_file);
+    // Initialize SPDK wrapper with RPC client
+    logger()->debug("[APP] Creating SPDK RPC client wrapper");
+    spdk_wrapper_ = std::make_shared<spdk_flint::spdk::SpdkWrapper>(config_.spdk_rpc_socket);
     if (!spdk_wrapper_->initialize()) {
-        throw std::runtime_error("Failed to initialize embedded SPDK");
+        throw std::runtime_error("Failed to initialize SPDK RPC client");
     }
-    logger()->info("[APP] Embedded SPDK initialized successfully");
+    logger()->info("[APP] SPDK RPC client initialized successfully");
     
     // Initialize Kubernetes client
     logger()->debug("[APP] Initializing Kubernetes client");

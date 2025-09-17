@@ -58,6 +58,21 @@ public:
     json createLvolStore(const std::string& bdev_name, const std::string& lvs_name, uint32_t cluster_sz = 0);
     json deleteLvolStore(const std::string& uuid = "", const std::string& lvs_name = "");
 
+    // RAID operations
+    json getRaidBdevs(const std::string& category = "");
+    json createRaid(const std::string& name, int raid_level, const std::vector<std::string>& base_bdevs,
+                   uint32_t strip_size = 0, uint32_t extra_base_bdevs = 0);
+    json deleteRaid(const std::string& name);
+    json addRaidMember(const std::string& name, const std::string& member);
+    json removeRaidMember(const std::string& name, const std::string& member);
+    json replaceRaidMember(const std::string& name, const std::string& old_member, const std::string& new_member);
+
+    // NVMe operations
+    json getNvmeControllers(const std::string& name = "");
+    json attachNvmeController(const std::string& name, const std::string& trtype, const std::string& traddr,
+                             const json& additional_params = json::object());
+    json detachNvmeController(const std::string& name);
+
     // NVMe-oF operations
     json nvmfGetSubsystems();
     json nvmfCreateSubsystem(const std::string& nqn, const std::string& serial_number = "",

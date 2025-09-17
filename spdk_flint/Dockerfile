@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     git \
     wget \
     curl \
+    patchelf \
     # SPDK dependencies
     libaio-dev \
     libssl-dev \
@@ -30,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler-grpc \
     # Additional build tools
     python3 \
+    python3-pip \
     python3-pyelftools \
     nasm \
     autoconf \

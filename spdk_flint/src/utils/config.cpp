@@ -122,17 +122,24 @@ AppConfig loadConfigFromEnvironment() {
     }
     
     // SPDK configuration
+    const char* rpc_socket = std::getenv("SPDK_RPC_SOCKET");
     const char* discovery_interval = std::getenv("DISK_DISCOVERY_INTERVAL");
     const char* auto_init = std::getenv("AUTO_INITIALIZE_BLOBSTORE");
     const char* backup_path = std::getenv("DISK_BACKUP_PATH");
-    const char* config_file = std::getenv("SPDK_CONFIG_FILE");
-    
-    logger()->debug("[CONFIG] SPDK environment variables - DISK_DISCOVERY_INTERVAL: '{}', AUTO_INITIALIZE_BLOBSTORE: '{}', "
-                   "DISK_BACKUP_PATH: '{}', SPDK_CONFIG_FILE: '{}'",
+
+    logger()->debug("[CONFIG] SPDK environment variables - SPDK_RPC_SOCKET: '{}', DISK_DISCOVERY_INTERVAL: '{}', "
+                   "AUTO_INITIALIZE_BLOBSTORE: '{}', DISK_BACKUP_PATH: '{}'",
+                   rpc_socket ? rpc_socket : "unset",
                    discovery_interval ? discovery_interval : "unset",
                    auto_init ? auto_init : "unset",
-                   backup_path ? backup_path : "unset",
-                   config_file ? config_file : "unset");
+                   backup_path ? backup_path : "unset");
+
+    if (rpc_socket) {
+        config.spdk_rpc_socket = std::string(rpc_socket);
+        logger()->info("[CONFIG] SPDK RPC socket set to: '{}' (from SPDK_RPC_SOCKET)", config.spdk_rpc_socket);
+    } else {
+        logger()->debug("[CONFIG] SPDK RPC socket remains default: '{}'", config.spdk_rpc_socket);
+    }
     
     if (discovery_interval) {
         try {
@@ -172,21 +179,7 @@ AppConfig loadConfigFromEnvironment() {
         logger()->debug("[CONFIG] Backup path remains default: '{}'", config.backup_path);
     }
     
-    // SPDK configuration file (optional)
-    if (config_file) {
-        config.config_file = std::string(config_file);
-        logger()->info("[CONFIG] SPDK config file set to: '{}' (from SPDK_CONFIG_FILE)", config.config_file);
-        
-        // Check if the file exists and is readable
-        std::ifstream file(config.config_file);
-        if (file.good()) {
-            logger()->debug("[CONFIG] SPDK config file verified: exists and readable");
-        } else {
-            logger()->warn("[CONFIG] SPDK config file '{}' may not exist or is not readable", config.config_file);
-        }
-    } else {
-        logger()->debug("[CONFIG] No SPDK config file specified (SPDK_CONFIG_FILE not set)");
-    }
+    // No SPDK config file needed for RPC interface
     
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start_time);
@@ -194,18 +187,16 @@ AppConfig loadConfigFromEnvironment() {
     // Log the loaded configuration summary
     logger()->info("[CONFIG] Configuration loaded successfully in {} ms", duration.count());
     logger()->info("[CONFIG] ===== Configuration Summary =====");
-    logger()->info("[CONFIG]   Mode: node-agent (embedded SPDK)");
+    logger()->info("[CONFIG]   Mode: node-agent (SPDK RPC client)");
     logger()->info("[CONFIG]   Node ID: '{}'", config.node_id);
     logger()->info("[CONFIG]   Log Level: '{}'", config.log_level);
     logger()->info("[CONFIG]   Health Port: {}", config.health_port);
     logger()->info("[CONFIG]   Node Agent Port: {}", config.node_agent_port);
     logger()->info("[CONFIG]   Target Namespace: '{}'", config.target_namespace);
+    logger()->info("[CONFIG]   SPDK RPC Socket: '{}'", config.spdk_rpc_socket);
     logger()->info("[CONFIG]   Discovery Interval: {} seconds", config.discovery_interval);
     logger()->info("[CONFIG]   Auto Initialize Blobstore: {}", config.auto_initialize_blobstore);
     logger()->info("[CONFIG]   Backup Path: '{}'", config.backup_path);
-    if (!config.config_file.empty()) {
-        logger()->info("[CONFIG]   SPDK Config File: '{}'", config.config_file);
-    }
     logger()->info("[CONFIG] ================================");
     
     // Log configuration validation

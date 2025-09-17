@@ -12,29 +12,8 @@
 #include <atomic>
 #include <chrono>
 
-// Suppress pedantic warnings from SPDK headers (they use C99/GNU extensions)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-
-// SPDK headers
-extern "C" {
-#include <spdk/stdinc.h>
-#include <spdk/env.h>
-#include <spdk/event.h>
-#include <spdk/bdev.h>
-#include <spdk/blob_bdev.h>
-#include <spdk/blobfs.h>
-#include <spdk/lvol.h>
-#include <spdk/nvme.h>
-#include <spdk/nvmf.h>
-#include <spdk/rpc.h>
-#include <spdk/thread.h>
-#include <spdk/log.h>
-#include <spdk/uuid.h>
-}
-
-// Restore previous diagnostic settings
-#pragma GCC diagnostic pop
+// Forward declaration for RPC client (no SPDK headers needed)
+namespace spdk_flint::spdk { class RpcClient; }
 
 namespace spdk_flint {
 namespace spdk {
@@ -257,7 +236,6 @@ private:
 
     // Internal data members
     std::string config_file_;
-    struct spdk_app_opts* opts_;
     std::atomic<bool> event_loop_running_{false};
     std::atomic<bool> shutdown_requested_{false};
 

@@ -330,6 +330,117 @@ json RpcClient::deleteLvolStore(const std::string& uuid, const std::string& lvs_
     return callRpc("bdev_lvol_delete_lvstore", params);
 }
 
+// RAID operations
+
+json RpcClient::getRaidBdevs(const std::string& category) {
+    logger()->debug("[RPC_CLIENT] Getting RAID bdevs: category={}", category);
+
+    json params;
+    if (!category.empty()) {
+        params["category"] = category;
+    }
+
+    return callRpc("bdev_raid_get_bdevs", params);
+}
+
+json RpcClient::createRaid(const std::string& name, int raid_level, const std::vector<std::string>& base_bdevs,
+                          uint32_t strip_size, uint32_t extra_base_bdevs) {
+    logger()->info("[RPC_CLIENT] Creating RAID: name={}, level={}, members={}", name, raid_level, base_bdevs.size());
+
+    json params;
+    params["name"] = name;
+    params["raid_level"] = raid_level;
+    params["base_bdevs"] = base_bdevs;
+
+    if (strip_size > 0) {
+        params["strip_size"] = strip_size;
+    }
+    if (extra_base_bdevs > 0) {
+        params["extra_base_bdevs"] = extra_base_bdevs;
+    }
+
+    return callRpc("bdev_raid_create", params);
+}
+
+json RpcClient::deleteRaid(const std::string& name) {
+    logger()->info("[RPC_CLIENT] Deleting RAID: {}", name);
+
+    json params;
+    params["name"] = name;
+
+    return callRpc("bdev_raid_delete", params);
+}
+
+json RpcClient::addRaidMember(const std::string& name, const std::string& member) {
+    logger()->info("[RPC_CLIENT] Adding RAID member: raid={}, member={}", name, member);
+
+    json params;
+    params["name"] = name;
+    params["member"] = member;
+
+    return callRpc("bdev_raid_add_member", params);
+}
+
+json RpcClient::removeRaidMember(const std::string& name, const std::string& member) {
+    logger()->info("[RPC_CLIENT] Removing RAID member: raid={}, member={}", name, member);
+
+    json params;
+    params["name"] = name;
+    params["member"] = member;
+
+    return callRpc("bdev_raid_remove_member", params);
+}
+
+json RpcClient::replaceRaidMember(const std::string& name, const std::string& old_member, const std::string& new_member) {
+    logger()->info("[RPC_CLIENT] Replacing RAID member: raid={}, old={}, new={}", name, old_member, new_member);
+
+    json params;
+    params["name"] = name;
+    params["old_member"] = old_member;
+    params["new_member"] = new_member;
+
+    return callRpc("bdev_raid_replace_member", params);
+}
+
+// NVMe operations
+
+json RpcClient::getNvmeControllers(const std::string& name) {
+    logger()->debug("[RPC_CLIENT] Getting NVMe controllers: name={}", name);
+
+    json params;
+    if (!name.empty()) {
+        params["name"] = name;
+    }
+
+    return callRpc("bdev_nvme_get_controllers", params);
+}
+
+json RpcClient::attachNvmeController(const std::string& name, const std::string& trtype, const std::string& traddr,
+                                    const json& additional_params) {
+    logger()->info("[RPC_CLIENT] Attaching NVMe controller: name={}, trtype={}, traddr={}", name, trtype, traddr);
+
+    json params;
+    params["name"] = name;
+    params["trtype"] = trtype;
+    params["traddr"] = traddr;
+
+    // Merge additional parameters
+    for (auto& [key, value] : additional_params.items()) {
+        params[key] = value;
+    }
+
+    return callRpc("bdev_nvme_attach_controller", params);
+}
+
+json RpcClient::detachNvmeController(const std::string& name) {
+    logger()->info("[RPC_CLIENT] Detaching NVMe controller: {}", name);
+
+    json params;
+    params["name"] = name;
+
+    return callRpc("bdev_nvme_detach_controller", params);
+}
+
 // NVMe-oF operations
 
 json RpcClient::nvmfGetSubsystems() {
