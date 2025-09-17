@@ -3,7 +3,7 @@
 # Multi-stage build for the C implementation with Ulfius framework
 
 # Stage 1: Base image with SPDK and dependencies
-FROM ubuntu:22.04 AS base
+FROM ubuntu:24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SPDK_VERSION=23.09
@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y \
     libcunit1-dev \
     uuid-dev \
     libiscsi-dev \
+    librdmacm-dev \
+    libibverbs-dev \
     python3 \
     python3-pip \
     # Ulfius dependencies
@@ -80,9 +82,7 @@ RUN git clone https://github.com/babelouest/ulfius.git /tmp/ulfius && \
 RUN git clone --depth 1 --branch v${SPDK_VERSION} https://github.com/spdk/spdk /tmp/spdk && \
     cd /tmp/spdk && \
     git submodule update --init && \
-    ./scripts/pkgdep.sh --rdma && \
     ./configure --with-rdma --with-shared \
-        --with-crypto --with-vhost --with-virtio \
         --disable-tests --disable-unit-tests --disable-examples && \
     make -j$(nproc) && \
     make install && \
