@@ -95,7 +95,6 @@ WORKDIR /app
 
 # Copy source files
 COPY src/main.c src/
-COPY include/node_agent.h include/
 COPY Makefile .
 
 # Build the node agent
