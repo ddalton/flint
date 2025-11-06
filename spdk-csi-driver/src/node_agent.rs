@@ -11,6 +11,8 @@ use std::env;
 use std::fs;
 use std::process::Command;
 use std::path::Path;
+use std::time::Instant;
+use std::collections::HashSet;
 use regex::Regex;
 
 
@@ -645,34 +647,61 @@ async fn wait_for_spdk_ready(agent: &NodeAgent) -> Result<(), Box<dyn std::error
 /// Immediately create bdevs (AIO or NVMe) for all known SpdkDisks to enable SPDK auto-discovery
 async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🔧 [RECOVERY] Starting immediate bdev recovery from SpdkDisk CRDs (AIO + NVMe)");
-    
+
     // Get Kubernetes client
     let spdk_disks: Api<SpdkDisk> = Api::namespaced(agent.kube_client.clone(), &agent.target_namespace);
-    
+
     // Get SpdkDisks for this node using efficient label-based filtering
     let lp = ListParams::default().labels(&format!("node={}", agent.node_name));
     match spdk_disks.list(&lp).await {
         Ok(disk_list) => {
             println!("🔍 [RECOVERY] Found {} SpdkDisk CRDs for node {}", disk_list.items.len(), agent.node_name);
-            
+
+            // Track which LVS we expect to be discovered
+            let mut expected_lvs_names = Vec::new();
+
             for disk in disk_list.items {
                 if let Some(disk_name) = &disk.metadata.name {
                     println!("🔧 [RECOVERY] Creating bdev for disk: {}", disk_name);
-                    
+
                     // Try to create appropriate bdev type (AIO for kernel, NVMe for userspace)
                     if let Err(e) = recover_disk_bdev(agent, &disk).await {
                         println!("⚠️ [RECOVERY] Failed to create bdev for {}: {}", disk_name, e);
                         // Continue with other disks - don't fail the whole startup
                     } else {
                         println!("✅ [RECOVERY] Bdev ready for: {}", disk_name);
+
+                        // If this disk has an initialized LVS, track it for discovery verification
+                        if let Some(status) = &disk.status {
+                            if status.blobstore_initialized {
+                                if let Some(lvs_name) = &status.lvs_name {
+                                    println!("📋 [RECOVERY] Expecting LVS to be discovered: {}", lvs_name);
+                                    expected_lvs_names.push(lvs_name.clone());
+                                }
+                            }
+                        }
                     }
                 }
             }
-            
-            // Give SPDK a moment to discover LVS on the newly created bdevs
-            println!("⏳ [RECOVERY] Waiting 3 seconds for SPDK to auto-discover existing LVS...");
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            
+
+            // Wait for SPDK to auto-discover LVS on the newly created bdevs
+            // This replaces the blind 3-second sleep with active polling
+            if !expected_lvs_names.is_empty() {
+                println!("🔍 [RECOVERY] Waiting for SPDK to auto-discover {} LVS...", expected_lvs_names.len());
+
+                match agent.wait_for_lvs_discovery(&expected_lvs_names, Duration::from_secs(10)).await {
+                    Ok(()) => {
+                        println!("✅ [RECOVERY] All LVS successfully discovered");
+                    }
+                    Err(e) => {
+                        println!("⚠️ [RECOVERY] LVS discovery incomplete: {}", e);
+                        println!("⚠️ [RECOVERY] Continuing anyway - reconciliation will handle missing LVS");
+                    }
+                }
+            } else {
+                println!("📋 [RECOVERY] No initialized LVS expected, skipping discovery wait");
+            }
+
             println!("✅ [RECOVERY] Bdev recovery completed");
         }
         Err(e) => {
@@ -680,7 +709,7 @@ async fn recover_existing_aio_bdevs(agent: &NodeAgent) -> Result<(), Box<dyn std
             // Don't fail startup - continue without recovery
         }
     }
-    
+
     Ok(())
 }
 
@@ -1716,6 +1745,91 @@ impl NodeAgent {
         // Convert PCI address to valid Kubernetes name: 0000:00:1f.0 → 0000-00-1f-0
         let pci_safe = pci_addr.replace(":", "-").replace(".", "-");
         format!("{}-pci-{}", self.node_name, pci_safe)
+    }
+
+    /// Wait for SPDK to auto-discover LVS on newly created bdevs
+    ///
+    /// SPDK automatically examines bdevs for existing LVS (Logical Volume Stores) when they're created.
+    /// This function polls bdev_lvol_get_lvstores RPC to verify that expected LVS have been discovered.
+    ///
+    /// # Arguments
+    /// * `expected_lvs_names` - List of LVS names we expect SPDK to discover
+    /// * `timeout` - Maximum time to wait before returning an error
+    ///
+    /// # Returns
+    /// * `Ok(())` if all expected LVS are discovered within timeout
+    /// * `Err` if timeout is reached or RPC call fails
+    async fn wait_for_lvs_discovery(
+        &self,
+        expected_lvs_names: &[String],
+        timeout: Duration,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if expected_lvs_names.is_empty() {
+            println!("✅ [LVS_DISCOVERY] No LVS expected, skipping discovery wait");
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        let mut iteration = 0;
+        let expected_set: HashSet<String> = expected_lvs_names.iter().cloned().collect();
+
+        println!("🔍 [LVS_DISCOVERY] Waiting for {} LVS to be discovered: {:?}",
+                 expected_lvs_names.len(), expected_lvs_names);
+
+        loop {
+            iteration += 1;
+
+            // Query SPDK for current LVS state
+            let result = call_spdk_rpc(&self.spdk_rpc_url, &json!({
+                "method": "bdev_lvol_get_lvstores"
+            })).await?;
+
+            // Parse discovered LVS names
+            let discovered: HashSet<String> = result["result"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|lvs| lvs["name"].as_str())
+                .map(|s| s.to_string())
+                .collect();
+
+            // Check if all expected LVS are discovered
+            let all_found = expected_set.iter().all(|name| discovered.contains(name));
+
+            if all_found {
+                println!("✅ [LVS_DISCOVERY] Success! All {} LVS discovered after {} iterations ({}ms)",
+                         expected_lvs_names.len(),
+                         iteration,
+                         start.elapsed().as_millis());
+                return Ok(());
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                let missing: Vec<String> = expected_set.difference(&discovered)
+                    .cloned()
+                    .collect();
+                return Err(format!(
+                    "Timeout after {}s waiting for LVS discovery. Expected {} LVS, found {}. Missing: {:?}",
+                    timeout.as_secs(),
+                    expected_lvs_names.len(),
+                    discovered.len(),
+                    missing
+                ).into());
+            }
+
+            // Log progress periodically
+            if iteration == 1 || iteration % 10 == 0 {
+                println!("⏳ [LVS_DISCOVERY] Iteration {}: found {}/{} LVS ({}ms elapsed)",
+                         iteration,
+                         discovered.len(),
+                         expected_lvs_names.len(),
+                         start.elapsed().as_millis());
+            }
+
+            // Wait 100ms before next check
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn discover_all_disks(&self) -> Result<Vec<UnimplementedDisk>, Box<dyn std::error::Error + Send + Sync>> {
