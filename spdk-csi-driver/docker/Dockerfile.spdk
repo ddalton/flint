@@ -33,9 +33,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /spdk
 
-# Clone, configure, and build SPDK v25.05.x with full NVMe-oF support
+# Clone, configure, and build SPDK v25.09.x with full NVMe-oF support
 RUN git clone https://github.com/spdk/spdk.git . && \
-    git checkout v25.05.x && \
+    git checkout v25.09.x && \
     git submodule update --init --recursive && \
     # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
     sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
@@ -99,7 +99,7 @@ RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 # Create a custom SPDK startup script optimized for CSI usage
 RUN echo '#!/bin/bash\n\
 echo "Starting SPDK target daemon for CSI (RPC mode)..."\n\
-echo "SPDK Version: v25.05.x"\n\
+echo "SPDK Version: v25.09.x"\n\
 echo "RPC Socket: /var/tmp/spdk.sock"\n\
 \n\
 # Ensure clean RPC socket\n\
