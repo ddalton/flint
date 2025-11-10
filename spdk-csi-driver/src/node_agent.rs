@@ -1656,60 +1656,20 @@ mod tests {
 }
 
 async fn check_device_health(agent: &NodeAgent, device: &NvmeDevice) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if device is accessible via SPDK by trying both possible bdev names:
-    // 1. Kernel AIO bdev: kernel_nvme1n1 (for kernel-bound devices)
-    // 2. Direct controller bdev: nvme1 (for userspace-bound devices)
+    println!("🔍 [HEALTH_CHECK_ROBUST] Checking device health: {} (PCI: {})", device.controller_id, device.pcie_addr);
     
-    let kernel_bdev_name = format!("kernel_{}", device.controller_id);  // e.g., kernel_nvme1n1
-    
-    // Extract controller name dynamically (nvme1n1 -> nvme1, nvme2n3 -> nvme2, etc.)
-    let direct_bdev_name = extract_nvme_controller_name(&device.controller_id);
-    
-    // Try kernel AIO bdev first (most common for our setup)
-    let kernel_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_get_bdevs",
-        "params": {
-            "name": kernel_bdev_name
+    // Use the SAME robust logic as find_existing_bdev_for_device - this is proven to work!
+    // Instead of trying only 2 patterns, this tries 10+ patterns and handles all edge cases
+    match agent.find_existing_bdev_for_device(&device.pcie_addr, &device.controller_id).await {
+        Ok(bdev_name) => {
+            println!("✅ [HEALTH_CHECK_ROBUST] Device {} is healthy (found bdev: {})", device.controller_id, bdev_name);
+            Ok(true)
         }
-    })).await;
-    
-    if let Ok(response) = kernel_result {
-        // Check if bdev actually exists in the response
-        if let Some(bdevs) = response["result"].as_array() {
-            if !bdevs.is_empty() {
-                println!("✅ [HEALTH_CHECK] Found kernel bdev: {}", kernel_bdev_name);
-                return Ok(true);
-            }
+        Err(e) => {
+            println!("❌ [HEALTH_CHECK_ROBUST] Device {} health check failed: {}", device.controller_id, e);
+            Ok(false)
         }
     }
-    
-    // Try direct controller bdev for userspace devices
-    let direct_result = call_spdk_rpc(&agent.spdk_rpc_url, &json!({
-        "method": "bdev_get_bdevs", 
-        "params": {
-            "name": direct_bdev_name
-        }
-    })).await;
-    
-    if let Ok(response) = direct_result {
-        // Check if bdev actually exists in the response
-        if let Some(bdevs) = response["result"].as_array() {
-            if !bdevs.is_empty() {
-                println!("✅ [HEALTH_CHECK] Found direct bdev: {}", direct_bdev_name);
-                return Ok(true);
-            }
-        }
-    }
-    
-    println!("⚠️ [HEALTH_CHECK] No accessible bdev found for device: {} (tried {} and {})", 
-             device.controller_id, kernel_bdev_name, direct_bdev_name);
-    
-    // Additional health checks could be added here
-    // - SMART data analysis
-    // - Temperature monitoring  
-    // - Error rate checking
-    
-    Ok(false)
 }
 
 #[allow(dead_code)]
