@@ -52,8 +52,8 @@ impl MinimalDiskService {
                     
                     // Filter out system disks and non-storage devices
                     if self.is_storage_disk(&disk_info).await? {
-                        disks.push(disk_info);
                         println!("✅ [DEBUG] Added disk to list: {}", disk_info.device_name);
+                        disks.push(disk_info);
                     } else {
                         println!("❌ [DEBUG] Filtered out disk: {}", disk_info.device_name);
                     }
