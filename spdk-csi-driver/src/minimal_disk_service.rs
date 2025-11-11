@@ -633,22 +633,39 @@ impl MinimalDiskService {
         "0000:00:00:0".to_string()
     }
 
-    /// Find LVS information for a bdev
+    /// Find LVS information for a bdev - Enhanced with recovery logic
     fn find_lvs_for_bdev(&self, bdev_name: &str, lvstores: &Value) -> (Option<String>, u64, u32) {
+        println!("🔍 [LVS_SEARCH] Looking for LVS on bdev: {}", bdev_name);
+        
         if let Some(lvs_list) = lvstores["result"].as_array() {
-            for lvs in lvs_list {
+            println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());
+            
+            for (i, lvs) in lvs_list.iter().enumerate() {
                 if let Some(base_bdev) = lvs["base_bdev"].as_str() {
+                    println!("🔍 [LVS_SEARCH] LVS[{}]: name='{}', base_bdev='{}'", 
+                             i, 
+                             lvs["name"].as_str().unwrap_or("unknown"), 
+                             base_bdev);
+                    
                     if base_bdev == bdev_name {
                         let lvs_name = lvs["name"].as_str().unwrap_or("").to_string();
                         let free_clusters = lvs["free_clusters"].as_u64().unwrap_or(0);
                         let cluster_size = lvs["cluster_size"].as_u64().unwrap_or(0);
                         let free_space = free_clusters * cluster_size;
                         let lvol_count = 0; // TODO: Count lvols
+                        
+                        println!("✅ [LVS_RECOVERY] Found existing LVS '{}' on bdev '{}' (free: {}MB)", 
+                                 lvs_name, bdev_name, free_space / 1024 / 1024);
                         return (Some(lvs_name), free_space, lvol_count);
                     }
                 }
             }
+            println!("❌ [LVS_SEARCH] No LVS found for bdev: {}", bdev_name);
+        } else {
+            println!("❌ [LVS_SEARCH] No LVS stores found in SPDK response");
+            println!("🔧 [DEBUG] lvstores structure: {}", serde_json::to_string(lvstores).unwrap_or_else(|_| "JSON error".to_string()));
         }
+        
         (None, 0, 0)
     }
 }
