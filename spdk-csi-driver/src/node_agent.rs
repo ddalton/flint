@@ -150,7 +150,7 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_spdk_rpc);
 
-        // Combine all routes
+        // Combine all routes (ublk endpoints will be added after handlers are implemented)
         list_disks
             .or(list_uninitialized)
             .or(disk_status)
