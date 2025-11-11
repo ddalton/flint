@@ -150,7 +150,28 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_spdk_rpc);
 
-        // Combine all routes (ublk endpoints will be added after handlers are implemented)
+        // POST /api/ublk/create_target - Create ublk target
+        let ublk_create_target = warp::path!("api" / "ublk" / "create_target")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_ublk_create_target);
+
+        // POST /api/ublk/create - Create ublk device
+        let ublk_create = warp::path!("api" / "ublk" / "create")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_ublk_create);
+
+        // POST /api/ublk/delete - Delete ublk device
+        let ublk_delete = warp::path!("api" / "ublk" / "delete")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_ublk_delete);
+
+        // Combine all routes
         list_disks
             .or(list_uninitialized)
             .or(disk_status)
@@ -161,6 +182,9 @@ impl NodeAgent {
             .or(create_lvol)
             .or(delete_lvol)
             .or(spdk_rpc)
+            .or(ublk_create_target)
+            .or(ublk_create)
+            .or(ublk_delete)
             .with(warp::cors().allow_any_origin())
     }
 
@@ -412,6 +436,108 @@ impl NodeAgent {
             "result": "SPDK RPC proxy not yet implemented"
         });
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+    }
+
+    /// Handle POST /api/ublk/create_target - Create ublk target
+    async fn handle_ublk_create_target(
+        _request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling ublk target creation");
+        
+        let ublk_target_rpc = json!({
+            "method": "ublk_create_target",
+            "params": {}
+        });
+        
+        match node_agent.disk_service.call_spdk_rpc(&ublk_target_rpc).await {
+            Ok(response) => {
+                println!("✅ [HTTP_API] ublk target created successfully");
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) if e.to_string().contains("Method not found") => {
+                // SPDK doesn't support ublk - not an error
+                let warning_response = json!({
+                    "success": true,
+                    "message": "SPDK doesn't support ublk - skipping"
+                });
+                println!("ℹ️ [HTTP_API] SPDK doesn't support ublk - returning success");
+                Ok(warp::reply::with_status(warp::reply::json(&warning_response), StatusCode::OK))
+            }
+            Err(e) => {
+                println!("❌ [HTTP_API] ublk target creation failed: {}", e);
+                let error_response = json!({
+                    "success": false,
+                    "error": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/ublk/create - Create ublk device  
+    async fn handle_ublk_create(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling ublk device creation");
+        
+        // Extract method and params from request
+        let method = request["method"].as_str().unwrap_or("ublk_start_disk");
+        let params = &request["params"];
+        
+        let ublk_rpc = json!({
+            "method": method,
+            "params": params
+        });
+        
+        match node_agent.disk_service.call_spdk_rpc(&ublk_rpc).await {
+            Ok(response) => {
+                println!("✅ [HTTP_API] ublk device created successfully");
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                println!("❌ [HTTP_API] ublk device creation failed: {}", e);
+                let error_response = json!({
+                    "success": false,
+                    "error": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/ublk/delete - Delete ublk device
+    async fn handle_ublk_delete(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling ublk device deletion");
+        
+        // Extract method and params from request
+        let method = request["method"].as_str().unwrap_or("ublk_stop_disk");
+        let params = &request["params"];
+        
+        let ublk_rpc = json!({
+            "method": method,
+            "params": params
+        });
+        
+        match node_agent.disk_service.call_spdk_rpc(&ublk_rpc).await {
+            Ok(response) => {
+                println!("✅ [HTTP_API] ublk device deleted successfully");
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                println!("⚠️ [HTTP_API] ublk device deletion failed (may not exist): {}", e);
+                // For deletion, we return success even if it fails (cleanup is best effort)
+                let success_response = json!({
+                    "success": true,
+                    "message": "Device deleted or did not exist"
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
+            }
+        }
     }
 }
 

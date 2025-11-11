@@ -151,7 +151,7 @@ impl MinimalDiskService {
     // === PRIVATE HELPER METHODS ===
 
     /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
-    async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         use crate::spdk_native::SpdkNative;
         
         let method = rpc_request["method"].as_str().unwrap_or("unknown");
