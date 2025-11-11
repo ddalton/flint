@@ -762,16 +762,22 @@ impl Controller for ControllerService {
             return Err(Status::invalid_argument("Missing volume ID"));
         }
 
+        println!("🗑️ [DELETE_VOLUME] Starting deletion for volume: {}", volume_id);
         let crd_api: Api<SpdkVolume> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
-        let spdk_volume = match crd_api.get(&volume_id).await {
+        let mut spdk_volume = match crd_api.get(&volume_id).await {
             Ok(vol) => vol,
-            Err(_) => return Ok(Response::new(DeleteVolumeResponse {})),
+            Err(_) => {
+                println!("✅ [DELETE_VOLUME] Volume {} not found - already deleted", volume_id);
+                return Ok(Response::new(DeleteVolumeResponse {}));
+            }
         };
 
         // Delete replicas
+        println!("🔄 [DELETE_VOLUME] Deleting replicas for volume: {}", volume_id);
         self.delete_volume_replicas(&spdk_volume).await?;
 
         // Update disk statuses
+        println!("🔄 [DELETE_VOLUME] Updating disk statuses for volume: {}", volume_id);
         let disks: Api<SpdkDisk> = Api::namespaced(self.driver.kube_client.clone(), &self.driver.target_namespace);
         let mut disk_refs = Vec::new();
         for replica in &spdk_volume.spec.replicas {
@@ -782,9 +788,27 @@ impl Controller for ControllerService {
         
         self.update_disk_statuses(&disks, &disk_refs, spdk_volume.spec.size_bytes, -1).await?;
 
-        // Delete CRD
-        crd_api.delete(&volume_id, &Default::default()).await.ok();
+        // Remove finalizer to allow deletion
+        if let Some(ref mut finalizers) = spdk_volume.metadata.finalizers {
+            finalizers.retain(|f| f != "flint.csi.storage.io/volume-protection");
+            if finalizers.is_empty() {
+                spdk_volume.metadata.finalizers = None;
+            }
+        }
+        
+        // Update the volume to remove finalizer
+        match crd_api.replace(&volume_id, &kube::api::PostParams::default(), &spdk_volume).await {
+            Ok(_) => println!("✅ [DELETE_VOLUME] Removed finalizer from volume: {}", volume_id),
+            Err(e) => println!("⚠️ [DELETE_VOLUME] Failed to remove finalizer: {}", e),
+        }
 
+        // Delete CRD (should now succeed due to removed finalizer)
+        match crd_api.delete(&volume_id, &Default::default()).await {
+            Ok(_) => println!("✅ [DELETE_VOLUME] Successfully deleted SpdkVolume CRD: {}", volume_id),
+            Err(e) => println!("⚠️ [DELETE_VOLUME] Failed to delete CRD (may already be deleted): {}", e),
+        }
+
+        println!("🎉 [DELETE_VOLUME] Volume deletion completed: {}", volume_id);
         Ok(Response::new(DeleteVolumeResponse {}))
     }
 

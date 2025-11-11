@@ -1,0 +1,22 @@
+# Rust
+target/
+Cargo.lock
+
+# Generated files
+spdk-csi-driver/src/csi.v1.rs
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*~

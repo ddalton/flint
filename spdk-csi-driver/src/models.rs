@@ -371,7 +371,7 @@ impl RaidStatus {
     }
 }
 
-/// Create a new SpdkVolume instance with proper metadata
+/// Create a new SpdkVolume instance with proper metadata and owner references
 impl SpdkVolume {
     pub fn new_with_metadata(name: &str, spec: SpdkVolumeSpec, namespace: &str) -> Self {
         use kube::api::ObjectMeta;
@@ -416,6 +416,8 @@ impl SpdkVolume {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some(namespace.to_string()),
+                // Add finalizer to ensure proper cleanup sequence
+                finalizers: Some(vec!["flint.csi.storage.io/volume-protection".to_string()]),
                 ..Default::default()
             },
             spec,
