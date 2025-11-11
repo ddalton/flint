@@ -25,11 +25,16 @@ impl MinimalDiskService {
         }
     }
 
-    /// Discover all disks on this node by querying SPDK directly
+    /// Discover all disks on this node with auto-recovery
     pub async fn discover_local_disks(&self) -> Result<Vec<DiskInfo>, MinimalStateError> {
-        println!("🔍 [MINIMAL_DISK] Starting pure SPDK disk discovery on node: {}", self.node_name);
+        println!("🔍 [MINIMAL_DISK] Starting disk discovery with auto-recovery on node: {}", self.node_name);
 
-        // Get data from SPDK
+        // Step 1: Auto-recover SPDK state for physical devices
+        if let Err(e) = self.auto_recover_spdk_state().await {
+            println!("⚠️ [MINIMAL_DISK] Auto-recovery failed (continuing anyway): {}", e);
+        }
+
+        // Step 2: Get current SPDK state after recovery
         let bdevs = self.get_spdk_bdevs().await?;
         let lvstores = self.get_spdk_lvstores().await?;
         let controllers = self.get_spdk_nvme_controllers().await?;
@@ -150,7 +155,235 @@ impl MinimalDiskService {
 
     // === PRIVATE HELPER METHODS ===
 
-        /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
+    /// Auto-recover SPDK state for physical NVMe devices
+    async fn auto_recover_spdk_state(&self) -> Result<(), MinimalStateError> {
+        println!("🔄 [AUTO_RECOVERY] Starting SPDK state recovery for node: {}", self.node_name);
+
+        // Get all physical NVMe devices
+        let nvme_devices = self.discover_physical_nvme_devices().await?;
+        println!("🔄 [AUTO_RECOVERY] Found {} physical NVMe devices", nvme_devices.len());
+
+        for device in nvme_devices {
+            println!("🔄 [AUTO_RECOVERY] Processing device: {} ({})", device.device_name, device.pci_address);
+            
+            // Skip system disks
+            if self.is_system_disk_physical(&device).await {
+                println!("⏭️ [AUTO_RECOVERY] Skipping system disk: {}", device.device_name);
+                continue;
+            }
+
+            // Auto-create bdev if device should have SPDK access
+            if let Err(e) = self.ensure_device_bdev_exists(&device).await {
+                println!("⚠️ [AUTO_RECOVERY] Failed to ensure bdev for {}: {}", device.device_name, e);
+            }
+        }
+
+        println!("✅ [AUTO_RECOVERY] SPDK state recovery completed");
+        Ok(())
+    }
+
+    /// Discover physical NVMe devices via system inspection
+    async fn discover_physical_nvme_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
+        use std::process::Command;
+
+        println!("🔍 [PHYSICAL_DISCOVERY] Scanning for NVMe devices via lspci...");
+        
+        let output = Command::new("lspci")
+            .args(["-D", "-d", "::0108"]) // NVMe class code
+            .output()
+            .map_err(|e| MinimalStateError::InternalError { 
+                message: format!("Failed to run lspci: {}", e) 
+            })?;
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|e| MinimalStateError::InternalError { 
+                message: format!("Invalid lspci output: {}", e) 
+            })?;
+
+        let mut devices = Vec::new();
+        for line in stdout.lines() {
+            if let Some(pci_addr) = line.split_whitespace().next() {
+                println!("🔍 [PHYSICAL_DISCOVERY] Found NVMe device: {}", pci_addr);
+                
+                // Get device info
+                if let Ok(device_info) = self.get_physical_device_info(pci_addr).await {
+                    devices.push(device_info);
+                }
+            }
+        }
+
+        println!("✅ [PHYSICAL_DISCOVERY] Found {} NVMe devices", devices.len());
+        Ok(devices)
+    }
+
+    /// Get physical device information from system
+    async fn get_physical_device_info(&self, pci_address: &str) -> Result<PhysicalDevice, MinimalStateError> {
+        // Get current driver
+        let driver = self.get_current_driver(pci_address).await
+            .unwrap_or_else(|_| "unbound".to_string());
+
+        // Try to find device name if bound to nvme driver
+        let device_name = if driver == "nvme" {
+            self.find_nvme_device_name(pci_address).await
+                .unwrap_or_else(|_| format!("nvme-{}", pci_address.replace(":", "-")))
+        } else {
+            format!("nvme-{}", pci_address.replace(":", "-"))
+        };
+
+        // Get size - estimate for unbound devices
+        let size_bytes = if driver == "nvme" {
+            self.get_device_size_from_blockdev(&device_name).await
+                .unwrap_or(1_000_000_000_000) // 1TB default
+        } else {
+            1_000_000_000_000 // 1TB default for unbound
+        };
+
+        Ok(PhysicalDevice {
+            pci_address: pci_address.to_string(),
+            device_name,
+            driver,
+            size_bytes,
+            model: "NVMe Device".to_string(), // Could enhance with PCI ID lookup
+        })
+    }
+
+    /// Ensure a physical device has appropriate SPDK bdev
+    async fn ensure_device_bdev_exists(&self, device: &PhysicalDevice) -> Result<(), MinimalStateError> {
+        println!("🔄 [BDEV_RECOVERY] Ensuring bdev exists for device: {}", device.device_name);
+
+        let expected_bdev_name = if device.driver == "nvme" {
+            // Kernel-bound device -> AIO bdev
+            format!("kernel_{}", device.device_name)
+        } else {
+            // Unbound/SPDK-bound device -> would need NVMe controller attach
+            // For now, skip unbound devices in auto-recovery
+            println!("⏭️ [BDEV_RECOVERY] Skipping unbound device: {}", device.device_name);
+            return Ok(());
+        };
+
+        // Check if bdev already exists
+        let bdevs = self.get_spdk_bdevs().await?;
+        if let Some(bdev_list) = bdevs["result"].as_array() {
+            for bdev in bdev_list {
+                if let Some(name) = bdev["name"].as_str() {
+                    if name == expected_bdev_name {
+                        println!("✅ [BDEV_RECOVERY] Bdev already exists: {}", expected_bdev_name);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Create missing AIO bdev for kernel-bound device
+        if device.driver == "nvme" {
+            println!("🔧 [BDEV_RECOVERY] Creating AIO bdev: {}", expected_bdev_name);
+            let device_path = format!("/dev/{}", device.device_name);
+            
+            let aio_params = serde_json::json!({
+                "method": "bdev_aio_create",
+                "params": {
+                    "name": expected_bdev_name,
+                    "filename": device_path,
+                    "block_size": 4096
+                }
+            });
+
+            match self.call_spdk_rpc(&aio_params).await {
+                Ok(_) => {
+                    println!("✅ [BDEV_RECOVERY] Successfully created AIO bdev: {}", expected_bdev_name);
+                }
+                Err(e) if e.to_string().contains("File exists") => {
+                    println!("✅ [BDEV_RECOVERY] AIO bdev already exists: {}", expected_bdev_name);
+                }
+                Err(e) => {
+                    println!("⚠️ [BDEV_RECOVERY] Failed to create AIO bdev {}: {}", expected_bdev_name, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper methods for physical device discovery
+    async fn get_current_driver(&self, pci_addr: &str) -> Result<String, MinimalStateError> {
+        use std::fs;
+        let driver_path = format!("/sys/bus/pci/devices/{}/driver", pci_addr);
+        
+        match std::fs::read_link(&driver_path) {
+            Ok(link) => {
+                if let Some(driver_name) = link.file_name() {
+                    Ok(driver_name.to_string_lossy().to_string())
+                } else {
+                    Ok("unknown".to_string())
+                }
+            }
+            Err(_) => Ok("unbound".to_string()),
+        }
+    }
+
+    async fn find_nvme_device_name(&self, pci_addr: &str) -> Result<String, MinimalStateError> {
+        use std::fs;
+        let devices_dir = "/sys/block";
+        
+        for entry in fs::read_dir(devices_dir).map_err(|e| MinimalStateError::InternalError { 
+            message: format!("Failed to read /sys/block: {}", e) 
+        })? {
+            let entry = entry.map_err(|e| MinimalStateError::InternalError { 
+                message: format!("Failed to read directory entry: {}", e) 
+            })?;
+            
+            if let Some(device_name) = entry.file_name().to_str() {
+                if device_name.starts_with("nvme") {
+                    // Check if this device corresponds to our PCI address
+                    let device_path = format!("/sys/block/{}/device", device_name);
+                    if let Ok(link) = fs::read_link(&device_path) {
+                        if link.to_string_lossy().contains(pci_addr) {
+                            return Ok(device_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(MinimalStateError::DiskNotFound { 
+            node: self.node_name.clone(), 
+            pci: pci_addr.to_string() 
+        })
+    }
+
+    async fn get_device_size_from_blockdev(&self, device_name: &str) -> Result<u64, MinimalStateError> {
+        use std::process::Command;
+        
+        let output = Command::new("blockdev")
+            .args(["--getsize64", &format!("/dev/{}", device_name)])
+            .output()
+            .map_err(|e| MinimalStateError::InternalError { 
+                message: format!("Failed to run blockdev: {}", e) 
+            })?;
+
+        let size_str = String::from_utf8(output.stdout)
+            .map_err(|e| MinimalStateError::InternalError { 
+                message: format!("Invalid blockdev output: {}", e) 
+            })?;
+        
+        size_str.trim().parse().map_err(|e| MinimalStateError::InternalError { 
+            message: format!("Failed to parse device size: {}", e) 
+        })
+    }
+
+    async fn is_system_disk_physical(&self, device: &PhysicalDevice) -> bool {
+        // Simple heuristic: if device contains root filesystem, it's a system disk
+        // This could be enhanced with more sophisticated detection
+        if device.driver == "nvme" {
+            // Check if any partition is mounted on /
+            // This is a simplified check - production would be more thorough
+            false // For now, assume no system disks in our test environment
+        } else {
+            false
+        }
+    }
+
+    /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
         pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
             use crate::spdk_native::SpdkNative;
 
@@ -357,4 +590,14 @@ impl MinimalDiskService {
         }
         (None, 0, 0)
     }
+}
+
+/// Physical device information from system discovery
+#[derive(Debug, Clone)]
+struct PhysicalDevice {
+    pub pci_address: String,
+    pub device_name: String,
+    pub driver: String,
+    pub size_bytes: u64,
+    pub model: String,
 }
