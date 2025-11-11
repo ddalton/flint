@@ -148,11 +148,15 @@ impl SpdkCsiDriver {
         let full_url = format!("{}{}", node_agent_url, endpoint);
         
         let http_client = HttpClient::new();
-        let response = http_client
-            .post(&full_url)
-            .json(payload)
-            .send()
-            .await?;
+        
+        // Some endpoints expect GET, others expect POST
+        let response = if endpoint.contains("/uninitialized") || endpoint.contains("/status") {
+            // GET endpoints for read-only operations
+            http_client.get(&full_url).send().await?
+        } else {
+            // POST endpoints for write operations
+            http_client.post(&full_url).json(payload).send().await?
+        };
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
