@@ -3,27 +3,24 @@ name = "spdk-csi-driver"
 version = "0.4.0"
 edition = "2021"
 
-[[bin]]
-name = "controller"
-path = "src/controller_operator.rs"
-
-[[bin]]
-name = "node-agent"
-path = "src/node_agent.rs"
+# Old CRD-based controller operator - disabled in minimal state
+# [[bin]]
+# name = "controller" 
+# path = "src/controller_operator.rs"
 
 [[bin]]
 name = "csi-driver"
 path = "src/main.rs"
 
-[[bin]]
-name = "spdk-dashboard-backend"
-path = "src/spdk_dashboard_backend.rs"
+# Removed old binaries:
+# - node-agent: now a library module, not standalone binary
+# - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
-kube = { version = "0.87", features = ["client", "derive", "runtime"] }
+kube = { version = "0.87", features = ["client", "runtime"] }
 k8s-openapi = { version = "0.20", features = ["latest"] }
-schemars = { version = "0.8", features = ["chrono"] }
+# Removed schemars - no longer needed without CRD schema generation
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

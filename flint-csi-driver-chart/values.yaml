@@ -7,9 +7,9 @@ crds:
   # (they are often installed by RKE2, EKS, or other snapshot controllers)
   installSnapshotCRDs: true
   
-  # SPDK-specific CRDs are always needed for this CSI driver
-  # Set to false only if you've manually installed them already
-  installSpdkCRDs: true
+  # SPDK-specific CRDs are NO LONGER NEEDED in minimal state architecture
+  # The CSI driver now queries SPDK directly for real-time data
+  installSpdkCRDs: false
 
 images:
   repository: docker-sandbox.infra.cloudera.com/ddalton  # Change this to your actual registry for production

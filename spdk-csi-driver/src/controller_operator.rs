@@ -10,7 +10,7 @@ use serde_json::json;
 use chrono::Utc;
 use std::env;
 use std::sync::Arc;
-use spdk_csi_driver::models::*;
+use spdk_csi_driver::minimal_models::*;
 use warp::Filter;
 
 
