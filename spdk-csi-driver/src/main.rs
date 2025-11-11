@@ -7,6 +7,7 @@ use warp::Filter;
 // Import minimal state components from library
 use spdk_csi_driver::node_agent::NodeAgent;
 use spdk_csi_driver::driver::SpdkCsiDriver;
+use spdk_csi_driver::spdk_dashboard_backend_minimal::start_minimal_dashboard_backend;
 
 // Use the CSI protobuf types from lib.rs instead of duplicating them
 // This avoids the tonic::include_proto! macro issue
@@ -92,6 +93,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         start_health_server().await;
     });
+
+    // Start dashboard backend (if enabled)
+    let enable_dashboard = std::env::var("ENABLE_DASHBOARD")
+        .unwrap_or("false".to_string())
+        .parse()
+        .unwrap_or(false);
+    
+    if enable_dashboard {
+        let dashboard_port = std::env::var("DASHBOARD_PORT")
+            .unwrap_or("8080".to_string())
+            .parse()
+            .unwrap_or(8080);
+        
+        println!("📊 [DASHBOARD] Starting minimal dashboard backend on port {}", dashboard_port);
+        tokio::spawn(async move {
+            if let Err(e) = start_minimal_dashboard_backend(dashboard_port).await {
+                eprintln!("❌ [DASHBOARD] Failed to start: {}", e);
+            }
+        });
+    }
     
     let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
     let endpoint = std::env::var("CSI_ENDPOINT")

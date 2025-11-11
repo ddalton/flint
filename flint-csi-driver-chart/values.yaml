@@ -13,19 +13,16 @@ crds:
 
 images:
   repository: docker-sandbox.infra.cloudera.com/ddalton  # Change this to your actual registry for production
-  flintCsiController:
-    name: flint-controller  # SPDK Controller Operator binary
-    tag: latest
   flintCsiDriver:
-    name: flint-driver      # CSI Driver binary (controller and node modes)
+    name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
     tag: latest
-  # Three-container node deployment (recommended)
+  # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (v25.05.x)
     tag: latest
-  nodeAgent:
-    name: flint-node-agent  # Disk management and HTTP API server
-    tag: latest
+  # Legacy images (no longer used in minimal state architecture)
+  # flintCsiController: replaced by flintCsiDriver with CSI_MODE=controller
+  # nodeAgent: replaced by flintCsiDriver with CSI_MODE=node
 
 csiSidecars:
   repository: registry.k8s.io/sig-storage
@@ -133,12 +130,12 @@ storageClass:
 # - Access to all SPDK CRDs and Kubernetes APIs
 dashboard:
   enabled: true
-  image:
-    name: spdk-dashboard-backend
-    tag: latest
+  backend:
+    port: 8080
   frontend:
     name: spdk-dashboard-frontend
     tag: latest
+    port: 3000
   resources:
     backend:
       requests:

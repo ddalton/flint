@@ -1,4 +1,4 @@
-// minimal_disk_service_clean.rs - Clean Minimal State Disk Service
+// minimal_disk_service.rs - Minimal State Disk Service
 // FOR NODE AGENTS ONLY - Uses direct Unix socket communication with SPDK
 
 use serde_json::{json, Value};

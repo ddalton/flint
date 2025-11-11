@@ -25,7 +25,7 @@ spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: flint-csi-controller
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -38,6 +38,15 @@ spec:
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.controllerPort | default 9809 }}"
+            {{- if .Values.dashboard.enabled }}
+            - name: ENABLE_DASHBOARD
+              value: "true"
+            - name: DASHBOARD_PORT
+              value: {{ .Values.dashboard.backend.port | default 8080 | quote }}
+            {{- else }}
+            - name: ENABLE_DASHBOARD
+              value: "false"
+            {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"
           ports:

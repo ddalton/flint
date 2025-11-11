@@ -23,7 +23,7 @@ spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: spdk-controller-operator
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiController.name }}:{{ .Values.images.flintCsiController.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: RUST_LOG

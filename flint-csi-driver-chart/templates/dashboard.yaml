@@ -23,17 +23,21 @@ spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: dashboard-backend
-          image: "{{ .Values.images.repository }}/{{ .Values.dashboard.image.name }}:{{ .Values.dashboard.image.tag }}"
+          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
+            - name: CSI_MODE
+              value: "controller"
+            - name: ENABLE_DASHBOARD
+              value: "true"
+            - name: DASHBOARD_PORT
+              value: {{ .Values.dashboard.backend.port | default 8080 | quote }}
+            - name: CSI_ENDPOINT
+              value: "tcp://0.0.0.0:50051"
             - name: RUST_LOG
               value: {{ .Values.logLevel | default "info" | quote }}
-            - name: KUBE_NAMESPACE
-              value: {{ .Release.Namespace }}
             - name: FLINT_NAMESPACE
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
-            - name: SPDK_NODE_URLS
-              value: ""  # Will auto-discover via K8s API
           ports:
             - name: api
               containerPort: 8080

@@ -38,13 +38,16 @@ RUN cargo build --release --bin csi-driver
 # --- Runtime image ---
 FROM ubuntu:24.04
 
-# Install runtime dependencies for the CSI driver
+# Install runtime dependencies for the CSI driver (controller + node modes)
 RUN apt-get update && apt-get install -y \
     nvme-cli \
     util-linux \
     e2fsprogs \
     xfsprogs \
     mount \
+    pciutils \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary from the builder stage
