@@ -150,23 +150,42 @@ impl MinimalDiskService {
 
     // === PRIVATE HELPER METHODS ===
 
-    /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
-    pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::spdk_native::SpdkNative;
-        
-        let method = rpc_request["method"].as_str().unwrap_or("unknown");
-        println!("🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: {}", method);
-        
-        // Use Unix socket connection (not HTTP)
-        let spdk = SpdkNative::new(Some(self.spdk_socket_path.clone())).await
-            .map_err(|e| format!("Failed to connect to SPDK socket {}: {}", self.spdk_socket_path, e))?;
+        /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
+        pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            use crate::spdk_native::SpdkNative;
 
-        // Call the method based on the RPC request
-        match method {
-            "bdev_get_bdevs" => {
-                let bdevs = spdk.get_bdevs().await?;
-                Ok(json!({ "result": bdevs }))
+            let method = rpc_request["method"].as_str().unwrap_or("unknown");
+            println!("🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: {}", method);
+            println!("🔧 [SPDK_RPC] Original socket URL: {}", self.spdk_socket_path);
+            
+            // Handle socket path like raid_over_lv branch
+            let spdk_socket = self.spdk_socket_path.trim_start_matches("unix://");
+            println!("🔧 [SPDK_RPC] Cleaned socket path: {}", spdk_socket);
+            
+            // Check if socket file exists before attempting connection (from raid_over_lv)
+            if !std::path::Path::new(spdk_socket).exists() {
+                let error_msg = format!("SPDK socket file does not exist: {}", spdk_socket);
+                println!("❌ [SPDK_RPC] {}", error_msg);
+                return Err(error_msg.into());
             }
+            
+            println!("✅ [SPDK_RPC] Socket file exists, creating SPDK client...");
+
+            // Use Unix socket connection (matches raid_over_lv pattern)
+            let spdk = SpdkNative::new(Some(spdk_socket.to_string())).await
+                .map_err(|e| {
+                    let error_msg = format!("Failed to create SPDK client for socket {}: {}", spdk_socket, e);
+                    println!("❌ [SPDK_RPC] {}", error_msg);
+                    error_msg
+                })?;
+
+            // Call method using the new persistent socket client (matches raid_over_lv)
+            println!("🔧 [SPDK_RPC] Calling method '{}' with params: {:?}", method, rpc_request.get("params"));
+            let result = match method {
+                "bdev_get_bdevs" => {
+                    let bdevs = spdk.get_bdevs().await?;
+                    json!(bdevs)
+                }
             "bdev_lvol_get_lvstores" => {
                 let lvstores = spdk.get_lvol_stores().await?;
                 // Convert LvsInfo to serializable format  
@@ -180,22 +199,21 @@ impl MinimalDiskService {
                         "block_size": lvs.block_size
                     })
                 }).collect();
-                Ok(json!({ "result": serializable_lvstores }))  
+                json!(serializable_lvstores)
             }
             "bdev_nvme_get_controllers" => {
-                // TODO: Implement in SpdkNative
-                Ok(json!({ "result": [] }))
+                let controllers = spdk.get_nvme_controllers().await?;
+                json!(controllers)
             }
             "bdev_lvol_create_lvstore" => {
                 let params = rpc_request["params"].as_object()
                     .ok_or("Missing params for lvstore creation")?;
                 let bdev_name = params["bdev_name"].as_str().unwrap_or("");
                 let lvs_name = params["lvs_name"].as_str().unwrap_or("");
-                let _cluster_sz = params["cluster_sz"].as_u64().unwrap_or(1048576);
+                let cluster_sz = params["cluster_sz"].as_u64().unwrap_or(1048576);
                 
-                // TODO: Implement create_lvol_store in SpdkNative or use generic RPC
-                println!("🚧 [NODE_AGENT_SPDK] LVS creation not yet implemented: {} on {}", lvs_name, bdev_name);
-                Ok(json!({ "result": "success" }))
+                spdk.create_lvs(bdev_name, lvs_name, cluster_sz).await?;
+                json!("success")
             }
             "bdev_lvol_create" => {
                 let params = rpc_request["params"].as_object()
@@ -206,21 +224,32 @@ impl MinimalDiskService {
                 let size_bytes = size_mib * 1024 * 1024;
                 
                 let uuid = spdk.create_lvol(lvs_name, lvol_name, size_bytes, 1048576).await?;
-                Ok(json!({ "result": uuid }))
+                json!(uuid)
             }
             "bdev_lvol_delete" => {
                 let params = rpc_request["params"].as_object()
                     .ok_or("Missing params for lvol deletion")?;
                 let name = params["name"].as_str().unwrap_or("");
                 
-                // TODO: Fix delete_lvol signature or use generic RPC
-                println!("🚧 [NODE_AGENT_SPDK] Lvol deletion not yet implemented: {}", name);
-                Ok(json!({ "result": "success" }))
+                spdk.delete_lvol("", name).await?;
+                json!("success")
             }
             _ => {
-                Err(format!("Unsupported SPDK method: {}", method).into())
+                // For other methods, use generic RPC call (matches raid_over_lv)
+                let params = rpc_request.get("params").cloned();
+                spdk.call_method(method, params).await
+                    .map_err(|e| {
+                        let error_msg = format!("SPDK RPC call '{}' failed: {}", method, e);
+                        println!("❌ [SPDK_RPC] {}", error_msg);
+                        Box::new(std::io::Error::new(std::io::ErrorKind::Other, error_msg)) as Box<dyn std::error::Error + Send + Sync>
+                    })?
             }
-        }
+        };
+        
+        println!("✅ [SPDK_RPC] Method '{}' completed successfully", method);
+        
+        // Return result in JSON-RPC 2.0 format (matches raid_over_lv)
+        Ok(json!({"result": result}))
     }
 
     /// Get all bdevs from SPDK
