@@ -560,8 +560,19 @@ impl MinimalDiskService {
         println!("✅ [DISK_FILTER] Including storage bdev: '{}' (product: '{}')", bdev_name, product_name);
 
         let size_bytes = block_size * num_blocks;
+        
+        // Try to get device name from AIO filename if available, otherwise use bdev name
+        let device_name = if let Some(filename) = bdev.get("driver_specific")
+            .and_then(|ds| ds.get("aio"))
+            .and_then(|aio| aio.get("filename"))
+            .and_then(|f| f.as_str()) {
+            // Extract device name from filename like "/dev/nvme0n1" -> "nvme0n1"
+            filename.trim_start_matches("/dev/").to_string()
+        } else {
+            bdev_name.trim_start_matches("kernel_").to_string()
+        };
+        
         let pci_address = self.extract_pci_from_bdev_name(bdev_name);
-        let device_name = bdev_name.trim_start_matches("kernel_").to_string();
         
         // Find LVS information for this bdev
         let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores);
@@ -590,15 +601,30 @@ impl MinimalDiskService {
         Ok(true)
     }
 
-    /// Extract PCI address from bdev name (placeholder)
+    /// Extract real PCI address from bdev name using system information
     fn extract_pci_from_bdev_name(&self, bdev_name: &str) -> String {
-        // TODO: Implement proper PCI extraction logic
-        if bdev_name.starts_with("nvme") {
-            // Extract number and create dummy PCI address
-            if let Some(num_str) = bdev_name.chars().filter(|c| c.is_ascii_digit()).collect::<String>().chars().next() {
-                return format!("0000:00:0{}:0", num_str);
+        // For AIO bdevs like "kernel_nvme0n1", extract device name and map to PCI
+        let device_name = bdev_name.trim_start_matches("kernel_");
+        
+        if device_name.starts_with("nvme") && device_name.ends_with("n1") {
+            // Try to read the actual PCI address from sysfs
+            let symlink_path = format!("/sys/block/{}", device_name);
+            if let Ok(link) = std::fs::read_link(&symlink_path) {
+                let link_str = link.to_string_lossy();
+                // Extract PCI address from path like "../devices/pci0000:00/0000:00:04.0/nvme/nvme0/nvme0n1"
+                if let Some(pci_start) = link_str.find("0000:") {
+                    if let Some(pci_end) = link_str[pci_start..].find("/") {
+                        let pci_addr = &link_str[pci_start..pci_start + pci_end];
+                        println!("✅ [PCI_EXTRACT] Mapped {} -> {}", device_name, pci_addr);
+                        return pci_addr.to_string();
+                    }
+                }
             }
+            
+            println!("❌ [PCI_EXTRACT] Failed to map {} to PCI address", device_name);
         }
+        
+        // Fallback to placeholder for non-nvme or failed lookups
         "0000:00:00:0".to_string()
     }
 
