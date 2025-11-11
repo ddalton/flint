@@ -182,10 +182,11 @@ impl MinimalDiskService {
             // Call method using the new persistent socket client (matches raid_over_lv)
             println!("🔧 [SPDK_RPC] Calling method '{}' with params: {:?}", method, rpc_request.get("params"));
             let result = match method {
-                "bdev_get_bdevs" => {
-                    let bdevs = spdk.get_bdevs().await?;
-                    json!(bdevs)
-                }
+            "bdev_get_bdevs" => {
+                let bdevs = spdk.get_bdevs().await?;
+                // Return the bdev list directly, not wrapped
+                json!(bdevs)
+            }
             "bdev_lvol_get_lvstores" => {
                 let lvstores = spdk.get_lvol_stores().await?;
                 // Convert LvsInfo to serializable format  
@@ -248,7 +249,7 @@ impl MinimalDiskService {
         
         println!("✅ [SPDK_RPC] Method '{}' completed successfully", method);
         
-        // Return result in JSON-RPC 2.0 format (matches raid_over_lv)
+        // Return the direct SPDK response (already in JSON-RPC 2.0 format)
         Ok(json!({"result": result}))
     }
 
