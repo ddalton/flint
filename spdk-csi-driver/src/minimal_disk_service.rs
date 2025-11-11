@@ -188,8 +188,14 @@ impl MinimalDiskService {
             }
 
             // Auto-create bdev if device should have SPDK access
-            if let Err(e) = self.ensure_device_bdev_exists(&device).await {
-                println!("⚠️ [AUTO_RECOVERY] Failed to ensure bdev for {}: {}", device.device_name, e);
+            match self.ensure_device_bdev_exists(&device).await {
+                Ok(bdev_name) => {
+                    // CRITICAL: Try to import existing LVS from this bdev
+                    self.try_import_existing_lvs(&bdev_name).await;
+                }
+                Err(e) => {
+                    println!("⚠️ [AUTO_RECOVERY] Failed to ensure bdev for {}: {}", device.device_name, e);
+                }
             }
         }
 
@@ -263,7 +269,7 @@ impl MinimalDiskService {
     }
 
     /// Ensure a physical device has appropriate SPDK bdev
-    async fn ensure_device_bdev_exists(&self, device: &PhysicalDevice) -> Result<(), MinimalStateError> {
+    async fn ensure_device_bdev_exists(&self, device: &PhysicalDevice) -> Result<String, MinimalStateError> {
         println!("🔄 [BDEV_RECOVERY] Ensuring bdev exists for device: {}", device.device_name);
 
         let expected_bdev_name = if device.driver == "nvme" {
@@ -273,7 +279,9 @@ impl MinimalDiskService {
             // Unbound/SPDK-bound device -> would need NVMe controller attach
             // For now, skip unbound devices in auto-recovery
             println!("⏭️ [BDEV_RECOVERY] Skipping unbound device: {}", device.device_name);
-            return Ok(());
+            return Err(MinimalStateError::InternalError { 
+                message: "Unbound device skipped".to_string() 
+            });
         };
 
         // Check if bdev already exists
@@ -283,7 +291,7 @@ impl MinimalDiskService {
                 if let Some(name) = bdev["name"].as_str() {
                     if name == expected_bdev_name {
                         println!("✅ [BDEV_RECOVERY] Bdev already exists: {}", expected_bdev_name);
-                        return Ok(());
+                        return Ok(expected_bdev_name);
                     }
                 }
             }
@@ -306,17 +314,52 @@ impl MinimalDiskService {
             match self.call_spdk_rpc(&aio_params).await {
                 Ok(_) => {
                     println!("✅ [BDEV_RECOVERY] Successfully created AIO bdev: {}", expected_bdev_name);
+                    return Ok(expected_bdev_name);
                 }
                 Err(e) if e.to_string().contains("File exists") => {
                     println!("✅ [BDEV_RECOVERY] AIO bdev already exists: {}", expected_bdev_name);
+                    return Ok(expected_bdev_name);
                 }
                 Err(e) => {
                     println!("⚠️ [BDEV_RECOVERY] Failed to create AIO bdev {}: {}", expected_bdev_name, e);
+                    return Err(MinimalStateError::SpdkRpcError { 
+                        message: format!("Failed to create AIO bdev: {}", e) 
+                    });
                 }
             }
         }
 
-        Ok(())
+        Err(MinimalStateError::InternalError { 
+            message: "Unexpected code path in ensure_device_bdev_exists".to_string() 
+        })
+    }
+
+    /// Try to import existing LVS from a bdev (CRITICAL for recovery!)
+    async fn try_import_existing_lvs(&self, bdev_name: &str) {
+        println!("🔍 [LVS_IMPORT] Attempting to import existing LVS from bdev: {}", bdev_name);
+        
+        let import_params = serde_json::json!({
+            "method": "bdev_lvol_import_lvstore",
+            "params": {
+                "bdev_name": bdev_name
+            }
+        });
+
+        match self.call_spdk_rpc(&import_params).await {
+            Ok(response) => {
+                if let Some(lvs_name) = response.get("result").and_then(|r| r.as_str()) {
+                    println!("✅ [LVS_IMPORT] Successfully imported existing LVS: {}", lvs_name);
+                } else {
+                    println!("✅ [LVS_IMPORT] LVS import succeeded (unknown name)");
+                }
+            }
+            Err(e) if e.to_string().contains("No such device") || e.to_string().contains("not found") => {
+                println!("ℹ️ [LVS_IMPORT] No existing LVS found on {}, disk is clean", bdev_name);
+            }
+            Err(e) => {
+                println!("⚠️ [LVS_IMPORT] LVS import failed for {} (continuing): {}", bdev_name, e);
+            }
+        }
     }
 
     /// Helper methods for physical device discovery
