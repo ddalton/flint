@@ -184,8 +184,8 @@ impl MinimalDiskService {
             let result = match method {
             "bdev_get_bdevs" => {
                 let bdevs = spdk.get_bdevs().await?;
-                // Return the bdev list directly, not wrapped
-                json!(bdevs)
+                // Return the bdev list directly as JSON Value (no extra wrapping)
+                serde_json::to_value(bdevs)?
             }
             "bdev_lvol_get_lvstores" => {
                 let lvstores = spdk.get_lvol_stores().await?;
