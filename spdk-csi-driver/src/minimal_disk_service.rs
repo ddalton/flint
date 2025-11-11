@@ -40,15 +40,30 @@ impl MinimalDiskService {
         let controllers = self.get_spdk_nvme_controllers().await?;
 
         let mut disks = Vec::new();
+        println!("🔧 [DEBUG] bdevs JSON structure: {}", serde_json::to_string_pretty(&bdevs).unwrap_or_else(|_| "JSON error".to_string()));
+        
         if let Some(bdev_list) = bdevs["result"].as_array() {
-            for bdev in bdev_list {
+            println!("🔧 [DEBUG] Found {} bdevs in result array", bdev_list.len());
+            for (i, bdev) in bdev_list.iter().enumerate() {
+                println!("🔧 [DEBUG] Processing bdev {}: {}", i, serde_json::to_string(bdev).unwrap_or_else(|_| "JSON error".to_string()));
+                
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
+                    println!("🔧 [DEBUG] Created DiskInfo: name={}, pci={}, healthy={}", disk_info.device_name, disk_info.pci_address, disk_info.healthy);
+                    
                     // Filter out system disks and non-storage devices
                     if self.is_storage_disk(&disk_info).await? {
                         disks.push(disk_info);
+                        println!("✅ [DEBUG] Added disk to list: {}", disk_info.device_name);
+                    } else {
+                        println!("❌ [DEBUG] Filtered out disk: {}", disk_info.device_name);
                     }
+                } else {
+                    println!("❌ [DEBUG] bdev_to_disk_info returned None for bdev {}", i);
                 }
             }
+        } else {
+            println!("❌ [DEBUG] No bdev array found in result!");
+            println!("🔧 [DEBUG] bdevs keys: {:?}", bdevs.as_object().map(|o| o.keys().collect::<Vec<_>>()));
         }
 
         println!("✅ [MINIMAL_DISK] Discovered {} local storage disks", disks.len());
@@ -521,11 +536,16 @@ impl MinimalDiskService {
 
     /// Convert SPDK bdev JSON to our DiskInfo structure
     async fn bdev_to_disk_info(&self, bdev: &Value, lvstores: &Value, _controllers: &Value) -> Result<Option<DiskInfo>, MinimalStateError> {
+        println!("🔧 [BDEV_TO_DISK] Raw bdev JSON: {}", serde_json::to_string(bdev).unwrap_or_else(|_| "JSON error".to_string()));
+        
         let bdev_name = bdev["name"].as_str().unwrap_or("");
         let product_name = bdev["product_name"].as_str().unwrap_or("");
         let block_size = bdev["block_size"].as_u64().unwrap_or(0);
         let num_blocks = bdev["num_blocks"].as_u64().unwrap_or(0);
         let claimed = bdev["claimed"].as_bool().unwrap_or(false);
+        
+        println!("🔧 [BDEV_TO_DISK] Extracted values: name='{}', product='{}', block_size={}, num_blocks={}, claimed={}", 
+                 bdev_name, product_name, block_size, num_blocks, claimed);
 
         // Filter for storage devices (matches raid_over_lv pattern)
         if !product_name.contains("NVMe") && !product_name.contains("SSD") && !product_name.contains("AIO") {
