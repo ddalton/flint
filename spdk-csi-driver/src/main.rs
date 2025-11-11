@@ -327,6 +327,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     r#type: RpcType::CreateDeleteVolume as i32,
                 })),
             },
+            ControllerServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::CreateDeleteSnapshot as i32,
+                })),
+            },
+            ControllerServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::ExpandVolume as i32,
+                })),
+            },
         ];
         
         Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerGetCapabilitiesResponse { capabilities }))
