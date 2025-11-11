@@ -612,9 +612,14 @@ impl MinimalDiskService {
             if let Ok(link) = std::fs::read_link(&symlink_path) {
                 let link_str = link.to_string_lossy();
                 // Extract PCI address from path like "../devices/pci0000:00/0000:00:04.0/nvme/nvme0/nvme0n1"
-                if let Some(pci_start) = link_str.find("0000:") {
-                    if let Some(pci_end) = link_str[pci_start..].find("/") {
-                        let pci_addr = &link_str[pci_start..pci_start + pci_end];
+                // Look for the device PCI address (second occurrence), not the domain (first occurrence)
+                if let Some(domain_end) = link_str.find("/0000:") {
+                    // Start after the domain part: "pci0000:00/0000:00:04.0" -> "0000:00:04.0"
+                    let device_start = domain_end + 1; // Skip the "/"
+                    let device_part = &link_str[device_start..];
+                    
+                    if let Some(device_end) = device_part.find("/") {
+                        let pci_addr = &device_part[..device_end];
                         println!("✅ [PCI_EXTRACT] Mapped {} -> {}", device_name, pci_addr);
                         return pci_addr.to_string();
                     }
