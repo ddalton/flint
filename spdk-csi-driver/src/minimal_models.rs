@@ -107,6 +107,10 @@ pub enum MinimalStateError {
     NodeSeparationFailed { required: u32, available: u32 },
     SpdkRpcError { message: String },
     KubernetesError { message: String },
+    SerializationError { message: String },
+    DeserializationError { message: String },
+    HttpError { message: String },
+    InternalError { message: String },
 }
 
 impl std::fmt::Display for MinimalStateError {
@@ -122,8 +126,16 @@ impl std::fmt::Display for MinimalStateError {
                 write!(f, "Node separation failed: need {} nodes, have {}", required, available),
             MinimalStateError::SpdkRpcError { message } => 
                 write!(f, "SPDK RPC error: {}", message),
-            MinimalStateError::KubernetesError { message } => 
-                write!(f, "Kubernetes error: {}", message),
+                MinimalStateError::KubernetesError { message } => 
+                    write!(f, "Kubernetes error: {}", message),
+                MinimalStateError::SerializationError { message } => 
+                    write!(f, "Serialization error: {}", message),
+                MinimalStateError::DeserializationError { message } => 
+                    write!(f, "Deserialization error: {}", message),
+                MinimalStateError::HttpError { message } => 
+                    write!(f, "HTTP error: {}", message),
+                MinimalStateError::InternalError { message } => 
+                    write!(f, "Internal error: {}", message),
         }
     }
 }

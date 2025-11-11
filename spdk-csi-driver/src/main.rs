@@ -263,10 +263,41 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::CreateVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
-        println!("🔧 [CONTROLLER] Creating volume: {}", req.name);
-        
-        // TODO: Implement minimal state volume creation via node agents
-        Err(tonic::Status::unimplemented("Volume creation not yet implemented in minimal state"))
+        let volume_id = req.name.clone();
+        println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
+
+        // Extract parameters
+        let size_bytes = req.capacity_range
+            .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
+            .unwrap_or(1024 * 1024 * 1024) as u64; // Default 1GB
+
+        let replica_count = req.parameters.get("numReplicas")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1);
+
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}", volume_id, size_bytes, replica_count);
+
+        // Call the driver's create volume method 
+        match self.driver.create_volume(&volume_id, size_bytes, replica_count).await {
+            Ok(_volume_info) => {
+                println!("✅ [CONTROLLER] Volume {} created successfully", volume_id);
+                
+                let response = spdk_csi_driver::csi::CreateVolumeResponse {
+                    volume: Some(spdk_csi_driver::csi::Volume {
+                        volume_id: volume_id.clone(),
+                        capacity_bytes: size_bytes as i64,
+                        volume_context: std::collections::HashMap::new(),
+                        content_source: None,
+                        accessible_topology: vec![],
+                    }),
+                };
+                Ok(tonic::Response::new(response))
+            }
+            Err(e) => {
+                println!("❌ [CONTROLLER] Volume creation failed: {}", e);
+                Err(tonic::Status::internal(format!("Volume creation failed: {}", e)))
+            }
+        }
     }
 
     async fn delete_volume(

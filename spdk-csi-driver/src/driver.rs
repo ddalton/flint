@@ -52,6 +52,35 @@ impl SpdkCsiDriver {
         }
     }
 
+    /// Create volume using minimal state architecture
+    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32) -> Result<String, MinimalStateError> {
+        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas)", volume_id, size_bytes, replica_count);
+
+        // For now, simulate available disks (TODO: implement proper discovery)
+        println!("📊 [DRIVER] Simulating available disks for testing...");
+        // For testing, hardcode ublk-2 with 1TB disk
+        println!("🧪 [DRIVER] Using hardcoded ublk-2 node for testing");
+        let node_name = "ublk-2.vpc.cloudera.com";
+        let pci_address = "0000:00:1f.2"; // Placeholder PCI address
+        
+        // Try to initialize blobstore on the disk
+        match self.initialize_blobstore(node_name, pci_address).await {
+            Ok(lvs_name) => {
+                println!("✅ [DRIVER] Blobstore ready: {}", lvs_name);
+                
+                // Create logical volume
+                let lvol_uuid = self.create_lvol(node_name, &lvs_name, volume_id, size_bytes).await?;
+                
+                println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
+                Ok(lvol_uuid)
+            }
+            Err(e) => {
+                println!("❌ [DRIVER] Failed to initialize blobstore: {}", e);
+                Err(e)
+            }
+        }
+    }
+
     /// Get SPDK RPC URL for a specific node (simplified)
     pub async fn get_rpc_url_for_node(&self, node_name: &str) -> Result<String, Status> {
         // For minimal state, we'll use a simple pattern
