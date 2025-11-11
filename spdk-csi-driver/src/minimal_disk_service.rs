@@ -30,21 +30,13 @@ impl MinimalDiskService {
         println!("🔍 [MINIMAL_DISK] Starting pure SPDK disk discovery on node: {}", self.node_name);
 
         // Get data from SPDK
-        println!("🔧 [DEBUG] Getting bdevs...");
         let bdevs = self.get_spdk_bdevs().await?;
-        println!("🔧 [DEBUG] Getting lvstores...");
         let lvstores = self.get_spdk_lvstores().await?;
-        println!("🔧 [DEBUG] Getting controllers...");
         let controllers = self.get_spdk_nvme_controllers().await?;
 
         let mut disks = Vec::new();
-        println!("🔧 [DEBUG] Processing bdevs response...");
-        println!("🔧 [DEBUG] bdevs keys: {:?}", bdevs.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-        
         if let Some(bdev_list) = bdevs["result"].as_array() {
-            println!("🔧 [DEBUG] Found {} bdevs in result array", bdev_list.len());
-            for (i, bdev) in bdev_list.iter().enumerate() {
-                println!("🔧 [DEBUG] Processing bdev {}: {:?}", i, bdev.get("name"));
+            for bdev in bdev_list {
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
                     // Filter out system disks and non-storage devices
                     if self.is_storage_disk(&disk_info).await? {
@@ -52,9 +44,6 @@ impl MinimalDiskService {
                     }
                 }
             }
-        } else {
-            println!("🔧 [DEBUG] No bdev array found in result or result is not array");
-            println!("🔧 [DEBUG] bdevs[\"result\"] = {:?}", bdevs.get("result"));
         }
 
         println!("✅ [MINIMAL_DISK] Discovered {} local storage disks", disks.len());
