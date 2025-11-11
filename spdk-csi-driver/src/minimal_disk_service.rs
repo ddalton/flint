@@ -287,10 +287,13 @@ impl MinimalDiskService {
         let num_blocks = bdev["num_blocks"].as_u64().unwrap_or(0);
         let claimed = bdev["claimed"].as_bool().unwrap_or(false);
 
-        // Basic filtering for NVMe devices
-        if !product_name.contains("NVMe") && !product_name.contains("SSD") {
+        // Filter for storage devices (matches raid_over_lv pattern)
+        if !product_name.contains("NVMe") && !product_name.contains("SSD") && !product_name.contains("AIO") {
+            println!("🔍 [DISK_FILTER] Skipping bdev '{}' with product: '{}' (not storage)", bdev_name, product_name);
             return Ok(None);
         }
+        
+        println!("✅ [DISK_FILTER] Including storage bdev: '{}' (product: '{}')", bdev_name, product_name);
 
         let size_bytes = block_size * num_blocks;
         let pci_address = self.extract_pci_from_bdev_name(bdev_name);
