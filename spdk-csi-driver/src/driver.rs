@@ -12,7 +12,7 @@ use tonic::Status;
 use kube::{Api, Client};
 use k8s_openapi::api::core::v1::Node as k8sNode;
 
-use crate::minimal_models::MinimalStateError;
+use crate::minimal_models::{MinimalStateError, DiskInfo};
 
 /// Minimal State SPDK CSI Driver
 /// Focuses on direct SPDK operations without heavy CRD management
