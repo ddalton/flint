@@ -56,14 +56,28 @@ impl SpdkCsiDriver {
     pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32) -> Result<String, MinimalStateError> {
         println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas)", volume_id, size_bytes, replica_count);
 
-        // For now, simulate available disks (TODO: implement proper discovery)
-        println!("📊 [DRIVER] Simulating available disks for testing...");
-        // For testing, hardcode ublk-2 with 1TB disk
-        println!("🧪 [DRIVER] Using hardcoded ublk-2 node for testing");
-        let node_name = "ublk-2.vpc.cloudera.com";
-        let pci_address = "0000:00:1f.2"; // Placeholder PCI address
+        // Get actual available disks from discovered nodes
+        println!("📊 [DRIVER] Finding available disks from discovered nodes...");
+        let node_name = "ublk-2.vpc.cloudera.com"; // Still use ublk-2 for now
         
-        // Try to initialize blobstore on the disk
+        // Get real disks from the node agent
+        let available_disks = self.get_available_disks_from_node(node_name).await?;
+        if available_disks.is_empty() {
+            return Err(MinimalStateError::InsufficientCapacity { 
+                required: size_bytes, 
+                available: 0 
+            });
+        }
+        
+        // Use the first available disk (for single replica)
+        let selected_disk = &available_disks[0];
+        let pci_address = &selected_disk.pci_address;
+        println!("✅ [DRIVER] Selected disk: {} ({}GB) on node: {}", 
+                 selected_disk.device_name, 
+                 selected_disk.size_bytes / (1024*1024*1024), 
+                 node_name);
+        
+        // Try to initialize blobstore on the selected disk
         match self.initialize_blobstore(node_name, pci_address).await {
             Ok(lvs_name) => {
                 println!("✅ [DRIVER] Blobstore ready: {}", lvs_name);
@@ -469,6 +483,44 @@ impl SpdkCsiDriver {
             (hash >> 48) as u16,
             hash & 0xFFFFFFFFFFFF
         )
+    }
+
+    /// Get available disks from a specific node
+    pub async fn get_available_disks_from_node(&self, node_name: &str) -> Result<Vec<DiskInfo>, MinimalStateError> {
+        println!("🔍 [DRIVER] Getting available disks from node: {}", node_name);
+        
+        let response = self.call_node_agent(node_name, "/api/disks/uninitialized", &serde_json::json!({})).await
+            .map_err(|e| MinimalStateError::SpdkRpcError { 
+                message: format!("Failed to get disks from node agent: {}", e) 
+            })?;
+
+        let disks_array = response["uninitialized_disks"].as_array()
+            .ok_or_else(|| MinimalStateError::InternalError { 
+                message: "No uninitialized_disks array in response".to_string() 
+            })?;
+
+        let mut disks = Vec::new();
+        for disk_json in disks_array {
+            let disk = DiskInfo {
+                node_name: node_name.to_string(),
+                pci_address: disk_json["pci_address"].as_str().unwrap_or("unknown").to_string(),
+                device_name: disk_json["device_name"].as_str().unwrap_or("unknown").to_string(),
+                bdev_name: format!("kernel_{}", disk_json["device_name"].as_str().unwrap_or("unknown")),
+                size_bytes: disk_json["size_bytes"].as_u64().unwrap_or(0),
+                free_space: disk_json["size_bytes"].as_u64().unwrap_or(0), // Assume all free for uninitialized
+                model: disk_json["model"].as_str().unwrap_or("unknown").to_string(),
+                serial: Some("unknown".to_string()),
+                firmware: Some("unknown".to_string()),
+                healthy: disk_json["healthy"].as_bool().unwrap_or(false),
+                blobstore_initialized: false, // These are uninitialized disks
+                lvs_name: None,
+                lvol_count: 0,
+            };
+            disks.push(disk);
+        }
+
+        println!("✅ [DRIVER] Found {} available disks on node {}", disks.len(), node_name);
+        Ok(disks)
     }
 
     /// Generate consistent ublk device ID from volume ID
