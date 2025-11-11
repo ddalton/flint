@@ -325,6 +325,8 @@ impl MinimalDiskService {
         use std::fs;
         let devices_dir = "/sys/block";
         
+        println!("🔍 [DEVICE_MAPPING] Looking for device name for PCI: {}", pci_addr);
+        
         for entry in fs::read_dir(devices_dir).map_err(|e| MinimalStateError::InternalError { 
             message: format!("Failed to read /sys/block: {}", e) 
         })? {
@@ -333,11 +335,14 @@ impl MinimalDiskService {
             })?;
             
             if let Some(device_name) = entry.file_name().to_str() {
-                if device_name.starts_with("nvme") {
-                    // Check if this device corresponds to our PCI address
-                    let device_path = format!("/sys/block/{}/device", device_name);
-                    if let Ok(link) = fs::read_link(&device_path) {
-                        if link.to_string_lossy().contains(pci_addr) {
+                if device_name.starts_with("nvme") && device_name.ends_with("n1") {
+                    // Check if this device corresponds to our PCI address via symlink
+                    let device_symlink = format!("/sys/block/{}", device_name);
+                    if let Ok(link) = fs::read_link(&device_symlink) {
+                        let link_str = link.to_string_lossy();
+                        println!("🔍 [DEVICE_MAPPING] Checking {} -> {}", device_name, link_str);
+                        if link_str.contains(pci_addr) {
+                            println!("✅ [DEVICE_MAPPING] Found match: {} -> {}", pci_addr, device_name);
                             return Ok(device_name.to_string());
                         }
                     }
@@ -345,6 +350,7 @@ impl MinimalDiskService {
             }
         }
         
+        println!("❌ [DEVICE_MAPPING] No device found for PCI: {}", pci_addr);
         Err(MinimalStateError::DiskNotFound { 
             node: self.node_name.clone(), 
             pci: pci_addr.to_string() 
