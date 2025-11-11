@@ -437,9 +437,13 @@ impl MinimalDiskService {
             println!("🔧 [SPDK_RPC] Calling method '{}' with params: {:?}", method, rpc_request.get("params"));
             let result = match method {
             "bdev_get_bdevs" => {
-                let bdevs = spdk.get_bdevs().await?;
-                // Return the bdev list directly as JSON Value (no extra wrapping)
-                serde_json::to_value(bdevs)?
+                // Use generic RPC call to get full bdev objects, not just names
+                spdk.call_method("bdev_get_bdevs", None).await
+                    .map_err(|e| {
+                        let error_msg = format!("SPDK RPC call 'bdev_get_bdevs' failed: {}", e);
+                        println!("❌ [SPDK_RPC] {}", error_msg);
+                        Box::new(std::io::Error::new(std::io::ErrorKind::Other, error_msg)) as Box<dyn std::error::Error + Send + Sync>
+                    })?
             }
             "bdev_lvol_get_lvstores" => {
                 let lvstores = spdk.get_lvol_stores().await?;
