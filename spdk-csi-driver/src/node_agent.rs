@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use warp::Filter;
 use warp::{Rejection, Reply};
 use warp::http::StatusCode;
@@ -89,15 +89,17 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_list_disks);
 
-        // GET /api/disks/uninitialized - List uninitialized disks (dashboard compatibility)
+        // POST /api/disks/uninitialized - List uninitialized disks (RPC-style)
         let list_uninitialized = warp::path!("api" / "disks" / "uninitialized")
-            .and(warp::get())
+            .and(warp::post())
+            .and(warp::body::json())
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_get_uninitialized_disks);
 
-        // GET /api/disks/status - Get disk status (dashboard compatibility)
+        // POST /api/disks/status - Get disk status (RPC-style)
         let disk_status = warp::path!("api" / "disks" / "status")
-            .and(warp::get())
+            .and(warp::post())
+            .and(warp::body::json())
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_get_disk_status);
 
@@ -288,8 +290,8 @@ impl NodeAgent {
         }
     }
 
-    /// Handle GET /api/disks/uninitialized - List uninitialized disks
-    async fn handle_get_uninitialized_disks(node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
+    /// Handle POST /api/disks/uninitialized - List uninitialized disks (RPC-style)
+    async fn handle_get_uninitialized_disks(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
         println!("🌐 [HTTP_API] Handling get uninitialized disks request");
         
         match node_agent.disk_service.discover_local_disks().await {
@@ -323,8 +325,8 @@ impl NodeAgent {
         }
     }
 
-    /// Handle GET /api/disks/status - Get disk status  
-    async fn handle_get_disk_status(node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
+    /// Handle POST /api/disks/status - Get disk status (RPC-style)
+    async fn handle_get_disk_status(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
         println!("🌐 [HTTP_API] Handling get disk status request");
         
         match node_agent.disk_service.discover_local_disks().await {
