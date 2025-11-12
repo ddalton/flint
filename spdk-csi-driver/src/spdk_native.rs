@@ -53,6 +53,7 @@ impl std::error::Error for SpdkRpcError {}
 pub struct LvsInfo {
     pub name: String,
     pub uuid: String,
+    pub base_bdev: String,
     pub cluster_size: u64,
     pub total_clusters: u64,
     pub free_clusters: u64,
@@ -248,6 +249,7 @@ impl SpdkNative {
         Ok(LvsInfo {
             name: lvs_name.to_string(),
             uuid: result.as_str().unwrap_or("").to_string(),
+            base_bdev: bdev_name.to_string(),
             cluster_size,
             total_clusters: 0,
             free_clusters: 0,
@@ -268,6 +270,7 @@ impl SpdkNative {
                 stores.push(LvsInfo {
                     name: obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     uuid: obj.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    base_bdev: obj.get("base_bdev").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     cluster_size: obj.get("cluster_size").and_then(|v| v.as_u64()).unwrap_or(0),
                     total_clusters: obj.get("total_clusters").and_then(|v| v.as_u64()).unwrap_or(0),
                     free_clusters: obj.get("free_clusters").and_then(|v| v.as_u64()).unwrap_or(0),

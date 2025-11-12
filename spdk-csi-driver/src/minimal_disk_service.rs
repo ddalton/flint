@@ -566,6 +566,7 @@ impl MinimalDiskService {
                     json!({
                         "name": lvs.name,
                         "uuid": lvs.uuid,
+                        "base_bdev": lvs.base_bdev,
                         "cluster_size": lvs.cluster_size,
                         "total_clusters": lvs.total_clusters,
                         "free_clusters": lvs.free_clusters,
