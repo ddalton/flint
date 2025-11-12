@@ -364,7 +364,6 @@ impl MinimalDiskService {
 
     /// Helper methods for physical device discovery
     async fn get_current_driver(&self, pci_addr: &str) -> Result<String, MinimalStateError> {
-        use std::fs;
         let driver_path = format!("/sys/bus/pci/devices/{}/driver", pci_addr);
         
         match std::fs::read_link(&driver_path) {

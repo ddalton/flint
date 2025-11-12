@@ -6,7 +6,7 @@ use warp::Filter;
 
 // Import minimal state components from library
 use spdk_csi_driver::node_agent::NodeAgent;
-use spdk_csi_driver::driver::SpdkCsiDriver;
+use spdk_csi_driver::driver::{SpdkCsiDriver, NvmeofConnectionInfo};
 use spdk_csi_driver::spdk_dashboard_backend_minimal::start_minimal_dashboard_backend;
 
 // Use the CSI protobuf types from lib.rs instead of duplicating them
@@ -305,24 +305,161 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::DeleteVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::DeleteVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
-        println!("🗑️ [CONTROLLER] Deleting volume: {}", req.volume_id);
+        let volume_id = req.volume_id.clone();
         
-        // TODO: Implement minimal state volume deletion via node agents
+        println!("🗑️ [CONTROLLER] Deleting volume: {}", volume_id);
+        
+        // Get volume information to know which node it's on
+        let volume_info = match self.driver.get_volume_info(&volume_id).await {
+            Ok(info) => info,
+            Err(e) => {
+                println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
+                // Not an error - idempotent delete
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+            }
+        };
+
+        println!("📊 [CONTROLLER] Deleting volume on node: {}", volume_info.node_name);
+
+        // Delete the logical volume on the storage node
+        match self.driver.delete_lvol(&volume_info.node_name, &volume_info.lvol_uuid).await {
+            Ok(_) => {
+                println!("✅ [CONTROLLER] Logical volume deleted successfully");
+            }
+            Err(e) => {
+                println!("❌ [CONTROLLER] Failed to delete logical volume: {}", e);
+                return Err(tonic::Status::internal(format!("Failed to delete volume: {}", e)));
+            }
+        }
+
+        // Clean up any NVMe-oF targets that might still exist
+        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        if let Err(e) = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await {
+            println!("⚠️ [CONTROLLER] Failed to remove NVMe-oF target (may not exist): {}", e);
+            // Continue anyway - best effort cleanup
+        }
+
+        println!("✅ [CONTROLLER] Volume {} deleted successfully", volume_id);
+        
         Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}))
     }
 
     async fn controller_publish_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::ControllerPublishVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::ControllerPublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerPublishVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Controller publish volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let node_id = req.node_id.clone();
+        
+        println!("📤 [CONTROLLER] Publishing volume {} to node {}", volume_id, node_id);
+
+        // Get volume information (which node it's on)
+        let volume_info = match self.driver.get_volume_info(&volume_id).await {
+            Ok(info) => info,
+            Err(e) => {
+                println!("❌ [CONTROLLER] Failed to get volume info: {}", e);
+                return Err(tonic::Status::not_found(format!("Volume not found: {}", e)));
+            }
+        };
+
+        println!("📊 [CONTROLLER] Volume {} is on node {}", volume_id, volume_info.node_name);
+
+        let mut publish_context = std::collections::HashMap::new();
+        
+        // Check if pod is on the same node as the logical volume
+        if volume_info.node_name == node_id {
+            println!("✅ [CONTROLLER] Volume is local to node - no NVMe-oF needed");
+            
+            // Store volume info in publish context for NodeStage
+            publish_context.insert("volumeType".to_string(), "local".to_string());
+            publish_context.insert("bdevName".to_string(), volume_info.lvol_uuid.clone());
+            publish_context.insert("lvsName".to_string(), volume_info.lvs_name.clone());
+        } else {
+            println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
+            
+            // Construct bdev name for lvol
+            let bdev_name = volume_info.lvol_uuid.clone();
+            
+            // Setup NVMe-oF target on the node hosting the logical volume
+            let conn_info = match self.driver.setup_nvmeof_target_on_node(
+                &volume_info.node_name,
+                &bdev_name,
+                &volume_id
+            ).await {
+                Ok(info) => info,
+                Err(e) => {
+                    println!("❌ [CONTROLLER] Failed to setup NVMe-oF target: {}", e);
+                    return Err(tonic::Status::internal(format!("Failed to setup NVMe-oF: {}", e)));
+                }
+            };
+
+            println!("✅ [CONTROLLER] NVMe-oF target ready: {}", conn_info.nqn);
+
+            // Store connection info in publish context for NodeStage
+            publish_context.insert("volumeType".to_string(), "remote".to_string());
+            publish_context.insert("nqn".to_string(), conn_info.nqn.clone());
+            publish_context.insert("targetIp".to_string(), conn_info.target_ip.clone());
+            publish_context.insert("targetPort".to_string(), conn_info.target_port.to_string());
+            publish_context.insert("transport".to_string(), conn_info.transport.clone());
+            publish_context.insert("storageNode".to_string(), volume_info.node_name.clone());
+        }
+
+        publish_context.insert("volumeId".to_string(), volume_id.clone());
+
+        println!("✅ [CONTROLLER] Volume {} published successfully", volume_id);
+        
+        let response = spdk_csi_driver::csi::ControllerPublishVolumeResponse {
+            publish_context,
+        };
+        
+        Ok(tonic::Response::new(response))
     }
 
     async fn controller_unpublish_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::ControllerUnpublishVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::ControllerUnpublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerUnpublishVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Controller unpublish volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let node_id = req.node_id.clone();
+        
+        println!("📥 [CONTROLLER] Unpublishing volume {} from node {:?}", volume_id, node_id);
+
+        // Get volume information
+        let volume_info = match self.driver.get_volume_info(&volume_id).await {
+            Ok(info) => info,
+            Err(e) => {
+                println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
+                // Not an error - volume might already be deleted
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerUnpublishVolumeResponse {}));
+            }
+        };
+
+        // If node_id is specified and volume is remote, we need to cleanup
+        if !node_id.is_empty() {
+            if volume_info.node_name != node_id {
+                println!("🧹 [CONTROLLER] Volume is remote - cleaning up NVMe-oF connections");
+                
+                let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+                
+                // Disconnect from NVMe-oF target on the node where pod was running
+                // Note: We need to create a temporary driver instance for the target node
+                // For now, we'll use the controller's node_id since this is a cleanup operation
+                println!("🔌 [CONTROLLER] Note: NVMe disconnection handled by NodeUnpublish on node {}", node_id);
+                
+                // Remove the NVMe-oF target from the storage node
+                if let Err(e) = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await {
+                    println!("⚠️ [CONTROLLER] Failed to remove NVMe-oF target (continuing): {}", e);
+                }
+            } else {
+                println!("ℹ️ [CONTROLLER] Volume is local - no NVMe-oF cleanup needed");
+            }
+        }
+
+        println!("✅ [CONTROLLER] Volume {} unpublished successfully", volume_id);
+        
+        Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerUnpublishVolumeResponse {}))
     }
 
     async fn validate_volume_capabilities(
@@ -356,6 +493,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             ControllerServiceCapability {
                 r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
                     r#type: RpcType::CreateDeleteVolume as i32,
+                })),
+            },
+            ControllerServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::PublishUnpublishVolume as i32,
                 })),
             },
             ControllerServiceCapability {
@@ -431,9 +573,84 @@ impl MinimalNodeService {
 impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
     async fn node_stage_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodeStageVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodeStageVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeStageVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Node stage volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let staging_target_path = req.staging_target_path.clone();
+        let publish_context = req.publish_context.clone();
+        
+        println!("📦 [NODE] Staging volume {} at {}", volume_id, staging_target_path);
+
+        // Get volume type from publish context
+        let volume_type = publish_context.get("volumeType")
+            .ok_or_else(|| tonic::Status::invalid_argument("No volumeType in publish context"))?;
+
+        let bdev_name = if volume_type == "local" {
+            // Local volume - bdev is the lvol UUID
+            let bdev = publish_context.get("bdevName")
+                .ok_or_else(|| tonic::Status::invalid_argument("No bdevName in publish context"))?;
+            println!("✅ [NODE] Local volume - using bdev: {}", bdev);
+            bdev.clone()
+        } else if volume_type == "remote" {
+            // Remote volume - need to connect to NVMe-oF target first
+            println!("🌐 [NODE] Remote volume - connecting to NVMe-oF target");
+            
+            let nqn = publish_context.get("nqn")
+                .ok_or_else(|| tonic::Status::invalid_argument("No nqn in publish context"))?;
+            let target_ip = publish_context.get("targetIp")
+                .ok_or_else(|| tonic::Status::invalid_argument("No targetIp in publish context"))?;
+            let target_port = publish_context.get("targetPort")
+                .ok_or_else(|| tonic::Status::invalid_argument("No targetPort in publish context"))?
+                .parse::<u16>()
+                .map_err(|e| tonic::Status::invalid_argument(format!("Invalid targetPort: {}", e)))?;
+            let transport = publish_context.get("transport")
+                .ok_or_else(|| tonic::Status::invalid_argument("No transport in publish context"))?;
+
+            let conn_info = NvmeofConnectionInfo {
+                nqn: nqn.clone(),
+                target_ip: target_ip.clone(),
+                target_port,
+                transport: transport.clone(),
+            };
+
+            // Connect to NVMe-oF target
+            match self.driver.connect_to_nvmeof_target(&conn_info).await {
+                Ok(bdev) => {
+                    println!("✅ [NODE] Connected to NVMe-oF target, bdev: {}", bdev);
+                    bdev
+                }
+                Err(e) => {
+                    println!("❌ [NODE] Failed to connect to NVMe-oF target: {}", e);
+                    return Err(tonic::Status::internal(format!("Failed to connect to NVMe-oF: {}", e)));
+                }
+            }
+        } else {
+            return Err(tonic::Status::invalid_argument(format!("Unknown volume type: {}", volume_type)));
+        };
+
+        // Now create ublk device from the bdev
+        println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
+        
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        
+        match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
+            Ok(device_path) => {
+                println!("✅ [NODE] ublk device created: {}", device_path);
+                
+                // Create staging directory if it doesn't exist
+                if let Err(e) = std::fs::create_dir_all(&staging_target_path) {
+                    println!("⚠️ [NODE] Failed to create staging directory (may exist): {}", e);
+                }
+
+                println!("✅ [NODE] Volume {} staged successfully", volume_id);
+                Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}))
+            }
+            Err(e) => {
+                println!("❌ [NODE] Failed to create ublk device: {}", e);
+                Err(tonic::Status::internal(format!("Failed to create ublk device: {}", e)))
+            }
+        }
     }
 
     async fn node_unstage_volume(
@@ -452,9 +669,38 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
     async fn node_unpublish_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodeUnpublishVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodeUnpublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnpublishVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Node unpublish volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let target_path = req.target_path.clone();
+        
+        println!("📤 [NODE] Unpublishing volume {} from {}", volume_id, target_path);
+
+        // Generate ublk ID and stop the device
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        
+        match self.driver.delete_ublk_device(ublk_id).await {
+            Ok(_) => {
+                println!("✅ [NODE] ublk device stopped successfully");
+            }
+            Err(e) => {
+                println!("⚠️ [NODE] Failed to stop ublk device (may not exist): {}", e);
+                // Continue anyway - best effort cleanup
+            }
+        }
+
+        // Also disconnect from NVMe-oF if this was a remote volume
+        // We determine this by checking if there's an NVMe connection
+        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        if let Err(e) = self.driver.disconnect_from_nvmeof_target(&nqn).await {
+            println!("⚠️ [NODE] Failed to disconnect from NVMe-oF (may not be connected): {}", e);
+            // Continue anyway - best effort cleanup
+        }
+
+        println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
+        
+        Ok(tonic::Response::new(spdk_csi_driver::csi::NodeUnpublishVolumeResponse {}))
     }
 
     async fn node_get_volume_stats(

@@ -41,6 +41,24 @@ impl NodeAgent {
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🚀 [MINIMAL_NODE_AGENT] Starting minimal state node agent: {}", self.node_name);
 
+        // Initialize ublk subsystem on startup
+        println!("🔧 [MINIMAL_NODE_AGENT] Initializing ublk subsystem...");
+        match self.disk_service.call_spdk_rpc(&json!({
+            "method": "ublk_create_target",
+            "params": {}
+        })).await {
+            Ok(_) => println!("✅ [MINIMAL_NODE_AGENT] ublk subsystem initialized"),
+            Err(e) if e.to_string().contains("Method not found") => {
+                println!("ℹ️ [MINIMAL_NODE_AGENT] SPDK doesn't support ublk - skipping initialization");
+            }
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [MINIMAL_NODE_AGENT] ublk subsystem already initialized");
+            }
+            Err(e) => {
+                println!("⚠️ [MINIMAL_NODE_AGENT] ublk initialization failed (continuing anyway): {}", e);
+            }
+        }
+
         // Start disk discovery loop
         let disk_service = self.disk_service.clone();
         let discovery_task = tokio::spawn(async move {
@@ -173,6 +191,13 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_ublk_delete);
 
+        // POST /api/volumes/get_info - Get volume information
+        let get_volume_info = warp::path!("api" / "volumes" / "get_info")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_get_volume_info);
+
         // Combine all routes
         list_disks
             .or(list_uninitialized)
@@ -187,6 +212,7 @@ impl NodeAgent {
             .or(ublk_create_target)
             .or(ublk_create)
             .or(ublk_delete)
+            .or(get_volume_info)
             .with(warp::cors().allow_any_origin())
     }
 
@@ -540,6 +566,93 @@ impl NodeAgent {
                 Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
             }
         }
+    }
+
+    /// Handle POST /api/volumes/get_info - Get volume information
+    async fn handle_get_volume_info(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        let volume_id = match request["volume_id"].as_str() {
+            Some(id) => id,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing volume_id in request"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+
+        println!("🌐 [HTTP_API] Getting info for volume: {}", volume_id);
+
+        // Query all lvstores to find the volume
+        let lvstores_response = match node_agent.disk_service.call_spdk_rpc(&json!({
+            "method": "bdev_lvol_get_lvstores"
+        })).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let error_response = json!({
+                    "success": false,
+                    "error": format!("Failed to query lvstores: {}", e)
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+            }
+        };
+
+        // Look for the volume in all lvstores
+        if let Some(lvstores) = lvstores_response["result"].as_array() {
+            for lvstore in lvstores {
+                let lvs_name = lvstore["name"].as_str().unwrap_or("");
+                
+                // Get all bdevs to find lvols for this lvstore
+                let bdevs_response = match node_agent.disk_service.call_spdk_rpc(&json!({
+                    "method": "bdev_get_bdevs"
+                })).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        println!("⚠️ [HTTP_API] Failed to get bdevs: {}", e);
+                        continue;
+                    }
+                };
+
+                if let Some(bdevs) = bdevs_response["result"].as_array() {
+                    for bdev in bdevs {
+                        if let Some(product_name) = bdev["product_name"].as_str() {
+                            if product_name == "Logical Volume" {
+                                // Check if this is the volume we're looking for
+                                let bdev_name = bdev["name"].as_str().unwrap_or("");
+                                
+                                // Extract volume name from bdev name (format: "lvs_name/vol_volumeId")
+                                if bdev_name.contains(&format!("vol_{}", volume_id)) {
+                                    let size_bytes = bdev["num_blocks"].as_u64().unwrap_or(0) * 
+                                                   bdev["block_size"].as_u64().unwrap_or(512);
+                                    
+                                    let response = json!({
+                                        "success": true,
+                                        "volume_id": volume_id,
+                                        "lvol_uuid": bdev_name,
+                                        "lvs_name": lvs_name,
+                                        "size_bytes": size_bytes
+                                    });
+                                    
+                                    println!("✅ [HTTP_API] Found volume: {}", volume_id);
+                                    return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Volume not found
+        let error_response = json!({
+            "success": false,
+            "error": format!("Volume {} not found", volume_id)
+        });
+        println!("❌ [HTTP_API] Volume not found: {}", volume_id);
+        Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::NOT_FOUND))
     }
 }
 

@@ -558,4 +558,249 @@ impl SpdkCsiDriver {
 
         Err(format!("Bdev '{}' not found in SPDK", bdev_name).into())
     }
+
+    /// Get volume information (which node it's on, lvol UUID, etc.)
+    pub async fn get_volume_info(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DRIVER] Getting info for volume: {}", volume_id);
+        
+        // For now, we need to query all nodes to find where the volume is
+        // In production, this would query a metadata store
+        // For this implementation, we'll check the hardcoded node
+        let node_name = "ublk-2.vpc.cloudera.com";
+        
+        // Query the node agent for volume info
+        let payload = json!({
+            "volume_id": volume_id
+        });
+        
+        match self.call_node_agent(node_name, "/api/volumes/get_info", &payload).await {
+            Ok(response) => {
+                let lvol_uuid = response["lvol_uuid"].as_str()
+                    .ok_or("No lvol_uuid in response")?
+                    .to_string();
+                let lvs_name = response["lvs_name"].as_str()
+                    .ok_or("No lvs_name in response")?
+                    .to_string();
+                let size_bytes = response["size_bytes"].as_u64()
+                    .ok_or("No size_bytes in response")?;
+                
+                Ok(VolumeInfo {
+                    volume_id: volume_id.to_string(),
+                    node_name: node_name.to_string(),
+                    lvol_uuid,
+                    lvs_name,
+                    size_bytes,
+                })
+            }
+            Err(_) => {
+                Err(format!("Volume {} not found", volume_id).into())
+            }
+        }
+    }
+
+    /// Setup NVMe-oF target and return connection info
+    pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
+        
+        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        
+        // Create subsystem
+        let subsystem_params = json!({
+            "method": "nvmf_create_subsystem",
+            "params": {
+                "nqn": nqn,
+                "allow_any_host": true,
+                "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64),
+                "model_number": "SPDK CSI Volume"
+            }
+        });
+
+        match self.call_node_agent(node_name, "/api/spdk/rpc", &subsystem_params).await {
+            Ok(_) => println!("✅ [DRIVER] Subsystem created: {}", nqn),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [DRIVER] Subsystem already exists: {}", nqn);
+            }
+            Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
+        }
+
+        // Add namespace
+        let namespace_params = json!({
+            "method": "nvmf_subsystem_add_ns",
+            "params": {
+                "nqn": nqn,
+                "namespace": {
+                    "nsid": 1,
+                    "bdev_name": bdev_name
+                }
+            }
+        });
+
+        match self.call_node_agent(node_name, "/api/spdk/rpc", &namespace_params).await {
+            Ok(_) => println!("✅ [DRIVER] Namespace added for bdev: {}", bdev_name),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [DRIVER] Namespace already exists for bdev: {}", bdev_name);
+            }
+            Err(e) => return Err(format!("Failed to add namespace: {}", e).into()),
+        }
+
+        // Add listener
+        let node_ip = self.get_node_ip(node_name).await
+            .map_err(|e| format!("Failed to get node IP: {}", e))?;
+        
+        let listener_params = json!({
+            "method": "nvmf_subsystem_add_listener",
+            "params": {
+                "nqn": nqn,
+                "listen_address": {
+                    "trtype": self.nvmeof_transport.to_uppercase(),
+                    "traddr": node_ip,
+                    "trsvcid": self.nvmeof_target_port.to_string(),
+                    "adrfam": "ipv4"
+                }
+            }
+        });
+
+        match self.call_node_agent(node_name, "/api/spdk/rpc", &listener_params).await {
+            Ok(_) => println!("✅ [DRIVER] Listener added: {}:{}", node_ip, self.nvmeof_target_port),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [DRIVER] Listener already exists: {}:{}", node_ip, self.nvmeof_target_port);
+            }
+            Err(e) => return Err(format!("Failed to add listener: {}", e).into()),
+        }
+
+        println!("🎉 [DRIVER] NVMe-oF target setup completed: {}", nqn);
+        
+        Ok(NvmeofConnectionInfo {
+            nqn: nqn.clone(),
+            target_ip: node_ip.clone(),
+            target_port: self.nvmeof_target_port,
+            transport: self.nvmeof_transport.clone(),
+        })
+    }
+
+    /// Connect to NVMe-oF target from current node
+    pub async fn connect_to_nvmeof_target(&self, conn_info: &NvmeofConnectionInfo) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔌 [DRIVER] Connecting to NVMe-oF target: {} at {}:{}", 
+                 conn_info.nqn, conn_info.target_ip, conn_info.target_port);
+        
+        let controller_name = format!("nvme_{}", conn_info.nqn.replace(":", "_").replace(".", "_"));
+        
+        let attach_params = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": controller_name,
+                "trtype": conn_info.transport.to_uppercase(),
+                "traddr": conn_info.target_ip,
+                "trsvcid": conn_info.target_port.to_string(),
+                "subnqn": conn_info.nqn,
+                "adrfam": "IPv4"
+            }
+        });
+
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {
+            Ok(response) => {
+                // The response should contain the bdev names created
+                if let Some(result) = response.get("result") {
+                    if let Some(bdev_names) = result.as_array() {
+                        if let Some(first_bdev) = bdev_names.first() {
+                            if let Some(bdev_name) = first_bdev.as_str() {
+                                println!("✅ [DRIVER] Connected to NVMe-oF target, bdev created: {}", bdev_name);
+                                return Ok(bdev_name.to_string());
+                            }
+                        }
+                    }
+                }
+                // Fallback - construct expected bdev name
+                let bdev_name = format!("{}n1", controller_name);
+                println!("✅ [DRIVER] Connected to NVMe-oF target, expected bdev: {}", bdev_name);
+                Ok(bdev_name)
+            }
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [DRIVER] Already connected to NVMe-oF target");
+                let bdev_name = format!("{}n1", controller_name);
+                Ok(bdev_name)
+            }
+            Err(e) => {
+                Err(format!("Failed to attach NVMe controller: {}", e).into())
+            }
+        }
+    }
+
+    /// Disconnect from NVMe-oF target
+    pub async fn disconnect_from_nvmeof_target(&self, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔌 [DRIVER] Disconnecting from NVMe-oF target: {}", nqn);
+        
+        let controller_name = format!("nvme_{}", nqn.replace(":", "_").replace(".", "_"));
+        
+        let detach_params = json!({
+            "method": "bdev_nvme_detach_controller",
+            "params": {
+                "name": controller_name
+            }
+        });
+
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &detach_params).await {
+            Ok(_) => {
+                println!("✅ [DRIVER] Disconnected from NVMe-oF target: {}", nqn);
+                Ok(())
+            }
+            Err(e) if e.to_string().contains("does not exist") => {
+                println!("ℹ️ [DRIVER] NVMe controller not found (already disconnected): {}", controller_name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [DRIVER] Failed to disconnect (continuing anyway): {}", e);
+                Ok(()) // Best effort cleanup
+            }
+        }
+    }
+
+    /// Remove NVMe-oF target from a node
+    pub async fn remove_nvmeof_target(&self, node_name: &str, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧹 [DRIVER] Removing NVMe-oF target from node: {} nqn: {}", node_name, nqn);
+        
+        let delete_params = json!({
+            "method": "nvmf_delete_subsystem",
+            "params": {
+                "nqn": nqn
+            }
+        });
+
+        match self.call_node_agent(node_name, "/api/spdk/rpc", &delete_params).await {
+            Ok(_) => {
+                println!("✅ [DRIVER] Successfully removed NVMe-oF target: {}", nqn);
+                Ok(())
+            }
+            Err(e) if e.to_string().contains("does not exist") => {
+                println!("ℹ️ [DRIVER] NVMe-oF target not found (already removed): {}", nqn);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [DRIVER] Failed to remove target (continuing anyway): {}", e);
+                Ok(()) // Best effort cleanup
+            }
+        }
+    }
+}
+
+/// Volume information
+#[derive(Debug, Clone)]
+pub struct VolumeInfo {
+    pub volume_id: String,
+    pub node_name: String,
+    pub lvol_uuid: String,
+    pub lvs_name: String,
+    pub size_bytes: u64,
+}
+
+/// NVMe-oF connection information
+#[derive(Debug, Clone)]
+pub struct NvmeofConnectionInfo {
+    pub nqn: String,
+    pub target_ip: String,
+    pub target_port: u16,
+    pub transport: String,
 }
