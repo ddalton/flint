@@ -213,6 +213,7 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::GetPluginInfoRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::GetPluginInfoResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Identity.GetPluginInfo called");
         Ok(tonic::Response::new(spdk_csi_driver::csi::GetPluginInfoResponse {
             name: "flint.csi.storage.io".to_string(),
             vendor_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -224,6 +225,7 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::GetPluginCapabilitiesRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::GetPluginCapabilitiesResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Identity.GetPluginCapabilities called");
         use spdk_csi_driver::csi::{plugin_capability::service::Type as ServiceType, PluginCapability, plugin_capability::Service};
         
         let capabilities = vec![
@@ -241,6 +243,7 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::ProbeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ProbeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Identity.Probe called");
         Ok(tonic::Response::new(spdk_csi_driver::csi::ProbeResponse { ready: Some(true) }))
     }
 }
@@ -487,6 +490,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::ControllerGetCapabilitiesRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerGetCapabilitiesResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Controller.ControllerGetCapabilities called");
         use spdk_csi_driver::csi::{controller_service_capability::rpc::Type as RpcType, ControllerServiceCapability, controller_service_capability::Rpc};
         
         let capabilities = vec![
@@ -575,6 +579,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         request: tonic::Request<spdk_csi_driver::csi::NodeStageVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeStageVolumeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] *** Node.NodeStageVolume CALLED ***");
         let req = request.into_inner();
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
@@ -657,6 +662,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::NodeUnstageVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnstageVolumeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeUnstageVolume called");
         Err(tonic::Status::unimplemented("Node unstage volume not implemented"))
     }
 
@@ -664,6 +670,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         request: tonic::Request<spdk_csi_driver::csi::NodePublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodePublishVolumeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodePublishVolume called");
         let req = request.into_inner();
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
@@ -710,6 +717,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         request: tonic::Request<spdk_csi_driver::csi::NodeUnpublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnpublishVolumeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeUnpublishVolume called");
         let req = request.into_inner();
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
@@ -746,6 +754,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::NodeGetVolumeStatsRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetVolumeStatsResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeGetVolumeStats called");
         Err(tonic::Status::unimplemented("Node get volume stats not implemented"))
     }
 
@@ -753,6 +762,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::NodeExpandVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeExpandVolumeResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeExpandVolume called");
         Err(tonic::Status::unimplemented("Node expand volume not implemented"))
     }
 
@@ -760,6 +770,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::NodeGetCapabilitiesRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetCapabilitiesResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeGetCapabilities called");
         use spdk_csi_driver::csi::{node_service_capability::rpc::Type as RpcType, NodeServiceCapability, node_service_capability::Rpc};
         
         let capabilities = vec![
@@ -770,6 +781,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             },
         ];
         
+        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume capability");
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetCapabilitiesResponse { capabilities }))
     }
 
@@ -777,6 +789,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         _request: tonic::Request<spdk_csi_driver::csi::NodeGetInfoRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetInfoResponse>, tonic::Status> {
+        println!("🔵 [GRPC] Node.NodeGetInfo called");
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetInfoResponse {
             node_id: self.driver.node_id.clone(),
             max_volumes_per_node: 0, // 0 means unlimited
