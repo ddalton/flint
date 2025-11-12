@@ -25,16 +25,28 @@ impl MinimalDiskService {
         }
     }
 
-    /// Discover all disks on this node with auto-recovery
+    /// Discover all disks on this node with auto-recovery (for startup/periodic discovery)
     pub async fn discover_local_disks(&self) -> Result<Vec<DiskInfo>, MinimalStateError> {
-        println!("🔍 [MINIMAL_DISK] Starting disk discovery with auto-recovery on node: {}", self.node_name);
+        self.discover_local_disks_internal(true).await
+    }
 
-        // Step 1: Auto-recover SPDK state for physical devices
-        if let Err(e) = self.auto_recover_spdk_state().await {
-            println!("⚠️ [MINIMAL_DISK] Auto-recovery failed (continuing anyway): {}", e);
+    /// Fast disk discovery without auto-recovery (for API requests)
+    pub async fn discover_local_disks_fast(&self) -> Result<Vec<DiskInfo>, MinimalStateError> {
+        self.discover_local_disks_internal(false).await
+    }
+
+    /// Internal disk discovery with optional auto-recovery
+    async fn discover_local_disks_internal(&self, with_auto_recovery: bool) -> Result<Vec<DiskInfo>, MinimalStateError> {
+        println!("🔍 [MINIMAL_DISK] Starting disk discovery (auto-recovery: {}) on node: {}", with_auto_recovery, self.node_name);
+
+        // Step 1: Auto-recover SPDK state for physical devices (only on startup/periodic)
+        if with_auto_recovery {
+            if let Err(e) = self.auto_recover_spdk_state().await {
+                println!("⚠️ [MINIMAL_DISK] Auto-recovery failed (continuing anyway): {}", e);
+            }
         }
 
-        // Step 2: Get current SPDK state after recovery
+        // Step 2: Get current SPDK state
         let bdevs = self.get_spdk_bdevs().await?;
         let lvstores = self.get_spdk_lvstores().await?;
         let controllers = self.get_spdk_nvme_controllers().await?;

@@ -263,9 +263,9 @@ impl NodeAgent {
             .as_micros() as u32);
         
         println!("🌐 [HTTP_API:{}] ========== NEW REQUEST: POST /api/disks ==========", request_id);
-        println!("🌐 [HTTP_API:{}] Starting disk discovery...", request_id);
+        println!("🌐 [HTTP_API:{}] Starting FAST disk discovery (no auto-recovery)...", request_id);
         
-        match node_agent.disk_service.discover_local_disks().await {
+        match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 let elapsed = start.elapsed();
                 println!("✅ [HTTP_API:{}] Discovery completed in {:?}", request_id, elapsed);
