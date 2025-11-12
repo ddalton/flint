@@ -292,8 +292,40 @@ When everything works, you should see:
 - Kubernetes: v1.33.5+rke2r1 (RKE2 distribution)
 - Node: ublk-2.vpc.cloudera.com (Ubuntu 24.04 LTS)
 
-**Commit:** a16f1d6
+**Commits:** a16f1d6 (health fix), cab01fa (GRPC logging)
 
 ---
 **Status:** Health port fixed, but NodeStageVolume mystery remains! 🔍
+
+## 🎉 Session 3 Discovery (Nov 12, 21:32 UTC) - BREAKTHROUGH!
+
+### GRPC Logging Reveals The Truth!
+
+**Critical Finding:** NodeStageVolume **IS** being called! The earlier assumption was wrong.
+
+**Actual Flow Observed:**
+```
+✅ Node.NodeGetCapabilities called → returns StageUnstageVolume
+✅ Node.NodeStageVolume CALLED ← THIS WAS HAPPENING ALL ALONG!
+  ✅ ublk device created: /dev/ublkb41339
+  ✅ Volume staged successfully
+✅ Node.NodePublishVolume called
+  ❌ Mount failed: "mount(2) system call failed: Not a directory"
+```
+
+### The Real Problem:
+
+The issue is in `NodePublishVolume` trying to bind mount the ublk block device:
+```rust
+mount --bind /dev/ublkb41339 /var/lib/kubelet/pods/.../mount
+```
+
+This fails because:
+- We're trying to bind mount a **block device** to a **directory**
+- For `volumeMode: Filesystem`, we need to:
+  1. **Format** the ublk device with a filesystem (in NodeStageVolume)
+  2. **Mount** it to the staging path (in NodeStageVolume)
+  3. **Bind mount** the staging path to target (in NodePublishVolume)
+
+**Commit:** cab01fa (GRPC logging added)
 
