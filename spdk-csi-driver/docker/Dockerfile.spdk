@@ -98,7 +98,7 @@ RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 
 # Create a custom SPDK startup script with proper signal handling
 RUN echo '#!/bin/bash\n\
-set -e\n\
+# Note: Do NOT use set -e as it interferes with signal handling\n\
 \n\
 echo "Starting SPDK target daemon for CSI (RPC mode)..."\n\
 echo "SPDK Version: v25.09.x"\n\
@@ -202,11 +202,21 @@ except Exception as e:\n\
 \n\
 echo "[$(date)] SPDK initialization complete"\n\
 \n\
-# Wait for SPDK process (signal handler will interrupt wait on SIGTERM)\n\
-wait "$SPDK_PID"\n\
-SPDK_EXIT_CODE=$?\n\
-echo "[$(date)] SPDK exited with code: $SPDK_EXIT_CODE"\n\
-exit $SPDK_EXIT_CODE\n\
+# Wait for SPDK process in a loop to properly catch signals\n\
+# Using while loop instead of plain wait ensures signal handler runs\n\
+while kill -0 "$SPDK_PID" 2>/dev/null; do\n\
+    wait "$SPDK_PID" 2>/dev/null\n\
+    SPDK_EXIT_CODE=$?\n\
+    # If wait was interrupted by signal, handler will run\n\
+    # If SPDK exited naturally, we break\n\
+    if ! kill -0 "$SPDK_PID" 2>/dev/null; then\n\
+        echo "[$(date)] SPDK exited with code: $SPDK_EXIT_CODE"\n\
+        exit $SPDK_EXIT_CODE\n\
+    fi\n\
+done\n\
+\n\
+echo "[$(date)] SPDK process ended"\n\
+exit 0\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 
 # Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)
