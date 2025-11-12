@@ -1,26 +1,9 @@
 # This YAML file defines the resources that run on each node in the cluster.
 # These resources are responsible for managing Flint volumes on the node.
 
----
-# Headless Service for node agents (allows controller to reach them by pod name)
-apiVersion: v1
-kind: Service
-metadata:
-  name: flint-csi-node-agents
-  namespace: {{ .Release.Namespace }}
-spec:
-  clusterIP: None  # Headless service
-  selector:
-    app: flint-csi-node
-  ports:
-    - name: node-api
-      port: 8081
-      targetPort: 8081
-      protocol: TCP
-
----
 # The DaemonSet for the Flint CSI node driver.
 # This DaemonSet ensures that the Flint CSI node driver is running on every node in the cluster.
+# Controller reaches node agents via pod IP (queried from Kubernetes API)
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
