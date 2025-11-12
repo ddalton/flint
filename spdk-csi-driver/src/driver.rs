@@ -56,43 +56,43 @@ impl SpdkCsiDriver {
     pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32) -> Result<String, MinimalStateError> {
         println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas)", volume_id, size_bytes, replica_count);
 
-        // Get actual available disks from discovered nodes
-        println!("📊 [DRIVER] Finding available disks from discovered nodes...");
+        // Get disks with existing LVS (initialized by administrator)
+        println!("📊 [DRIVER] Finding disks with existing LVS...");
         let node_name = "ublk-2.vpc.cloudera.com"; // Still use ublk-2 for now
         
-        // Get real disks from the node agent
-        let available_disks = self.get_available_disks_from_node(node_name).await?;
-        if available_disks.is_empty() {
+        // Get disks that have been initialized with LVS
+        let initialized_disks = self.get_initialized_disks_from_node(node_name).await?;
+        if initialized_disks.is_empty() {
             return Err(MinimalStateError::InsufficientCapacity { 
                 required: size_bytes, 
                 available: 0 
             });
         }
         
-        // Use the first available disk (for single replica)
-        let selected_disk = &available_disks[0];
-        let pci_address = &selected_disk.pci_address;
-        println!("✅ [DRIVER] Selected disk: {} ({}GB) on node: {}", 
+        // Find a disk with enough free space
+        let selected_disk = initialized_disks.iter()
+            .find(|d| d.free_space >= size_bytes)
+            .ok_or_else(|| MinimalStateError::InsufficientCapacity { 
+                required: size_bytes, 
+                available: initialized_disks.iter().map(|d| d.free_space).max().unwrap_or(0)
+            })?;
+        
+        let lvs_name = selected_disk.lvs_name.as_ref()
+            .ok_or_else(|| MinimalStateError::InternalError { 
+                message: "Selected disk has no LVS name".to_string() 
+            })?;
+        
+        println!("✅ [DRIVER] Selected disk: {} with LVS: {} (free: {}GB) on node: {}", 
                  selected_disk.device_name, 
-                 selected_disk.size_bytes / (1024*1024*1024), 
+                 lvs_name,
+                 selected_disk.free_space / (1024*1024*1024), 
                  node_name);
         
-        // Try to initialize blobstore on the selected disk
-        match self.initialize_blobstore(node_name, pci_address).await {
-            Ok(lvs_name) => {
-                println!("✅ [DRIVER] Blobstore ready: {}", lvs_name);
-                
-                // Create logical volume
-                let lvol_uuid = self.create_lvol(node_name, &lvs_name, volume_id, size_bytes).await?;
-                
-                println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
-                Ok(lvol_uuid)
-            }
-            Err(e) => {
-                println!("❌ [DRIVER] Failed to initialize blobstore: {}", e);
-                Err(e)
-            }
-        }
+        // Create logical volume on existing LVS (no need to initialize - LVS already exists)
+        let lvol_uuid = self.create_lvol(node_name, lvs_name, volume_id, size_bytes).await?;
+        
+        println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
+        Ok(lvol_uuid)
     }
 
     /// Get SPDK RPC URL for a specific node (simplified)
@@ -481,6 +481,51 @@ impl SpdkCsiDriver {
             (hash >> 48) as u16,
             hash & 0xFFFFFFFFFFFF
         )
+    }
+
+    /// Get disks with existing LVS (initialized) from a specific node
+    pub async fn get_initialized_disks_from_node(&self, node_name: &str) -> Result<Vec<DiskInfo>, MinimalStateError> {
+        println!("🔍 [DRIVER] Getting initialized disks (with LVS) from node: {}", node_name);
+        
+        let response = self.call_node_agent(node_name, "/api/disks", &serde_json::json!({})).await
+            .map_err(|e| MinimalStateError::SpdkRpcError { 
+                message: format!("Failed to get disks from node agent: {}", e) 
+            })?;
+
+        let disks_array = response["disks"].as_array()
+            .ok_or_else(|| MinimalStateError::InternalError { 
+                message: "No disks array in response".to_string() 
+            })?;
+
+        let mut disks = Vec::new();
+        for disk_json in disks_array {
+            let blobstore_initialized = disk_json["blobstore_initialized"].as_bool().unwrap_or(false);
+            
+            // Only include disks that have LVS initialized
+            if !blobstore_initialized {
+                continue;
+            }
+            
+            let disk = DiskInfo {
+                node_name: node_name.to_string(),
+                pci_address: disk_json["pci_address"].as_str().unwrap_or("unknown").to_string(),
+                device_name: disk_json["device_name"].as_str().unwrap_or("unknown").to_string(),
+                bdev_name: disk_json["bdev_name"].as_str().unwrap_or("unknown").to_string(),
+                size_bytes: disk_json["size_bytes"].as_u64().unwrap_or(0),
+                free_space: disk_json["free_space"].as_u64().unwrap_or(0),
+                model: disk_json["model"].as_str().unwrap_or("unknown").to_string(),
+                serial: disk_json["serial"].as_str().map(|s| s.to_string()),
+                firmware: disk_json["firmware"].as_str().map(|s| s.to_string()),
+                healthy: disk_json["healthy"].as_bool().unwrap_or(false),
+                blobstore_initialized: true,
+                lvs_name: disk_json["lvs_name"].as_str().map(|s| s.to_string()),
+                lvol_count: disk_json["lvol_count"].as_u64().unwrap_or(0) as u32,
+            };
+            disks.push(disk);
+        }
+
+        println!("✅ [DRIVER] Found {} initialized disks on node {}", disks.len(), node_name);
+        Ok(disks)
     }
 
     /// Get available disks from a specific node
