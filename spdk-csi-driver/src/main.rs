@@ -671,10 +671,24 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                 if !blkid_output.status.success() {
                                     // Device not formatted, format it
                                     println!("🔧 [NODE] Formatting device with mkfs.{}", fs_type);
-                                    let mkfs_output = std::process::Command::new(format!("mkfs.{}", fs_type))
-                                        .arg(&device_path)
-                                        .output()
-                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?;
+                                    let mkfs_output = if fs_type == "ext4" {
+                                        std::process::Command::new("mkfs.ext4")
+                                            .arg("-F") // Force format even if already formatted
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    } else if fs_type == "xfs" {
+                                        std::process::Command::new("mkfs.xfs")
+                                            .arg("-f") // Force format
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    } else {
+                                        std::process::Command::new(format!("mkfs.{}", fs_type))
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    };
                                     
                                     if !mkfs_output.status.success() {
                                         let error = String::from_utf8_lossy(&mkfs_output.stderr);
