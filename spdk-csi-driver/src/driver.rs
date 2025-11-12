@@ -27,7 +27,6 @@ pub struct SpdkCsiDriver {
     
     // Simple caching for efficiency
     pub spdk_node_urls: Arc<Mutex<HashMap<String, String>>>,
-    pub ublk_target_initialized: Arc<Mutex<bool>>,
 }
 
 impl SpdkCsiDriver {
@@ -48,7 +47,6 @@ impl SpdkCsiDriver {
             nvmeof_transport,
             nvmeof_target_port,
             spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
-            ublk_target_initialized: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -377,8 +375,8 @@ impl SpdkCsiDriver {
     pub async fn create_ublk_device(&self, bdev_name: &str, ublk_id: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [MINIMAL_UBLK] Creating ublk device for bdev: {} with ID: {}", bdev_name, ublk_id);
 
-        // Ensure ublk target exists first
-        self.ensure_ublk_target().await?;
+        // Note: ublk target is initialized by node agent on startup
+        // No need to call ensure_ublk_target() here
 
         let ublk_params = json!({
             "method": "ublk_start_disk",
@@ -432,36 +430,7 @@ impl SpdkCsiDriver {
     }
 
     /// Ensure ublk target exists (simplified)
-    async fn ensure_ublk_target(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut initialized = self.ublk_target_initialized.lock().await;
-        
-        if *initialized {
-            return Ok(());
-        }
-
-        let target_params = json!({
-            "method": "ublk_create_target",
-            "params": {}
-        });
-
-        match self.call_node_agent(&self.node_id, "/api/ublk/create_target", &target_params).await {
-            Ok(_) => {
-                println!("✅ [MINIMAL_UBLK] ublk target created");
-                *initialized = true;
-                Ok(())
-            }
-            Err(e) if e.to_string().contains("Method not found") => {
-                println!("ℹ️ [MINIMAL_UBLK] SPDK doesn't support ublk - skipping");
-                *initialized = true;
-                Ok(())
-            }
-            Err(e) => {
-                println!("⚠️ [MINIMAL_UBLK] ublk target creation failed: {}", e);
-                *initialized = true; // Avoid infinite retries
-                Ok(())
-            }
-        }
-    }
+    // Note: ensure_ublk_target() removed - ublk target is initialized by node agent on startup
 
     /// Generate predictable UUID from NQN for namespace consistency  
     pub fn generate_namespace_uuid_from_nqn(nqn: &str) -> String {
