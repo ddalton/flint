@@ -616,7 +616,7 @@ impl SpdkCsiDriver {
     pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
         
-        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
         
         // Create subsystem
         let subsystem_params = json!({

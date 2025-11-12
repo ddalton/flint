@@ -336,7 +336,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
 
         // Clean up any NVMe-oF targets that might still exist
-        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
         if let Err(e) = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await {
             println!("⚠️ [CONTROLLER] Failed to remove NVMe-oF target (may not exist): {}", e);
             // Continue anyway - best effort cleanup
@@ -444,7 +444,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             if volume_info.node_name != node_id {
                 println!("🧹 [CONTROLLER] Volume is remote - cleaning up NVMe-oF connections");
                 
-                let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+                let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
                 
                 // Disconnect from NVMe-oF target on the node where pod was running
                 // Note: We need to create a temporary driver instance for the target node
@@ -761,7 +761,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         }
 
         // Disconnect from NVMe-oF if this was a remote volume
-        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
         if let Err(e) = self.driver.disconnect_from_nvmeof_target(&nqn).await {
             println!("⚠️ [NODE] Failed to disconnect from NVMe-oF (may not be connected): {}", e);
             // Continue anyway - best effort cleanup
