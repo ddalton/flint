@@ -662,9 +662,48 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
     async fn node_publish_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodePublishVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodePublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodePublishVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Node publish volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let target_path = req.target_path.clone();
+        let staging_target_path = req.staging_target_path.clone();
+        
+        println!("📋 [NODE] Publishing volume {} to {}", volume_id, target_path);
+        println!("📋 [NODE] Staging path: {}", staging_target_path);
+
+        // Get the ublk device path
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        
+        println!("📋 [NODE] ublk device: {}", device_path);
+
+        // Check if device exists
+        if !std::path::Path::new(&device_path).exists() {
+            println!("❌ [NODE] ublk device {} does not exist", device_path);
+            return Err(tonic::Status::internal(format!("ublk device {} not found", device_path)));
+        }
+
+        // Create target directory if it doesn't exist
+        if let Err(e) = std::fs::create_dir_all(&target_path) {
+            println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
+        }
+
+        // For block volumes, create a bind mount from the ublk device to the target path
+        let mount_output = std::process::Command::new("mount")
+            .args(["--bind", &device_path, &target_path])
+            .output()
+            .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+
+        if !mount_output.status.success() {
+            let error = String::from_utf8_lossy(&mount_output.stderr);
+            println!("❌ [NODE] Mount failed: {}", error);
+            return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+        }
+
+        println!("✅ [NODE] Volume {} published successfully at {}", volume_id, target_path);
+        
+        Ok(tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {}))
     }
 
     async fn node_unpublish_volume(
