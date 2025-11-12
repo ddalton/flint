@@ -322,8 +322,9 @@ impl MinimalDiskService {
                 "method": "bdev_aio_create",
                 "params": {
                     "name": expected_bdev_name,
-                    "filename": device_path,
-                    "block_size": 4096
+                    "filename": device_path
+                    // Note: Not specifying block_size - let SPDK auto-detect from device
+                    // This prevents errors when disk size is not a multiple of 4096
                 }
             });
 
