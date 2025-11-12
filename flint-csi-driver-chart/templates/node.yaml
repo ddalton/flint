@@ -1,6 +1,24 @@
 # This YAML file defines the resources that run on each node in the cluster.
 # These resources are responsible for managing Flint volumes on the node.
 
+---
+# Headless Service for node agents (allows controller to reach them by pod name)
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-csi-node-agents
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterIP: None  # Headless service
+  selector:
+    app: flint-csi-node
+  ports:
+    - name: node-api
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+
+---
 # The DaemonSet for the Flint CSI node driver.
 # This DaemonSet ensures that the Flint CSI node driver is running on every node in the cluster.
 apiVersion: apps/v1
@@ -78,7 +96,7 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
-        # CSI Driver Container (Node Mode)
+        # CSI Driver Container (Node Mode) - Includes integrated node agent on port 8081
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
@@ -105,6 +123,9 @@ spec:
             - name: healthz
               containerPort: {{ .Values.healthCheck.csiDriverPort | default 9809 }}
               protocol: TCP
+            - name: node-api
+              containerPort: 8081
+              protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
@@ -121,45 +142,8 @@ spec:
               mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
-        # Node Agent Container (Disk Management & API) - Now integrated into CSI driver
-        - name: node-agent
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
-          imagePullPolicy: Always
-          env:
-            - name: CSI_MODE
-              value: "node"
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: NODE_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: SPDK_RPC_URL
-              value: "unix:///var/tmp/spdk.sock"
-            - name: CSI_ENDPOINT
-              value: "unix:///csi/csi.sock"
-            - name: HEALTH_PORT
-              value: "9809"
-            - name: ENABLE_DASHBOARD
-              value: "false"
-            - name: RUST_LOG
-              value: "{{ .Values.logging.level | default "info" }}"
-            - name: FLINT_NAMESPACE
-              value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
-          securityContext:
-            privileged: true
-          ports:
-            - name: api
-              containerPort: 8081
-              protocol: TCP
-          volumeMounts:
-            - name: device-dir
-              mountPath: /dev
-              mountPropagation: "HostToContainer"
-            - name: spdk-socket
-              mountPath: /var/tmp
+          # Note: Node agent functionality is integrated into flint-csi-driver container above
+          # The separate node-agent container has been removed to prevent port conflicts
         {{- else if .Values.deployment.nodeMode | eq "two-container" }}
         # SPDK Target Container (v25.05.x)
         - name: spdk-tgt
