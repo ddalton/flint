@@ -108,8 +108,9 @@ echo "Container PID: $$"\n\
 # Ensure clean RPC socket\n\
 rm -f /var/tmp/spdk.sock\n\
 \n\
-# Create SPDK configuration file with NVMe-oF transports pre-configured\n\
-echo "Creating SPDK configuration file with NVMe-oF transports..."\n\
+# Create SPDK configuration file with NVMe-oF TCP transport\n\
+# RDMA is initialized separately later (optional, non-fatal)\n\
+echo "Creating SPDK configuration file with NVMe-oF TCP transport..."\n\
 cat > /tmp/spdk_config.json << '"'"'EOF'"'"'\n\
 {\n\
   "subsystems": [\n\
@@ -125,12 +126,6 @@ cat > /tmp/spdk_config.json << '"'"'EOF'"'"'\n\
           "params": {\n\
             "trtype": "TCP"\n\
           }\n\
-        },\n\
-        {\n\
-          "method": "nvmf_create_transport",\n\
-          "params": {\n\
-            "trtype": "RDMA"\n\
-          }\n\
         }\n\
       ]\n\
     }\n\
@@ -144,7 +139,7 @@ if [ ! -f /tmp/spdk_config.json ]; then\n\
     exit 1\n\
 fi\n\
 \n\
-echo "SPDK config created successfully"\n\
+echo "SPDK config created successfully (TCP transport)"\n\
 \n\
 # Signal handler for graceful SPDK shutdown\n\
 # Forwards SIGTERM/SIGINT to spdk_tgt and waits for clean exit\n\
@@ -181,6 +176,31 @@ echo "[$(date)] Starting SPDK target daemon..."\n\
 SPDK_PID=$!\n\
 echo "[$(date)] SPDK started with PID: $SPDK_PID (wrapper PID: $$)"\n\
 echo "[$(date)] Signal handling: SIGTERM will be forwarded to SPDK for graceful shutdown"\n\
+\n\
+# Wait for SPDK to be ready before trying optional RDMA init\n\
+sleep 2\n\
+\n\
+# Try to initialize RDMA transport (optional, non-fatal)\n\
+echo "[$(date)] Attempting to initialize RDMA transport (optional)..."\n\
+python3 -c '"'"'\n\
+import socket, json\n\
+try:\n\
+    s = socket.socket(socket.AF_UNIX)\n\
+    s.connect("/var/tmp/spdk.sock")\n\
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "nvmf_create_transport", "params": {"trtype": "RDMA"}}\n\
+    s.send((json.dumps(rpc) + "\\n").encode())\n\
+    resp = s.recv(4096)\n\
+    result = json.loads(resp.decode())\n\
+    if "error" in result:\n\
+        print(f"RDMA transport not available (no RDMA hardware): {result['"'"'error'"'"']['"'"'message'"'"']}")\n\
+    else:\n\
+        print("RDMA transport initialized successfully")\n\
+    s.close()\n\
+except Exception as e:\n\
+    print(f"RDMA transport initialization skipped: {e}")\n\
+'"'"' 2>&1 || echo "RDMA transport init failed (continuing without RDMA)"\n\
+\n\
+echo "[$(date)] SPDK initialization complete"\n\
 \n\
 # Wait for SPDK process (signal handler will interrupt wait on SIGTERM)\n\
 wait "$SPDK_PID"\n\
