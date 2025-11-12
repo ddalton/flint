@@ -96,10 +96,9 @@ logging:
 # Health check configuration
 healthCheck:
   # Port for health server in CSI driver container
-  # Use different ports to avoid conflicts when multiple containers need health endpoints
-  # Changed from 9809 to 9810 to avoid conflict with node-agent container
-  csiDriverPort: 9810
-  # Port for controller health server (runs in separate pod, so 9809 is fine)
+  # In three-container mode, the node-agent is integrated into flint-csi-driver, so 9809 is safe
+  csiDriverPort: 9809
+  # Port for controller health server (runs in separate pod)
   controllerPort: 9809
   # Port for node-agent health server (currently uses 8081 for API server)
   nodeAgentPort: 8082
