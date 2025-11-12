@@ -96,18 +96,47 @@ RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
 # Make the scripts executable
 RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 
-# Create a custom SPDK startup script optimized for CSI usage
+# Create a custom SPDK startup script with proper signal handling
 RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
 echo "Starting SPDK target daemon for CSI (RPC mode)..."\n\
 echo "SPDK Version: v25.09.x"\n\
 echo "RPC Socket: /var/tmp/spdk.sock"\n\
+echo "Container PID: $$"\n\
 \n\
 # Ensure clean RPC socket\n\
 rm -f /var/tmp/spdk.sock\n\
 \n\
-# Create SPDK configuration file (fix for process substitution issue)\n\
-echo "Creating SPDK configuration file..."\n\
-echo "{\\"subsystems\\":[]}" > /tmp/spdk_config.json\n\
+# Create SPDK configuration file with NVMe-oF transports pre-configured\n\
+echo "Creating SPDK configuration file with NVMe-oF transports..."\n\
+cat > /tmp/spdk_config.json << '"'"'EOF'"'"'\n\
+{\n\
+  "subsystems": [\n\
+    {\n\
+      "subsystem": "bdev",\n\
+      "config": []\n\
+    },\n\
+    {\n\
+      "subsystem": "nvmf",\n\
+      "config": [\n\
+        {\n\
+          "method": "nvmf_create_transport",\n\
+          "params": {\n\
+            "trtype": "TCP"\n\
+          }\n\
+        },\n\
+        {\n\
+          "method": "nvmf_create_transport",\n\
+          "params": {\n\
+            "trtype": "RDMA"\n\
+          }\n\
+        }\n\
+      ]\n\
+    }\n\
+  ]\n\
+}\n\
+EOF\n\
 \n\
 # Verify config file was created\n\
 if [ ! -f /tmp/spdk_config.json ]; then\n\
@@ -115,85 +144,49 @@ if [ ! -f /tmp/spdk_config.json ]; then\n\
     exit 1\n\
 fi\n\
 \n\
-echo "SPDK config created: $(cat /tmp/spdk_config.json)"\n\
+echo "SPDK config created successfully"\n\
+\n\
+# Signal handler for graceful SPDK shutdown\n\
+# Forwards SIGTERM/SIGINT to spdk_tgt and waits for clean exit\n\
+shutdown_handler() {\n\
+    echo "[$(date)] Received shutdown signal (SIGTERM/SIGINT)"\n\
+    if [ -n "$SPDK_PID" ] && kill -0 "$SPDK_PID" 2>/dev/null; then\n\
+        echo "[$(date)] Sending SIGTERM to SPDK (PID: $SPDK_PID) for graceful shutdown..."\n\
+        kill -TERM "$SPDK_PID"\n\
+        \n\
+        # Wait for SPDK to shutdown gracefully (max 30 seconds)\n\
+        for i in {1..30}; do\n\
+            if ! kill -0 "$SPDK_PID" 2>/dev/null; then\n\
+                echo "[$(date)] SPDK shutdown completed gracefully"\n\
+                exit 0\n\
+            fi\n\
+            sleep 1\n\
+        done\n\
+        \n\
+        echo "[$(date)] SPDK did not shutdown in 30s, forcing..."\n\
+        kill -9 "$SPDK_PID" 2>/dev/null || true\n\
+    fi\n\
+    exit 0\n\
+}\n\
+\n\
+trap shutdown_handler SIGTERM SIGINT\n\
 \n\
 # Start SPDK target daemon with RPC enabled\n\
-# - Uses Unix socket for RPC communication\n\
-# - Logging set to NOTICE level for production\n\
-# - Configuration loaded from proper JSON file\n\
-# - No device binding initially (devices added via RPC)\n\
-echo "Starting SPDK target daemon..."\n\
+echo "[$(date)] Starting SPDK target daemon..."\n\
 /usr/local/bin/spdk_tgt \\\n\
     -r /var/tmp/spdk.sock \\\n\
     -L all \\\n\
     --json /tmp/spdk_config.json &\n\
 \n\
-# Wait for SPDK to be ready\n\
-echo "Waiting for SPDK to initialize..."\n\
+SPDK_PID=$!\n\
+echo "[$(date)] SPDK started with PID: $SPDK_PID (wrapper PID: $$)"\n\
+echo "[$(date)] Signal handling: SIGTERM will be forwarded to SPDK for graceful shutdown"\n\
 \n\
-# Create SPDK readiness check script\n\
-cat > /tmp/check_spdk_ready.py << 'PYEOF'\n\
-import json, socket\n\
-try:\n\
-    s = socket.socket(socket.AF_UNIX)\n\
-    s.connect("/var/tmp/spdk.sock")\n\
-    rpc = {"id": 1, "method": "bdev_get_bdevs", "jsonrpc": "2.0"}\n\
-    s.send((json.dumps(rpc) + "\\n").encode())\n\
-    s.close()\n\
-    print("ready")\n\
-except Exception as e:\n\
-    print(f"not ready: {e}")\n\
-    exit(1)\n\
-PYEOF\n\
-\n\
-for i in {1..30}; do\n\
-    if [ -S /var/tmp/spdk.sock ]; then\n\
-        if python3 /tmp/check_spdk_ready.py > /dev/null 2>&1; then\n\
-            echo "SPDK is ready!"\n\
-            break\n\
-        fi\n\
-    fi\n\
-    echo "Waiting for SPDK... ($i/30)"\n\
-    sleep 1\n\
-done\n\
-\n\
-# Clean up the check script\n\
-rm -f /tmp/check_spdk_ready.py\n\
-\n\
-# Initialize NVMe-oF transports (TCP and RDMA for complete support)\n\
-echo "Initializing NVMe-oF TCP transport..."\n\
-cat > /tmp/init_transport.py << 'PYEOF'\n\
-import json, socket\n\
-\n\
-def init_transport(transport_type, rpc_id):\n\
-    try:\n\
-        s = socket.socket(socket.AF_UNIX)\n\
-        s.connect("/var/tmp/spdk.sock")\n\
-        rpc = {"id": rpc_id, "method": "nvmf_create_transport", "jsonrpc": "2.0", "params": {"trtype": transport_type}}\n\
-        s.send((json.dumps(rpc) + "\\n").encode())\n\
-        response = s.recv(4096).decode()\n\
-        print(f"{transport_type} transport init response: {response}")\n\
-        s.close()\n\
-        return True\n\
-    except Exception as e:\n\
-        print(f"Error initializing {transport_type} transport: {e}")\n\
-        return False\n\
-\n\
-# Initialize TCP transport\n\
-init_transport("TCP", 1)\n\
-\n\
-# Initialize RDMA transport\n\
-init_transport("RDMA", 2)\n\
-PYEOF\n\
-\n\
-python3 /tmp/init_transport.py\n\
-rm -f /tmp/init_transport.py\n\
-\n\
-echo "SPDK NVMe-oF transports (TCP + RDMA) initialized successfully!"\n\
-echo "SPDK is ready for CSI operations with full NVMe-oF support"\n\
-\n\
-# Wait for SPDK process to exit\n\
-wait\n\
+# Wait for SPDK process (signal handler will interrupt wait on SIGTERM)\n\
+wait "$SPDK_PID"\n\
+SPDK_EXIT_CODE=$?\n\
+echo "[$(date)] SPDK exited with code: $SPDK_EXIT_CODE"\n\
+exit $SPDK_EXIT_CODE\n\
 ' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
 
 # Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)
