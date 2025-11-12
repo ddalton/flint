@@ -251,10 +251,49 @@ When everything works, you should see:
    - `✅ [NODE] Volume published successfully`
 4. Pod running nginx with volume mounted at `/data`
 
-## 💡 Likely Fix
+## ✅ Session 2 Progress (Nov 12, 21:15 UTC)
 
-The port 9810 panic is probably preventing the CSI gRPC service from functioning correctly. Fix this and NodeStageVolume should start being called properly.
+### Fixed: Port 9810 Panic
+**Root Cause:** Health server trying to bind to port 9810 which was already in use, causing container crash loops (7 restarts observed).
+
+**Fix:** Changed `values.yaml` health port from 9810 to 9809. In three-container mode, the node-agent is integrated into flint-csi-driver, so 9809 is available.
+
+**Result:** ✅ Container now stable with 0 restarts!
+
+### Verified Configuration
+- ✅ CSI socket exists at `/csi/csi.sock` (inside container)
+- ✅ `plugin-dir` volume mount correctly configured
+- ✅ node-driver-registrar successfully connected and registered driver
+- ✅ PV has `volumeMode: Filesystem` (correct for staging)
+- ✅ `NodeGetCapabilities` returns `StageUnstageVolume` capability
+
+### 🔴 Remaining Issue: NodeStageVolume Still Not Called
+
+**Symptoms:**
+- Kubelet only calls `NodePublishVolume` (📋), never `NodeStageVolume` (📦)
+- Error: "ublk device /dev/ublkb12733 does not exist" (because staging never created it)
+- Mount error: "mount(2) system call failed: Not a directory"
+
+**Branch Comparison Findings:**
+- `main` branch has **identical** `NodeGetCapabilities` and `NodeStageVolume` code
+- `main` branch has separate `node.rs` file but same implementation
+- Commit 3735927 originally implemented the full CSI lifecycle we have now
+- Commit 8a41753 added NodePublishVolume for bind mounting
+- All branches use same CSIDriver config: `fsGroupPolicy: ReadWriteOnceWithFSType`
+- All branches use same StorageClass: `volumeBindingMode: WaitForFirstConsumer`
+
+**Investigation Needed:**
+1. Add GRPC request logging to see what methods kubelet is actually calling
+2. Check if there's a Kubernetes 1.33.5-specific behavior change
+3. Verify kubelet can query NodeGetCapabilities successfully
+4. Test with a fresh PVC to eliminate caching issues
+
+**Environment:**
+- Kubernetes: v1.33.5+rke2r1 (RKE2 distribution)
+- Node: ublk-2.vpc.cloudera.com (Ubuntu 24.04 LTS)
+
+**Commit:** a16f1d6
 
 ---
-**Good luck with the next session!** You're 95% there! 🚀
+**Status:** Health port fixed, but NodeStageVolume mystery remains! 🔍
 
