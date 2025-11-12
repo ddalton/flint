@@ -1,9 +1,0 @@
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: flint-single-replica
-provisioner: flint.csi.storage.io
-parameters:
-  numReplicas: "1"
-volumeBindingMode: Immediate
-allowVolumeExpansion: true
