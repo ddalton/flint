@@ -507,17 +507,26 @@ impl NodeAgent {
     /// Handle POST /api/spdk/rpc - Generic SPDK RPC proxy
     async fn handle_spdk_rpc(
         rpc_request: serde_json::Value,
-        _node_agent: Arc<NodeAgent>
+        node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
         let method = rpc_request["method"].as_str().unwrap_or("unknown");
         println!("🌐 [HTTP_API] Handling SPDK RPC request: {}", method);
         
-        // TODO: Proxy to SPDK via MinimalDiskService
-        let response = json!({
-            "status": "success", 
-            "result": "SPDK RPC proxy not yet implemented"
-        });
-        Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+        // Proxy the RPC request directly to SPDK
+        match node_agent.disk_service.call_spdk_rpc(&rpc_request).await {
+            Ok(response) => {
+                println!("✅ [HTTP_API] SPDK RPC '{}' succeeded", method);
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                println!("❌ [HTTP_API] SPDK RPC '{}' failed: {}", method, e);
+                let error_response = json!({
+                    "success": false,
+                    "error": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
     }
 
     /// Handle POST /api/ublk/create_target - Create ublk target
