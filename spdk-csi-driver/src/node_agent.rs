@@ -107,6 +107,13 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_list_disks);
 
+        // POST /api/disks - List all disks (RPC-style for controller)
+        let list_disks_post = warp::path!("api" / "disks")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_list_disks_post);
+
         // POST /api/disks/uninitialized - List uninitialized disks (RPC-style)
         let list_uninitialized = warp::path!("api" / "disks" / "uninitialized")
             .and(warp::post())
@@ -200,6 +207,7 @@ impl NodeAgent {
 
         // Combine all routes
         list_disks
+            .or(list_disks_post)
             .or(list_uninitialized)
             .or(disk_status)
             .or(init_blobstore)
@@ -236,6 +244,30 @@ impl NodeAgent {
                 let error_response = json!({
                     "status": "error",
                     "message": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/disks (RPC-style for controller)
+    async fn handle_list_disks_post(
+        _request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling list disks request (POST)");
+        
+        match node_agent.disk_service.discover_local_disks().await {
+            Ok(disks) => {
+                let response = json!({
+                    "disks": disks
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                let error_response = json!({
+                    "success": false,
+                    "error": e.to_string()
                 });
                 Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
