@@ -327,5 +327,38 @@ This fails because:
   2. **Mount** it to the staging path (in NodeStageVolume)
   3. **Bind mount** the staging path to target (in NodePublishVolume)
 
-**Commit:** cab01fa (GRPC logging added)
+**Commits:** 
+- cab01fa: GRPC logging added
+- 7c97fef: Removed redundant ublk_create_target call
+- bca45b6: Implemented proper filesystem volume support
+
+### The Solution:
+
+**NodeStageVolume** now properly handles filesystem volumes:
+```rust
+1. Create ublk device from bdev
+2. Format device with filesystem (ext4 default, skip if already formatted)
+3. Mount formatted device to staging_target_path
+4. For block volumes: skip formatting/mounting
+```
+
+**NodePublishVolume** now uses correct bind mount source:
+```rust
+Filesystem volumes: mount --bind staging_target_path target_path
+Block volumes:      mount --bind /dev/ublkbN target_path
+```
+
+**NodeUnstageVolume** implemented:
+```rust
+1. Unmount staging_target_path
+2. Delete ublk device
+3. Disconnect from NVMe-oF (if remote)
+```
+
+**NodeUnpublishVolume** simplified:
+```rust
+1. Unmount target_path (the bind mount)
+2. Remove target directory
+(Device cleanup happens in NodeUnstageVolume)
+```
 
