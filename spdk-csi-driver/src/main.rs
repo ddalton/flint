@@ -648,6 +648,67 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     println!("⚠️ [NODE] Failed to create staging directory (may exist): {}", e);
                 }
 
+                // For filesystem volumes, format and mount the device
+                // Check if this is a filesystem volume by looking at volume_capability
+                if let Some(volume_capability) = req.volume_capability {
+                    if let Some(access_type) = volume_capability.access_type {
+                        match access_type {
+                            spdk_csi_driver::csi::volume_capability::AccessType::Mount(mount_config) => {
+                                let fs_type = if mount_config.fs_type.is_empty() {
+                                    "ext4".to_string()
+                                } else {
+                                    mount_config.fs_type
+                                };
+                                
+                                println!("📁 [NODE] Formatting device {} with {} filesystem", device_path, fs_type);
+                                
+                                // Check if device is already formatted
+                                let blkid_output = std::process::Command::new("blkid")
+                                    .arg(&device_path)
+                                    .output()
+                                    .map_err(|e| tonic::Status::internal(format!("Failed to check filesystem: {}", e)))?;
+                                
+                                if !blkid_output.status.success() {
+                                    // Device not formatted, format it
+                                    println!("🔧 [NODE] Formatting device with mkfs.{}", fs_type);
+                                    let mkfs_output = std::process::Command::new(format!("mkfs.{}", fs_type))
+                                        .arg(&device_path)
+                                        .output()
+                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?;
+                                    
+                                    if !mkfs_output.status.success() {
+                                        let error = String::from_utf8_lossy(&mkfs_output.stderr);
+                                        println!("❌ [NODE] Format failed: {}", error);
+                                        return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
+                                    }
+                                    println!("✅ [NODE] Device formatted successfully");
+                                } else {
+                                    println!("ℹ️ [NODE] Device already formatted, skipping format");
+                                }
+                                
+                                // Mount the device to staging path
+                                println!("🔧 [NODE] Mounting {} to {}", device_path, staging_target_path);
+                                let mount_output = std::process::Command::new("mount")
+                                    .arg(&device_path)
+                                    .arg(&staging_target_path)
+                                    .output()
+                                    .map_err(|e| tonic::Status::internal(format!("Failed to mount device: {}", e)))?;
+                                
+                                if !mount_output.status.success() {
+                                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                                    println!("❌ [NODE] Mount failed: {}", error);
+                                    return Err(tonic::Status::internal(format!("Failed to mount device: {}", error)));
+                                }
+                                
+                                println!("✅ [NODE] Device mounted to staging path");
+                            }
+                            spdk_csi_driver::csi::volume_capability::AccessType::Block(_) => {
+                                println!("ℹ️ [NODE] Block volume - no filesystem mounting needed");
+                            }
+                        }
+                    }
+                }
+
                 println!("✅ [NODE] Volume {} staged successfully", volume_id);
                 Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}))
             }
@@ -660,10 +721,55 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
     async fn node_unstage_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodeUnstageVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodeUnstageVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnstageVolumeResponse>, tonic::Status> {
         println!("🔵 [GRPC] Node.NodeUnstageVolume called");
-        Err(tonic::Status::unimplemented("Node unstage volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let staging_target_path = req.staging_target_path.clone();
+        
+        println!("📤 [NODE] Unstaging volume {} from {}", volume_id, staging_target_path);
+
+        // Unmount the filesystem from staging path (if mounted)
+        if std::path::Path::new(&staging_target_path).exists() {
+            println!("🔧 [NODE] Unmounting staging path: {}", staging_target_path);
+            let umount_output = std::process::Command::new("umount")
+                .arg(&staging_target_path)
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+            
+            if !umount_output.status.success() {
+                let error = String::from_utf8_lossy(&umount_output.stderr);
+                // Only log warning - unmount might fail if already unmounted
+                println!("⚠️ [NODE] Unmount failed (may not be mounted): {}", error);
+            } else {
+                println!("✅ [NODE] Staging path unmounted successfully");
+            }
+        }
+
+        // Delete the ublk device
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        
+        match self.driver.delete_ublk_device(ublk_id).await {
+            Ok(_) => {
+                println!("✅ [NODE] ublk device stopped successfully");
+            }
+            Err(e) => {
+                println!("⚠️ [NODE] Failed to stop ublk device (may not exist): {}", e);
+                // Continue anyway - best effort cleanup
+            }
+        }
+
+        // Disconnect from NVMe-oF if this was a remote volume
+        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
+        if let Err(e) = self.driver.disconnect_from_nvmeof_target(&nqn).await {
+            println!("⚠️ [NODE] Failed to disconnect from NVMe-oF (may not be connected): {}", e);
+            // Continue anyway - best effort cleanup
+        }
+
+        println!("✅ [NODE] Volume {} unstaged successfully", volume_id);
+        
+        Ok(tonic::Response::new(spdk_csi_driver::csi::NodeUnstageVolumeResponse {}))
     }
 
     async fn node_publish_volume(
@@ -679,33 +785,61 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         println!("📋 [NODE] Publishing volume {} to {}", volume_id, target_path);
         println!("📋 [NODE] Staging path: {}", staging_target_path);
 
-        // Get the ublk device path
-        let ublk_id = self.driver.generate_ublk_id(&volume_id);
-        let device_path = format!("/dev/ublkb{}", ublk_id);
-        
-        println!("📋 [NODE] ublk device: {}", device_path);
-
-        // Check if device exists
-        if !std::path::Path::new(&device_path).exists() {
-            println!("❌ [NODE] ublk device {} does not exist", device_path);
-            return Err(tonic::Status::internal(format!("ublk device {} not found", device_path)));
-        }
-
         // Create target directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&target_path) {
             println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
         }
 
-        // For block volumes, create a bind mount from the ublk device to the target path
-        let mount_output = std::process::Command::new("mount")
-            .args(["--bind", &device_path, &target_path])
-            .output()
-            .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+        // Determine if this is a filesystem or block volume
+        let is_block_volume = if let Some(volume_capability) = req.volume_capability {
+            matches!(volume_capability.access_type, 
+                Some(spdk_csi_driver::csi::volume_capability::AccessType::Block(_)))
+        } else {
+            false // Default to filesystem
+        };
 
-        if !mount_output.status.success() {
-            let error = String::from_utf8_lossy(&mount_output.stderr);
-            println!("❌ [NODE] Mount failed: {}", error);
-            return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+        if is_block_volume {
+            // Block volume - bind mount the device directly
+            let ublk_id = self.driver.generate_ublk_id(&volume_id);
+            let device_path = format!("/dev/ublkb{}", ublk_id);
+            
+            println!("📋 [NODE] Block volume - bind mounting device {} to {}", device_path, target_path);
+            
+            if !std::path::Path::new(&device_path).exists() {
+                println!("❌ [NODE] ublk device {} does not exist", device_path);
+                return Err(tonic::Status::internal(format!("ublk device {} not found", device_path)));
+            }
+            
+            let mount_output = std::process::Command::new("mount")
+                .args(["--bind", &device_path, &target_path])
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+
+            if !mount_output.status.success() {
+                let error = String::from_utf8_lossy(&mount_output.stderr);
+                println!("❌ [NODE] Mount failed: {}", error);
+                return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+            }
+        } else {
+            // Filesystem volume - bind mount from staging path
+            println!("📋 [NODE] Filesystem volume - bind mounting staging path to target");
+            
+            // Verify staging path exists and is mounted
+            if !std::path::Path::new(&staging_target_path).exists() {
+                println!("❌ [NODE] Staging path {} does not exist", staging_target_path);
+                return Err(tonic::Status::internal(format!("Staging path {} not found", staging_target_path)));
+            }
+            
+            let mount_output = std::process::Command::new("mount")
+                .args(["--bind", &staging_target_path, &target_path])
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+
+            if !mount_output.status.success() {
+                let error = String::from_utf8_lossy(&mount_output.stderr);
+                println!("❌ [NODE] Mount failed: {}", error);
+                return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+            }
         }
 
         println!("✅ [NODE] Volume {} published successfully at {}", volume_id, target_path);
@@ -724,25 +858,26 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         println!("📤 [NODE] Unpublishing volume {} from {}", volume_id, target_path);
 
-        // Generate ublk ID and stop the device
-        let ublk_id = self.driver.generate_ublk_id(&volume_id);
-        
-        match self.driver.delete_ublk_device(ublk_id).await {
-            Ok(_) => {
-                println!("✅ [NODE] ublk device stopped successfully");
-            }
-            Err(e) => {
-                println!("⚠️ [NODE] Failed to stop ublk device (may not exist): {}", e);
+        // Unmount the target path (bind mount from staging path)
+        if std::path::Path::new(&target_path).exists() {
+            println!("🔧 [NODE] Unmounting target path: {}", target_path);
+            let umount_output = std::process::Command::new("umount")
+                .arg(&target_path)
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+            
+            if !umount_output.status.success() {
+                let error = String::from_utf8_lossy(&umount_output.stderr);
+                println!("⚠️ [NODE] Unmount failed (may not be mounted): {}", error);
                 // Continue anyway - best effort cleanup
+            } else {
+                println!("✅ [NODE] Target path unmounted successfully");
             }
-        }
-
-        // Also disconnect from NVMe-oF if this was a remote volume
-        // We determine this by checking if there's an NVMe connection
-        let nqn = format!("nqn.2024.com.flint:volume:{}", volume_id);
-        if let Err(e) = self.driver.disconnect_from_nvmeof_target(&nqn).await {
-            println!("⚠️ [NODE] Failed to disconnect from NVMe-oF (may not be connected): {}", e);
-            // Continue anyway - best effort cleanup
+            
+            // Remove the target directory
+            if let Err(e) = std::fs::remove_dir(&target_path) {
+                println!("⚠️ [NODE] Failed to remove target directory: {}", e);
+            }
         }
 
         println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
