@@ -35,6 +35,31 @@ spec:
               add:
                 - SYS_ADMIN
                 - SYS_RAWIO
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "[$(date)] preStop: Initiating graceful SPDK shutdown..."
+                    python3 -c '
+                    import socket, json, time
+                    try:
+                        s = socket.socket(socket.AF_UNIX)
+                        s.settimeout(5)
+                        s.connect("/var/tmp/spdk.sock")
+                        rpc = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "spdk_kill_instance", "params": {"sig_name": "SIGTERM"}})
+                        s.send((rpc + "\n").encode())
+                        resp = s.recv(4096)
+                        print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated: {resp.decode()}")
+                        s.close()
+                        # Give SPDK time to flush metadata
+                        time.sleep(3)
+                        print(f"[{time.strftime(\"%c\")}] preStop: Graceful shutdown complete")
+                    except Exception as e:
+                        print(f"[{time.strftime(\"%c\")}] preStop: Shutdown RPC failed (SPDK may already be down): {e}")
+                    '
           resources:
             limits:
               hugepages-2Mi: "1Gi"
