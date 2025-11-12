@@ -97,7 +97,8 @@ RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
 RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
 
 # Create minimal SPDK config file at build time with TCP transport
-RUN echo '{\n\
+RUN mkdir -p /etc/spdk && \
+    echo '{\n\
   "subsystems": [\n\
     {\n\
       "subsystem": "bdev",\n\
@@ -115,16 +116,16 @@ RUN echo '{\n\
       ]\n\
     }\n\
   ]\n\
-}' > /etc/spdk/config.json\n\
-\n\
-# Create simple cleanup script that runs before SPDK starts\n\
-RUN echo '#!/bin/bash\n\
+}' > /etc/spdk/config.json
+
+# Create simple cleanup script that runs before SPDK starts
+RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
 echo "Starting SPDK v25.09.x (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
-exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n\
-' > /usr/local/bin/spdk-csi-start.sh && chmod +x /usr/local/bin/spdk-csi-start.sh
+exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
+    chmod +x /usr/local/bin/spdk-csi-start.sh
 
 # Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)
 # RDMA transport doesn't use fixed ports - uses discovery service
