@@ -255,20 +255,42 @@ impl NodeAgent {
         _request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling list disks request (POST)");
+        use std::time::Instant;
+        let start = Instant::now();
+        let request_id = format!("{:08x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u32);
+        
+        println!("🌐 [HTTP_API:{}] ========== NEW REQUEST: POST /api/disks ==========", request_id);
+        println!("🌐 [HTTP_API:{}] Starting disk discovery...", request_id);
         
         match node_agent.disk_service.discover_local_disks().await {
             Ok(disks) => {
+                let elapsed = start.elapsed();
+                println!("✅ [HTTP_API:{}] Discovery completed in {:?}", request_id, elapsed);
+                println!("✅ [HTTP_API:{}] Found {} disks", request_id, disks.len());
+                
                 let response = json!({
                     "disks": disks
                 });
+                
+                let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                println!("✅ [HTTP_API:{}] Response size: {} bytes", request_id, response_json.len());
+                println!("✅ [HTTP_API:{}] Sending response with status OK", request_id);
+                
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
+                let elapsed = start.elapsed();
+                println!("❌ [HTTP_API:{}] Discovery FAILED after {:?}: {}", request_id, elapsed, e);
+                
                 let error_response = json!({
                     "success": false,
                     "error": e.to_string()
                 });
+                
+                println!("❌ [HTTP_API:{}] Sending error response", request_id);
                 Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
