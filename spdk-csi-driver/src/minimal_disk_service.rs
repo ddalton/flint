@@ -190,8 +190,17 @@ impl MinimalDiskService {
             // Auto-create bdev if device should have SPDK access
             match self.ensure_device_bdev_exists(&device).await {
                 Ok(bdev_name) => {
-                    // CRITICAL: Try to import existing LVS from this bdev
-                    self.try_import_existing_lvs(&bdev_name).await;
+                    println!("🔍 [AUTO_RECOVERY] Bdev ready: {}, now checking for existing LVS...", bdev_name);
+                    println!("🔍 [AUTO_RECOVERY] Device details: {} ({}), Size: {}GB", 
+                             device.device_name, device.pci_address, device.size_bytes / (1024*1024*1024));
+                    
+                    // CRITICAL: Wait for SPDK to auto-discover existing LVS from this bdev
+                    // In modern SPDK, the lvol module asynchronously examines new bdevs for LVS
+                    if let Some(lvs_name) = self.wait_for_lvs_discovery(&bdev_name, 5).await {
+                        println!("✅ [AUTO_RECOVERY] Auto-discovered existing LVS: {} on {}", lvs_name, bdev_name);
+                    } else {
+                        println!("ℹ️ [AUTO_RECOVERY] No LVS found on bdev: {} (disk is clean)", bdev_name);
+                    }
                 }
                 Err(e) => {
                     println!("⚠️ [AUTO_RECOVERY] Failed to ensure bdev for {}: {}", device.device_name, e);
@@ -299,7 +308,14 @@ impl MinimalDiskService {
 
         // Create missing AIO bdev for kernel-bound device
         if device.driver == "nvme" {
-            println!("🔧 [BDEV_RECOVERY] Creating AIO bdev: {}", expected_bdev_name);
+            let correlation_id = format!("{:08x}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as u32);
+            println!("🔧 [BDEV_RECOVERY:{}] Creating AIO bdev: {}", correlation_id, expected_bdev_name);
+            println!("🔧 [BDEV_RECOVERY:{}] Device: /dev/{}, PCI: {}", correlation_id, device.device_name, device.pci_address);
+            println!("🔧 [BDEV_RECOVERY:{}] CORRELATE: Watch SPDK logs for bdev_aio.c create messages and vbdev_lvol.c examine", correlation_id);
+            
             let device_path = format!("/dev/{}", device.device_name);
             
             let aio_params = serde_json::json!({
@@ -313,15 +329,17 @@ impl MinimalDiskService {
 
             match self.call_spdk_rpc(&aio_params).await {
                 Ok(_) => {
-                    println!("✅ [BDEV_RECOVERY] Successfully created AIO bdev: {}", expected_bdev_name);
+                    println!("✅ [BDEV_RECOVERY:{}] Successfully created AIO bdev: {}", correlation_id, expected_bdev_name);
+                    println!("✅ [BDEV_RECOVERY:{}] SPDK will now asynchronously examine this bdev for existing LVS", correlation_id);
                     return Ok(expected_bdev_name);
                 }
                 Err(e) if e.to_string().contains("File exists") => {
-                    println!("✅ [BDEV_RECOVERY] AIO bdev already exists: {}", expected_bdev_name);
+                    println!("✅ [BDEV_RECOVERY:{}] AIO bdev already exists: {}", correlation_id, expected_bdev_name);
                     return Ok(expected_bdev_name);
                 }
                 Err(e) => {
-                    println!("⚠️ [BDEV_RECOVERY] Failed to create AIO bdev {}: {}", expected_bdev_name, e);
+                    println!("⚠️ [BDEV_RECOVERY:{}] Failed to create AIO bdev {}: {}", correlation_id, expected_bdev_name, e);
+                    println!("⚠️ [BDEV_RECOVERY:{}] Error details: {}", correlation_id, e);
                     return Err(MinimalStateError::SpdkRpcError { 
                         message: format!("Failed to create AIO bdev: {}", e) 
                     });
@@ -334,32 +352,85 @@ impl MinimalDiskService {
         })
     }
 
-    /// Try to import existing LVS from a bdev (CRITICAL for recovery!)
-    async fn try_import_existing_lvs(&self, bdev_name: &str) {
-        println!("🔍 [LVS_IMPORT] Attempting to import existing LVS from bdev: {}", bdev_name);
+    /// Wait for SPDK to auto-discover LVS on a bdev (async examination)
+    /// In modern SPDK, when a bdev is created, the lvol module asynchronously examines it for existing LVS
+    async fn wait_for_lvs_discovery(&self, bdev_name: &str, timeout_secs: u64) -> Option<String> {
+        let correlation_id = format!("{:08x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u32);
+        println!("🔍 [LVS_DISCOVERY:{}] Waiting for SPDK to auto-discover LVS on bdev: {} (timeout: {}s)", 
+                 correlation_id, bdev_name, timeout_secs);
+        println!("🔍 [LVS_DISCOVERY:{}] CORRELATE: Check SPDK logs for vbdev_lvol.c messages about '{}'", 
+                 correlation_id, bdev_name);
         
-        let import_params = serde_json::json!({
-            "method": "bdev_lvol_import_lvstore",
-            "params": {
-                "bdev_name": bdev_name
+        use tokio::time::{sleep, Duration};
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        
+        let mut iteration = 0;
+        while start.elapsed() < timeout {
+            iteration += 1;
+            
+            if iteration % 10 == 1 {
+                println!("🔄 [LVS_DISCOVERY:{}] Polling iteration {} (elapsed: {}ms)", 
+                         correlation_id, iteration, start.elapsed().as_millis());
             }
-        });
-
-        match self.call_spdk_rpc(&import_params).await {
-            Ok(response) => {
-                if let Some(lvs_name) = response.get("result").and_then(|r| r.as_str()) {
-                    println!("✅ [LVS_IMPORT] Successfully imported existing LVS: {}", lvs_name);
-                } else {
-                    println!("✅ [LVS_IMPORT] LVS import succeeded (unknown name)");
+            
+            // Query for all lvstores
+            match self.call_spdk_rpc(&json!({
+                "method": "bdev_lvol_get_lvstores"
+            })).await {
+                Ok(response) => {
+                    if let Some(lvstore_list) = response["result"].as_array() {
+                        if iteration % 10 == 1 && !lvstore_list.is_empty() {
+                            println!("🔍 [LVS_DISCOVERY:{}] Found {} total LVS in system", correlation_id, lvstore_list.len());
+                            for (idx, lvstore) in lvstore_list.iter().enumerate() {
+                                let name = lvstore["name"].as_str().unwrap_or("unknown");
+                                let base = lvstore["base_bdev"].as_str().unwrap_or("unknown");
+                                println!("🔍 [LVS_DISCOVERY:{}]   LVS[{}]: name='{}', base_bdev='{}'", 
+                                         correlation_id, idx, name, base);
+                            }
+                        }
+                        
+                        for lvstore in lvstore_list {
+                            if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
+                                if base_bdev == bdev_name {
+                                    let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
+                                    let lvs_uuid = lvstore["uuid"].as_str().unwrap_or("unknown");
+                                    let free_clusters = lvstore["free_clusters"].as_u64().unwrap_or(0);
+                                    let cluster_size = lvstore["cluster_size"].as_u64().unwrap_or(0);
+                                    let free_gb = (free_clusters * cluster_size) / (1024*1024*1024);
+                                    
+                                    println!("✅ [LVS_DISCOVERY:{}] SUCCESS! Found LVS after {} iterations ({}ms)", 
+                                             correlation_id, iteration, start.elapsed().as_millis());
+                                    println!("✅ [LVS_DISCOVERY:{}]   LVS Name: {}", correlation_id, lvs_name);
+                                    println!("✅ [LVS_DISCOVERY:{}]   LVS UUID: {}", correlation_id, lvs_uuid);
+                                    println!("✅ [LVS_DISCOVERY:{}]   Base Bdev: {}", correlation_id, base_bdev);
+                                    println!("✅ [LVS_DISCOVERY:{}]   Free Space: {}GB", correlation_id, free_gb);
+                                    
+                                    return Some(lvs_name);
+                                }
+                            }
+                        }
+                    } else if iteration % 10 == 1 {
+                        println!("🔍 [LVS_DISCOVERY:{}] Query returned no lvstores array", correlation_id);
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ [LVS_DISCOVERY:{}] Failed to query lvstores (iteration {}): {}", correlation_id, iteration, e);
                 }
             }
-            Err(e) if e.to_string().contains("No such device") || e.to_string().contains("not found") => {
-                println!("ℹ️ [LVS_IMPORT] No existing LVS found on {}, disk is clean", bdev_name);
-            }
-            Err(e) => {
-                println!("⚠️ [LVS_IMPORT] LVS import failed for {} (continuing): {}", bdev_name, e);
-            }
+            
+            // Wait 100ms before next check
+            sleep(Duration::from_millis(100)).await;
         }
+        
+        println!("❌ [LVS_DISCOVERY:{}] TIMEOUT! No LVS discovered on bdev '{}' after {}s ({} iterations)", 
+                 correlation_id, bdev_name, timeout_secs, iteration);
+        println!("❌ [LVS_DISCOVERY:{}] CORRELATE: Check SPDK logs around this time for vbdev_lvol examination of '{}'", 
+                 correlation_id, bdev_name);
+        None
     }
 
     /// Helper methods for physical device discovery
