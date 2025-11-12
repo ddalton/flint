@@ -654,46 +654,45 @@ impl NodeAgent {
             }
         };
 
-        // Look for the volume in all lvstores
+        // Look for the volume in all lvstores using bdev_lvol_get_lvols
         if let Some(lvstores) = lvstores_response["result"].as_array() {
             for lvstore in lvstores {
                 let lvs_name = lvstore["name"].as_str().unwrap_or("");
                 
-                // Get all bdevs to find lvols for this lvstore
-                let bdevs_response = match node_agent.disk_service.call_spdk_rpc(&json!({
-                    "method": "bdev_get_bdevs"
+                // Get all lvols in this lvstore
+                let lvols_response = match node_agent.disk_service.call_spdk_rpc(&json!({
+                    "method": "bdev_lvol_get_lvols",
+                    "params": {
+                        "lvs_name": lvs_name
+                    }
                 })).await {
                     Ok(resp) => resp,
                     Err(e) => {
-                        println!("⚠️ [HTTP_API] Failed to get bdevs: {}", e);
+                        println!("⚠️ [HTTP_API] Failed to get lvols for LVS {}: {}", lvs_name, e);
                         continue;
                     }
                 };
 
-                if let Some(bdevs) = bdevs_response["result"].as_array() {
-                    for bdev in bdevs {
-                        if let Some(product_name) = bdev["product_name"].as_str() {
-                            if product_name == "Logical Volume" {
-                                // Check if this is the volume we're looking for
-                                let bdev_name = bdev["name"].as_str().unwrap_or("");
-                                
-                                // Extract volume name from bdev name (format: "lvs_name/vol_volumeId")
-                                if bdev_name.contains(&format!("vol_{}", volume_id)) {
-                                    let size_bytes = bdev["num_blocks"].as_u64().unwrap_or(0) * 
-                                                   bdev["block_size"].as_u64().unwrap_or(512);
-                                    
-                                    let response = json!({
-                                        "success": true,
-                                        "volume_id": volume_id,
-                                        "lvol_uuid": bdev_name,
-                                        "lvs_name": lvs_name,
-                                        "size_bytes": size_bytes
-                                    });
-                                    
-                                    println!("✅ [HTTP_API] Found volume: {}", volume_id);
-                                    return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
-                                }
-                            }
+                if let Some(lvols) = lvols_response["result"].as_array() {
+                    for lvol in lvols {
+                        let lvol_name = lvol["name"].as_str().unwrap_or("");
+                        
+                        // Check if this lvol matches our volume
+                        if lvol_name == format!("vol_{}", volume_id) {
+                            let size_bytes = lvol["num_blocks"].as_u64().unwrap_or(0) * 
+                                           lvol["block_size"].as_u64().unwrap_or(512);
+                            let lvol_uuid = lvol["uuid"].as_str().unwrap_or("").to_string();
+                            
+                            let response = json!({
+                                "success": true,
+                                "volume_id": volume_id,
+                                "lvol_uuid": lvol_uuid,
+                                "lvs_name": lvs_name,
+                                "size_bytes": size_bytes
+                            });
+                            
+                            println!("✅ [HTTP_API] Found volume: {} (lvol: {}, UUID: {})", volume_id, lvol_name, lvol_uuid);
+                            return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
                         }
                     }
                 }
