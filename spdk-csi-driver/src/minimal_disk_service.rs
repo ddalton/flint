@@ -750,16 +750,20 @@ impl MinimalDiskService {
     /// Find LVS information for a bdev - Enhanced with recovery logic
     fn find_lvs_for_bdev(&self, bdev_name: &str, lvstores: &Value) -> (Option<String>, u64, u32) {
         println!("🔍 [LVS_SEARCH] Looking for LVS on bdev: {}", bdev_name);
+        println!("🔧 [LVS_SEARCH_DEBUG] Full lvstores response: {}", serde_json::to_string(lvstores).unwrap_or_else(|_| "JSON error".to_string()));
         
         if let Some(lvs_list) = lvstores["result"].as_array() {
             println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());
             
             for (i, lvs) in lvs_list.iter().enumerate() {
+                println!("🔧 [LVS_SEARCH_DEBUG] LVS[{}] raw: {}", i, serde_json::to_string(lvs).unwrap_or_else(|_| "JSON error".to_string()));
+                
                 if let Some(base_bdev) = lvs["base_bdev"].as_str() {
-                    println!("🔍 [LVS_SEARCH] LVS[{}]: name='{}', base_bdev='{}'", 
+                    println!("🔍 [LVS_SEARCH] LVS[{}]: name='{}', base_bdev='{}' (looking for: '{}')", 
                              i, 
                              lvs["name"].as_str().unwrap_or("unknown"), 
-                             base_bdev);
+                             base_bdev,
+                             bdev_name);
                     
                     if base_bdev == bdev_name {
                         let lvs_name = lvs["name"].as_str().unwrap_or("").to_string();
@@ -772,6 +776,8 @@ impl MinimalDiskService {
                                  lvs_name, bdev_name, free_space / 1024 / 1024);
                         return (Some(lvs_name), free_space, lvol_count);
                     }
+                } else {
+                    println!("⚠️ [LVS_SEARCH] LVS[{}] has no base_bdev field!", i);
                 }
             }
             println!("❌ [LVS_SEARCH] No LVS found for bdev: {}", bdev_name);
