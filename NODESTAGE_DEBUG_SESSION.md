@@ -424,3 +424,68 @@ All issues fixed:
 ---
 **Mission Accomplished!** 🚀 The CSI driver now fully supports filesystem volumes with proper Stage/Unstage/Publish/Unpublish lifecycle!
 
+## 🌐 Session 4: Remote Volume Testing (Nov 12, 22:18 UTC)
+
+### Additional Bugs Fixed for NVMe-oF Support:
+
+**Bug 1: Invalid NQN Date Format** (commit 325b5c6)
+```
+Error: "Invalid date code in NQN 'nqn.2024.com.flint:volume:...'"
+Fix: Changed nqn.2024.com.flint → nqn.2024-11.com.flint (YYYY-MM format required)
+```
+
+**Bug 2: SPDK RPC Stub** (commit e253c4a) ⭐ **CRITICAL**
+```
+The /api/spdk/rpc endpoint was returning fake success without calling SPDK!
+This caused NVMe-oF subsystems to never be created.
+Fix: Implemented actual SPDK RPC proxying via disk_service.call_spdk_rpc()
+```
+
+**Bug 3: mkfs Force Flags** (commit 2fa8e82)
+```
+Added -F flag to mkfs.ext4 and -f to mkfs.xfs for robust formatting
+Prevents geometry mismatch errors from old filesystem remnants
+```
+
+### ✅ Both Scenarios Verified Working:
+
+**Scenario 1: Local Volume (No NVMe-oF)**
+```
+Pod:     debug-test-pod
+Node:    ublk-2.vpc.cloudera.com  
+Volume:  pvc-1d4f851c... on ublk-2
+Type:    volumeType: local
+Device:  /dev/ublkb41339 (direct ublk access)
+I/O:     1.6 GB/s ✅
+Status:  Running ✅
+```
+
+**Scenario 2: Remote Volume (NVMe-oF)**
+```
+Pod:         remote-test-pod
+Node:        ublk-1.vpc.cloudera.com
+Volume:      pvc-9198c8d8... on ublk-2 (remote!)
+Type:        volumeType: remote
+NVMe-oF:     nqn.2024-11.com.flint:volume:pvc-9198c8d8...
+Target:      10.65.131.143:4420 (ublk-2)
+Device:      /dev/ublkb39892 (via NVMe-oF → ublk)
+I/O:         1.6 GB/s ✅
+Status:      Running ✅
+Verified:    Read/write working across nodes!
+```
+
+### 🎯 Final Commit Summary:
+
+| Commit | Description |
+|--------|-------------|
+| a16f1d6 | Health port fix (9810 → 9809) |
+| cab01fa | GRPC logging for debugging |
+| 7c97fef | Removed redundant ublk init |
+| bca45b6 | Filesystem volume support ⭐ |
+| 325b5c6 | NVMe-oF NQN format fix |
+| e253c4a | SPDK RPC proxy implementation ⭐ |
+| 2fa8e82 | mkfs force flags |
+
+---
+**🏆 COMPLETE SUCCESS!** Both local and remote (NVMe-oF) volumes fully functional! 🚀
+
