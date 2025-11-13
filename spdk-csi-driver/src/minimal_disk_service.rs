@@ -208,7 +208,9 @@ impl MinimalDiskService {
                     
                     // CRITICAL: Wait for SPDK to auto-discover existing LVS from this bdev
                     // In modern SPDK, the lvol module asynchronously examines new bdevs for LVS
-                    if let Some(lvs_name) = self.wait_for_lvs_discovery(&bdev_name, 5).await {
+                    // This is IDEMPOTENT - if auto-discovery fails, we explicitly load the LVS
+                    // Timeout is 10 seconds to handle slow disks or examination delays
+                    if let Some(lvs_name) = self.wait_for_lvs_discovery(&bdev_name, 10).await {
                         println!("✅ [AUTO_RECOVERY] Auto-discovered existing LVS: {} on {}", lvs_name, bdev_name);
                     } else {
                         println!("ℹ️ [AUTO_RECOVERY] No LVS found on bdev: {} (disk is clean)", bdev_name);
@@ -367,6 +369,7 @@ impl MinimalDiskService {
 
     /// Wait for SPDK to auto-discover LVS on a bdev (async examination)
     /// In modern SPDK, when a bdev is created, the lvol module asynchronously examines it for existing LVS
+    /// This is IDEMPOTENT and will try multiple strategies to ensure LVS is discovered if it exists
     async fn wait_for_lvs_discovery(&self, bdev_name: &str, timeout_secs: u64) -> Option<String> {
         let correlation_id = format!("{:08x}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -382,6 +385,8 @@ impl MinimalDiskService {
         let timeout = Duration::from_secs(timeout_secs);
         
         let mut iteration = 0;
+        let mut tried_explicit_load = false;
+        
         while start.elapsed() < timeout {
             iteration += 1;
             
@@ -435,6 +440,33 @@ impl MinimalDiskService {
                 }
             }
             
+            // If we've waited 2 seconds and still no LVS, try explicit load
+            // This handles cases where SPDK's async examination didn't trigger
+            if !tried_explicit_load && start.elapsed() > Duration::from_secs(2) {
+                tried_explicit_load = true;
+                println!("🔄 [LVS_DISCOVERY:{}] Auto-discovery taking longer than expected, trying explicit load...", correlation_id);
+                
+                match self.call_spdk_rpc(&json!({
+                    "method": "bdev_lvol_load_lvstore",
+                    "params": {
+                        "bdev_name": bdev_name
+                    }
+                })).await {
+                    Ok(_) => {
+                        println!("✅ [LVS_DISCOVERY:{}] Explicit lvstore load succeeded, checking again...", correlation_id);
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    Err(e) if e.to_string().contains("No such device") || e.to_string().contains("not found") => {
+                        println!("ℹ️ [LVS_DISCOVERY:{}] No LVS exists on bdev (disk is clean)", correlation_id);
+                        return None;
+                    }
+                    Err(e) => {
+                        println!("⚠️ [LVS_DISCOVERY:{}] Explicit load failed: {}", correlation_id, e);
+                    }
+                }
+            }
+            
             // Wait 100ms before next check
             sleep(Duration::from_millis(100)).await;
         }
@@ -443,6 +475,8 @@ impl MinimalDiskService {
                  correlation_id, bdev_name, timeout_secs, iteration);
         println!("❌ [LVS_DISCOVERY:{}] CORRELATE: Check SPDK logs around this time for vbdev_lvol examination of '{}'", 
                  correlation_id, bdev_name);
+        println!("❌ [LVS_DISCOVERY:{}] This may indicate: 1) No LVS on disk, 2) SPDK examination failed, or 3) Timing issue", 
+                 correlation_id);
         None
     }
 
