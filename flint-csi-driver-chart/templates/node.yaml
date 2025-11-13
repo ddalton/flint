@@ -165,6 +165,9 @@ spec:
             periodSeconds: 10
             failureThreshold: 5
           volumeMounts:
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: "Bidirectional"
             - name: plugin-dir
               mountPath: /csi
             - name: device-dir
