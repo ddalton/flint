@@ -399,14 +399,51 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         println!("📊 [CONTROLLER] Deleting volume on node: {}", volume_info.node_name);
 
-        // Delete the logical volume on the storage node
+        // DEFENSIVE CLEANUP: Check if volume is still staged (NodeUnstageVolume may not have been called)
+        // This happens when PVC is deleted before VolumeAttachment, causing kubelet to skip NodeUnstageVolume
+        println!("🔍 [CONTROLLER] Checking if volume is still staged on node (defensive cleanup)...");
+        
+        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        
+        if let Err(e) = self.driver.force_unstage_volume_if_needed(&volume_info.node_name, &volume_id, ublk_id).await {
+            println!("⚠️ [CONTROLLER] Force unstaging failed (may not be staged): {}", e);
+            // Continue - this is best-effort cleanup
+        }
+
+        // Now safe to delete the logical volume on the storage node
         match self.driver.delete_lvol(&volume_info.node_name, &volume_info.lvol_uuid).await {
             Ok(_) => {
                 println!("✅ [CONTROLLER] Logical volume deleted successfully");
             }
             Err(e) => {
-                println!("❌ [CONTROLLER] Failed to delete logical volume: {}", e);
-                return Err(tonic::Status::internal(format!("Failed to delete volume: {}", e)));
+                // Check if error is "Device or resource busy" - this means volume is still mounted
+                let error_msg = format!("{}", e);
+                if error_msg.contains("Device or resource busy") || error_msg.contains("busy") {
+                    println!("❌ [CONTROLLER] Lvol deletion failed - volume still in use!");
+                    println!("🔍 [CONTROLLER] This usually means:");
+                    println!("   1. Volume is still mounted somewhere");
+                    println!("   2. ublk device still exists and has active I/O");
+                    println!("   3. NodeUnstageVolume was not called by kubelet");
+                    println!("⚠️ [CONTROLLER] Retrying with more aggressive cleanup...");
+                    
+                    // Try one more time with explicit cleanup
+                    if let Err(cleanup_err) = self.driver.force_cleanup_volume(&volume_info.node_name, &volume_id, ublk_id).await {
+                        println!("❌ [CONTROLLER] Aggressive cleanup also failed: {}", cleanup_err);
+                        return Err(tonic::Status::internal(format!("Failed to delete volume (still in use): {}", e)));
+                    }
+                    
+                    // Retry lvol deletion after cleanup
+                    match self.driver.delete_lvol(&volume_info.node_name, &volume_info.lvol_uuid).await {
+                        Ok(_) => println!("✅ [CONTROLLER] Lvol deleted after aggressive cleanup"),
+                        Err(retry_err) => {
+                            println!("❌ [CONTROLLER] Lvol deletion still failed: {}", retry_err);
+                            return Err(tonic::Status::internal(format!("Failed to delete volume: {}", retry_err)));
+                        }
+                    }
+                } else {
+                    println!("❌ [CONTROLLER] Failed to delete logical volume: {}", e);
+                    return Err(tonic::Status::internal(format!("Failed to delete volume: {}", e)));
+                }
             }
         }
 

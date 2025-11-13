@@ -271,7 +271,7 @@ spec:
           args:
             - "--v=5"
             - "--csi-address=/csi/csi.sock"
-            - "--kubelet-registration-path=/var/lib/kubelet/plugins/csi.flint.com/csi.sock"
+            - "--kubelet-registration-path=/var/lib/kubelet/plugins/flint.csi.storage.io/csi.sock"
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
@@ -292,7 +292,7 @@ spec:
             type: Directory
         - name: plugin-dir
           hostPath:
-            path: /var/lib/kubelet/plugins/csi.flint.com
+            path: /var/lib/kubelet/plugins/flint.csi.storage.io
             type: DirectoryOrCreate
         - name: registration-dir
           hostPath:

@@ -205,6 +205,13 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_get_volume_info);
 
+        // POST /api/volumes/force_unstage - Force unstage volume (defensive cleanup)
+        let force_unstage = warp::path!("api" / "volumes" / "force_unstage")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_force_unstage);
+
         // Combine all routes
         list_disks
             .or(list_disks_post)
@@ -221,6 +228,7 @@ impl NodeAgent {
             .or(ublk_create)
             .or(ublk_delete)
             .or(get_volume_info)
+            .or(force_unstage)
             .with(warp::cors().allow_any_origin())
     }
 
@@ -715,6 +723,176 @@ impl NodeAgent {
         });
         println!("❌ [HTTP_API] Volume not found: {}", volume_id);
         Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::NOT_FOUND))
+    }
+
+    /// Handle POST /api/volumes/force_unstage - Force unstage volume (defensive cleanup)
+    /// This is called by DeleteVolume when NodeUnstageVolume wasn't called by kubelet
+    async fn handle_force_unstage(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        let volume_id = match request["volume_id"].as_str() {
+            Some(id) => id,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing volume_id in request"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+
+        let ublk_id = request["ublk_id"].as_u64().unwrap_or(0) as u32;
+        let force = request["force"].as_bool().unwrap_or(false);
+
+        println!("🔧 [HTTP_API] Force unstage request for volume: {} (ublk_id: {}, force: {})", volume_id, ublk_id, force);
+
+        let mut was_staged = false;
+        let mut operations_performed = Vec::new();
+
+        // Step 1: Find and unmount all staging paths for this volume
+        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/flint.csi.storage.io";
+        
+        if let Ok(entries) = std::fs::read_dir(staging_base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let globalmount = path.join("globalmount");
+                    
+                    if globalmount.exists() {
+                        // Check if this path is mounted
+                        let is_mounted = std::process::Command::new("mountpoint")
+                            .arg("-q")
+                            .arg(&globalmount)
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        
+                        if is_mounted {
+                            println!("📍 [FORCE_UNSTAGE] Found mounted staging path: {}", globalmount.display());
+                            was_staged = true;
+                            
+                            // Unmount with retry
+                            println!("🔧 [FORCE_UNSTAGE] Attempting to unmount...");
+                            let mut unmounted = false;
+                            
+                            for attempt in 1..=3 {
+                                let result = std::process::Command::new("umount")
+                                    .arg(&globalmount)
+                                    .status();
+                                
+                                if result.map(|s| s.success()).unwrap_or(false) {
+                                    println!("✅ [FORCE_UNSTAGE] Unmounted on attempt {}", attempt);
+                                    unmounted = true;
+                                    operations_performed.push(format!("Unmounted {}", globalmount.display()));
+                                    break;
+                                }
+                                
+                                if attempt < 3 {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
+                            
+                            // If normal unmount failed, try lazy unmount
+                            if !unmounted {
+                                println!("⚠️ [FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount...");
+                                let result = std::process::Command::new("umount")
+                                    .arg("-l")
+                                    .arg(&globalmount)
+                                    .status();
+                                
+                                if result.map(|s| s.success()).unwrap_or(false) {
+                                    println!("✅ [FORCE_UNSTAGE] Lazy unmount succeeded");
+                                    operations_performed.push(format!("Lazy unmounted {}", globalmount.display()));
+                                    unmounted = true;
+                                }
+                            }
+                            
+                            if !unmounted && !force {
+                                let error_response = json!({
+                                    "success": false,
+                                    "error": format!("Failed to unmount {}", globalmount.display()),
+                                    "was_staged": was_staged,
+                                    "operations": operations_performed
+                                });
+                                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Delete ublk device if it exists
+        let device_path = format!("/dev/ublkb{}", ublk_id);
+        if std::path::Path::new(&device_path).exists() {
+            println!("📍 [FORCE_UNSTAGE] Found ublk device: {}", device_path);
+            was_staged = true;
+            
+            // Stop the ublk device via SPDK
+            let result = node_agent.disk_service.call_spdk_rpc(&json!({
+                "method": "ublk_stop_disk",
+                "params": {
+                    "ublk_id": ublk_id
+                }
+            })).await;
+            
+            match result {
+                Ok(_) => {
+                    println!("✅ [FORCE_UNSTAGE] ublk device stopped");
+                    operations_performed.push(format!("Stopped ublk device {}", ublk_id));
+                }
+                Err(e) => {
+                    println!("⚠️ [FORCE_UNSTAGE] Failed to stop ublk device: {}", e);
+                    if !force {
+                        let error_response = json!({
+                            "success": false,
+                            "error": format!("Failed to stop ublk device: {}", e),
+                            "was_staged": was_staged,
+                            "operations": operations_performed
+                        });
+                        return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+                    }
+                }
+            }
+        }
+
+        // Step 3: Disconnect from NVMe-oF if this was a remote volume
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        
+        // Try to disconnect (best effort - may not be connected)
+        let result = node_agent.disk_service.call_spdk_rpc(&json!({
+            "method": "bdev_nvme_detach_controller",
+            "params": {
+                "name": nqn
+            }
+        })).await;
+        
+        match result {
+            Ok(_) => {
+                println!("✅ [FORCE_UNSTAGE] Disconnected from NVMe-oF: {}", nqn);
+                operations_performed.push("Disconnected NVMe-oF".to_string());
+            }
+            Err(_) => {
+                // Ignore - volume may not be remote
+                println!("ℹ️ [FORCE_UNSTAGE] No NVMe-oF connection to disconnect (volume may be local)");
+            }
+        }
+
+        // Return success response
+        let response = json!({
+            "success": true,
+            "was_staged": was_staged,
+            "operations": operations_performed,
+            "message": if was_staged {
+                "Volume was staged and has been unstaged"
+            } else {
+                "Volume was not staged - no action needed"
+            }
+        });
+
+        println!("✅ [FORCE_UNSTAGE] Completed for volume: {} (was_staged: {})", volume_id, was_staged);
+        Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
     }
 }
 

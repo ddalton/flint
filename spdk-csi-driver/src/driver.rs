@@ -271,6 +271,52 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
+    /// Force unstage volume if it's still staged (defensive cleanup for when NodeUnstageVolume wasn't called)
+    pub async fn force_unstage_volume_if_needed(&self, node_name: &str, volume_id: &str, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔍 [DEFENSIVE] Checking if volume {} is still staged on node: {}", volume_id, node_name);
+        
+        // Request node agent to check and unstage if needed
+        let payload = json!({
+            "volume_id": volume_id,
+            "ublk_id": ublk_id,
+            "force": false  // Don't force if not needed
+        });
+        
+        match self.call_node_agent(node_name, "/api/volumes/force_unstage", &payload).await {
+            Ok(response) => {
+                if let Some(was_staged) = response["was_staged"].as_bool() {
+                    if was_staged {
+                        println!("✅ [DEFENSIVE] Volume was staged - successfully unstaged");
+                    } else {
+                        println!("ℹ️ [DEFENSIVE] Volume was not staged - no action needed");
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [DEFENSIVE] Force unstage check failed: {}", e);
+                // Don't fail - this is best effort
+                Ok(())
+            }
+        }
+    }
+
+    /// Aggressive cleanup for stuck volumes (last resort)
+    pub async fn force_cleanup_volume(&self, node_name: &str, volume_id: &str, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [AGGRESSIVE] Force cleaning up volume {} on node: {}", volume_id, node_name);
+        
+        let payload = json!({
+            "volume_id": volume_id,
+            "ublk_id": ublk_id,
+            "force": true  // Force cleanup even if errors
+        });
+        
+        self.call_node_agent(node_name, "/api/volumes/force_unstage", &payload).await?;
+        
+        println!("✅ [AGGRESSIVE] Force cleanup completed");
+        Ok(())
+    }
+
     /// Create NVMe-oF target (minimal implementation - will be enhanced later)
     pub async fn create_nvmeof_target(&self, bdev_name: &str, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🚧 [MINIMAL_NVMEOF] Creating NVMe-oF target for bdev: {}, nqn: {}", bdev_name, nqn);
