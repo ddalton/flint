@@ -790,39 +790,133 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     mount_config.fs_type
                                 };
                                 
-                                println!("📁 [NODE] Formatting device {} with {}", device_path, fs_type);
-                                
                                 // Wait a moment for device to be ready
                                 std::thread::sleep(std::time::Duration::from_millis(500));
                                 
-                                // ALWAYS format the device to ensure clean state
-                                // This prevents issues where ublk ID is reused but points to different lvol
-                                // The kernel may cache old superblock data causing geometry mismatches
-                                let mkfs_output = if fs_type == "ext4" {
-                                    std::process::Command::new("mkfs.ext4")
-                                        .arg("-F")  // Force - don't ask for confirmation
+                                // Check if device already has a valid filesystem
+                                // This preserves data across pod migrations and restages
+                                let blkid_output = std::process::Command::new("blkid")
+                                    .arg(&device_path)
+                                    .output()
+                                    .map_err(|e| tonic::Status::internal(format!("Failed to check filesystem: {}", e)))?;
+                                
+                                let has_filesystem = blkid_output.status.success();
+                                
+                                let should_format = if has_filesystem {
+                                    let blkid_info = String::from_utf8_lossy(&blkid_output.stdout);
+                                    println!("📁 [NODE] Device {} already has filesystem: {}", device_path, blkid_info.trim());
+                                    
+                                    // GEOMETRY MISMATCH DETECTION
+                                    // Get actual device size
+                                    let blockdev_output = std::process::Command::new("blockdev")
+                                        .arg("--getsize64")
                                         .arg(&device_path)
                                         .output()
-                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
-                                } else if fs_type == "xfs" {
-                                    std::process::Command::new("mkfs.xfs")
-                                        .arg("-f")  // Force
-                                        .arg(&device_path)
-                                        .output()
-                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                        .ok();
+                                    
+                                    let mut needs_reformat = false;
+                                    
+                                    if let Some(output) = blockdev_output {
+                                        if let Ok(size_str) = String::from_utf8(output.stdout) {
+                                            if let Ok(device_size) = size_str.trim().parse::<u64>() {
+                                                // Get filesystem size for ext4
+                                                let fs_size_output = std::process::Command::new("dumpe2fs")
+                                                    .arg("-h")
+                                                    .arg(&device_path)
+                                                    .output()
+                                                    .ok();
+                                                
+                                                if let Some(fs_output) = fs_size_output {
+                                                    let fs_info = String::from_utf8_lossy(&fs_output.stdout);
+                                                    // Parse block count and block size
+                                                    let mut block_count = 0u64;
+                                                    let mut block_size = 0u64;
+                                                    
+                                                    for line in fs_info.lines() {
+                                                        if line.starts_with("Block count:") {
+                                                            block_count = line.split_whitespace().nth(2)
+                                                                .and_then(|s| s.parse().ok()).unwrap_or(0);
+                                                        }
+                                                        if line.starts_with("Block size:") {
+                                                            block_size = line.split_whitespace().nth(2)
+                                                                .and_then(|s| s.parse().ok()).unwrap_or(0);
+                                                        }
+                                                    }
+                                                    
+                                                    let fs_size = block_count * block_size;
+                                                    
+                                                    if fs_size > 0 && device_size > 0 {
+                                                        let size_diff = if fs_size > device_size {
+                                                            fs_size - device_size
+                                                        } else {
+                                                            device_size - fs_size
+                                                        };
+                                                        
+                                                        // If difference is more than 10%, we have geometry mismatch
+                                                        let diff_percent = (size_diff as f64 / device_size as f64) * 100.0;
+                                                        
+                                                        if diff_percent > 10.0 {
+                                                            println!("⚠️ [NODE] GEOMETRY MISMATCH DETECTED!");
+                                                            println!("⚠️ [NODE] Device size: {} bytes", device_size);
+                                                            println!("⚠️ [NODE] Filesystem thinks: {} bytes", fs_size);
+                                                            println!("⚠️ [NODE] Difference: {:.1}%", diff_percent);
+                                                            println!("🔧 [NODE] This indicates ublk ID reuse - will reformat to fix");
+                                                            needs_reformat = true;
+                                                        } else {
+                                                            println!("✅ [NODE] Filesystem size matches device (diff: {:.1}%)", diff_percent);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Verify filesystem type matches
+                                    if !needs_reformat && !blkid_info.contains(&format!("TYPE=\"{}\"", fs_type)) {
+                                        println!("⚠️ [NODE] Warning: Expected {} but found different filesystem type", fs_type);
+                                        println!("⚠️ [NODE] This may indicate ublk ID reuse");
+                                        needs_reformat = true;
+                                    }
+                                    
+                                    if !needs_reformat {
+                                        println!("✅ [NODE] Preserving existing filesystem (data persistence)");
+                                    }
+                                    
+                                    needs_reformat
                                 } else {
-                                    std::process::Command::new(format!("mkfs.{}", fs_type))
-                                        .arg(&device_path)
-                                        .output()
-                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    println!("📁 [NODE] No filesystem found on {}", device_path);
+                                    true // Need to format
                                 };
                                 
-                                if !mkfs_output.status.success() {
-                                    let error = String::from_utf8_lossy(&mkfs_output.stderr);
-                                    println!("❌ [NODE] Format failed: {}", error);
-                                    return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
+                                if should_format {
+                                    println!("🔧 [NODE] Formatting device {} with {}", device_path, fs_type);
+                                    
+                                    let mkfs_output = if fs_type == "ext4" {
+                                        std::process::Command::new("mkfs.ext4")
+                                            .arg("-F")  // Force - don't ask for confirmation
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    } else if fs_type == "xfs" {
+                                        std::process::Command::new("mkfs.xfs")
+                                            .arg("-f")  // Force
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    } else {
+                                        std::process::Command::new(format!("mkfs.{}", fs_type))
+                                            .arg(&device_path)
+                                            .output()
+                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                    };
+                                    
+                                    if !mkfs_output.status.success() {
+                                        let error = String::from_utf8_lossy(&mkfs_output.stderr);
+                                        println!("❌ [NODE] Format failed: {}", error);
+                                        return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
+                                    }
+                                    println!("✅ [NODE] Device formatted successfully with {}", fs_type);
                                 }
-                                println!("✅ [NODE] Device formatted successfully with {}", fs_type);
                                 
                                 // Check if already mounted (idempotency)
                                 let is_mounted = std::process::Command::new("mountpoint")

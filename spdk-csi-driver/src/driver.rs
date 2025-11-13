@@ -590,8 +590,11 @@ impl SpdkCsiDriver {
         volume_id.hash(&mut hasher);
         let hash = hasher.finish();
         
-        // Use lower 16 bits to keep ID manageable
-        (hash & 0xFFFF) as u32
+        // Use lower 24 bits instead of 16 to reduce collision probability
+        // 16 bits = 65K IDs (high collision risk)
+        // 24 bits = 16M IDs (very low collision risk)
+        // ublk supports up to 2^31 - 1, so 24 bits is safe
+        (hash & 0xFFFFFF) as u32
     }
 
     /// Verify bdev exists (simplified)
