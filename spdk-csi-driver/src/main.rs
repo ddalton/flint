@@ -943,6 +943,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         println!("✅ [NODE] Verified: Directory no longer exists");
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Directory already gone - this is success!
+                    println!("ℹ️ [NODE] Target directory already removed (not an error)");
+                }
                 Err(e) => {
                     println!("⚠️ [NODE] Failed to remove target directory: {}", e);
                     println!("🔍 [DEBUG] Error kind: {:?}", e.kind());
@@ -951,6 +955,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         if let Ok(entries) = std::fs::read_dir(&target_path) {
                             let count = entries.count();
                             println!("🔍 [DEBUG] Directory still exists with {} entries", count);
+                            // If directory not empty, we can't remove it
+                            // This might be why kubelet retries!
+                            if count > 0 {
+                                println!("⚠️ [NODE] CRITICAL: Directory not empty! This may cause kubelet retries!");
+                            }
                         }
                     }
                 }
