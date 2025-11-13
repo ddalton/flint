@@ -20,6 +20,9 @@ spec:
     spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
+      # Increase termination grace period to allow SPDK clean shutdown
+      # preStop hook: 15s + SPDK metadata flush: ~15s = 30s minimum needed
+      terminationGracePeriodSeconds: 60
       securityContext: {}
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
