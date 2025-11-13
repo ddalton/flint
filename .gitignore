@@ -20,3 +20,4 @@ spdk-csi-driver/src/csi.v1.rs
 # Temporary files
 *.tmp
 *~
+.kube/
