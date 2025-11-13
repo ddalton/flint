@@ -385,7 +385,6 @@ impl MinimalDiskService {
         let timeout = Duration::from_secs(timeout_secs);
         
         let mut iteration = 0;
-        let mut tried_explicit_load = false;
         
         while start.elapsed() < timeout {
             iteration += 1;
@@ -440,32 +439,9 @@ impl MinimalDiskService {
                 }
             }
             
-            // If we've waited 2 seconds and still no LVS, try explicit load
-            // This handles cases where SPDK's async examination didn't trigger
-            if !tried_explicit_load && start.elapsed() > Duration::from_secs(2) {
-                tried_explicit_load = true;
-                println!("🔄 [LVS_DISCOVERY:{}] Auto-discovery taking longer than expected, trying explicit load...", correlation_id);
-                
-                match self.call_spdk_rpc(&json!({
-                    "method": "bdev_lvol_load_lvstore",
-                    "params": {
-                        "bdev_name": bdev_name
-                    }
-                })).await {
-                    Ok(_) => {
-                        println!("✅ [LVS_DISCOVERY:{}] Explicit lvstore load succeeded, checking again...", correlation_id);
-                        sleep(Duration::from_millis(500)).await;
-                        continue;
-                    }
-                    Err(e) if e.to_string().contains("No such device") || e.to_string().contains("not found") => {
-                        println!("ℹ️ [LVS_DISCOVERY:{}] No LVS exists on bdev (disk is clean)", correlation_id);
-                        return None;
-                    }
-                    Err(e) => {
-                        println!("⚠️ [LVS_DISCOVERY:{}] Explicit load failed: {}", correlation_id, e);
-                    }
-                }
-            }
+            // SPDK v25.09.x has no explicit "load_lvstore" method
+            // Auto-discovery happens via examine_disk callback when bdev is created
+            // Just keep polling - if examination hasn't completed yet, it will soon
             
             // Wait 100ms before next check
             sleep(Duration::from_millis(100)).await;
