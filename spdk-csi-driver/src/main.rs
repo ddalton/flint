@@ -723,8 +723,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
 
-                println!("✅ [NODE] Volume {} staged successfully", volume_id);
-                Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}))
+        println!("✅ [NODE] Volume {} staged successfully", volume_id);
+        
+        let response = tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {});
+        println!("🔵 [GRPC] NodeStageVolume returning success response");
+        Ok(response)
             }
             Err(e) => {
                 println!("❌ [NODE] Failed to create ublk device: {}", e);
@@ -783,7 +786,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
         println!("✅ [NODE] Volume {} unstaged successfully", volume_id);
         
-        Ok(tonic::Response::new(spdk_csi_driver::csi::NodeUnstageVolumeResponse {}))
+        let response = tonic::Response::new(spdk_csi_driver::csi::NodeUnstageVolumeResponse {});
+        println!("🔵 [GRPC] NodeUnstageVolume returning success response");
+        Ok(response)
     }
 
     async fn node_publish_volume(
@@ -858,7 +863,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
         println!("✅ [NODE] Volume {} published successfully at {}", volume_id, target_path);
         
-        Ok(tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {}))
+        let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
+        println!("🔵 [GRPC] NodePublishVolume returning success response");
+        Ok(response)
     }
 
     async fn node_unpublish_volume(
@@ -896,7 +903,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
         println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
         
-        Ok(tonic::Response::new(spdk_csi_driver::csi::NodeUnpublishVolumeResponse {}))
+        let response = tonic::Response::new(spdk_csi_driver::csi::NodeUnpublishVolumeResponse {});
+        println!("🔵 [GRPC] NodeUnpublishVolume returning success response");
+        Ok(response)
     }
 
     async fn node_get_volume_stats(
