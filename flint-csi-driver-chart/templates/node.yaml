@@ -20,9 +20,6 @@ spec:
     spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
-      # Increase termination grace period to allow SPDK clean shutdown
-      # preStop hook: 15s + SPDK metadata flush: ~15s = 30s minimum needed
-      terminationGracePeriodSeconds: 60
       securityContext: {}
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
@@ -49,21 +46,47 @@ spec:
                     echo "[$(date)] preStop: Initiating graceful SPDK shutdown..."
                     python3 -c '
                     import socket, json, time
-                    try:
+                    
+                    def spdk_rpc(method, params=None):
                         s = socket.socket(socket.AF_UNIX)
-                        s.settimeout(5)
+                        s.settimeout(10)
                         s.connect("/var/tmp/spdk.sock")
-                        rpc = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "spdk_kill_instance", "params": {"sig_name": "SIGTERM"}})
+                        rpc = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
                         s.send((rpc + "\n").encode())
-                        resp = s.recv(4096)
-                        print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated: {resp.decode()}")
+                        resp = json.loads(s.recv(65536).decode())
                         s.close()
-                        # Give SPDK time to flush metadata (increased from 3s to 15s for clean shutdown)
-                        # Blobstore needs to write: used pages, used blobids, used clusters, and superblock
+                        return resp.get("result")
+                    
+                    try:
+                        print(f"[{time.strftime(\"%c\")}] preStop: Step 1 - Deleting NVMe-oF subsystems...")
+                        # Get all NVMe-oF subsystems
+                        subsystems = spdk_rpc("nvmf_get_subsystems") or []
+                        deleted_count = 0
+                        for subsys in subsystems:
+                            nqn = subsys.get("nqn", "")
+                            # Skip discovery subsystem
+                            if "discovery" not in nqn.lower() and "nqn.2024" in nqn:
+                                try:
+                                    spdk_rpc("nvmf_delete_subsystem", {"nqn": nqn})
+                                    deleted_count += 1
+                                    print(f"  Deleted subsystem: {nqn}")
+                                except:
+                                    pass
+                        print(f"[{time.strftime(\"%c\")}] preStop: Deleted {deleted_count} NVMe-oF subsystems")
+                        
+                        # Small delay for cleanup
+                        time.sleep(2)
+                        
+                        print(f"[{time.strftime(\"%c\")}] preStop: Step 2 - Sending SIGTERM to SPDK...")
+                        spdk_rpc("spdk_kill_instance", {"sig_name": "SIGTERM"})
+                        print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated")
+                        
+                        # Give SPDK time to unload LVS and flush metadata
+                        # Thread timeout: 5s + blobstore unload: ~10s = 15s total
                         time.sleep(15)
                         print(f"[{time.strftime(\"%c\")}] preStop: Graceful shutdown complete")
                     except Exception as e:
-                        print(f"[{time.strftime(\"%c\")}] preStop: Shutdown RPC failed (SPDK may already be down): {e}")
+                        print(f"[{time.strftime(\"%c\")}] preStop: Shutdown failed (SPDK may already be down): {e}")
                     '
           resources:
             limits:
