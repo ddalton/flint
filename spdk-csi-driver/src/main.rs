@@ -66,6 +66,76 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
     Ok("flint-system".to_string())
 }
 
+/// Cleanup any ghost mounts at startup
+/// Ghost mounts are mount table entries that reference non-existent ublk devices
+async fn cleanup_ghost_mounts() {
+    println!("🧹 [STARTUP] Scanning for ghost mounts...");
+    
+    // Get all mount entries
+    let mount_output = match std::process::Command::new("mount").output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("⚠️ [STARTUP] Failed to read mount table: {}", e);
+            return;
+        }
+    };
+    
+    let mount_text = String::from_utf8_lossy(&mount_output.stdout);
+    let mut ghost_count = 0;
+    let mut cleaned_count = 0;
+    
+    // Parse mount output and look for ublk devices
+    for line in mount_text.lines() {
+        if line.contains("/dev/ublkb") {
+            // Parse the mount line: /dev/ublkbXXXXX on /path/to/mount type ext4 (options)
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let device = parts[0];
+                let mount_point = parts[2];
+                
+                // Check if the device actually exists
+                let device_exists = std::path::Path::new(device).exists();
+                
+                if !device_exists {
+                    ghost_count += 1;
+                    println!("👻 [STARTUP] Found ghost mount: {} -> {} (device doesn't exist)", device, mount_point);
+                    
+                    // Try to lazy unmount the ghost mount
+                    let unmount_result = std::process::Command::new("umount")
+                        .arg("-l")
+                        .arg(mount_point)
+                        .output();
+                    
+                    match unmount_result {
+                        Ok(output) if output.status.success() => {
+                            cleaned_count += 1;
+                            println!("✅ [STARTUP] Cleaned ghost mount: {}", mount_point);
+                        }
+                        Ok(output) => {
+                            let error = String::from_utf8_lossy(&output.stderr);
+                            println!("⚠️ [STARTUP] Failed to clean ghost mount {}: {}", mount_point, error);
+                        }
+                        Err(e) => {
+                            println!("⚠️ [STARTUP] Failed to execute umount for {}: {}", mount_point, e);
+                        }
+                    }
+                    
+                    // Small delay to allow cleanup to propagate
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                } else {
+                    println!("✅ [STARTUP] Valid ublk mount: {} -> {}", device, mount_point);
+                }
+            }
+        }
+    }
+    
+    if ghost_count == 0 {
+        println!("✅ [STARTUP] No ghost mounts found");
+    } else {
+        println!("📊 [STARTUP] Ghost mount cleanup: found {}, cleaned {}", ghost_count, cleaned_count);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kube_client = Client::try_default().await?;
@@ -117,6 +187,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
     let endpoint = std::env::var("CSI_ENDPOINT")
         .unwrap_or("unix:///csi/csi.sock".to_string());
+    
+    // Cleanup any ghost mounts from previous runs (only in node mode)
+    if mode == "node" || mode == "all" {
+        cleanup_ghost_mounts().await;
+    }
     
     // Start node agent (if in node mode)
     if mode == "node" || mode == "all" {
@@ -753,24 +828,82 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         println!("📤 [NODE] Unstaging volume {} from {}", volume_id, staging_target_path);
 
-        // Unmount the filesystem from staging path (if mounted)
+        // Check if staging path is actually mounted before attempting unmount
         if std::path::Path::new(&staging_target_path).exists() {
-            println!("🔧 [NODE] Unmounting staging path: {}", staging_target_path);
-            let umount_output = std::process::Command::new("umount")
+            let is_mounted = std::process::Command::new("mountpoint")
+                .arg("-q")
                 .arg(&staging_target_path)
-                .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
             
-            if !umount_output.status.success() {
-                let error = String::from_utf8_lossy(&umount_output.stderr);
-                // Only log warning - unmount might fail if already unmounted
-                println!("⚠️ [NODE] Unmount failed (may not be mounted): {}", error);
+            if is_mounted {
+                println!("🔧 [NODE] Staging path is mounted, attempting unmount: {}", staging_target_path);
+                
+                // Try normal unmount with retry (3 attempts)
+                let mut unmount_success = false;
+                for attempt in 1..=3 {
+                    println!("🔄 [NODE] Unmount attempt {}/3", attempt);
+                    let success = std::process::Command::new("umount")
+                        .arg(&staging_target_path)
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    
+                    if success {
+                        println!("✅ [NODE] Unmount succeeded on attempt {}", attempt);
+                        unmount_success = true;
+                        break;
+                    }
+                    
+                    if attempt < 3 {
+                        println!("⚠️ [NODE] Unmount failed, retrying in 100ms...");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+                
+                // If normal unmount failed, try lazy unmount as fallback
+                if !unmount_success {
+                    println!("⚠️ [NODE] Normal unmount failed, trying lazy unmount (-l)...");
+                    let lazy_success = std::process::Command::new("umount")
+                        .arg("-l")
+                        .arg(&staging_target_path)
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    
+                    if lazy_success {
+                        println!("✅ [NODE] Lazy unmount succeeded, waiting for cleanup...");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else {
+                        println!("❌ [NODE] Lazy unmount also failed");
+                    }
+                }
+                
+                // CRITICAL: Verify unmount was successful before proceeding
+                let still_mounted = std::process::Command::new("mountpoint")
+                    .arg("-q")
+                    .arg(&staging_target_path)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                
+                if still_mounted {
+                    return Err(tonic::Status::internal(
+                        format!("Failed to unmount staging path: {} - refusing to delete ublk device to prevent ghost mount", 
+                                staging_target_path)
+                    ));
+                }
+                
+                println!("✅ [NODE] Verified staging path is no longer mounted");
             } else {
-                println!("✅ [NODE] Staging path unmounted successfully");
+                println!("ℹ️ [NODE] Staging path exists but is not mounted");
             }
+        } else {
+            println!("ℹ️ [NODE] Staging path does not exist, skipping unmount");
         }
 
-        // Delete the ublk device
+        // Only delete the ublk device after verified unmount
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
         
         match self.driver.delete_ublk_device(ublk_id).await {
