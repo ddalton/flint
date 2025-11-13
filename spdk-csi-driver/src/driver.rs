@@ -590,11 +590,12 @@ impl SpdkCsiDriver {
         volume_id.hash(&mut hasher);
         let hash = hasher.finish();
         
-        // Use lower 24 bits instead of 16 to reduce collision probability
-        // 16 bits = 65K IDs (high collision risk)
-        // 24 bits = 16M IDs (very low collision risk)
-        // ublk supports up to 2^31 - 1, so 24 bits is safe
-        (hash & 0xFFFFFF) as u32
+        // Use full 32-bit hash for maximum collision resistance
+        // ublk supports IDs up to 2^31 - 1 for signed int, but we use u32
+        // With 4 billion possible IDs, collisions are extremely unlikely
+        // The volume_id itself is stored in the lvol name (vol_{volume_id})
+        // so we can always find the lvol by name, and ublk ID is just for device numbering
+        hash as u32
     }
 
     /// Verify bdev exists (simplified)
