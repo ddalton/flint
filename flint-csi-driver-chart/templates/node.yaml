@@ -51,14 +51,35 @@ spec:
                         s = socket.socket(socket.AF_UNIX)
                         s.settimeout(10)
                         s.connect("/var/tmp/spdk.sock")
-                        rpc = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}})
-                        s.send((rpc + "\n").encode())
+                        rpc = {"jsonrpc": "2.0", "id": 1, "method": method}
+                        if params is not None:
+                            rpc["params"] = params
+                        s.send((json.dumps(rpc) + "\n").encode())
                         resp = json.loads(s.recv(65536).decode())
                         s.close()
+                        if "error" in resp:
+                            raise Exception(resp["error"])
                         return resp.get("result")
                     
                     try:
-                        print(f"[{time.strftime(\"%c\")}] preStop: Step 1 - Deleting NVMe-oF subsystems...")
+                        print(f"[{time.strftime(\"%c\")}] preStop: Step 1 - Stopping all ublk devices...")
+                        # Get all ublk devices using ublk_get_disks RPC
+                        ublk_devices = spdk_rpc("ublk_get_disks") or []
+                        ublk_stopped = 0
+                        for ublk_dev in ublk_devices:
+                            ublk_id = ublk_dev.get("id")
+                            bdev_name = ublk_dev.get("bdev_name", "unknown")
+                            if ublk_id is not None:
+                                try:
+                                    spdk_rpc("ublk_stop_disk", {"ublk_id": ublk_id})
+                                    ublk_stopped += 1
+                                    print(f"  Stopped ublk device: {ublk_id} (bdev: {bdev_name})")
+                                except Exception as e:
+                                    print(f"  Warning: Failed to stop ublk {ublk_id}: {e}")
+                        print(f"[{time.strftime(\"%c\")}] preStop: Stopped {ublk_stopped} ublk devices")
+                        time.sleep(1)
+                        
+                        print(f"[{time.strftime(\"%c\")}] preStop: Step 2 - Deleting NVMe-oF subsystems...")
                         # Get all NVMe-oF subsystems
                         subsystems = spdk_rpc("nvmf_get_subsystems") or []
                         deleted_count = 0
@@ -73,17 +94,16 @@ spec:
                                 except:
                                     pass
                         print(f"[{time.strftime(\"%c\")}] preStop: Deleted {deleted_count} NVMe-oF subsystems")
+                        time.sleep(1)
                         
-                        # Small delay for cleanup
-                        time.sleep(2)
-                        
-                        print(f"[{time.strftime(\"%c\")}] preStop: Step 2 - Sending SIGTERM to SPDK...")
+                        print(f"[{time.strftime(\"%c\")}] preStop: Step 3 - Sending SIGTERM to SPDK...")
                         spdk_rpc("spdk_kill_instance", {"sig_name": "SIGTERM"})
                         print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated")
                         
-                        # Give SPDK time to unload LVS and flush metadata
-                        # Thread timeout: 5s + blobstore unload: ~10s = 15s total
-                        time.sleep(15)
+                        # Give SPDK time to unload LVS and flush blobstore metadata
+                        # After stopping ublk devices, LVS can be cleanly unloaded
+                        # Blobstore flush: ~5s, thread cleanup: ~5s
+                        time.sleep(12)
                         print(f"[{time.strftime(\"%c\")}] preStop: Graceful shutdown complete")
                     except Exception as e:
                         print(f"[{time.strftime(\"%c\")}] preStop: Shutdown failed (SPDK may already be down): {e}")
