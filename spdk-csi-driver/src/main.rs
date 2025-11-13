@@ -878,28 +878,90 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let target_path = req.target_path.clone();
         
         println!("📤 [NODE] Unpublishing volume {} from {}", volume_id, target_path);
+        println!("🔍 [DEBUG] Target path: {}", target_path);
 
-        // Unmount the target path (bind mount from staging path)
-        if std::path::Path::new(&target_path).exists() {
-            println!("🔧 [NODE] Unmounting target path: {}", target_path);
-            let umount_output = std::process::Command::new("umount")
+        // Check if target path exists BEFORE unmount
+        let path_exists_before = std::path::Path::new(&target_path).exists();
+        println!("🔍 [DEBUG] Target path exists before unmount: {}", path_exists_before);
+        
+        if path_exists_before {
+            // Check if it's actually mounted
+            let mount_check = std::process::Command::new("mountpoint")
+                .arg("-q")
                 .arg(&target_path)
-                .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+                .status();
+            let is_mounted = mount_check.map(|s| s.success()).unwrap_or(false);
+            println!("🔍 [DEBUG] Target path is mounted: {}", is_mounted);
             
-            if !umount_output.status.success() {
-                let error = String::from_utf8_lossy(&umount_output.stderr);
-                println!("⚠️ [NODE] Unmount failed (may not be mounted): {}", error);
-                // Continue anyway - best effort cleanup
+            if is_mounted {
+                println!("🔧 [NODE] Unmounting target path: {}", target_path);
+                let umount_output = std::process::Command::new("umount")
+                    .arg(&target_path)
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+                
+                if !umount_output.status.success() {
+                    let error = String::from_utf8_lossy(&umount_output.stderr);
+                    let stdout = String::from_utf8_lossy(&umount_output.stdout);
+                    println!("⚠️ [NODE] Unmount failed - stderr: {}", error);
+                    println!("⚠️ [NODE] Unmount failed - stdout: {}", stdout);
+                    println!("⚠️ [NODE] Unmount exit code: {:?}", umount_output.status.code());
+                    // Continue anyway - best effort cleanup
+                } else {
+                    println!("✅ [NODE] Target path unmounted successfully");
+                    
+                    // Verify it's actually unmounted
+                    let verify_mount = std::process::Command::new("mountpoint")
+                        .arg("-q")
+                        .arg(&target_path)
+                        .status();
+                    let still_mounted = verify_mount.map(|s| s.success()).unwrap_or(false);
+                    if still_mounted {
+                        println!("⚠️ [NODE] WARNING: Path still shows as mounted after umount!");
+                    } else {
+                        println!("✅ [NODE] Verified: Target path is no longer mounted");
+                    }
+                }
             } else {
-                println!("✅ [NODE] Target path unmounted successfully");
+                println!("ℹ️ [NODE] Target path exists but is not mounted, skipping umount");
             }
             
-            // Remove the target directory
-            if let Err(e) = std::fs::remove_dir(&target_path) {
-                println!("⚠️ [NODE] Failed to remove target directory: {}", e);
+            // Check directory state before removal
+            let is_dir = std::path::Path::new(&target_path).is_dir();
+            println!("🔍 [DEBUG] Target path is directory: {}", is_dir);
+            
+            // Try to remove the directory
+            match std::fs::remove_dir(&target_path) {
+                Ok(_) => {
+                    println!("✅ [NODE] Target directory removed successfully");
+                    
+                    // Verify removal
+                    let still_exists = std::path::Path::new(&target_path).exists();
+                    if still_exists {
+                        println!("⚠️ [NODE] WARNING: Directory still exists after removal!");
+                    } else {
+                        println!("✅ [NODE] Verified: Directory no longer exists");
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ [NODE] Failed to remove target directory: {}", e);
+                    println!("🔍 [DEBUG] Error kind: {:?}", e.kind());
+                    // Check if directory still exists and what's in it
+                    if std::path::Path::new(&target_path).exists() {
+                        if let Ok(entries) = std::fs::read_dir(&target_path) {
+                            let count = entries.count();
+                            println!("🔍 [DEBUG] Directory still exists with {} entries", count);
+                        }
+                    }
+                }
             }
+        } else {
+            println!("ℹ️ [NODE] Target path does not exist, nothing to clean up");
         }
+        
+        // Final state check
+        let path_exists_after = std::path::Path::new(&target_path).exists();
+        println!("🔍 [DEBUG] Target path exists after cleanup: {}", path_exists_after);
 
         println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
         
