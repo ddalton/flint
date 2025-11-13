@@ -660,26 +660,34 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     mount_config.fs_type
                                 };
                                 
-                                println!("📁 [NODE] Formatting device {} with {} filesystem", device_path, fs_type);
+                                println!("📁 [NODE] Checking filesystem on device {}", device_path);
                                 
-                                // Check if device is already formatted
+                                // Wait a moment for device to be ready
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                
+                                // Check if device is already formatted using blkid
                                 let blkid_output = std::process::Command::new("blkid")
+                                    .arg("-p")  // Low-level probe, more reliable
                                     .arg(&device_path)
                                     .output()
                                     .map_err(|e| tonic::Status::internal(format!("Failed to check filesystem: {}", e)))?;
                                 
-                                if !blkid_output.status.success() {
+                                let has_filesystem = blkid_output.status.success();
+                                
+                                if has_filesystem {
+                                    let blkid_stdout = String::from_utf8_lossy(&blkid_output.stdout);
+                                    println!("✅ [NODE] Device already has a filesystem, skipping format");
+                                    println!("📋 [NODE] Filesystem info: {}", blkid_stdout.trim());
+                                } else {
                                     // Device not formatted, format it
-                                    println!("🔧 [NODE] Formatting device with mkfs.{}", fs_type);
+                                    println!("🔧 [NODE] No filesystem detected, formatting device with {}", fs_type);
                                     let mkfs_output = if fs_type == "ext4" {
                                         std::process::Command::new("mkfs.ext4")
-                                            .arg("-F") // Force format even if already formatted
                                             .arg(&device_path)
                                             .output()
                                             .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
                                     } else if fs_type == "xfs" {
                                         std::process::Command::new("mkfs.xfs")
-                                            .arg("-f") // Force format
                                             .arg(&device_path)
                                             .output()
                                             .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
@@ -695,9 +703,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                         println!("❌ [NODE] Format failed: {}", error);
                                         return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
                                     }
-                                    println!("✅ [NODE] Device formatted successfully");
-                                } else {
-                                    println!("ℹ️ [NODE] Device already formatted, skipping format");
+                                    println!("✅ [NODE] Device formatted successfully with {}", fs_type);
                                 }
                                 
                                 // Mount the device to staging path
