@@ -55,8 +55,9 @@ spec:
                         resp = s.recv(4096)
                         print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated: {resp.decode()}")
                         s.close()
-                        # Give SPDK time to flush metadata
-                        time.sleep(3)
+                        # Give SPDK time to flush metadata (increased from 3s to 15s for clean shutdown)
+                        # Blobstore needs to write: used pages, used blobids, used clusters, and superblock
+                        time.sleep(15)
                         print(f"[{time.strftime(\"%c\")}] preStop: Graceful shutdown complete")
                     except Exception as e:
                         print(f"[{time.strftime(\"%c\")}] preStop: Shutdown RPC failed (SPDK may already be down): {e}")
