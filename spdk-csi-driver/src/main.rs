@@ -753,51 +753,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     mount_config.fs_type
                                 };
                                 
-                                println!("📁 [NODE] Checking filesystem on device {}", device_path);
+                                println!("📁 [NODE] Formatting device {} with {}", device_path, fs_type);
                                 
                                 // Wait a moment for device to be ready
                                 std::thread::sleep(std::time::Duration::from_millis(500));
                                 
-                                // Check if device is already formatted using blkid
-                                let blkid_output = std::process::Command::new("blkid")
-                                    .arg("-p")  // Low-level probe, more reliable
-                                    .arg(&device_path)
-                                    .output()
-                                    .map_err(|e| tonic::Status::internal(format!("Failed to check filesystem: {}", e)))?;
-                                
-                                let has_filesystem = blkid_output.status.success();
-                                
-                                if has_filesystem {
-                                    let blkid_stdout = String::from_utf8_lossy(&blkid_output.stdout);
-                                    println!("✅ [NODE] Device already has a filesystem, skipping format");
-                                    println!("📋 [NODE] Filesystem info: {}", blkid_stdout.trim());
+                                // ALWAYS format the device to ensure clean state
+                                // This prevents issues where ublk ID is reused but points to different lvol
+                                // The kernel may cache old superblock data causing geometry mismatches
+                                let mkfs_output = if fs_type == "ext4" {
+                                    std::process::Command::new("mkfs.ext4")
+                                        .arg("-F")  // Force - don't ask for confirmation
+                                        .arg(&device_path)
+                                        .output()
+                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                } else if fs_type == "xfs" {
+                                    std::process::Command::new("mkfs.xfs")
+                                        .arg("-f")  // Force
+                                        .arg(&device_path)
+                                        .output()
+                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
                                 } else {
-                                    // Device not formatted, format it
-                                    println!("🔧 [NODE] No filesystem detected, formatting device with {}", fs_type);
-                                    let mkfs_output = if fs_type == "ext4" {
-                                        std::process::Command::new("mkfs.ext4")
-                                            .arg(&device_path)
-                                            .output()
-                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
-                                    } else if fs_type == "xfs" {
-                                        std::process::Command::new("mkfs.xfs")
-                                            .arg(&device_path)
-                                            .output()
-                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
-                                    } else {
-                                        std::process::Command::new(format!("mkfs.{}", fs_type))
-                                            .arg(&device_path)
-                                            .output()
-                                            .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
-                                    };
-                                    
-                                    if !mkfs_output.status.success() {
-                                        let error = String::from_utf8_lossy(&mkfs_output.stderr);
-                                        println!("❌ [NODE] Format failed: {}", error);
-                                        return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
-                                    }
-                                    println!("✅ [NODE] Device formatted successfully with {}", fs_type);
+                                    std::process::Command::new(format!("mkfs.{}", fs_type))
+                                        .arg(&device_path)
+                                        .output()
+                                        .map_err(|e| tonic::Status::internal(format!("Failed to format device: {}", e)))?
+                                };
+                                
+                                if !mkfs_output.status.success() {
+                                    let error = String::from_utf8_lossy(&mkfs_output.stderr);
+                                    println!("❌ [NODE] Format failed: {}", error);
+                                    return Err(tonic::Status::internal(format!("Failed to format device: {}", error)));
                                 }
+                                println!("✅ [NODE] Device formatted successfully with {}", fs_type);
                                 
                                 // Check if already mounted (idempotency)
                                 let is_mounted = std::process::Command::new("mountpoint")
