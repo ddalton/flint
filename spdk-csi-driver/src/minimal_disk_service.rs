@@ -710,7 +710,11 @@ impl MinimalDiskService {
             device_name,
             bdev_name: bdev_name.to_string(),
             size_bytes,
-            healthy: !claimed, // Simple heuristic: unclaimed = healthy
+            // A disk is healthy if it's usable for storage
+            // claimed=true means it has an LVS, which is GOOD (it's initialized and ready)
+            // claimed=false means it's unclaimed (also healthy, just not initialized)
+            // So all disks are healthy unless we detect specific problems
+            healthy: true,
             blobstore_initialized: lvs_name.is_some(),
             free_space,
             lvs_name,
