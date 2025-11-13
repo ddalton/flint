@@ -709,14 +709,32 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             return Err(tonic::Status::invalid_argument(format!("Unknown volume type: {}", volume_type)));
         };
 
-        // Now create ublk device from the bdev
-        println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
-        
+        // Check if ublk device already exists (idempotency)
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        let expected_device_path = format!("/dev/ublkb{}", ublk_id);
         
-        match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
-            Ok(device_path) => {
-                println!("✅ [NODE] ublk device created: {}", device_path);
+        let device_path = if std::path::Path::new(&expected_device_path).exists() {
+            println!("✅ [NODE] ublk device already exists (idempotent): {}", expected_device_path);
+            expected_device_path
+        } else {
+            // Create ublk device from the bdev
+            println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
+            
+            match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
+                Ok(path) => {
+                    println!("✅ [NODE] ublk device created: {}", path);
+                    path
+                }
+                Err(e) => {
+                    println!("❌ [NODE] Failed to create ublk device: {}", e);
+                    return Err(tonic::Status::internal(format!("Failed to create ublk device: {}", e)));
+                }
+            }
+        };
+        
+        // Device now exists (either created or already existed)
+        {
+            println!("✅ [NODE] ublk device available: {}", device_path);
                 
                 // Create staging directory if it doesn't exist
                 if let Err(e) = std::fs::create_dir_all(&staging_target_path) {
@@ -781,21 +799,33 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     println!("✅ [NODE] Device formatted successfully with {}", fs_type);
                                 }
                                 
-                                // Mount the device to staging path
-                                println!("🔧 [NODE] Mounting {} to {}", device_path, staging_target_path);
-                                let mount_output = std::process::Command::new("mount")
-                                    .arg(&device_path)
+                                // Check if already mounted (idempotency)
+                                let is_mounted = std::process::Command::new("mountpoint")
+                                    .arg("-q")
                                     .arg(&staging_target_path)
-                                    .output()
-                                    .map_err(|e| tonic::Status::internal(format!("Failed to mount device: {}", e)))?;
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false);
                                 
-                                if !mount_output.status.success() {
-                                    let error = String::from_utf8_lossy(&mount_output.stderr);
-                                    println!("❌ [NODE] Mount failed: {}", error);
-                                    return Err(tonic::Status::internal(format!("Failed to mount device: {}", error)));
+                                if is_mounted {
+                                    println!("✅ [NODE] Staging path already mounted (idempotent)");
+                                } else {
+                                    // Mount the device to staging path
+                                    println!("🔧 [NODE] Mounting {} to {}", device_path, staging_target_path);
+                                    let mount_output = std::process::Command::new("mount")
+                                        .arg(&device_path)
+                                        .arg(&staging_target_path)
+                                        .output()
+                                        .map_err(|e| tonic::Status::internal(format!("Failed to mount device: {}", e)))?;
+                                    
+                                    if !mount_output.status.success() {
+                                        let error = String::from_utf8_lossy(&mount_output.stderr);
+                                        println!("❌ [NODE] Mount failed: {}", error);
+                                        return Err(tonic::Status::internal(format!("Failed to mount device: {}", error)));
+                                    }
+                                    
+                                    println!("✅ [NODE] Device mounted to staging path");
                                 }
-                                
-                                println!("✅ [NODE] Device mounted to staging path");
                             }
                             spdk_csi_driver::csi::volume_capability::AccessType::Block(_) => {
                                 println!("ℹ️ [NODE] Block volume - no filesystem mounting needed");
@@ -809,11 +839,6 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let response = tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {});
         println!("🔵 [GRPC] NodeStageVolume returning success response");
         Ok(response)
-            }
-            Err(e) => {
-                println!("❌ [NODE] Failed to create ublk device: {}", e);
-                Err(tonic::Status::internal(format!("Failed to create ublk device: {}", e)))
-            }
         }
     }
 
