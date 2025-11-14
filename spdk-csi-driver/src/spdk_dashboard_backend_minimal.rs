@@ -240,10 +240,12 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
     let mut all_disks = Vec::new();
     
     for (node_name, agent_url) in node_agents.iter() {
-        println!("🔍 [DISK_FETCH] Fetching disks from node: {}", node_name);
+        println!("🔍 [DISK_FETCH] Fetching disks from node: {} (fast mode)", node_name);
         
+        // Use POST endpoint which calls discover_local_disks_fast() - skips expensive auto-recovery
         match http_client
-            .get(&format!("{}/api/disks", agent_url))
+            .post(&format!("{}/api/disks", agent_url))
+            .json(&json!({}))  // Empty body for POST request
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
