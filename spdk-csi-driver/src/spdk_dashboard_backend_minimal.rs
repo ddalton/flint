@@ -234,7 +234,9 @@ async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<H
 /// Fetch all disks from all node agents
 async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<DashboardDisk>, Box<dyn std::error::Error>> {
     let node_agents = state.node_agents.read().await;
-    let http_client = HttpClient::new();
+    let http_client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
     let mut all_disks = Vec::new();
     
     for (node_name, agent_url) in node_agents.iter() {
@@ -242,6 +244,7 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
         
         match http_client
             .get(&format!("{}/api/disks", agent_url))
+            .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
         {
@@ -267,12 +270,13 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
                 }
             }
             Err(e) => {
-                println!("❌ [DISK_FETCH] Failed to connect to {}: {}", node_name, e);
+                println!("⚠️ [DISK_FETCH] Failed to connect to {} (timeout or connection error): {}", node_name, e);
+                // Continue with other nodes instead of failing completely
             }
         }
     }
     
-    println!("✅ [DISK_FETCH] Collected {} disks total", all_disks.len());
+    println!("✅ [DISK_FETCH] Collected {} disks from {} node agents", all_disks.len(), node_agents.len());
     Ok(all_disks)
 }
 
@@ -390,19 +394,24 @@ async fn proxy_node_agent_endpoint(
     
     let node_agents = state.node_agents.read().await;
     if let Some(agent_url) = node_agents.get(&node) {
-        let http_client = HttpClient::new();
+        let http_client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| warp::reject::reject())?;
         let full_url = format!("{}{}", agent_url, endpoint);
         
         let result = match method.as_str() {
             "GET" => {
-                http_client.get(&full_url).send().await
+                http_client.get(&full_url)
+                    .timeout(std::time::Duration::from_secs(8))
+                    .send().await
             }
             "POST" => {
                 let mut request = http_client.post(&full_url);
                 if let Some(json_body) = body {
                     request = request.json(&json_body);
                 }
-                request.send().await
+                request.timeout(std::time::Duration::from_secs(8)).send().await
             }
             _ => {
                 return Ok(warp::reply::with_status(
@@ -510,6 +519,30 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
             proxy_node_agent_endpoint(node, "/api/disks/status".to_string(), "GET".to_string(), None, state)
         });
 
+    let proxy_reset = warp::path("api")
+        .and(warp::path("nodes"))
+        .and(warp::path::param::<String>())
+        .and(warp::path("disks"))
+        .and(warp::path("reset"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            proxy_node_agent_endpoint(node, "/api/disks/reset".to_string(), "POST".to_string(), Some(body), state)
+        });
+
+    let proxy_delete = warp::path("api")
+        .and(warp::path("nodes"))
+        .and(warp::path::param::<String>())
+        .and(warp::path("disks"))
+        .and(warp::path("delete"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            proxy_node_agent_endpoint(node, "/api/disks/delete".to_string(), "POST".to_string(), Some(body), state)
+        });
+
     let refresh_route = warp::path("api")
         .and(warp::path("refresh"))
         .and(warp::post())
@@ -526,6 +559,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .or(proxy_setup)
         .or(proxy_initialize)
         .or(proxy_status)
+        .or(proxy_reset)
+        .or(proxy_delete)
         .or(refresh_route)
         .with(cors)
 }
