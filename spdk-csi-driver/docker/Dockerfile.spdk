@@ -33,31 +33,20 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /spdk
 
-# Clone, configure, and build SPDK v25.09.x with full NVMe-oF support
+# Copy the lvol flush patch
+COPY lvol-flush.patch /tmp/
+
+# Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
     git checkout v25.09.x && \
     git submodule update --init --recursive && \
     # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
     sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
     sed -i 's/subsystem->subnqn, hostnqn);/subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype), listen_trid.traddr, listen_trid.trsvcid);/' lib/nvmf/ctrlr.c && \
-    # Apply patch to add FLUSH support to lvol bdev (fixes sync hang on ublk devices)
-    # Step 1: Add FLUSH to io_type_supported switch
-    sed -i '/case SPDK_BDEV_IO_TYPE_SEEK_HOLE:/a\	case SPDK_BDEV_IO_TYPE_FLUSH:' module/bdev/lvol/vbdev_lvol.c && \
-    # Step 2: Add lvol_flush function after lvol_seek_hole
-    sed -i '/^lvol_seek_hole(struct spdk_lvol \*lvol, struct spdk_bdev_io \*bdev_io)$/,/^}$/{/^}$/a\\n\
-static void\n\
-lvol_flush(struct spdk_lvol *lvol, struct spdk_io_channel *ch,\n\
-	   struct spdk_bdev_io *bdev_io)\n\
-{\n\
-	/* For lvol, flush is a no-op since blobstore handles persistence */\n\
-	/* The underlying base bdev (e.g., AIO, NVMe) handles actual flush */\n\
-	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);\n\
-}\n\
-}' module/bdev/lvol/vbdev_lvol.c && \
-    # Step 3: Add FLUSH case to submit_request switch (find SEEK_HOLE case and add after it)
-    sed -i '/case SPDK_BDEV_IO_TYPE_SEEK_HOLE:$/,/break;$/{/break;$/a\	case SPDK_BDEV_IO_TYPE_FLUSH:\n\		lvol_flush(lvol, ch, bdev_io);\n\		break;
-}' module/bdev/lvol/vbdev_lvol.c && \
-    echo "✅ PATCH APPLIED: lvol flush support added" && \
+    # Apply lvol flush support patch (fixes sync hang on ublk devices)
+    patch -p1 < /tmp/lvol-flush.patch && \
+    rm /tmp/lvol-flush.patch && \
+    echo "✅ FLUSH patch applied to lvol bdev" && \
     ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
