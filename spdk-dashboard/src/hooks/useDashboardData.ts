@@ -1319,49 +1319,31 @@ export const useDiskSetup = () => {
         
         return result;
       } else {
-        throw new Error(`Setup request failed: ${response.statusText}`);
+        // Try to get error details from response
+        const errorData = await response.json().catch(() => ({}));
+        const errorMsg = errorData.error || response.statusText;
+        
+        // Return error result instead of mock success
+        return {
+          success: false,
+          setup_disks: [],
+          failed_disks: request.pci_addresses.map(addr => [addr, errorMsg]),
+          warnings: [`API error: ${errorMsg}`],
+          completed_at: new Date().toISOString()
+        };
       }
     } catch (apiError) {
-      console.warn(`Disk setup API not available for ${nodeName}, using mock result:`, apiError);
+      console.error(`Disk setup API error for ${nodeName}:`, apiError);
       
-      // Mock successful setup for demo
-      const mockResult: DiskSetupResult = {
-        success: true,
-        setup_disks: request.pci_addresses,
-        failed_disks: [],
-        warnings: [],
-        huge_pages_configured: request.huge_pages_mb,
+      // Return error result instead of mock success
+      const errorMsg = apiError instanceof Error ? apiError.message : 'Unknown error';
+      return {
+        success: false,
+        setup_disks: [],
+        failed_disks: request.pci_addresses.map(addr => [addr, errorMsg]),
+        warnings: [`Connection error: ${errorMsg}`],
         completed_at: new Date().toISOString()
       };
-
-      // Simulate the setup by updating local state
-      setTimeout(() => {
-        setNodeData(prev => {
-          const nodeDisks = prev[nodeName]?.disks || [];
-          const updatedDisks = nodeDisks.map(disk => {
-            if (request.pci_addresses.includes(disk.pci_address)) {
-              return {
-                ...disk,
-                driver: request.driver_override || 'vfio-pci',
-                spdk_ready: true,
-                mounted_partitions: request.force_unmount ? [] : disk.mounted_partitions
-              };
-            }
-            return disk;
-          });
-
-          return {
-            ...prev,
-            [nodeName]: {
-              ...prev[nodeName],
-              disks: updatedDisks,
-              last_updated: new Date().toISOString()
-            }
-          };
-        });
-      }, 1000);
-
-      return mockResult;
     }
   }, [refreshNodeDisks]);
 
@@ -1386,47 +1368,27 @@ export const useDiskSetup = () => {
         
         return result;
       } else {
-        throw new Error(`Reset request failed: ${response.statusText}`);
+        // Try to get error details from response
+        const errorData = await response.json().catch(() => ({}));
+        const errorMsg = errorData.error || response.statusText;
+        
+        return {
+          success: false,
+          reset_disks: [],
+          failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
+          completed_at: new Date().toISOString()
+        };
       }
     } catch (apiError) {
-      console.warn(`Disk reset API not available for ${nodeName}, using mock result:`, apiError);
+      console.error(`Disk reset API error for ${nodeName}:`, apiError);
       
-      // Mock successful reset for demo
-      const mockResult = {
-        success: true,
-        reset_disks: pciAddresses,
-        failed_disks: [],
+      const errorMsg = apiError instanceof Error ? apiError.message : 'Unknown error';
+      return {
+        success: false,
+        reset_disks: [],
+        failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
         completed_at: new Date().toISOString()
       };
-
-      // Simulate the reset by updating local state
-      setTimeout(() => {
-        setNodeData(prev => {
-          const nodeDisks = prev[nodeName]?.disks || [];
-          const updatedDisks = nodeDisks.map(disk => {
-            if (pciAddresses.includes(disk.pci_address)) {
-              return {
-                ...disk,
-                driver: 'nvme',
-                spdk_ready: false,
-                mounted_partitions: []
-              };
-            }
-            return disk;
-          });
-
-          return {
-            ...prev,
-            [nodeName]: {
-              ...prev[nodeName],
-              disks: updatedDisks,
-              last_updated: new Date().toISOString()
-            }
-          };
-        });
-      }, 1000);
-
-      return mockResult;
     }
   }, [refreshNodeDisks, setNodeData]);
 

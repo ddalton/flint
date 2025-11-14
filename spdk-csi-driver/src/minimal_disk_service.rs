@@ -86,8 +86,8 @@ impl MinimalDiskService {
     pub async fn initialize_blobstore(&self, pci_address: &str) -> Result<String, MinimalStateError> {
         println!("🔧 [MINIMAL_DISK] Initializing blobstore on disk with PCI: {}", pci_address);
 
-        // Find the disk first
-        let disk_found = self.discover_local_disks().await?
+        // Find the disk first - use fast discovery to avoid timeout
+        let disk_found = self.discover_local_disks_fast().await?
             .into_iter()
             .find(|d| d.pci_address == pci_address)
             .ok_or_else(|| MinimalStateError::DiskNotFound { 
