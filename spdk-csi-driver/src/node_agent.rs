@@ -380,9 +380,10 @@ impl NodeAgent {
 
     /// Handle POST /api/disks/uninitialized - List uninitialized disks (RPC-style)
     async fn handle_get_uninitialized_disks(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling get uninitialized disks request");
+        println!("🌐 [HTTP_API] Handling get uninitialized disks request (fast mode)");
         
-        match node_agent.disk_service.discover_local_disks().await {
+        // Use fast discovery to avoid timeout - no LVS auto-recovery
+        match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 let uninitialized: Vec<_> = disks.iter()
                     .filter(|d| !d.blobstore_initialized && d.healthy)
@@ -415,9 +416,10 @@ impl NodeAgent {
 
     /// Handle POST /api/disks/status - Get disk status (RPC-style)
     async fn handle_get_disk_status(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling get disk status request");
+        println!("🌐 [HTTP_API] Handling get disk status request (fast mode)");
         
-        match node_agent.disk_service.discover_local_disks().await {
+        // Use fast discovery to avoid timeout - no LVS auto-recovery
+        match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 let disk_statuses: Vec<_> = disks.iter().map(|d| json!({
                     "pci_address": d.pci_address,
