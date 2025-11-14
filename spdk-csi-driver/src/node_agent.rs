@@ -392,7 +392,22 @@ impl NodeAgent {
                         "device_name": d.device_name,
                         "size_bytes": d.size_bytes,
                         "model": d.model,
-                        "healthy": d.healthy
+                        "healthy": d.healthy,
+                        // Additional fields expected by frontend
+                        "vendor_id": "0x0000",
+                        "device_id": "0x0000",
+                        "subsystem_vendor_id": "0x0000",
+                        "subsystem_device_id": "0x0000",
+                        "numa_node": 0,
+                        "driver": "kernel",  // Will be changed to vfio-pci during setup
+                        "serial": "",
+                        "firmware_version": "",
+                        "namespace_id": 1,
+                        "mounted_partitions": Vec::<String>::new(),
+                        "filesystem_type": null,
+                        "is_system_disk": false,
+                        "spdk_ready": false,  // Not setup yet
+                        "discovered_at": chrono::Utc::now().to_rfc3339()
                     }))
                     .collect();
                 
