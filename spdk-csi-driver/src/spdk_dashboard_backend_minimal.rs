@@ -483,7 +483,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::get())
         .and(state_filter.clone())
         .and_then(|node: String, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/uninitialized".to_string(), "GET".to_string(), None, state)
+            // Node agent expects POST with empty body for uninitialized disks
+            proxy_node_agent_endpoint(node, "/api/disks/uninitialized".to_string(), "POST".to_string(), Some(json!({})), state)
         });
 
     let proxy_setup = warp::path("api")
@@ -518,7 +519,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::get())
         .and(state_filter.clone())
         .and_then(|node: String, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/status".to_string(), "GET".to_string(), None, state)
+            // Node agent expects POST with empty body for status
+            proxy_node_agent_endpoint(node, "/api/disks/status".to_string(), "POST".to_string(), Some(json!({})), state)
         });
 
     let proxy_reset = warp::path("api")
