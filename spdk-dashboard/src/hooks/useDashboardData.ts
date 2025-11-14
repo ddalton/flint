@@ -1219,9 +1219,9 @@ export const useDiskSetup = () => {
         const response = await fetch(`/api/nodes/${nodeName}/disks/uninitialized`);
         if (response.ok) {
           const data = await response.json();
-          if (data.success && data.disks) {
+          if (data.success && data.uninitialized_disks) {
             // Enhance disk data with SpdkDisk CRD information
-            const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
+            const enhancedDisks = data.uninitialized_disks.map((disk: UnimplementedDisk) => {
               const enhancedDisk = { ...disk, nodeName };
               
               // Find corresponding SpdkDisk CRD data using precise matching
