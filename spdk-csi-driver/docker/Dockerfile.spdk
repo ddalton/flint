@@ -40,6 +40,47 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
     sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
     sed -i 's/subsystem->subnqn, hostnqn);/subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype), listen_trid.traddr, listen_trid.trsvcid);/' lib/nvmf/ctrlr.c && \
+    # Apply patch to add FLUSH support to lvol bdev (fixes sync hang on ublk devices)
+    cat > /tmp/lvol-flush.patch << 'PATCHEOF' && \
+--- a/module/bdev/lvol/vbdev_lvol.c
++++ b/module/bdev/lvol/vbdev_lvol.c
+@@ -854,6 +854,7 @@ vbdev_lvol_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+ 	case SPDK_BDEV_IO_TYPE_READ:
+ 	case SPDK_BDEV_IO_TYPE_SEEK_DATA:
+ 	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
++	case SPDK_BDEV_IO_TYPE_FLUSH:
+ 		return true;
+ 	default:
+ 		return false;
+@@ -975,6 +976,16 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
+ 	}
+ }
+ 
++static void
++lvol_flush(struct spdk_lvol *lvol, struct spdk_io_channel *ch,
++	   struct spdk_bdev_io *bdev_io)
++{
++	/* For lvol, flush is a no-op since blobstore handles persistence */
++	/* The underlying base bdev (e.g., AIO, NVMe) handles actual flush */
++	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
++}
++
+ static void
+ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
+ {
+@@ -1003,6 +1014,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
+ 	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
+ 		lvol_seek_hole(lvol, bdev_io);
+ 		break;
++	case SPDK_BDEV_IO_TYPE_FLUSH:
++		lvol_flush(lvol, ch, bdev_io);
++		break;
+ 	default:
+ 		SPDK_INFOLOG(vbdev_lvol, "lvol: unsupported I/O type %d\n", bdev_io->type);
+ 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+PATCHEOF
+    patch -p1 < /tmp/lvol-flush.patch && \
+    echo "✅ PATCH APPLIED: lvol flush support added" && \
     ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
