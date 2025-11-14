@@ -8,7 +8,7 @@
  		return true;
  	default:
  		return false;
-@@ -976,6 +977,16 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
+@@ -976,6 +977,15 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
  }
  
  static void
@@ -24,7 +24,7 @@
  vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
  {
  	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
-@@ -1003,6 +1014,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
+@@ -1003,6 +1013,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
  	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
  		lvol_seek_hole(lvol, bdev_io);
  		break;
@@ -34,4 +34,3 @@
  	default:
  		SPDK_INFOLOG(vbdev_lvol, "lvol: unsupported I/O type %d\n", bdev_io->type);
  		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
-
