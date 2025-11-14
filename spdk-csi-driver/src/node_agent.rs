@@ -385,8 +385,9 @@ impl NodeAgent {
         // Use fast discovery to avoid timeout - no LVS auto-recovery
         match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
-                let uninitialized: Vec<_> = disks.iter()
-                    .filter(|d| !d.blobstore_initialized && d.healthy)
+                // Return ALL disks with complete fields so frontend can categorize them
+                let all_disks: Vec<_> = disks.iter()
+                    .filter(|d| d.healthy)
                     .map(|d| json!({
                         "pci_address": d.pci_address,
                         "device_name": d.device_name,
@@ -399,14 +400,16 @@ impl NodeAgent {
                         "subsystem_vendor_id": "0x0000",
                         "subsystem_device_id": "0x0000",
                         "numa_node": 0,
-                        "driver": "kernel",  // Will be changed to vfio-pci during setup
+                        "driver": if d.blobstore_initialized { "vfio-pci" } else { "kernel" },
                         "serial": "",
                         "firmware_version": "",
                         "namespace_id": 1,
                         "mounted_partitions": Vec::<String>::new(),
                         "filesystem_type": null,
                         "is_system_disk": false,
-                        "spdk_ready": false,  // Not setup yet
+                        "spdk_ready": d.blobstore_initialized,  // LVS initialized = ready
+                        "driver_ready": d.blobstore_initialized,
+                        "blobstore_initialized": d.blobstore_initialized,
                         "discovered_at": chrono::Utc::now().to_rfc3339()
                     }))
                     .collect();
@@ -414,8 +417,8 @@ impl NodeAgent {
                 let response = json!({
                     "success": true,
                     "node": node_agent.node_name,
-                    "uninitialized_disks": uninitialized,
-                    "count": uninitialized.len()
+                    "uninitialized_disks": all_disks,  // Keep same field name for compatibility
+                    "count": all_disks.len()
                 });
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
