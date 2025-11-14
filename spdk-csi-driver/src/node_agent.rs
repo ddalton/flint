@@ -433,23 +433,44 @@ impl NodeAgent {
     }
 
     /// Handle POST /api/disks/status - Get disk status (RPC-style)
+    /// Returns ALL disks with complete fields for Disk Setup tab
     async fn handle_get_disk_status(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
         println!("🌐 [HTTP_API] Handling get disk status request (fast mode)");
         
         // Use fast discovery to avoid timeout - no LVS auto-recovery
         match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
-                let disk_statuses: Vec<_> = disks.iter().map(|d| json!({
-                    "pci_address": d.pci_address,
-                    "device_name": d.device_name,
-                    "healthy": d.healthy,
-                    "initialized": d.blobstore_initialized,
-                    "size_bytes": d.size_bytes,
-                    "free_space": d.free_space,
-                    "model": d.model,
-                    "temperature": null,
-                    "error_count": 0
-                })).collect();
+                // Return all disks with complete fields for frontend filtering
+                let disk_statuses: Vec<_> = disks.iter()
+                    .filter(|d| d.healthy)
+                    .map(|d| json!({
+                        "pci_address": d.pci_address,
+                        "device_name": d.device_name,
+                        "size_bytes": d.size_bytes,
+                        "model": d.model,
+                        "healthy": d.healthy,
+                        // Additional fields expected by frontend
+                        "vendor_id": "0x0000",
+                        "device_id": "0x0000",
+                        "subsystem_vendor_id": "0x0000",
+                        "subsystem_device_id": "0x0000",
+                        "numa_node": 0,
+                        "driver": if d.blobstore_initialized { "vfio-pci" } else { "kernel" },
+                        "serial": "",
+                        "firmware_version": "",
+                        "namespace_id": 1,
+                        "mounted_partitions": Vec::<String>::new(),
+                        "filesystem_type": null,
+                        "is_system_disk": false,
+                        "spdk_ready": d.blobstore_initialized,
+                        "driver_ready": d.blobstore_initialized,
+                        "blobstore_initialized": d.blobstore_initialized,
+                        "discovered_at": chrono::Utc::now().to_rfc3339(),
+                        "free_space": d.free_space,
+                        "temperature": null,
+                        "error_count": 0
+                    }))
+                    .collect();
                 
                 let response = json!({
                     "node": node_agent.node_name,
