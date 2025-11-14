@@ -33,8 +33,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /spdk
 
-# Copy the lvol flush patch
+# Copy patches
 COPY lvol-flush.patch /tmp/
+COPY ublk-debug.patch /tmp/
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -45,8 +46,11 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     sed -i 's/subsystem->subnqn, hostnqn);/subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype), listen_trid.traddr, listen_trid.trsvcid);/' lib/nvmf/ctrlr.c && \
     # Apply lvol flush support patch (fixes sync hang on ublk devices)
     patch -p1 < /tmp/lvol-flush.patch && \
-    rm /tmp/lvol-flush.patch && \
     echo "✅ FLUSH patch applied to lvol bdev" && \
+    # Apply ublk debug logging patch
+    patch -p1 < /tmp/ublk-debug.patch && \
+    echo "✅ ublk debug logging patch applied" && \
+    rm /tmp/*.patch && \
     ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 

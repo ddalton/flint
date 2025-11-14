@@ -1,0 +1,18 @@
+diff --git a/lib/ublk/ublk.c b/lib/ublk/ublk.c
+index 6edcced92..23c81dbb6 100644
+--- a/lib/ublk/ublk.c
++++ b/lib/ublk/ublk.c
+@@ -1740,8 +1740,12 @@ ublk_info_param_init(struct spdk_ublk_dev *ublk)
+ 
+ 	if (spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH)) {
+ 		uparams.basic.attrs = UBLK_ATTR_VOLATILE_CACHE;
++		SPDK_NOTICELOG("ublk%d: bdev '%s' supports FLUSH - setting UBLK_ATTR_VOLATILE_CACHE\n",
++			       ublk->ublk_id, spdk_bdev_get_name(bdev));
++	} else {
++		SPDK_NOTICELOG("ublk%d: bdev '%s' does NOT support FLUSH\n",
++			       ublk->ublk_id, spdk_bdev_get_name(bdev));
+ 	}
+-
+ 	if (spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_UNMAP)) {
+ 		uparams.types |= UBLK_PARAM_TYPE_DISCARD;
+ 		uparams.discard.discard_alignment = sectors_per_block;
