@@ -458,6 +458,80 @@ async fn proxy_node_agent_endpoint(
     }
 }
 
+/// Proxy node agent endpoints with longer timeout for disk operations
+async fn proxy_node_agent_endpoint_long(
+    node: String,
+    endpoint: String,
+    method: String,
+    body: Option<serde_json::Value>,
+    state: AppState
+) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🌐 [PROXY_LONG] Proxying {} {} for node: {} (extended timeout)", method, endpoint, node);
+    
+    let node_agents = state.node_agents.read().await;
+    if let Some(agent_url) = node_agents.get(&node) {
+        let http_client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|_| warp::reject::reject())?;
+        let full_url = format!("{}{}", agent_url, endpoint);
+        
+        let result = match method.as_str() {
+            "GET" => {
+                http_client.get(&full_url)
+                    .timeout(std::time::Duration::from_secs(45))
+                    .send().await
+            }
+            "POST" => {
+                let mut request = http_client.post(&full_url);
+                if let Some(json_body) = body {
+                    request = request.json(&json_body);
+                }
+                request.timeout(std::time::Duration::from_secs(45)).send().await
+            }
+            _ => {
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({"error": "Method not supported"})),
+                    warp::http::StatusCode::METHOD_NOT_ALLOWED
+                ));
+            }
+        };
+        
+        match result {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(data) => Ok(warp::reply::with_status(
+                            warp::reply::json(&data),
+                            warp::http::StatusCode::OK
+                        )),
+                        Err(_) => Ok(warp::reply::with_status(
+                            warp::reply::json(&json!({"success": false, "error": "Failed to parse response"})),
+                            warp::http::StatusCode::BAD_GATEWAY
+                        ))
+                    }
+                } else {
+                    Ok(warp::reply::with_status(
+                        warp::reply::json(&json!({"success": false, "error": format!("Node agent returned: {}", response.status())})),
+                        warp::http::StatusCode::BAD_GATEWAY
+                    ))
+                }
+            }
+            Err(e) => {
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({"success": false, "error": format!("Failed to connect: {}", e)})),
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE
+                ))
+            }
+        }
+    } else {
+        Ok(warp::reply::with_status(
+            warp::reply::json(&json!({"success": false, "error": "Node agent not found"})),
+            warp::http::StatusCode::NOT_FOUND
+        ))
+    }
+}
+
 /// Setup all HTTP routes for the minimal dashboard backend  
 pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
     let cors = warp::cors()
@@ -496,7 +570,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/setup".to_string(), "POST".to_string(), Some(body), state)
+            // Setup operations can take longer - use extended timeout
+            proxy_node_agent_endpoint_long(node, "/api/disks/setup".to_string(), "POST".to_string(), Some(body), state)
         });
 
     let proxy_initialize = warp::path("api")
@@ -508,7 +583,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/initialize".to_string(), "POST".to_string(), Some(body), state)
+            // Initialize operations can take longer - use extended timeout
+            proxy_node_agent_endpoint_long(node, "/api/disks/initialize".to_string(), "POST".to_string(), Some(body), state)
         });
 
     let proxy_status = warp::path("api")
@@ -532,7 +608,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/reset".to_string(), "POST".to_string(), Some(body), state)
+            // Reset operations can take longer - use extended timeout
+            proxy_node_agent_endpoint_long(node, "/api/disks/reset".to_string(), "POST".to_string(), Some(body), state)
         });
 
     let proxy_delete = warp::path("api")
@@ -544,7 +621,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
-            proxy_node_agent_endpoint(node, "/api/disks/delete".to_string(), "POST".to_string(), Some(body), state)
+            // Delete operations can take longer - use extended timeout
+            proxy_node_agent_endpoint_long(node, "/api/disks/delete".to_string(), "POST".to_string(), Some(body), state)
         });
 
     let refresh_route = warp::path("api")
