@@ -1,0 +1,24 @@
+--- a/lib/blob/blobstore.c	2025-11-13 21:13:22.487249982 -0800
++++ b/lib/blob/blobstore.c	2025-11-13 21:13:30.530246066 -0800
+@@ -5834,6 +5834,9 @@
+ static void
+ bs_unload_finish(struct spdk_bs_load_ctx *ctx, int bserrno)
+ {
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE UNLOAD COMPLETE (status: %d)\n", bserrno);
++	SPDK_NOTICELOG("==========================================\n");
+ 	spdk_bs_sequence_t *seq = ctx->seq;
+ 	struct spdk_blob_store *bs = ctx->bs;
+ 
+@@ -5941,7 +5944,10 @@
+ 	struct spdk_bs_cpl	cpl;
+ 	struct spdk_bs_load_ctx *ctx;
+ 
+-	SPDK_DEBUGLOG(blob, "Syncing blobstore\n");
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE UNLOAD STARTING\n");
++	SPDK_NOTICELOG("  This will flush metadata and mark clean\n");
++	SPDK_NOTICELOG("==========================================\n");
+ 
+ 	/*
+ 	 * If external snapshot channels are being destroyed while the blobstore is unloaded, the

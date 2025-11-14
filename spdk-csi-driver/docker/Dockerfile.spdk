@@ -37,6 +37,7 @@ WORKDIR /spdk
 COPY lvol-flush.patch /tmp/
 COPY ublk-debug.patch /tmp/
 COPY blob-recovery-progress.patch /tmp/
+COPY blob-shutdown-debug.patch /tmp/
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -54,6 +55,9 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply blobstore recovery progress logging patch
     patch -p1 < /tmp/blob-recovery-progress.patch && \
     echo "✅ Blobstore recovery progress logging patch applied" && \
+    # Apply blobstore shutdown debug logging patch
+    patch -p0 < /tmp/blob-shutdown-debug.patch && \
+    echo "✅ Blobstore shutdown debug logging patch applied" && \
     rm /tmp/*.patch && \
     ./configure --with-ublk --with-rdma --disable-tests --disable-unit-tests && \
     make -j$(nproc)
