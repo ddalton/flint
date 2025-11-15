@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: snapshot-source-pvc
+status:
+  phase: Bound
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: initial-data-writer
+status:
+  phase: Succeeded

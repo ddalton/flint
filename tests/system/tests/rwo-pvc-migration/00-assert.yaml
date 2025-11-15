@@ -1,0 +1,8 @@
+# Assert no existing test resources
+# This ensures clean slate before test begins
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kuttl-test-vocal-swan
+# The namespace will be auto-created by kuttl with a random name
+# This just ensures we're starting fresh

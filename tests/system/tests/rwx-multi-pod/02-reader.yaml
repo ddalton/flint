@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-pod
+spec:
+  restartPolicy: Never
+  containers:
+    - name: reader
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Reading shared file..."
+          cat /data/shared-file.txt
+          
+          # Verify all three writers wrote to the file
+          if grep -q "Writer 1:" /data/shared-file.txt && \
+             grep -q "Writer 2:" /data/shared-file.txt && \
+             grep -q "Writer 3:" /data/shared-file.txt; then
+            echo "SUCCESS: All writers' data found!"
+            exit 0
+          else
+            echo "ERROR: Missing data from one or more writers"
+            exit 1
+          fi
+      volumeMounts:
+        - name: shared-volume
+          mountPath: /data
+  volumes:
+    - name: shared-volume
+      persistentVolumeClaim:
+        claimName: shared-pvc

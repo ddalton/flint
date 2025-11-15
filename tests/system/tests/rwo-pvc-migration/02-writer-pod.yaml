@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer-pod
+  labels:
+    test: csi-writer
+spec:
+  # Ensure pod runs on a specific node (optional - for node affinity testing)
+  # You can add node selector or affinity rules here
+  # nodeSelector:
+  #   node-role: worker-1
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Writing test data at $(date)" > /data/test-file.txt
+          echo "CSI Driver Test - RWO Migration" >> /data/test-file.txt
+          echo "Random data: $RANDOM" >> /data/test-file.txt
+          sync
+          echo "Data written and synced successfully"
+          cat /data/test-file.txt
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: test-pvc

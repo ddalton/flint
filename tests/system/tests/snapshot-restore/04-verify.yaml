@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: snapshot-verifier
+spec:
+  restartPolicy: Never
+  containers:
+    - name: verifier
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Verifying snapshot data..."
+          cat /data/snapshot-test.txt
+          
+          # Verify original data exists
+          if ! grep -q "This data should be in the snapshot" /data/snapshot-test.txt; then
+            echo "ERROR: Original snapshot data not found!"
+            exit 1
+          fi
+          
+          # Verify modified data does NOT exist (snapshot was taken before modification)
+          if grep -q "MODIFIED" /data/snapshot-test.txt; then
+            echo "ERROR: Snapshot contains modified data (should not happen)!"
+            exit 1
+          fi
+          
+          echo "SUCCESS: Snapshot restored correctly with original data only!"
+      volumeMounts:
+        - name: restored-volume
+          mountPath: /data
+  volumes:
+    - name: restored-volume
+      persistentVolumeClaim:
+        claimName: restored-pvc

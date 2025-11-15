@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-pod
+status:
+  phase: Succeeded
+  containerStatuses:
+    - name: reader
+      state:
+        terminated:
+          exitCode: 0

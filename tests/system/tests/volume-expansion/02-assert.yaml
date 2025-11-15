@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: expandable-pvc
+spec:
+  resources:
+    requests:
+      storage: 2Gi
+status:
+  phase: Bound
+  # Verify the capacity has been updated
+  capacity:
+    storage: 2Gi

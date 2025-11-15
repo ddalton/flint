@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer-pod
+# Kuttl will delete this resource when it sees $delete at the top
+# Alternative: use a separate delete command or let it be cleaned up
+$patch: delete

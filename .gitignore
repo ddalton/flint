@@ -21,3 +21,11 @@ spdk-csi-driver/src/csi.v1.rs
 *.tmp
 *~
 .kube/
+
+# System test configuration
+tests/system/config/kubeconfig
+tests/system/config/*.kubeconfig
+
+# Test artifacts
+tests/system/kuttl-test-*
+tests/system/*.log

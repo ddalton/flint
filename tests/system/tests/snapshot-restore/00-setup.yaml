@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: snapshot-source-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: initial-data-writer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Snapshot Test - Initial Data" > /data/snapshot-test.txt
+          echo "Timestamp: $(date)" >> /data/snapshot-test.txt
+          echo "This data should be in the snapshot" >> /data/snapshot-test.txt
+          sync
+          echo "Initial data written"
+      volumeMounts:
+        - name: data-volume
+          mountPath: /data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: snapshot-source-pvc
