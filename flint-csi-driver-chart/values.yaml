@@ -121,6 +121,15 @@ storageClass:
     numReplicas: "2"
     autoRebuild: "true"
 
+# VolumeSnapshotClass configuration
+snapshotClass:
+  enabled: true
+  name: csi-snapclass
+  deletionPolicy: Delete  # Delete or Retain
+  parameters: {}
+    # Optional parameters for snapshot operations
+    # Currently no parameters needed - snapshots use SPDK defaults
+
 # Dashboard configuration
 # The dashboard is fully integrated with the CSI driver and shares:
 # - Service account (flint-csi-controller) with RBAC permissions
