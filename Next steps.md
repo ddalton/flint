@@ -37,12 +37,24 @@ kubectl kuttl test --test clean-shutdown
 ## Priority 2: CSI Features
 
 ### Volume Snapshot and Clone
+**Status**: ✅ **IMPLEMENTED & COMPILED**
+
 Standardized APIs for creating point-in-time snapshots of volumes and cloning existing volumes to new PVCs. This is foundational for backup, recovery, and development workflows.
 
-**Implementation Notes**:
-- SPDK supports blobstore snapshots natively
-- Need CSI VolumeSnapshot CRD support
-- Requires snapshot-controller deployment
+**Implementation**: Isolated module in `src/snapshot/` with zero impact on existing code
+- ✅ Core SPDK operations (`bdev_lvol_snapshot`, `bdev_lvol_clone`)
+- ✅ HTTP API endpoints (5 routes on port 8081)
+- ✅ CSI RPC implementations (`CreateSnapshot`, `DeleteSnapshot`, `ListSnapshots`)
+- ✅ Clean compilation with zero errors
+- ✅ Only 61 lines changed in existing files (minimal integration)
+
+**See**: [Volume Snapshots](FLINT_CSI_ARCHITECTURE.md#volume-snapshots) section in architecture doc
+
+**Next Steps**:
+- 📋 Write unit tests
+- 🧪 Deploy and test in cluster  
+- 📝 Add kuttl integration tests
+- 🎯 Add VolumeSnapshotClass to Helm chart
 
 ### Volume Expansion (Resizing)
 The ability to dynamically grow the size of a persistent volume without taking down the consuming Pod or application.

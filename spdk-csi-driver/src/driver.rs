@@ -850,6 +850,24 @@ impl SpdkCsiDriver {
             }
         }
     }
+
+    /// Get list of all node names in the cluster
+    /// Used by snapshot controller to query all nodes for snapshots
+    pub async fn get_all_nodes(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        use kube::api::ListParams;
+        use k8s_openapi::api::core::v1::Node as k8sNode;
+        
+        let nodes_api: Api<k8sNode> = Api::all(self.kube_client.clone());
+        let nodes = nodes_api.list(&ListParams::default()).await?;
+        
+        let node_names: Vec<String> = nodes.items
+            .iter()
+            .filter_map(|n| n.metadata.name.clone())
+            .collect();
+        
+        println!("✅ [DRIVER] Found {} nodes in cluster", node_names.len());
+        Ok(node_names)
+    }
 }
 
 /// Volume information

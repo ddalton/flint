@@ -631,26 +631,35 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerGetCapabilitiesResponse { capabilities }))
     }
 
+    // ============= SNAPSHOT MODULE INTEGRATION =============
+    // Delegate to SnapshotController (isolated snapshot module)
     async fn create_snapshot(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::CreateSnapshotRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::CreateSnapshotRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateSnapshotResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Create snapshot not implemented"))
+        use spdk_csi_driver::snapshot::SnapshotController;
+        let snapshot_controller = SnapshotController::new(self.driver.clone());
+        snapshot_controller.create_snapshot(request).await
     }
 
     async fn delete_snapshot(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::DeleteSnapshotRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::DeleteSnapshotRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::DeleteSnapshotResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Delete snapshot not implemented"))
+        use spdk_csi_driver::snapshot::SnapshotController;
+        let snapshot_controller = SnapshotController::new(self.driver.clone());
+        snapshot_controller.delete_snapshot(request).await
     }
 
     async fn list_snapshots(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::ListSnapshotsRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::ListSnapshotsRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ListSnapshotsResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("List snapshots not implemented"))
+        use spdk_csi_driver::snapshot::SnapshotController;
+        let snapshot_controller = SnapshotController::new(self.driver.clone());
+        snapshot_controller.list_snapshots(request).await
     }
+    // ============= END SNAPSHOT INTEGRATION =============
 
     async fn controller_expand_volume(
         &self,

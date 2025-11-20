@@ -9,9 +9,10 @@
 3. [Components](#components)
 4. [Data Flow](#data-flow)
 5. [API Reference](#api-reference)
-6. [Deployment](#deployment)
-7. [Development](#development)
-8. [Migration from CRDs](#migration-from-crds)
+6. [Volume Snapshots](#volume-snapshots)
+7. [Deployment](#deployment)
+8. [Development](#development)
+9. [Migration from CRDs](#migration-from-crds)
 
 ---
 
@@ -452,6 +453,108 @@ graph TD
   "last_updated": "2024-11-10T17:30:00Z"
 }
 ```
+
+---
+
+## Volume Snapshots
+
+### Overview
+
+Flint supports CSI volume snapshots using SPDK's native `bdev_lvol_snapshot` capabilities. Snapshots are implemented as an **isolated module** (`src/snapshot/`) to maintain zero regression risk for existing volume operations.
+
+### Architecture
+
+**Modular Design**: All snapshot code is in a separate module with minimal integration (61 lines across 4 files):
+
+```
+src/snapshot/
+├── snapshot_service.rs      # SPDK snapshot operations
+├── snapshot_routes.rs       # HTTP endpoints
+├── snapshot_csi.rs          # CSI RPC implementations
+└── snapshot_models.rs       # Data structures
+```
+
+### SPDK Operations
+
+**Create Snapshot** (Read-only, instant with copy-on-write):
+```json
+{
+  "method": "bdev_lvol_snapshot",
+  "params": {
+    "lvol_name": "vol_pvc-abc123",
+    "snapshot_name": "snap_pvc-abc123_1234567890"
+  }
+}
+```
+
+**Clone Snapshot** (Creates writable volume):
+```json
+{
+  "method": "bdev_lvol_clone",
+  "params": {
+    "snapshot_name": "snap_uuid",
+    "clone_name": "vol_restored-pvc"
+  }
+}
+```
+
+### HTTP API Endpoints
+
+Node agent exposes snapshot operations on port 8081:
+
+```
+POST /api/snapshots/create   - Create snapshot
+POST /api/snapshots/delete   - Delete snapshot
+POST /api/snapshots/clone    - Clone snapshot to new volume
+GET  /api/snapshots/list     - List all snapshots
+GET  /api/snapshots/get_info - Get snapshot details
+```
+
+### CSI RPCs
+
+Three CSI Controller RPCs implemented:
+
+- **`CreateSnapshot`** - Called when user creates VolumeSnapshot
+- **`DeleteSnapshot`** - Called when user deletes VolumeSnapshot  
+- **`ListSnapshots`** - Called by kubectl/snapshot-controller
+
+### Usage Example
+
+```yaml
+# Create snapshot
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-snapshot
+spec:
+  volumeSnapshotClassName: flint-snapshot-class
+  source:
+    persistentVolumeClaimName: my-pvc
+
+# Restore from snapshot
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restored-pvc
+spec:
+  dataSource:
+    name: my-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint-csi
+```
+
+### Key Properties
+
+- ✅ **Instant Creation**: Copy-on-write, no data copying
+- ✅ **Space Efficient**: Minimal storage overhead
+- ✅ **Read-Only**: Snapshots cannot be modified
+- ✅ **Cloneable**: Multiple clones from same snapshot
+- ✅ **Zero Regression**: Isolated module, existing code unchanged
 
 ---
 

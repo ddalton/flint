@@ -212,6 +212,16 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_force_unstage);
 
+        // ============= SNAPSHOT MODULE INTEGRATION =============
+        // Register snapshot routes (isolated module - no changes to existing routes)
+        use crate::snapshot::{SnapshotService, register_snapshot_routes};
+        let snapshot_service = Arc::new(SnapshotService::new(
+            self.node_name.clone(),
+            self.disk_service.spdk_socket_path.clone(),
+        ));
+        let snapshot_routes = register_snapshot_routes(snapshot_service);
+        // ============= END SNAPSHOT INTEGRATION =============
+
         // Combine all routes
         list_disks
             .or(list_disks_post)
@@ -229,6 +239,7 @@ impl NodeAgent {
             .or(ublk_delete)
             .or(get_volume_info)
             .or(force_unstage)
+            .or(snapshot_routes)  // Add snapshot routes
             .with(warp::cors().allow_any_origin())
     }
 
