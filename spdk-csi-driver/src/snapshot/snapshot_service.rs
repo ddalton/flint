@@ -208,14 +208,30 @@ impl SnapshotService {
 
         if let Some(lvol_list) = lvols.as_array() {
             for lvol in lvol_list {
-                let name = lvol["name"].as_str().unwrap_or("");
+                // Check if this lvol is a snapshot using SPDK's snapshot flag
+                let is_snapshot = lvol.get("driver_specific")
+                    .and_then(|ds| ds.get("lvol"))
+                    .and_then(|lv| lv.get("snapshot"))
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(false);
                 
-                // Filter for our snapshots (name starts with "snap_")
-                if SnapshotInfo::is_valid_snapshot_name(name) {
+                if is_snapshot {
+                    let uuid = lvol["uuid"].as_str().unwrap_or("");
+                    
+                    // Get the human-readable name from aliases
+                    let snapshot_name = lvol.get("aliases")
+                        .and_then(|a| a.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|a| a.as_str())
+                        .unwrap_or(uuid);
+                    
+                    // Extract just the snapshot part from alias (lvs_name/snap_...)
+                    let simple_name = snapshot_name.split('/').last().unwrap_or(snapshot_name);
+                    
                     let snapshot_info = SnapshotInfo {
-                        snapshot_uuid: lvol["uuid"].as_str().unwrap_or("").to_string(),
-                        snapshot_name: name.to_string(),
-                        source_volume_id: SnapshotInfo::volume_id_from_snapshot_name(name),
+                        snapshot_uuid: uuid.to_string(),
+                        snapshot_name: simple_name.to_string(),
+                        source_volume_id: SnapshotInfo::volume_id_from_snapshot_name(simple_name),
                         node_name: self.node_name.clone(),
                         lvs_name: self.extract_lvs_name_from_lvol(lvol),
                         size_bytes: self.calculate_lvol_size(lvol),
@@ -261,11 +277,20 @@ impl SnapshotService {
 
         if let Some(bdev_list) = response.as_array() {
             if let Some(bdev) = bdev_list.first() {
-                let name = bdev["name"].as_str().unwrap_or("");
+                // Get the human-readable name from aliases
+                let snapshot_name = bdev.get("aliases")
+                    .and_then(|a| a.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|a| a.as_str())
+                    .unwrap_or(uuid);
+                
+                // Extract just the snapshot part from alias (lvs_name/snap_...)
+                let simple_name = snapshot_name.split('/').last().unwrap_or(snapshot_name);
+                
                 return Ok(SnapshotInfo {
                     snapshot_uuid: uuid.to_string(),
-                    snapshot_name: name.to_string(),
-                    source_volume_id: SnapshotInfo::volume_id_from_snapshot_name(name),
+                    snapshot_name: simple_name.to_string(),
+                    source_volume_id: SnapshotInfo::volume_id_from_snapshot_name(simple_name),
                     node_name: self.node_name.clone(),
                     lvs_name: self.extract_lvs_name_from_lvol(bdev),
                     size_bytes: self.calculate_lvol_size(bdev),
