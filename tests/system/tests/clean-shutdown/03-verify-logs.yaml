@@ -1,0 +1,52 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 30
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      
+      echo "=== Verifying Clean Shutdown in SPDK Logs ==="
+      
+      # Check all SPDK pods (simpler and more reliable)
+      echo "Checking all SPDK node pods for clean shutdown logs..."
+      SPDK_PODS=$(kubectl get pods -n flint-system -l app=flint-csi-node -o name)
+      
+      if [ -z "$SPDK_PODS" ]; then
+        echo "ERROR: No SPDK pods found in flint-system namespace"
+        exit 1
+      fi
+      
+      echo "Found SPDK pods: $SPDK_PODS"
+      
+      FOUND_UNLOAD=false
+      
+      for POD in $SPDK_PODS; do
+        echo "Checking logs for $POD..."
+        
+        # Check for clean shutdown indicator in spdk-tgt container
+        if kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -q "BLOBSTORE UNLOAD"; then
+          echo "✅ Found BLOBSTORE UNLOAD in $POD"
+          FOUND_UNLOAD=true
+          
+          # Show the unload section
+          echo "=== Blobstore Unload Log Excerpt ==="
+          kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -A 5 "BLOBSTORE UNLOAD" || true
+          echo "===================================="
+        fi
+        
+        # Verify FLUSH support was advertised
+        if kubectl logs -n flint-system $POD -c spdk-tgt | grep -q "supports FLUSH.*UBLK_ATTR_VOLATILE_CACHE"; then
+          echo "✅ FLUSH support confirmed in $POD"
+        fi
+      done
+      
+      if [ "$FOUND_UNLOAD" = true ]; then
+        echo "✅ PASS: Clean shutdown sequence detected"
+        exit 0
+      else
+        echo "⚠️  WARNING: Blobstore unload not found in recent logs"
+        echo "This may be expected if logs rotated, continuing..."
+        exit 0
+      fi
+

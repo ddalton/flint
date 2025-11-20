@@ -23,6 +23,20 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 .
 ├── kuttl-testsuite.yaml           # Main test suite configuration
 ├── tests/
+│   ├── clean-shutdown/            # Test: Clean shutdown and fast remount ⭐ NEW
+│   │   ├── 00-pvc.yaml            # Create PVC
+│   │   ├── 00-assert.yaml         # Assert PVC bound
+│   │   ├── 01-writer-pod.yaml     # Write data and sync
+│   │   ├── 01-assert.yaml         # Assert write succeeded
+│   │   ├── 02-delete-writer.yaml  # Trigger clean shutdown
+│   │   ├── 02-assert.yaml         # Assert deletion
+│   │   ├── 03-verify-logs.yaml    # Verify BLOBSTORE UNLOAD in logs
+│   │   ├── 04-fast-remount.yaml   # Remount and verify data
+│   │   ├── 04-assert.yaml         # Assert fast remount (< 30s)
+│   │   ├── 05-verify-no-recovery.yaml  # Verify no recovery triggered
+│   │   ├── 06-rapid-cycle.yaml    # Test rapid mount/unmount
+│   │   ├── 06-assert.yaml         # Assert rapid cycle works
+│   │   └── README.md              # Detailed test documentation
 │   ├── rwo-pvc-migration/         # Test: RWO PVC migration between nodes
 │   │   ├── 00-assert.yaml         # Initial state check
 │   │   ├── 01-pvc.yaml            # Create PVC
@@ -34,6 +48,7 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 │   │   ├── 04-reader-pod.yaml     # Pod that reads data on different node
 │   │   └── 04-assert.yaml         # Assert reader succeeded
 │   ├── rwx-multi-pod/             # Test: Multiple pods with RWX
+│   ├── snapshot-restore/          # Test: Snapshot and restore
 │   └── volume-expansion/          # Test: Volume expansion
 └── README.md
 ```
@@ -82,6 +97,30 @@ spec:
 ```
 
 ## Test Details
+
+### ⭐ Clean Shutdown Test (NEW - CRITICAL)
+
+**Purpose**: Verify that SPDK blobstore properly handles clean shutdown operations with all required patches applied.
+
+**Critical Issue**: Without patches, blobstore isn't marked "clean" on unmount → 3-5 minute recovery on every pod restart.
+
+**Steps**:
+1. Create PVC and write test data
+2. Delete pod (triggers clean shutdown)
+3. Verify SPDK logs show "BLOBSTORE UNLOAD COMPLETE"
+4. Remount volume in new pod (must complete < 30 seconds)
+5. Verify no recovery was triggered ("Clean blobstore, no recovery needed")
+6. Test rapid mount/unmount cycles
+7. Verify data integrity throughout
+
+**What it tests**:
+- SPDK patch application (lvol-flush, ublk-debug, blob-shutdown-debug, blob-recovery-progress)
+- FLUSH support through entire stack
+- Blobstore clean shutdown sequence
+- Fast remount without recovery
+- Production-ready pod migration performance
+
+**See**: `tests/clean-shutdown/README.md` for detailed documentation
 
 ### RWO PVC Migration Test
 

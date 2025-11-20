@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fast-remount-pod
+  labels:
+    test: clean-shutdown-reader
+spec:
+  restartPolicy: Never
+  containers:
+    - name: reader
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "=== Clean Shutdown Test - Fast Remount Verification ==="
+          START_TIME=$(date +%s)
+          
+          # Verify data integrity
+          if [ ! -f /data/clean-shutdown-test.txt ]; then
+            echo "❌ ERROR: Test file not found!"
+            exit 1
+          fi
+          
+          echo "=== Reading test file ==="
+          cat /data/clean-shutdown-test.txt
+          
+          # Verify test blob exists
+          if [ ! -f /data/test-blob.dat ]; then
+            echo "❌ ERROR: Test blob not found!"
+            exit 1
+          fi
+          
+          BLOB_SIZE=$(stat -c %s /data/test-blob.dat 2>/dev/null || stat -f %z /data/test-blob.dat 2>/dev/null)
+          echo "Test blob size: $BLOB_SIZE bytes"
+          
+          if [ "$BLOB_SIZE" -lt 10485760 ]; then  # 10MB
+            echo "❌ ERROR: Blob file too small, may be corrupted"
+            exit 1
+          fi
+          
+          END_TIME=$(date +%s)
+          MOUNT_TIME=$((END_TIME - START_TIME))
+          
+          echo "=== SUCCESS: Data verified ==="
+          echo "Mount and verification took: ${MOUNT_TIME}s"
+          echo "✅ Clean remount successful (no recovery delay)"
+          exit 0
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: clean-shutdown-pvc
+

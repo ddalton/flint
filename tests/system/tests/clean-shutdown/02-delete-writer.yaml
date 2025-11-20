@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer-pod
+# This triggers clean shutdown and blobstore unload
+$patch: delete
+

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cycle-test-pod
+status:
+  phase: Succeeded
+  containerStatuses:
+    - name: cycler
+      state:
+        terminated:
+          exitCode: 0
+---
+# Verify rapid cycle completes within timeout
+# With patches: should complete quickly
+# Without patches: would trigger recovery and timeout
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 30
+

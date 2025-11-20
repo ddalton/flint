@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer-pod
+  labels:
+    test: clean-shutdown-writer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "=== Clean Shutdown Test - Writing Data ==="
+          echo "Timestamp: $(date)" > /data/clean-shutdown-test.txt
+          echo "Test iteration: 1" >> /data/clean-shutdown-test.txt
+          echo "Random data: $RANDOM" >> /data/clean-shutdown-test.txt
+          
+          # Write a larger file to ensure blobstore has meaningful data
+          dd if=/dev/urandom of=/data/test-blob.dat bs=1M count=10 2>&1
+          
+          # Critical: sync to ensure data reaches storage layer
+          sync
+          echo "=== Data written and synced successfully ==="
+          cat /data/clean-shutdown-test.txt
+          echo "=== Writer pod complete ==="
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: clean-shutdown-pvc
+

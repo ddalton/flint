@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fast-remount-pod
+status:
+  phase: Succeeded
+  containerStatuses:
+    - name: reader
+      state:
+        terminated:
+          exitCode: 0
+---
+# Verify the remount happens quickly (within test timeout)
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 30
+# If patches are working: remount should be < 15s
+# If patches NOT working: would take 3-5 minutes (would fail this 30s timeout)
+
