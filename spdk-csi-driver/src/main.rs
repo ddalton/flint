@@ -332,6 +332,83 @@ impl MinimalControllerService {
     fn new(driver: Arc<SpdkCsiDriver>) -> Self {
         Self { driver }
     }
+
+    /// Create volume from snapshot by cloning the snapshot
+    async fn create_volume_from_snapshot(
+        &self,
+        volume_id: &str,
+        snapshot_id: &str,
+        size_bytes: u64,
+    ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
+        println!("🔄 [CONTROLLER] Creating volume {} from snapshot {}", volume_id, snapshot_id);
+
+        // Step 1: Find which node has the snapshot
+        let nodes = self.driver.get_all_nodes().await
+            .map_err(|e| tonic::Status::internal(format!("Failed to list nodes: {}", e)))?;
+
+        let mut snapshot_node = None;
+        
+        for node in &nodes {
+            let payload = serde_json::json!({
+                "snapshot_uuid": snapshot_id
+            });
+            
+            match self.driver.call_node_agent(node, "/api/snapshots/get_info", &payload).await {
+                Ok(_) => {
+                    snapshot_node = Some(node.clone());
+                    println!("✅ [CONTROLLER] Found snapshot on node: {}", node);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        
+        let node_name = snapshot_node
+            .ok_or_else(|| tonic::Status::not_found(format!("Snapshot {} not found", snapshot_id)))?;
+
+        // Step 2: Clone the snapshot to create a new writable volume
+        let clone_name = format!("vol_{}", volume_id);
+        
+        let payload = serde_json::json!({
+            "snapshot_uuid": snapshot_id,
+            "clone_name": clone_name
+        });
+        
+        let response = self.driver
+            .call_node_agent(&node_name, "/api/snapshots/clone", &payload)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to clone snapshot: {}", e)))?;
+        
+        let clone_uuid = response["clone_uuid"].as_str()
+            .ok_or_else(|| tonic::Status::internal("No clone UUID in response"))?
+            .to_string();
+        
+        let actual_size = response["size_bytes"].as_i64().unwrap_or(size_bytes as i64);
+        
+        println!("✅ [CONTROLLER] Volume {} created from snapshot (clone UUID: {})", volume_id, clone_uuid);
+        
+        // Step 3: Return volume with content_source populated
+        let content_source = spdk_csi_driver::csi::VolumeContentSource {
+            r#type: Some(spdk_csi_driver::csi::volume_content_source::Type::Snapshot(
+                spdk_csi_driver::csi::volume_content_source::SnapshotSource {
+                    snapshot_id: snapshot_id.to_string(),
+                }
+            )),
+        };
+
+        let response = spdk_csi_driver::csi::CreateVolumeResponse {
+            volume: Some(spdk_csi_driver::csi::Volume {
+                volume_id: volume_id.to_string(),
+                capacity_bytes: actual_size,
+                volume_context: std::collections::HashMap::new(),
+                content_source: Some(content_source),
+                accessible_topology: vec![],
+            }),
+        };
+        
+        println!("🎉 [CONTROLLER] Volume from snapshot created successfully");
+        Ok(tonic::Response::new(response))
+    }
 }
 
 #[tonic::async_trait]
@@ -344,7 +421,23 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.name.clone();
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
-        // Extract parameters
+        // Check if creating from snapshot first (before extracting parameters that move req fields)
+        if let Some(content_source) = &req.volume_content_source {
+            if let Some(snapshot_source) = &content_source.r#type {
+                use spdk_csi_driver::csi::volume_content_source::Type;
+                if let Type::Snapshot(snapshot) = snapshot_source {
+                    println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
+                    
+                    let size_bytes = req.capacity_range.as_ref()
+                        .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
+                        .unwrap_or(1024 * 1024 * 1024) as u64;
+                    
+                    return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
+                }
+            }
+        }
+
+        // Extract parameters for normal volume creation
         let size_bytes = req.capacity_range
             .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
             .unwrap_or(1024 * 1024 * 1024) as u64; // Default 1GB
