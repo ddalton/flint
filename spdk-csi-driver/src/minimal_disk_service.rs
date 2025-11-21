@@ -137,6 +137,40 @@ impl MinimalDiskService {
         let lvol_name = format!("vol_{}", volume_id);
         let size_mib = (size_bytes + 1048575) / 1048576; // Round up to MiB
 
+        println!("🔍 [LVOL_CREATE_DEBUG] Lvol name will be: {}", lvol_name);
+        println!("🔍 [LVOL_CREATE_DEBUG] Size in MiB: {}", size_mib);
+        
+        // Check if lvol already exists before attempting to create
+        println!("🔍 [LVOL_CREATE_DEBUG] Checking if lvol already exists...");
+        let check_bdevs = self.call_spdk_rpc(&json!({"method": "bdev_get_bdevs"})).await
+            .map_err(|e| MinimalStateError::SpdkRpcError {
+                message: format!("Failed to check existing bdevs: {}", e)
+            })?;
+        
+        if let Some(bdev_list) = check_bdevs["result"].as_array() {
+            for bdev in bdev_list {
+                if let Some(aliases) = bdev["aliases"].as_array() {
+                    for alias in aliases {
+                        if let Some(alias_str) = alias.as_str() {
+                            // Check if alias contains our lvol name
+                            if alias_str.ends_with(&lvol_name) {
+                                println!("⚠️ [LVOL_CREATE_DEBUG] Found existing bdev with matching name:");
+                                println!("   Alias: {}", alias_str);
+                                println!("   UUID: {}", bdev["name"].as_str().unwrap_or("unknown"));
+                                println!("   Product: {}", bdev.get("product_name").and_then(|p| p.as_str()).unwrap_or("unknown"));
+                            }
+                        }
+                    }
+                }
+                // Also check the bdev name itself
+                if let Some(name) = bdev["name"].as_str() {
+                    if name.contains(&lvol_name) {
+                        println!("⚠️ [LVOL_CREATE_DEBUG] Found bdev with name containing '{}': {}", lvol_name, name);
+                    }
+                }
+            }
+        }
+
         let create_params = json!({
             "method": "bdev_lvol_create",
             "params": {
@@ -147,9 +181,14 @@ impl MinimalDiskService {
             }
         });
 
+        println!("🔧 [LVOL_CREATE_DEBUG] Calling SPDK bdev_lvol_create with params: {}", serde_json::to_string_pretty(&create_params).unwrap_or_default());
+
         let response = self.call_spdk_rpc(&create_params).await
-            .map_err(|e| MinimalStateError::SpdkRpcError { 
-                message: format!("Failed to create lvol: {}", e) 
+            .map_err(|e| {
+                println!("❌ [LVOL_CREATE_DEBUG] SPDK returned error: {}", e);
+                MinimalStateError::SpdkRpcError { 
+                    message: format!("Failed to create lvol: {}", e) 
+                }
             })?;
 
         let lvol_uuid = response["result"].as_str()
