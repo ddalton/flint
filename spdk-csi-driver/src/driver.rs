@@ -12,7 +12,7 @@ use tonic::Status;
 use kube::{Api, Client};
 use k8s_openapi::api::core::v1::Node as k8sNode;
 
-use crate::minimal_models::{MinimalStateError, DiskInfo};
+use crate::minimal_models::{MinimalStateError, DiskInfo, VolumeCreationResult, ReplicaInfo};
 use crate::capacity_cache::CapacityCache;
 
 /// Minimal State SPDK CSI Driver
@@ -141,7 +141,7 @@ impl SpdkCsiDriver {
     }
 
     /// Create volume using minimal state architecture
-    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<String, MinimalStateError> {
+    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<VolumeCreationResult, MinimalStateError> {
         println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})", 
                  volume_id, size_bytes, replica_count, thin_provision);
 
@@ -215,7 +215,23 @@ impl SpdkCsiDriver {
         self.capacity_cache.invalidate(&node_name).await;
         
         println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
-        Ok(lvol_uuid)
+        
+        // Return full volume creation result with metadata
+        Ok(VolumeCreationResult {
+            volume_id: volume_id.to_string(),
+            size_bytes,
+            replicas: vec![ReplicaInfo {
+                node_name: node_name.to_string(),
+                disk_pci_address: selected_disk.pci_address.clone(),
+                lvol_uuid: lvol_uuid.clone(),
+                lvol_name: format!("vol_{}", volume_id),
+                lvs_name: lvs_name.clone(),
+                nqn: None,
+                target_ip: None,
+                target_port: None,
+                health: "online".to_string(),
+            }],
+        })
     }
 
     /// Get SPDK RPC URL for a specific node (simplified)
@@ -753,11 +769,24 @@ impl SpdkCsiDriver {
     }
 
     /// Get volume information (which node it's on, lvol UUID, etc.)
-    /// Queries all nodes to find the volume
+    /// First tries to read from PV volumeAttributes (fast), then queries nodes (slow fallback)
     pub async fn get_volume_info(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DRIVER] Getting info for volume: {}", volume_id);
         
-        // Query all nodes to find where the volume is located
+        // TRY 1: Read from PV volumeAttributes (FAST - single K8s API call)
+        match self.get_volume_info_from_pv(volume_id).await {
+            Ok(info) => {
+                println!("✅ [DRIVER] Found volume info from PV metadata (fast path): node={}", 
+                         info.node_name);
+                return Ok(info);
+            }
+            Err(e) => {
+                println!("⚠️ [DRIVER] Could not get info from PV metadata: {}", e);
+                println!("🔍 [DRIVER] Falling back to querying all nodes (slow path)...");
+            }
+        }
+
+        // TRY 2: FALLBACK - Query all nodes to find the volume (SLOW - for legacy volumes)
         let all_nodes = self.get_all_nodes().await?;
         
         if all_nodes.is_empty() {
@@ -815,6 +844,78 @@ impl SpdkCsiDriver {
         
         println!("❌ [DRIVER] Volume {} not found on any node", volume_id);
         Err(format!("Volume {} not found on any node", volume_id).into())
+    }
+
+    /// Get volume info from PV volumeAttributes (fast path)
+    async fn get_volume_info_from_pv(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv_list = pvs.list(&Default::default()).await?;
+        
+        for pv in pv_list.items {
+            if let Some(spec) = &pv.spec {
+                if let Some(csi) = &spec.csi {
+                    if csi.volume_handle == volume_id {
+                        // Found PV - read volumeAttributes
+                        if let Some(attrs) = &csi.volume_attributes {
+                            // Check if metadata exists
+                            if let Some(node_name) = attrs.get("flint.csi.storage.io/node-name") {
+                                let lvol_uuid = attrs.get("flint.csi.storage.io/lvol-uuid")
+                                    .ok_or("Missing lvol-uuid in volumeAttributes")?;
+                                let lvs_name = attrs.get("flint.csi.storage.io/lvs-name")
+                                    .ok_or("Missing lvs-name in volumeAttributes")?;
+                                
+                                // Get size from PV capacity
+                                let size_bytes = if let Some(capacity) = &spec.capacity {
+                                    if let Some(storage) = capacity.get("storage") {
+                                        // Parse quantity like "1Gi", "2Gi", etc.
+                                        Self::parse_quantity(&storage.0)?
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                
+                                return Ok(VolumeInfo {
+                                    volume_id: volume_id.to_string(),
+                                    node_name: node_name.clone(),
+                                    lvol_uuid: lvol_uuid.clone(),
+                                    lvs_name: lvs_name.clone(),
+                                    size_bytes,
+                                });
+                            }
+                        }
+                        // PV found but no metadata - fall through to query nodes
+                        return Err("PV found but missing flint metadata in volumeAttributes".into());
+                    }
+                }
+            }
+        }
+        
+        Err("PV not found".into())
+    }
+
+    /// Parse Kubernetes quantity string (e.g., "1Gi", "500Mi") to bytes
+    fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let quantity_str = quantity_str.trim();
+        
+        // Simple parser for common cases
+        if quantity_str.ends_with("Gi") {
+            let num: u64 = quantity_str.trim_end_matches("Gi").parse()?;
+            Ok(num * 1024 * 1024 * 1024)
+        } else if quantity_str.ends_with("Mi") {
+            let num: u64 = quantity_str.trim_end_matches("Mi").parse()?;
+            Ok(num * 1024 * 1024)
+        } else if quantity_str.ends_with("Ki") {
+            let num: u64 = quantity_str.trim_end_matches("Ki").parse()?;
+            Ok(num * 1024)
+        } else {
+            // Assume bytes
+            Ok(quantity_str.parse()?)
+        }
     }
 
     /// Setup NVMe-oF target and return connection info

@@ -54,6 +54,14 @@ pub struct VolumeInfo {
     pub created_at: String,
 }
 
+/// Volume creation result with replica information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeCreationResult {
+    pub volume_id: String,
+    pub size_bytes: u64,
+    pub replicas: Vec<ReplicaInfo>,
+}
+
 /// Node information for cluster discovery
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {

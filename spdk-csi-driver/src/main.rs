@@ -463,14 +463,53 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         // Call the driver's create volume method 
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
-            Ok(_volume_info) => {
-                println!("✅ [CONTROLLER] Volume {} created successfully", volume_id);
+            Ok(result) => {
+                println!("✅ [CONTROLLER] Volume {} created successfully with {} replica(s)", 
+                         volume_id, result.replicas.len());
+                
+                // Build volume_context with metadata
+                let mut volume_context = std::collections::HashMap::new();
+                
+                // Add replica count
+                volume_context.insert(
+                    "flint.csi.storage.io/replica-count".to_string(),
+                    result.replicas.len().to_string(),
+                );
+
+                if result.replicas.len() == 1 {
+                    // SINGLE REPLICA: Store simple metadata
+                    let replica = &result.replicas[0];
+                    volume_context.insert(
+                        "flint.csi.storage.io/node-name".to_string(),
+                        replica.node_name.clone(),
+                    );
+                    volume_context.insert(
+                        "flint.csi.storage.io/lvol-uuid".to_string(),
+                        replica.lvol_uuid.clone(),
+                    );
+                    volume_context.insert(
+                        "flint.csi.storage.io/lvs-name".to_string(),
+                        replica.lvs_name.clone(),
+                    );
+                    
+                    println!("📝 [CONTROLLER] Storing metadata in PV: node={}, lvol={}", 
+                             replica.node_name, replica.lvol_uuid);
+                } else {
+                    // MULTI-REPLICA: Store full replica array as JSON (future use)
+                    let replicas_json = serde_json::to_string(&result.replicas)
+                        .map_err(|e| tonic::Status::internal(format!("Failed to serialize replicas: {}", e)))?;
+                    
+                    volume_context.insert(
+                        "flint.csi.storage.io/replicas".to_string(),
+                        replicas_json,
+                    );
+                }
                 
                 let response = spdk_csi_driver::csi::CreateVolumeResponse {
                     volume: Some(spdk_csi_driver::csi::Volume {
                         volume_id: volume_id.clone(),
                         capacity_bytes: size_bytes as i64,
-                        volume_context: std::collections::HashMap::new(),
+                        volume_context,  // Kubernetes stores this in PV.spec.csi.volumeAttributes
                         content_source: None,
                         accessible_topology: vec![],
                     }),

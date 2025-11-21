@@ -118,7 +118,7 @@ storageClass:
   reclaimPolicy: "Delete"
   allowVolumeExpansion: true
   parameters:
-    numReplicas: "2"
+    numReplicas: "1"  # Single replica (default). Set to "2" or "3" for multi-replica HA (not yet implemented)
     autoRebuild: "true"
     thinProvision: "false"  # Set to "true" for thin provisioning (space allocated on write)
 
