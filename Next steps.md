@@ -57,7 +57,7 @@ Standardized APIs for creating point-in-time snapshots of volumes and cloning ex
 - 🎯 Add VolumeSnapshotClass to Helm chart
 
 ### Volume Expansion (Resizing)
-**Status**: ✅ **IMPLEMENTED** - Ready to test
+**Status**: ✅ **IMPLEMENTED & TESTED**
 
 The ability to dynamically grow the size of a persistent volume without taking down the consuming Pod or application.
 
@@ -90,7 +90,16 @@ kubectl patch pvc my-pvc -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}
 # 3. Update PVC status
 ```
 
-**Next Steps**: Test volume expansion with existing PVC
+**Test Results**: ✅ PASSED
+- Expanded 1Gi → 2Gi successfully
+- SPDK bdev: 2.00 GB
+- Filesystem: ~1.9 GB (automatic resize)
+- Zero downtime expansion
+
+**Additional Feature**: ✅ Thin provisioning support added
+- Configurable via StorageClass parameter: `thinProvision: "true"`
+- Default: thick provisioning (false) for predictable performance
+- Thin: allocate space on write for better utilization
 
 ### Raw Block Volume Support
 Allows CSI drivers to provision volumes as raw block devices instead of requiring a filesystem on them, which is critical for databases and high-performance applications that need to manage the filesystem directly.
