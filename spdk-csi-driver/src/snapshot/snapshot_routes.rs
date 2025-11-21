@@ -5,7 +5,6 @@
 
 use warp::{Filter, Rejection, Reply};
 use std::sync::Arc;
-use std::collections::HashMap;
 use super::SnapshotService;
 use super::snapshot_models::*;
 
@@ -70,13 +69,13 @@ fn list_snapshots_route(
         .and_then(handle_list_snapshots)
 }
 
-/// GET /api/snapshots/get_info?snapshot_uuid=xxx
+/// POST /api/snapshots/get_info
 fn get_snapshot_info_route(
     service: Arc<SnapshotService>,
 ) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     warp::path!("api" / "snapshots" / "get_info")
-        .and(warp::get())
-        .and(warp::query::<HashMap<String, String>>())
+        .and(warp::post())
+        .and(warp::body::json())
         .and(with_service(service))
         .and_then(handle_get_snapshot_info)
 }
@@ -220,18 +219,16 @@ async fn handle_list_snapshots(
     }
 }
 
-/// Handle GET /api/snapshots/get_info?snapshot_uuid=xxx
+/// Handle POST /api/snapshots/get_info
 async fn handle_get_snapshot_info(
-    params: HashMap<String, String>,
+    req: GetSnapshotInfoRequest,
     service: Arc<SnapshotService>,
 ) -> Result<impl Reply, Rejection> {
-    let snapshot_uuid = params.get("snapshot_uuid")
-        .map(|s| s.as_str())
-        .unwrap_or("");
+    let snapshot_uuid = &req.snapshot_uuid;
 
-    println!("🌐 [SNAPSHOT_ROUTES] GET /api/snapshots/get_info?snapshot_uuid={}", snapshot_uuid);
+    println!("🌐 [SNAPSHOT_ROUTES] POST /api/snapshots/get_info: {}", snapshot_uuid);
 
-    if snapshot_uuid.is_empty() {
+    if snapshot_uuid.is_empty() ||snapshot_uuid == "" {
         let error_response = serde_json::json!({
             "error": "Missing snapshot_uuid parameter",
         });
