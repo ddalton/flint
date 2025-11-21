@@ -756,9 +756,52 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
     async fn controller_expand_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::ControllerExpandVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::ControllerExpandVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerExpandVolumeResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Controller expand volume not implemented"))
+        let req = request.into_inner();
+        let volume_id = req.volume_id.clone();
+        let new_size_bytes = req.capacity_range
+            .ok_or_else(|| tonic::Status::invalid_argument("capacity_range is required"))?
+            .required_bytes as u64;
+
+        println!("📏 [CONTROLLER] Expanding volume {} to {} bytes", volume_id, new_size_bytes);
+
+        // Find which node has the volume
+        let volume_info = self.driver.get_volume_info(&volume_id).await
+            .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+
+        println!("✅ [CONTROLLER] Found volume on node: {}", volume_info.node_name);
+
+        // Check if new size is larger than current size
+        if new_size_bytes <= volume_info.size_bytes {
+            println!("ℹ️ [CONTROLLER] New size {} <= current size {}, no expansion needed", 
+                     new_size_bytes, volume_info.size_bytes);
+            // Return current size - CSI spec says this is OK
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                capacity_bytes: volume_info.size_bytes as i64,
+                node_expansion_required: false,
+            }));
+        }
+
+        // Call node agent to resize the volume
+        let payload = serde_json::json!({
+            "lvol_uuid": volume_info.lvol_uuid,
+            "new_size_bytes": new_size_bytes
+        });
+
+        self.driver
+            .call_node_agent(&volume_info.node_name, "/api/volumes/resize_lvol", &payload)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to resize volume: {}", e)))?;
+
+        println!("✅ [CONTROLLER] Volume {} expanded to {} bytes", volume_id, new_size_bytes);
+
+        // node_expansion_required=true tells Kubernetes to call NodeExpandVolume
+        // to resize the filesystem (ext4, xfs, etc.)
+        Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+            capacity_bytes: new_size_bytes as i64,
+            node_expansion_required: true, // Filesystem resize needed
+        }))
     }
 
     async fn controller_get_volume(

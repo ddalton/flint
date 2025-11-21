@@ -180,6 +180,29 @@ impl MinimalDiskService {
         Ok(())
     }
 
+    /// Resize logical volume (expand only)
+    pub async fn resize_lvol(&self, lvol_uuid: &str, new_size_bytes: u64) -> Result<(), MinimalStateError> {
+        println!("📏 [MINIMAL_DISK] Resizing lvol {} to {} bytes", lvol_uuid, new_size_bytes);
+        
+        let size_mib = (new_size_bytes + 1048575) / 1048576; // Round up to MiB
+
+        let resize_params = json!({
+            "method": "bdev_lvol_resize",
+            "params": {
+                "name": lvol_uuid,
+                "size_in_mib": size_mib
+            }
+        });
+
+        self.call_spdk_rpc(&resize_params).await
+            .map_err(|e| MinimalStateError::SpdkRpcError { 
+                message: format!("Failed to resize lvol: {}", e) 
+            })?;
+
+        println!("✅ [MINIMAL_DISK] Successfully resized lvol {} to {} MiB", lvol_uuid, size_mib);
+        Ok(())
+    }
+
     // === PRIVATE HELPER METHODS ===
 
     /// Auto-recover SPDK state for physical NVMe devices

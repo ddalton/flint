@@ -170,6 +170,13 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_delete_lvol);
 
+        // POST /api/volumes/resize_lvol - Resize logical volume
+        let resize_lvol = warp::path!("api" / "volumes" / "resize_lvol")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_resize_lvol);
+
         // POST /api/spdk/rpc - Generic SPDK RPC proxy
         let spdk_rpc = warp::path!("api" / "spdk" / "rpc")
             .and(warp::post())
@@ -233,6 +240,7 @@ impl NodeAgent {
             .or(reset_disks)
             .or(create_lvol)
             .or(delete_lvol)
+            .or(resize_lvol)
             .or(spdk_rpc)
             .or(ublk_create_target)
             .or(ublk_create)
@@ -376,6 +384,33 @@ impl NodeAgent {
             Ok(_) => {
                 let response = json!({
                     "status": "success"
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                let error_response = json!({
+                    "status": "error",
+                    "message": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/volumes/resize_lvol - Resize logical volume
+    async fn handle_resize_lvol(
+        request: ResizeLvolRequest,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling resize lvol request: {} to {} bytes", 
+                 request.lvol_uuid, request.new_size_bytes);
+        
+        match node_agent.disk_service.resize_lvol(&request.lvol_uuid, request.new_size_bytes).await {
+            Ok(_) => {
+                let response = json!({
+                    "status": "success",
+                    "lvol_uuid": request.lvol_uuid,
+                    "new_size_bytes": request.new_size_bytes
                 });
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
@@ -993,4 +1028,10 @@ pub struct CreateLvolRequest {
 #[derive(Debug, Serialize, Deserialize)] 
 pub struct DeleteLvolRequest {
     pub lvol_uuid: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResizeLvolRequest {
+    pub lvol_uuid: String,
+    pub new_size_bytes: u64,
 }
