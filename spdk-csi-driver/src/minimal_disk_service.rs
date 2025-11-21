@@ -78,58 +78,6 @@ impl MinimalDiskService {
             println!("🔧 [DEBUG] bdevs keys: {:?}", bdevs.as_object().map(|o| o.keys().collect::<Vec<_>>()));
         }
 
-        // CRITICAL FIX: Also enumerate disks from LVS stores
-        // When a blobstore is loaded on a bdev, that bdev may not appear in the regular bdev list
-        // We need to also check lvstores and add any base_bdevs that weren't found above
-        println!("🔍 [DISK_DISCOVERY] Checking for disks with loaded LVS...");
-        if let Some(lvs_list) = lvstores["result"].as_array() {
-            println!("🔍 [DISK_DISCOVERY] Found {} LVS stores to check", lvs_list.len());
-            
-            for lvs in lvs_list {
-                if let Some(base_bdev) = lvs["base_bdev"].as_str() {
-                    let lvs_name = lvs["name"].as_str().unwrap_or("unknown");
-                    
-                    // Check if we already have this disk
-                    if disks.iter().any(|d| d.bdev_name == base_bdev) {
-                        println!("   ✓ Disk for LVS '{}' already in list (base_bdev: {})", lvs_name, base_bdev);
-                        continue;
-                    }
-                    
-                    // This bdev has LVS but wasn't in the bdev list - create DiskInfo for it
-                    println!("   🔧 Found LVS on bdev not in bdev list: {} -> {}", base_bdev, lvs_name);
-                    
-                    // Try to get bdev info by querying with name
-                    let bdev_query = self.call_spdk_rpc(&json!({
-                        "method": "bdev_get_bdevs",
-                        "params": {"name": base_bdev}
-                    })).await.map_err(|e| MinimalStateError::SpdkRpcError {
-                        message: format!("Failed to query bdev {}: {}", base_bdev, e)
-                    })?;
-                    
-                    if let Some(bdev_arr) = bdev_query["result"].as_array() {
-                        if let Some(bdev) = bdev_arr.first() {
-                            println!("   ✅ Retrieved bdev info for: {}", base_bdev);
-                            
-                            if let Some(mut disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
-                                // Force LVS information since we know it has one
-                                disk_info.blobstore_initialized = true;
-                                disk_info.lvs_name = Some(lvs_name.to_string());
-                                
-                                let free_clusters = lvs["free_clusters"].as_u64().unwrap_or(0);
-                                let cluster_size = lvs["cluster_size"].as_u64().unwrap_or(0);
-                                disk_info.free_space = free_clusters * cluster_size;
-                                
-                                println!("   ✅ Added disk with LVS: {} ({}GB free)", 
-                                         disk_info.device_name,
-                                         disk_info.free_space / (1024*1024*1024));
-                                disks.push(disk_info);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         println!("✅ [MINIMAL_DISK] Discovered {} local storage disks", disks.len());
         Ok(disks)
     }
