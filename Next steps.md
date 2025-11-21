@@ -57,12 +57,33 @@ Standardized APIs for creating point-in-time snapshots of volumes and cloning ex
 - 🎯 Add VolumeSnapshotClass to Helm chart
 
 ### Volume Expansion (Resizing)
+**Status**: 🔍 SPDK support confirmed - ready to implement
+
 The ability to dynamically grow the size of a persistent volume without taking down the consuming Pod or application.
 
+**SPDK Function**: `bdev_lvol_resize`
+```json
+{
+  "method": "bdev_lvol_resize",
+  "params": {
+    "name": "lvol_uuid",
+    "size_in_mib": 2048
+  }
+}
+```
+
 **Implementation Notes**:
-- SPDK lvol supports resize operations
-- Need to implement `ControllerExpandVolume` RPC
-- Requires filesystem resize after bdev expansion
+- ✅ SPDK lvol supports resize operations natively
+- 📋 Need to implement `ControllerExpandVolume` CSI RPC
+- 📋 Add `/api/volumes/resize` endpoint to node agent
+- 📋 Requires filesystem resize after bdev expansion (handled by Kubernetes)
+- 📋 Can only expand (not shrink) - matches CSI spec
+
+**Implementation Approach**: Similar to snapshot module (isolated if possible)
+
+**References**:
+- SPDK doc: `/Users/ddalton/github/spdk/doc/jsonrpc.md.jinja2` line 9899
+- Schema: `/Users/ddalton/github/spdk/schema/schema.json` line 4826
 
 ### Raw Block Volume Support
 Allows CSI drivers to provision volumes as raw block devices instead of requiring a filesystem on them, which is critical for databases and high-performance applications that need to manage the filesystem directly.
