@@ -197,16 +197,16 @@ impl SnapshotService {
                 message: format!("Failed to connect to SPDK: {}", e),
             })?;
 
-        // Get all lvols
-        let lvols = spdk.call_method("bdev_lvol_get_lvols", None)
+        // Get all bdevs (includes full driver_specific info with snapshot flag)
+        let bdevs = spdk.call_method("bdev_get_bdevs", None)
             .await
             .map_err(|e| MinimalStateError::SpdkRpcError {
-                message: format!("Failed to list lvols: {}", e),
+                message: format!("Failed to list bdevs: {}", e),
             })?;
 
         let mut snapshots = Vec::new();
 
-        if let Some(lvol_list) = lvols.as_array() {
+        if let Some(lvol_list) = bdevs.as_array() {
             for lvol in lvol_list {
                 // Check if this lvol is a snapshot using SPDK's snapshot flag
                 let is_snapshot = lvol.get("driver_specific")
