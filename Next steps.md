@@ -57,7 +57,7 @@ Standardized APIs for creating point-in-time snapshots of volumes and cloning ex
 - 🎯 Add VolumeSnapshotClass to Helm chart
 
 ### Volume Expansion (Resizing)
-**Status**: 🔍 SPDK support confirmed - ready to implement
+**Status**: ✅ **IMPLEMENTED** - Ready to test
 
 The ability to dynamically grow the size of a persistent volume without taking down the consuming Pod or application.
 
@@ -72,18 +72,25 @@ The ability to dynamically grow the size of a persistent volume without taking d
 }
 ```
 
-**Implementation Notes**:
-- ✅ SPDK lvol supports resize operations natively
-- 📋 Need to implement `ControllerExpandVolume` CSI RPC
-- 📋 Add `/api/volumes/resize` endpoint to node agent
-- 📋 Requires filesystem resize after bdev expansion (handled by Kubernetes)
-- 📋 Can only expand (not shrink) - matches CSI spec
+**Implementation**: Complete (~80 lines)
+- ✅ `resize_lvol()` method in MinimalDiskService
+- ✅ `POST /api/volumes/resize_lvol` endpoint in node agent
+- ✅ `ControllerExpandVolume` CSI RPC implemented
+- ✅ `EXPAND_VOLUME` capability already advertised
+- ✅ StorageClass has `allowVolumeExpansion: true`
 
-**Implementation Approach**: Similar to snapshot module (isolated if possible)
+**Usage**:
+```bash
+# Expand a PVC from 1Gi to 2Gi
+kubectl patch pvc my-pvc -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'
 
-**References**:
-- SPDK doc: `/Users/ddalton/github/spdk/doc/jsonrpc.md.jinja2` line 9899
-- Schema: `/Users/ddalton/github/spdk/schema/schema.json` line 4826
+# Kubernetes will:
+# 1. Call ControllerExpandVolume (resize bdev)
+# 2. Call NodeExpandVolume (resize filesystem)
+# 3. Update PVC status
+```
+
+**Next Steps**: Test volume expansion with existing PVC
 
 ### Raw Block Volume Support
 Allows CSI drivers to provision volumes as raw block devices instead of requiring a filesystem on them, which is critical for databases and high-performance applications that need to manage the filesystem directly.
