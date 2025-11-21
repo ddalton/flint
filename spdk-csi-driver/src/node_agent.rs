@@ -59,13 +59,16 @@ impl NodeAgent {
             }
         }
 
-        // Start disk discovery loop
+        // Start disk discovery loop (use FAST mode to avoid expensive auto-recovery every 30s)
+        // Auto-recovery only runs once at startup via discover_local_disks() during initialization
         let disk_service = self.disk_service.clone();
         let discovery_task = tokio::spawn(async move {
             let mut discovery_interval = interval(Duration::from_secs(30));
             loop {
                 discovery_interval.tick().await;
-                match disk_service.discover_local_disks().await {
+                // Use FAST discovery (no auto-recovery) to reduce SPDK RPC spam
+                // Auto-recovery is expensive (400+ RPC calls) and only needed at startup
+                match disk_service.discover_local_disks_fast().await {
                     Ok(disks) => {
                         println!("🔍 [DISK_DISCOVERY] Found {} disks on node", disks.len());
                         for disk in &disks {

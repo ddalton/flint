@@ -507,8 +507,9 @@ impl MinimalDiskService {
             // Auto-discovery happens via examine_disk callback when bdev is created
             // Just keep polling - if examination hasn't completed yet, it will soon
             
-            // Wait 100ms before next check
-            sleep(Duration::from_millis(100)).await;
+            // Wait 500ms before next check (reduced from 100ms to minimize SPDK log spam)
+            // This reduces SPDK RPC calls from 100/disk to 20/disk during 10s timeout
+            sleep(Duration::from_millis(500)).await;
         }
         
         println!("❌ [LVS_DISCOVERY:{}] TIMEOUT! No LVS discovered on bdev '{}' after {}s ({} iterations)", 
