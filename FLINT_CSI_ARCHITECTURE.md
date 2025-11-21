@@ -28,6 +28,9 @@ Flint is a Kubernetes CSI (Container Storage Interface) driver that provides hig
 - 🛡️ **Self-healing**: Automatic failure detection and recovery
 - ⚡ **Fast Operations**: <50ms API response times vs 500ms+ with CRDs
 - 🔧 **Production Ready**: Complete Helm chart with RBAC
+- 📸 **Volume Snapshots**: Copy-on-write snapshots with instant restore
+- 📏 **Volume Expansion**: Zero-downtime dynamic resizing
+- 💾 **Flexible Provisioning**: Configurable thick/thin provisioning
 
 ### Architecture Principles
 
@@ -555,6 +558,50 @@ spec:
 - ✅ **Read-Only**: Snapshots cannot be modified
 - ✅ **Cloneable**: Multiple clones from same snapshot
 - ✅ **Zero Regression**: Isolated module, existing code unchanged
+
+### Volume Expansion
+
+Dynamic resize of persistent volumes without downtime.
+
+**Implementation**: ~110 lines in existing code
+
+**CSI RPC**: `ControllerExpandVolume`
+- Finds volume node
+- Calls SPDK `bdev_lvol_resize` 
+- Kubernetes handles automatic filesystem resize
+
+**Usage**:
+```bash
+kubectl patch pvc my-pvc -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'
+```
+
+**Properties**:
+- ✅ **Zero Downtime**: Resize while volume is in use
+- ✅ **Automatic Filesystem Resize**: ext4/xfs resized by Kubernetes
+- ✅ **Expand Only**: Cannot shrink (CSI spec compliance)
+- ✅ **Tested**: 1GB → 2GB verified successfully
+
+### Thin Provisioning
+
+Configurable provisioning mode via StorageClass parameter.
+
+**Configuration**:
+```yaml
+storageClass:
+  parameters:
+    thinProvision: "true"  # or "false" (default)
+```
+
+**Modes**:
+- **Thick (default)**: All space allocated upfront
+  - Predictable performance
+  - Guaranteed space
+  - Better for databases
+  
+- **Thin**: Space allocated on write
+  - Better utilization
+  - Allows over-provisioning
+  - Better for sparse workloads
 
 ---
 
