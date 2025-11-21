@@ -8,6 +8,7 @@ use warp::Filter;
 use spdk_csi_driver::node_agent::NodeAgent;
 use spdk_csi_driver::driver::{SpdkCsiDriver, NvmeofConnectionInfo};
 use spdk_csi_driver::spdk_dashboard_backend_minimal::start_minimal_dashboard_backend;
+use spdk_csi_driver::ReplicaInfo;
 
 // Use the CSI protobuf types from lib.rs instead of duplicating them
 // This avoids the tonic::include_proto! macro issue
@@ -532,7 +533,42 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         
         println!("🗑️ [CONTROLLER] Deleting volume: {}", volume_id);
         
-        // Get volume information to know which node it's on
+        // Check if this is a multi-replica volume
+        match self.driver.get_replicas_from_pv(&volume_id).await {
+            Ok(Some(replicas)) => {
+                // MULTI-REPLICA: Delete all replicas
+                println!("📊 [CONTROLLER] Deleting multi-replica volume ({} replicas)", replicas.len());
+                
+                // Delete each replica lvol
+                for (i, replica) in replicas.iter().enumerate() {
+                    println!("🗑️ [CONTROLLER] Deleting replica {} on node {}", 
+                             i + 1, replica.node_name);
+                    
+                    match self.driver.delete_lvol(&replica.node_name, &replica.lvol_uuid).await {
+                        Ok(()) => println!("✅ Deleted replica {} (UUID: {})", i + 1, replica.lvol_uuid),
+                        Err(e) => println!("⚠️ Failed to delete replica {}: {}", i + 1, e),
+                    }
+
+                    // Cleanup NVMe-oF target if it exists
+                    let nqn = format!("nqn.2024-11.com.flint:volume:{}:replica:{}", volume_id, i);
+                    let _ = self.driver.remove_nvmeof_target(&replica.node_name, &nqn).await;
+                }
+
+                println!("✅ [CONTROLLER] Multi-replica volume deleted: {}", volume_id);
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+            }
+            Ok(None) => {
+                // SINGLE REPLICA: Use existing logic
+                println!("📊 [CONTROLLER] Single-replica volume");
+            }
+            Err(e) => {
+                println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
+                // Not an error - idempotent delete
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+            }
+        }
+
+        // SINGLE REPLICA deletion logic (existing code)
         let volume_info = match self.driver.get_volume_info(&volume_id).await {
             Ok(info) => info,
             Err(e) => {
@@ -614,58 +650,78 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         
         println!("📤 [CONTROLLER] Publishing volume {} to node {}", volume_id, node_id);
 
-        // Get volume information (which node it's on)
-        let volume_info = match self.driver.get_volume_info(&volume_id).await {
-            Ok(info) => info,
+        let mut publish_context = std::collections::HashMap::new();
+
+        // Check if this is a multi-replica volume
+        match self.driver.get_replicas_from_pv(&volume_id).await {
+            Ok(Some(replicas)) => {
+                // MULTI-REPLICA: Store replicas as JSON for NodeStage
+                println!("📊 [CONTROLLER] Multi-replica volume with {} replicas", replicas.len());
+                
+                let replicas_json = serde_json::to_string(&replicas)
+                    .map_err(|e| tonic::Status::internal(format!("Failed to serialize replicas: {}", e)))?;
+                
+                publish_context.insert("volumeType".to_string(), "multi-replica".to_string());
+                publish_context.insert("replicas".to_string(), replicas_json);
+                publish_context.insert("volumeId".to_string(), volume_id.clone());
+            }
+            Ok(None) => {
+                // SINGLE REPLICA: Use existing logic
+                let volume_info = match self.driver.get_volume_info(&volume_id).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        println!("❌ [CONTROLLER] Failed to get volume info: {}", e);
+                        return Err(tonic::Status::not_found(format!("Volume not found: {}", e)));
+                    }
+                };
+
+                println!("📊 [CONTROLLER] Single-replica volume on node {}", volume_info.node_name);
+
+                // Check if pod is on the same node as the logical volume
+                if volume_info.node_name == node_id {
+                    println!("✅ [CONTROLLER] Volume is local to node - no NVMe-oF needed");
+                    
+                    // Store volume info in publish context for NodeStage
+                    publish_context.insert("volumeType".to_string(), "local".to_string());
+                    publish_context.insert("bdevName".to_string(), volume_info.lvol_uuid.clone());
+                    publish_context.insert("lvsName".to_string(), volume_info.lvs_name.clone());
+                } else {
+                    println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
+                    
+                    // Construct bdev name for lvol
+                    let bdev_name = volume_info.lvol_uuid.clone();
+                    
+                    // Setup NVMe-oF target on the node hosting the logical volume
+                    let conn_info = match self.driver.setup_nvmeof_target_on_node(
+                        &volume_info.node_name,
+                        &bdev_name,
+                        &volume_id
+                    ).await {
+                        Ok(info) => info,
+                        Err(e) => {
+                            println!("❌ [CONTROLLER] Failed to setup NVMe-oF target: {}", e);
+                            return Err(tonic::Status::internal(format!("Failed to setup NVMe-oF: {}", e)));
+                        }
+                    };
+
+                    println!("✅ [CONTROLLER] NVMe-oF target ready: {}", conn_info.nqn);
+
+                    // Store connection info in publish context for NodeStage
+                    publish_context.insert("volumeType".to_string(), "remote".to_string());
+                    publish_context.insert("nqn".to_string(), conn_info.nqn.clone());
+                    publish_context.insert("targetIp".to_string(), conn_info.target_ip.clone());
+                    publish_context.insert("targetPort".to_string(), conn_info.target_port.to_string());
+                    publish_context.insert("transport".to_string(), conn_info.transport.clone());
+                    publish_context.insert("storageNode".to_string(), volume_info.node_name.clone());
+                }
+
+                publish_context.insert("volumeId".to_string(), volume_id.clone());
+            }
             Err(e) => {
-                println!("❌ [CONTROLLER] Failed to get volume info: {}", e);
+                println!("❌ [CONTROLLER] Failed to get volume replicas: {}", e);
                 return Err(tonic::Status::not_found(format!("Volume not found: {}", e)));
             }
-        };
-
-        println!("📊 [CONTROLLER] Volume {} is on node {}", volume_id, volume_info.node_name);
-
-        let mut publish_context = std::collections::HashMap::new();
-        
-        // Check if pod is on the same node as the logical volume
-        if volume_info.node_name == node_id {
-            println!("✅ [CONTROLLER] Volume is local to node - no NVMe-oF needed");
-            
-            // Store volume info in publish context for NodeStage
-            publish_context.insert("volumeType".to_string(), "local".to_string());
-            publish_context.insert("bdevName".to_string(), volume_info.lvol_uuid.clone());
-            publish_context.insert("lvsName".to_string(), volume_info.lvs_name.clone());
-        } else {
-            println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
-            
-            // Construct bdev name for lvol
-            let bdev_name = volume_info.lvol_uuid.clone();
-            
-            // Setup NVMe-oF target on the node hosting the logical volume
-            let conn_info = match self.driver.setup_nvmeof_target_on_node(
-                &volume_info.node_name,
-                &bdev_name,
-                &volume_id
-            ).await {
-                Ok(info) => info,
-                Err(e) => {
-                    println!("❌ [CONTROLLER] Failed to setup NVMe-oF target: {}", e);
-                    return Err(tonic::Status::internal(format!("Failed to setup NVMe-oF: {}", e)));
-                }
-            };
-
-            println!("✅ [CONTROLLER] NVMe-oF target ready: {}", conn_info.nqn);
-
-            // Store connection info in publish context for NodeStage
-            publish_context.insert("volumeType".to_string(), "remote".to_string());
-            publish_context.insert("nqn".to_string(), conn_info.nqn.clone());
-            publish_context.insert("targetIp".to_string(), conn_info.target_ip.clone());
-            publish_context.insert("targetPort".to_string(), conn_info.target_port.to_string());
-            publish_context.insert("transport".to_string(), conn_info.transport.clone());
-            publish_context.insert("storageNode".to_string(), volume_info.node_name.clone());
         }
-
-        publish_context.insert("volumeId".to_string(), volume_id.clone());
 
         println!("✅ [CONTROLLER] Volume {} published successfully", volume_id);
         
@@ -900,7 +956,34 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_type = publish_context.get("volumeType")
             .ok_or_else(|| tonic::Status::invalid_argument("No volumeType in publish context"))?;
 
-        let bdev_name = if volume_type == "local" {
+        let bdev_name = if volume_type == "multi-replica" {
+            // MULTI-REPLICA: Create RAID 1 from replicas
+            println!("🔧 [NODE] Multi-replica volume - creating RAID");
+            
+            let replicas_json = publish_context.get("replicas")
+                .ok_or_else(|| tonic::Status::invalid_argument("No replicas in publish context"))?;
+            
+            let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)
+                .map_err(|e| tonic::Status::internal(format!("Failed to parse replicas: {}", e)))?;
+            
+            println!("📊 [NODE] Volume has {} replicas", replicas.len());
+            for (i, replica) in replicas.iter().enumerate() {
+                println!("   Replica {}: node={}, lvol={}", 
+                         i + 1, replica.node_name, replica.lvol_uuid);
+            }
+            
+            // Create RAID 1 bdev with mixed local/remote access
+            match self.driver.create_raid_from_replicas(&volume_id, &replicas).await {
+                Ok(raid_bdev) => {
+                    println!("✅ [NODE] RAID created: {}", raid_bdev);
+                    raid_bdev
+                }
+                Err(e) => {
+                    println!("❌ [NODE] Failed to create RAID: {}", e);
+                    return Err(tonic::Status::internal(format!("Failed to create RAID: {}", e)));
+                }
+            }
+        } else if volume_type == "local" {
             // Local volume - bdev is the lvol UUID
             let bdev = publish_context.get("bdevName")
                 .ok_or_else(|| tonic::Status::invalid_argument("No bdevName in publish context"))?;

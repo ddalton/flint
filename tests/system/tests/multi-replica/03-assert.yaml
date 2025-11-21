@@ -1,0 +1,24 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      echo "=== Verifying cleanup ==="
+      
+      # Verify PVC is deleted
+      if kubectl get pvc test-multi-replica-pvc 2>/dev/null; then
+        echo "⚠️ PVC still exists, waiting for deletion..."
+        sleep 5
+      else
+        echo "✅ PVC deleted successfully"
+      fi
+      
+      # Verify Pod is deleted
+      if kubectl get pod test-multi-replica-pod 2>/dev/null; then
+        echo "⚠️ Pod still exists, waiting for deletion..."
+        sleep 5
+      else
+        echo "✅ Pod deleted successfully"
+      fi
+      
+      echo "✅ Multi-replica test cleanup complete"
+

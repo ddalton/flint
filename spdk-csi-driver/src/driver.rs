@@ -142,18 +142,165 @@ impl SpdkCsiDriver {
         Ok(selected.node_name.clone())
     }
 
-    /// Create volume using minimal state architecture
-    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<VolumeCreationResult, MinimalStateError> {
-        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})", 
-                 volume_id, size_bytes, replica_count, thin_provision);
+    /// Select N nodes for multi-replica volume (each replica on different node)
+    async fn select_nodes_for_replicas(
+        &self,
+        replica_count: u32,
+        size_bytes: u64,
+    ) -> Result<Vec<crate::raid::NodeDiskSelection>, MinimalStateError> {
+        println!("🔍 [DRIVER] Finding {} nodes for replicas (size: {}GB)",
+                 replica_count, size_bytes / (1024 * 1024 * 1024));
 
-        // TODO: Support multi-replica in the future
-        if replica_count != 1 {
-            return Err(MinimalStateError::InternalError {
-                message: format!("Multi-replica not yet supported (requested: {})", replica_count)
+        // Get all nodes in cluster
+        let all_nodes = self.get_all_nodes().await
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to list nodes: {}", e)
+            })?;
+
+        println!("📊 [DRIVER] Found {} nodes in cluster", all_nodes.len());
+
+        let mut selected = Vec::new();
+
+        for node_name in all_nodes {
+            if selected.len() >= replica_count as usize {
+                break; // Found enough nodes
+            }
+
+            // Query disks on this node
+            match self.get_initialized_disks_from_node(&node_name).await {
+                Ok(disks) => {
+                    // Find first disk with enough space
+                    if let Some(disk) = disks.iter().find(|d| d.free_space >= size_bytes) {
+                        selected.push(crate::raid::NodeDiskSelection {
+                            node_name: node_name.clone(),
+                            disk: disk.clone(),
+                        });
+                        println!("   ✓ Selected node: {} (disk: {}, free: {}GB)",
+                                 node_name, disk.device_name, disk.free_space / (1024 * 1024 * 1024));
+                    }
+                }
+                Err(e) => {
+                    println!("   ⚠️ Skipping node {} (query failed: {})", node_name, e);
+                    continue;
+                }
+            }
+        }
+
+        if selected.len() < replica_count as usize {
+            return Err(MinimalStateError::InsufficientNodes {
+                required: replica_count,
+                available: selected.len() as u32,
+                message: format!(
+                    "Cannot create {} replicas: only {} nodes with sufficient space ({}GB required per node)",
+                    replica_count,
+                    selected.len(),
+                    size_bytes / (1024 * 1024 * 1024)
+                ),
             });
         }
 
+        Ok(selected)
+    }
+
+    /// Create distributed multi-replica volume (RAID 1 across nodes)
+    async fn create_distributed_multi_replica_volume(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+        replica_count: u32,
+        thin_provision: bool,
+    ) -> Result<VolumeCreationResult, MinimalStateError> {
+        println!("🎯 [DRIVER] Creating distributed multi-replica volume: {} ({} replicas)",
+                 volume_id, replica_count);
+
+        // Step 1: Find N nodes with available space (each on different node)
+        let selected_nodes = self.select_nodes_for_replicas(replica_count, size_bytes).await?;
+
+        println!("✅ [DRIVER] Selected {} nodes for replicas:", selected_nodes.len());
+        for (i, node_info) in selected_nodes.iter().enumerate() {
+            println!("   Replica {}: node={}, disk={}, free={}GB",
+                     i + 1,
+                     node_info.node_name,
+                     node_info.disk.device_name,
+                     node_info.disk.free_space / (1024 * 1024 * 1024));
+        }
+
+        // Step 2: Create lvol on each selected node
+        let mut replicas = Vec::new();
+        let mut created_replicas = Vec::new(); // Track for cleanup on error
+
+        for (i, node_info) in selected_nodes.iter().enumerate() {
+            let replica_volume_id = format!("{}_replica_{}", volume_id, i);
+            let lvs_name = node_info.disk.lvs_name.as_ref()
+                .ok_or_else(|| MinimalStateError::InternalError {
+                    message: "Selected disk has no LVS name".to_string()
+                })?;
+
+            match self.create_lvol(
+                &node_info.node_name,
+                lvs_name,
+                &replica_volume_id,
+                size_bytes,
+                thin_provision,
+            ).await {
+                Ok(lvol_uuid) => {
+                    println!("✅ [DRIVER] Created replica {} on node {}: UUID={}",
+                             i + 1, node_info.node_name, lvol_uuid);
+
+                    let replica = ReplicaInfo {
+                        node_name: node_info.node_name.clone(),
+                        disk_pci_address: node_info.disk.pci_address.clone(),
+                        lvol_uuid: lvol_uuid.clone(),
+                        lvol_name: format!("vol_{}", replica_volume_id),
+                        lvs_name: lvs_name.clone(),
+                        nqn: None, // Will be set during NodePublishVolume if needed
+                        target_ip: None,
+                        target_port: None,
+                        health: "online".to_string(),
+                    };
+
+                    created_replicas.push((node_info.node_name.clone(), lvol_uuid.clone()));
+                    replicas.push(replica);
+
+                    // Invalidate cache for this node
+                    self.capacity_cache.invalidate(&node_info.node_name).await;
+                }
+                Err(e) => {
+                    // Cleanup: Delete all previously created replicas
+                    println!("❌ [DRIVER] Failed to create replica {} on node {}: {}",
+                             i + 1, node_info.node_name, e);
+                    println!("🧹 [DRIVER] Cleaning up {} previously created replicas...",
+                             created_replicas.len());
+
+                    for (node, uuid) in created_replicas {
+                        let _ = self.delete_lvol(&node, &uuid).await;
+                    }
+
+            return Err(MinimalStateError::InternalError {
+                        message: format!("Failed to create replica {}: {}", i + 1, e)
+                    });
+                }
+            }
+        }
+
+        println!("✅ [DRIVER] Created {} replicas for volume {}", replicas.len(), volume_id);
+
+        // Step 3: Return result with replica metadata
+        // This will be stored in PV annotations by CSI controller
+        Ok(VolumeCreationResult {
+            volume_id: volume_id.to_string(),
+            size_bytes,
+            replicas,
+        })
+    }
+
+    /// Create single-replica volume (existing logic, unchanged)
+    async fn create_single_replica_volume(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+        thin_provision: bool,
+    ) -> Result<VolumeCreationResult, MinimalStateError> {
         // Select node dynamically using capacity cache
         let node_name = match self.select_node_for_single_replica(size_bytes).await {
             Ok(node) => node,
@@ -237,6 +384,33 @@ impl SpdkCsiDriver {
                 health: "online".to_string(),
             }],
         })
+    }
+
+    /// Create volume using minimal state architecture (routing to single or multi-replica)
+    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<VolumeCreationResult, MinimalStateError> {
+        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})",
+                 volume_id, size_bytes, replica_count, thin_provision);
+
+        // Route based on replica count
+        if replica_count == 1 {
+            // Single replica: Use existing path (zero changes to existing logic)
+            return self.create_single_replica_volume(volume_id, size_bytes, thin_provision).await;
+        }
+
+        // Multi-replica: RAID 1 requires minimum 2 replicas
+        if replica_count < 2 {
+            return Err(MinimalStateError::InvalidParameter {
+                message: "RAID 1 requires minimum 2 replicas".to_string()
+            });
+        }
+
+        // Create distributed multi-replica volume
+        self.create_distributed_multi_replica_volume(
+            volume_id,
+            size_bytes,
+            replica_count,
+            thin_provision
+        ).await
     }
 
     /// Get SPDK RPC URL for a specific node (simplified)
@@ -796,6 +970,44 @@ impl SpdkCsiDriver {
         }
     }
 
+    /// Get replica info from PV volumeAttributes (for multi-replica volumes)
+    pub async fn get_replicas_from_pv(&self, volume_id: &str) -> Result<Option<Vec<ReplicaInfo>>, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv_list = pvs.list(&Default::default()).await?;
+        
+        for pv in pv_list.items {
+            if let Some(spec) = &pv.spec {
+                if let Some(csi) = &spec.csi {
+                    if csi.volume_handle == volume_id {
+                        // Found PV - check for replica annotations
+                        if let Some(attrs) = &csi.volume_attributes {
+                            // Check replica count first
+                            let replica_count = attrs.get("flint.csi.storage.io/replica-count")
+                                .and_then(|s| s.parse::<u32>().ok())
+                                .unwrap_or(1);
+
+                            if replica_count > 1 {
+                                // Multi-replica: Read replicas JSON
+                                if let Some(replicas_json) = attrs.get("flint.csi.storage.io/replicas") {
+                                    let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
+                                    return Ok(Some(replicas));
+                                }
+                            }
+                            
+                            // Single replica or no replicas field
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err("PV not found".into())
+    }
+
     /// Get volume info from PV volumeAttributes (fast path)
     async fn get_volume_info_from_pv(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
@@ -866,6 +1078,105 @@ impl SpdkCsiDriver {
             // Assume bytes
             Ok(quantity_str.parse()?)
         }
+    }
+
+    /// Create RAID 1 bdev from replicas with mixed local/remote access
+    pub async fn create_raid_from_replicas(
+        &self,
+        volume_id: &str,
+        replicas: &[ReplicaInfo],
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let current_node = &self.node_id;
+        
+        println!("🔧 [DRIVER] Creating RAID 1 on node: {}", current_node);
+        println!("🔧 [DRIVER] Processing {} replicas...", replicas.len());
+
+        // Check minimum replica requirement
+        let available_replicas: Vec<&ReplicaInfo> = replicas.iter()
+            .filter(|r| self.is_node_available_sync(&r.node_name))
+            .collect();
+
+        if available_replicas.len() < 2 {
+            return Err(format!(
+                "Cannot create RAID 1: need minimum 2 replicas, only {} available",
+                available_replicas.len()
+            ).into());
+        }
+
+        if available_replicas.len() < replicas.len() {
+            println!("⚠️ [DRIVER] DEGRADED: {}/{} replicas available", 
+                     available_replicas.len(), replicas.len());
+        }
+
+        // Attach each replica (local or remote)
+        let mut base_bdevs = Vec::new();
+
+        for (i, replica) in available_replicas.iter().enumerate() {
+            if replica.node_name == *current_node {
+                // LOCAL: Use lvol bdev directly
+                println!("   Replica {}: LOCAL access (lvol: {})", 
+                         i + 1, replica.lvol_uuid);
+                base_bdevs.push(replica.lvol_uuid.clone());
+            } else {
+                // REMOTE: Setup NVMe-oF and attach
+                println!("   Replica {}: REMOTE access (node: {}, setting up NVMe-oF...)", 
+                         i + 1, replica.node_name);
+
+                // Create NVMe-oF target on remote node
+                let nqn = format!("nqn.2024-11.com.flint:volume:{}:replica:{}", volume_id, i);
+                let conn_info = self.setup_nvmeof_target_on_node(
+                    &replica.node_name,
+                    &replica.lvol_uuid,
+                    &format!("{}_{}", volume_id, i),
+                ).await?;
+
+                // Attach NVMe-oF target from current node
+                let nvme_bdev = self.connect_to_nvmeof_target(&conn_info).await?;
+                println!("   ✓ Attached remote replica as: {}", nvme_bdev);
+                base_bdevs.push(nvme_bdev);
+            }
+        }
+
+        // Create RAID 1 bdev
+        let raid_name = format!("raid_{}", volume_id);
+        println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs", 
+                 raid_name, base_bdevs.len());
+
+        let raid_bdev_name = self.create_raid1_bdev(&raid_name, base_bdevs).await?;
+
+        println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
+
+        Ok(raid_bdev_name)
+    }
+
+    /// Check if a node is available (simplified sync version)
+    fn is_node_available_sync(&self, _node_name: &str) -> bool {
+        // In production, this would check node readiness via K8s API
+        // For now, optimistically assume available
+        // TODO: Add proper node health checking
+        true
+    }
+
+    /// Create RAID 1 bdev
+    async fn create_raid1_bdev(
+        &self,
+        raid_name: &str,
+        base_bdevs: Vec<String>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Call SPDK RPC directly
+        let payload = serde_json::json!({
+            "method": "bdev_raid_create",
+            "params": {
+                "name": raid_name,
+                "raid_level": "1",
+                "base_bdevs": base_bdevs,
+            }
+        });
+
+        self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+
+        println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_name);
+        Ok(raid_name.to_string())
     }
 
     /// Setup NVMe-oF target and return connection info

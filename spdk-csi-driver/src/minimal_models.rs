@@ -113,6 +113,9 @@ pub enum MinimalStateError {
     VolumeNotFound { volume_id: String },
     InsufficientCapacity { required: u64, available: u64 },
     NodeSeparationFailed { required: u32, available: u32 },
+    InsufficientNodes { required: u32, available: u32, message: String },
+    RaidCreationFailed { message: String, available_replicas: u32, required_replicas: u32 },
+    InvalidParameter { message: String },
     SpdkRpcError { message: String },
     KubernetesError { message: String },
     SerializationError { message: String },
@@ -132,6 +135,12 @@ impl std::fmt::Display for MinimalStateError {
                 write!(f, "Insufficient capacity: need {}, have {}", required, available),
             MinimalStateError::NodeSeparationFailed { required, available } => 
                 write!(f, "Node separation failed: need {} nodes, have {}", required, available),
+            MinimalStateError::InsufficientNodes { required, available, message } => 
+                write!(f, "Insufficient nodes: need {}, have {} - {}", required, available, message),
+            MinimalStateError::RaidCreationFailed { message, available_replicas, required_replicas } => 
+                write!(f, "RAID creation failed: {}/{} replicas - {}", available_replicas, required_replicas, message),
+            MinimalStateError::InvalidParameter { message } => 
+                write!(f, "Invalid parameter: {}", message),
             MinimalStateError::SpdkRpcError { message } => 
                 write!(f, "SPDK RPC error: {}", message),
                 MinimalStateError::KubernetesError { message } => 

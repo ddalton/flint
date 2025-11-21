@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-multi-replica-pvc
+status:
+  phase: Bound
+---
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Verify PV has replica metadata
+      PV_NAME=$(kubectl get pvc test-multi-replica-pvc -o jsonpath='{.spec.volumeName}')
+      echo "PV Name: $PV_NAME"
+      
+      # Check replica count
+      REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}')
+      echo "Replica Count: $REPLICA_COUNT"
+      if [ "$REPLICA_COUNT" != "2" ]; then
+        echo "❌ Expected 2 replicas, got: $REPLICA_COUNT"
+        exit 1
+      fi
+      
+      # Check replicas JSON exists
+      REPLICAS_JSON=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replicas}')
+      if [ -z "$REPLICAS_JSON" ]; then
+        echo "❌ No replicas metadata found in PV"
+        exit 1
+      fi
+      
+      echo "✅ PV has correct multi-replica metadata"
+      echo "Replicas: $REPLICAS_JSON"
+

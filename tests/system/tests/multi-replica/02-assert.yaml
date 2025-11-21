@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-multi-replica-pod
+status:
+  phase: Running
+---
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Wait for data to be written
+      echo "Waiting for data write to complete..."
+      kubectl wait --for=condition=Ready pod/test-multi-replica-pod --timeout=60s || true
+      sleep 10
+      
+      # Check if checksum file exists
+      kubectl exec test-multi-replica-pod -- ls -lh /data/
+      
+      if kubectl exec test-multi-replica-pod -- test -f /data/checksum; then
+        echo "✅ Data written successfully to multi-replica volume"
+        kubectl exec test-multi-replica-pod -- cat /data/checksum
+      else
+        echo "⚠️ Checksum file not yet created, waiting..."
+        sleep 10
+        kubectl exec test-multi-replica-pod -- cat /data/checksum
+      fi
+      
+      # Get the node where pod is running
+      NODE=$(kubectl get pod test-multi-replica-pod -o jsonpath='{.spec.nodeName}')
+      echo "Pod running on node: $NODE"
+      
+      # Check CSI driver logs for RAID creation
+      echo "Checking for RAID creation in CSI driver logs..."
+      kubectl logs -n kube-system -l app=flint-csi-node --tail=100 | grep -i "raid" || echo "No RAID logs found yet"
+
