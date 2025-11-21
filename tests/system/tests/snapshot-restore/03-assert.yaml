@@ -3,4 +3,4 @@ kind: PersistentVolumeClaim
 metadata:
   name: restored-pvc
 status:
-  phase: Bound
+  phase: Pending
