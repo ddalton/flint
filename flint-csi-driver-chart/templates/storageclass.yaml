@@ -16,6 +16,7 @@ volumeBindingMode: WaitForFirstConsumer
 parameters:
   numReplicas: "{{ .Values.storageClass.parameters.numReplicas }}"
   autoRebuild: "{{ .Values.storageClass.parameters.autoRebuild }}"
+  thinProvision: "{{ .Values.storageClass.parameters.thinProvision }}"
   # Users can add other parameters here, like:
   # "fsType": "ext4"
 {{- end }}

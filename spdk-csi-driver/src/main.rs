@@ -446,10 +446,15 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(1);
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}", volume_id, size_bytes, replica_count);
+        let thin_provision = req.parameters.get("thinProvision")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}", 
+                 volume_id, size_bytes, replica_count, thin_provision);
 
         // Call the driver's create volume method 
-        match self.driver.create_volume(&volume_id, size_bytes, replica_count).await {
+        match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
             Ok(_volume_info) => {
                 println!("✅ [CONTROLLER] Volume {} created successfully", volume_id);
                 

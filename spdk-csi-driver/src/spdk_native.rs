@@ -302,7 +302,7 @@ impl SpdkNative {
     }
     
     /// Create logical volume - matches SPDK v25.05.x bdev_lvol_create RPC
-    pub async fn create_lvol(&self, lvs_name: &str, lvol_name: &str, size: u64, _cluster_size: u64) -> Result<String> {
+    pub async fn create_lvol(&self, lvs_name: &str, lvol_name: &str, size: u64, _cluster_size: u64, thin_provision: bool) -> Result<String> {
         // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
         let size_in_mib = (size + 1048575) / 1048576; // Round up to nearest MiB
         
@@ -310,7 +310,7 @@ impl SpdkNative {
             "lvs_name": lvs_name,
             "lvol_name": lvol_name,
             "size_in_mib": size_in_mib,
-            "thin_provision": false,
+            "thin_provision": thin_provision,
             "clear_method": "unmap"
         });
         

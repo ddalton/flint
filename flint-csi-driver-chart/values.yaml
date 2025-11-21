@@ -120,6 +120,7 @@ storageClass:
   parameters:
     numReplicas: "2"
     autoRebuild: "true"
+    thinProvision: "false"  # Set to "true" for thin provisioning (space allocated on write)
 
 # VolumeSnapshotClass configuration
 snapshotClass:

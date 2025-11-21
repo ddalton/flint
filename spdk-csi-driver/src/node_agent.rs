@@ -353,9 +353,10 @@ impl NodeAgent {
         request: CreateLvolRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling create lvol request: {}", request.volume_id);
+        println!("🌐 [HTTP_API] Handling create lvol request: {} (thin: {})", 
+                 request.volume_id, request.thin_provision);
         
-        match node_agent.disk_service.create_lvol(&request.lvs_name, &request.volume_id, request.size_bytes).await {
+        match node_agent.disk_service.create_lvol(&request.lvs_name, &request.volume_id, request.size_bytes, request.thin_provision).await {
             Ok(lvol_uuid) => {
                 let response = json!({
                     "status": "success",
@@ -1023,6 +1024,8 @@ pub struct CreateLvolRequest {
     pub lvs_name: String,
     pub volume_id: String,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub thin_provision: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)] 

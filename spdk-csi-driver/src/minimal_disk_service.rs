@@ -130,8 +130,9 @@ impl MinimalDiskService {
     }
 
     /// Create logical volume on a disk
-    pub async fn create_lvol(&self, lvs_name: &str, volume_id: &str, size_bytes: u64) -> Result<String, MinimalStateError> {
-        println!("🔧 [MINIMAL_DISK] Creating lvol: {} in LVS: {} (size: {} bytes)", volume_id, lvs_name, size_bytes);
+    pub async fn create_lvol(&self, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
+        println!("🔧 [MINIMAL_DISK] Creating lvol: {} in LVS: {} (size: {} bytes, thin: {})", 
+                 volume_id, lvs_name, size_bytes, thin_provision);
         
         let lvol_name = format!("vol_{}", volume_id);
         let size_mib = (size_bytes + 1048575) / 1048576; // Round up to MiB
@@ -141,7 +142,8 @@ impl MinimalDiskService {
             "params": {
                 "lvs_name": lvs_name,
                 "lvol_name": lvol_name,
-                "size_in_mib": size_mib
+                "size_in_mib": size_mib,
+                "thin_provision": thin_provision
             }
         });
 
@@ -641,8 +643,9 @@ impl MinimalDiskService {
                 let lvol_name = params["lvol_name"].as_str().unwrap_or("");  
                 let size_mib = params["size_in_mib"].as_u64().unwrap_or(0);
                 let size_bytes = size_mib * 1024 * 1024;
+                let thin_provision = params["thin_provision"].as_bool().unwrap_or(false);
                 
-                let uuid = spdk.create_lvol(lvs_name, lvol_name, size_bytes, 1048576).await?;
+                let uuid = spdk.create_lvol(lvs_name, lvol_name, size_bytes, 1048576, thin_provision).await?;
                 json!(uuid)
             }
             "bdev_lvol_delete" => {

@@ -51,8 +51,9 @@ impl SpdkCsiDriver {
     }
 
     /// Create volume using minimal state architecture
-    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32) -> Result<String, MinimalStateError> {
-        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas)", volume_id, size_bytes, replica_count);
+    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<String, MinimalStateError> {
+        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})", 
+                 volume_id, size_bytes, replica_count, thin_provision);
 
         // Get disks with existing LVS (initialized by administrator)
         println!("📊 [DRIVER] Finding disks with existing LVS...");
@@ -87,7 +88,7 @@ impl SpdkCsiDriver {
                  node_name);
         
         // Create logical volume on existing LVS (no need to initialize - LVS already exists)
-        let lvol_uuid = self.create_lvol(node_name, lvs_name, volume_id, size_bytes).await?;
+        let lvol_uuid = self.create_lvol(node_name, lvs_name, volume_id, size_bytes, thin_provision).await?;
         
         println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
         Ok(lvol_uuid)
@@ -230,13 +231,15 @@ impl SpdkCsiDriver {
     }
 
     /// Create logical volume (CONTROLLER calls Node Agent via HTTP)  
-    pub async fn create_lvol(&self, node_name: &str, lvs_name: &str, volume_id: &str, size_bytes: u64) -> Result<String, MinimalStateError> {
-        println!("🔧 [CONTROLLER] Requesting lvol creation on node: {} LVS: {} volume: {}", node_name, lvs_name, volume_id);
+    pub async fn create_lvol(&self, node_name: &str, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
+        println!("🔧 [CONTROLLER] Requesting lvol creation on node: {} LVS: {} volume: {} (thin: {})", 
+                 node_name, lvs_name, volume_id, thin_provision);
         
         let payload = json!({
             "lvs_name": lvs_name,
             "volume_id": volume_id,
-            "size_bytes": size_bytes
+            "size_bytes": size_bytes,
+            "thin_provision": thin_provision
         });
 
         let response = self.call_node_agent(node_name, "/api/volumes/create_lvol", &payload).await
