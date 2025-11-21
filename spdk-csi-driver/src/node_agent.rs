@@ -59,8 +59,26 @@ impl NodeAgent {
             }
         }
 
+        // Run initial disk discovery with auto-recovery at startup
+        // This creates bdevs and loads existing LVS stores
+        println!("🔍 [MINIMAL_NODE_AGENT] Running initial disk discovery with auto-recovery...");
+        match self.disk_service.discover_local_disks().await {
+            Ok(disks) => {
+                println!("✅ [MINIMAL_NODE_AGENT] Initial discovery found {} disks", disks.len());
+                for disk in &disks {
+                    if disk.blobstore_initialized {
+                        println!("   ✅ {} ({}): LVS initialized - {}", 
+                            disk.device_name, disk.pci_address, disk.lvs_name.as_ref().unwrap_or(&"unknown".to_string()));
+                    }
+                }
+            }
+            Err(e) => {
+                println!("⚠️ [MINIMAL_NODE_AGENT] Initial discovery failed (continuing anyway): {}", e);
+            }
+        }
+
         // Start disk discovery loop (use FAST mode to avoid expensive auto-recovery every 30s)
-        // Auto-recovery only runs once at startup via discover_local_disks() during initialization
+        // Auto-recovery already ran above during startup
         let disk_service = self.disk_service.clone();
         let discovery_task = tokio::spawn(async move {
             let mut discovery_interval = interval(Duration::from_secs(30));
