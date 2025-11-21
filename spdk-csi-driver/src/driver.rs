@@ -63,12 +63,14 @@ impl SpdkCsiDriver {
         println!("🔥 [DRIVER] Warming up capacity cache...");
         self.capacity_cache.warm_up(self).await?;
         
-        // Start background cache refresh (every 15 seconds)
-        println!("🔄 [DRIVER] Starting background capacity refresh...");
+        // Start background cache refresh (every 60 seconds)
+        // Note: Cache is also invalidated after every volume creation, so this is mainly
+        // to catch external changes (manual SPDK operations, disk failures, etc.)
+        println!("🔄 [DRIVER] Starting background capacity refresh (every 60s)...");
         CapacityCache::start_background_refresh(
             Arc::new(self.capacity_cache.clone()),
             Arc::new(self.clone()),
-            15,
+            60,
         );
         
         println!("✅ [DRIVER] Initialization complete");
@@ -211,7 +213,10 @@ impl SpdkCsiDriver {
         };
         
         // Invalidate cache entry to force refresh on next query
-        // (capacity has actually been consumed)
+        // This ensures next volume creation sees accurate capacity
+        // Combined with 60s background refresh, this provides:
+        // - Immediate accuracy after volume creation (invalidation)
+        // - External changes detected within 60s (background refresh)
         self.capacity_cache.invalidate(&node_name).await;
         
         println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
@@ -768,82 +773,27 @@ impl SpdkCsiDriver {
         Err(format!("Bdev '{}' not found in SPDK", bdev_name).into())
     }
 
-    /// Get volume information (which node it's on, lvol UUID, etc.)
-    /// First tries to read from PV volumeAttributes (fast), then queries nodes (slow fallback)
+    /// Get volume information from PV volumeAttributes
+    /// This is the ONLY way to get volume info - no fallback to querying nodes (scalability)
     pub async fn get_volume_info(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [DRIVER] Getting info for volume: {}", volume_id);
+        println!("🔍 [DRIVER] Getting volume info from PV metadata: {}", volume_id);
         
-        // TRY 1: Read from PV volumeAttributes (FAST - single K8s API call)
+        // Read from PV volumeAttributes (single K8s API call)
         match self.get_volume_info_from_pv(volume_id).await {
             Ok(info) => {
-                println!("✅ [DRIVER] Found volume info from PV metadata (fast path): node={}", 
-                         info.node_name);
+                println!("✅ [DRIVER] Found volume info: node={}, lvol={}", 
+                         info.node_name, info.lvol_uuid);
                 return Ok(info);
             }
             Err(e) => {
-                println!("⚠️ [DRIVER] Could not get info from PV metadata: {}", e);
-                println!("🔍 [DRIVER] Falling back to querying all nodes (slow path)...");
+                println!("❌ [DRIVER] Volume metadata not found in PV: {}", e);
+                println!("💡 [DRIVER] This means either:");
+                println!("   1. Volume doesn't exist");
+                println!("   2. Volume was created with old driver version (before metadata storage)");
+                println!("   3. PV is corrupted or missing volumeAttributes");
+                return Err(format!("Volume {} metadata not found in PV: {}", volume_id, e).into());
             }
         }
-
-        // TRY 2: FALLBACK - Query all nodes to find the volume (SLOW - for legacy volumes)
-        let all_nodes = self.get_all_nodes().await?;
-        
-        if all_nodes.is_empty() {
-            return Err("No nodes found in cluster".into());
-        }
-        
-        println!("🔍 [DRIVER] Querying {} nodes to find volume", all_nodes.len());
-        
-        let payload = json!({
-            "volume_id": volume_id
-        });
-        
-        // Try each node in parallel
-        let mut tasks = Vec::new();
-        for node_name in all_nodes {
-            let driver = self.clone();
-            let vid = volume_id.to_string();
-            let payload_clone = payload.clone();
-            
-            tasks.push(tokio::spawn(async move {
-                match driver.call_node_agent(&node_name, "/api/volumes/get_info", &payload_clone).await {
-                    Ok(response) => {
-                        let lvol_uuid = response["lvol_uuid"].as_str()
-                            .map(|s| s.to_string());
-                        let lvs_name = response["lvs_name"].as_str()
-                            .map(|s| s.to_string());
-                        let size_bytes = response["size_bytes"].as_u64();
-                        
-                        if let (Some(lvol_uuid), Some(lvs_name), Some(size_bytes)) = 
-                            (lvol_uuid, lvs_name, size_bytes) {
-                            Some(VolumeInfo {
-                                volume_id: vid,
-                                node_name: node_name.clone(),
-                                lvol_uuid,
-                                lvs_name,
-                                size_bytes,
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None, // Volume not on this node
-                }
-            }));
-        }
-        
-        // Wait for results and return first success
-        for task in tasks {
-            if let Ok(Some(volume_info)) = task.await {
-                println!("✅ [DRIVER] Found volume {} on node: {}", 
-                         volume_id, volume_info.node_name);
-                return Ok(volume_info);
-            }
-        }
-        
-        println!("❌ [DRIVER] Volume {} not found on any node", volume_id);
-        Err(format!("Volume {} not found on any node", volume_id).into())
     }
 
     /// Get volume info from PV volumeAttributes (fast path)
