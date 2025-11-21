@@ -159,6 +159,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("🎯 [CONFIG] Using namespace for custom resources: {}", driver.target_namespace);
     
+    // Initialize driver (warm up capacity cache, start background tasks)
+    println!("🚀 [MAIN] Initializing CSI driver...");
+    driver.initialize().await.map_err(|e| {
+        eprintln!("❌ [MAIN] Failed to initialize driver: {}", e);
+        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+    })?;
+    println!("✅ [MAIN] CSI driver initialization complete");
+    
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;

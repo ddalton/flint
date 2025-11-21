@@ -13,6 +13,7 @@ use kube::{Api, Client};
 use k8s_openapi::api::core::v1::Node as k8sNode;
 
 use crate::minimal_models::{MinimalStateError, DiskInfo};
+use crate::capacity_cache::CapacityCache;
 
 /// Minimal State SPDK CSI Driver
 /// Focuses on direct SPDK operations without heavy CRD management
@@ -27,6 +28,9 @@ pub struct SpdkCsiDriver {
     
     // Simple caching for efficiency
     pub spdk_node_urls: Arc<Mutex<HashMap<String, String>>>,
+    
+    // Capacity cache for scalability
+    pub capacity_cache: CapacityCache,
 }
 
 impl SpdkCsiDriver {
@@ -47,7 +51,93 @@ impl SpdkCsiDriver {
             nvmeof_transport,
             nvmeof_target_port,
             spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
+            capacity_cache: CapacityCache::new(30), // 30 second TTL
         }
+    }
+    
+    /// Initialize driver (warm up cache, start background tasks)
+    pub async fn initialize(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🚀 [DRIVER] Initializing CSI driver...");
+        
+        // Warm up capacity cache
+        println!("🔥 [DRIVER] Warming up capacity cache...");
+        self.capacity_cache.warm_up(self).await?;
+        
+        // Start background cache refresh (every 15 seconds)
+        println!("🔄 [DRIVER] Starting background capacity refresh...");
+        CapacityCache::start_background_refresh(
+            Arc::new(self.capacity_cache.clone()),
+            Arc::new(self.clone()),
+            15,
+        );
+        
+        println!("✅ [DRIVER] Initialization complete");
+        Ok(())
+    }
+
+    /// Select a node for single-replica volume using capacity cache
+    async fn select_node_for_single_replica(&self, size_bytes: u64) -> Result<String, MinimalStateError> {
+        println!("🔍 [DRIVER] Selecting node for single-replica volume (size: {}GB)",
+                 size_bytes / (1024 * 1024 * 1024));
+
+        // Get all nodes in cluster
+        let all_nodes = self.get_all_nodes().await
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to list nodes: {}", e)
+            })?;
+
+        if all_nodes.is_empty() {
+            return Err(MinimalStateError::InternalError {
+                message: "No nodes found in cluster".to_string()
+            });
+        }
+
+        println!("📊 [DRIVER] Found {} nodes in cluster", all_nodes.len());
+
+        // Get cached capacities for all nodes in parallel
+        let mut tasks = Vec::new();
+        for node_name in all_nodes {
+            let cache = self.capacity_cache.clone();
+            let driver_clone = self.clone();
+            
+            tasks.push(tokio::spawn(async move {
+                cache.get_node_capacity(&node_name, &driver_clone).await
+            }));
+        }
+
+        // Wait for all capacity checks and collect candidates
+        let mut candidates = Vec::new();
+        for task in tasks {
+            if let Ok(Ok(capacity)) = task.await {
+                if capacity.free_capacity >= size_bytes {
+                    candidates.push(capacity);
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            println!("❌ [DRIVER] No nodes with sufficient capacity found");
+            return Err(MinimalStateError::InsufficientCapacity {
+                required: size_bytes,
+                available: 0,
+            });
+        }
+
+        // Sort by free capacity (descending) for load balancing
+        candidates.sort_by(|a, b| b.free_capacity.cmp(&a.free_capacity));
+
+        // Select node with most free space
+        let selected = &candidates[0];
+
+        // Reserve capacity (optimistic locking)
+        self.capacity_cache.reserve_capacity(&selected.node_name, size_bytes).await?;
+
+        println!("✅ [DRIVER] Selected node: {} (free: {}GB / {}GB)",
+                 selected.node_name,
+                 selected.free_capacity / (1024 * 1024 * 1024),
+                 selected.total_capacity / (1024 * 1024 * 1024));
+
+        Ok(selected.node_name.clone())
     }
 
     /// Create volume using minimal state architecture
@@ -55,13 +145,27 @@ impl SpdkCsiDriver {
         println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})", 
                  volume_id, size_bytes, replica_count, thin_provision);
 
-        // Get disks with existing LVS (initialized by administrator)
-        println!("📊 [DRIVER] Finding disks with existing LVS...");
-        let node_name = "ublk-2.vpc.cloudera.com"; // Still use ublk-2 for now
+        // TODO: Support multi-replica in the future
+        if replica_count != 1 {
+            return Err(MinimalStateError::InternalError {
+                message: format!("Multi-replica not yet supported (requested: {})", replica_count)
+            });
+        }
+
+        // Select node dynamically using capacity cache
+        let node_name = match self.select_node_for_single_replica(size_bytes).await {
+            Ok(node) => node,
+            Err(e) => {
+                println!("❌ [DRIVER] Failed to select node: {}", e);
+                return Err(e);
+            }
+        };
         
-        // Get disks that have been initialized with LVS
-        let initialized_disks = self.get_initialized_disks_from_node(node_name).await?;
+        // Get disks that have been initialized with LVS on selected node
+        let initialized_disks = self.get_initialized_disks_from_node(&node_name).await?;
         if initialized_disks.is_empty() {
+            // Release capacity reservation
+            self.capacity_cache.release_capacity(&node_name, size_bytes).await;
             return Err(MinimalStateError::InsufficientCapacity { 
                 required: size_bytes, 
                 available: 0 
@@ -71,9 +175,18 @@ impl SpdkCsiDriver {
         // Find a disk with enough free space
         let selected_disk = initialized_disks.iter()
             .find(|d| d.free_space >= size_bytes)
-            .ok_or_else(|| MinimalStateError::InsufficientCapacity { 
-                required: size_bytes, 
-                available: initialized_disks.iter().map(|d| d.free_space).max().unwrap_or(0)
+            .ok_or_else(|| {
+                // Release capacity reservation
+                let node = node_name.clone();
+                let size = size_bytes;
+                let cache = self.capacity_cache.clone();
+                tokio::spawn(async move {
+                    cache.release_capacity(&node, size).await;
+                });
+                MinimalStateError::InsufficientCapacity { 
+                    required: size_bytes, 
+                    available: initialized_disks.iter().map(|d| d.free_space).max().unwrap_or(0)
+                }
             })?;
         
         let lvs_name = selected_disk.lvs_name.as_ref()
@@ -87,8 +200,19 @@ impl SpdkCsiDriver {
                  selected_disk.free_space / (1024*1024*1024), 
                  node_name);
         
-        // Create logical volume on existing LVS (no need to initialize - LVS already exists)
-        let lvol_uuid = self.create_lvol(node_name, lvs_name, volume_id, size_bytes, thin_provision).await?;
+        // Create logical volume on existing LVS
+        let lvol_uuid = match self.create_lvol(&node_name, lvs_name, volume_id, size_bytes, thin_provision).await {
+            Ok(uuid) => uuid,
+            Err(e) => {
+                // Release capacity reservation on failure
+                self.capacity_cache.release_capacity(&node_name, size_bytes).await;
+                return Err(e);
+            }
+        };
+        
+        // Invalidate cache entry to force refresh on next query
+        // (capacity has actually been consumed)
+        self.capacity_cache.invalidate(&node_name).await;
         
         println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
         Ok(lvol_uuid)
@@ -629,42 +753,68 @@ impl SpdkCsiDriver {
     }
 
     /// Get volume information (which node it's on, lvol UUID, etc.)
+    /// Queries all nodes to find the volume
     pub async fn get_volume_info(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DRIVER] Getting info for volume: {}", volume_id);
         
-        // For now, we need to query all nodes to find where the volume is
-        // In production, this would query a metadata store
-        // For this implementation, we'll check the hardcoded node
-        let node_name = "ublk-2.vpc.cloudera.com";
+        // Query all nodes to find where the volume is located
+        let all_nodes = self.get_all_nodes().await?;
         
-        // Query the node agent for volume info
+        if all_nodes.is_empty() {
+            return Err("No nodes found in cluster".into());
+        }
+        
+        println!("🔍 [DRIVER] Querying {} nodes to find volume", all_nodes.len());
+        
         let payload = json!({
             "volume_id": volume_id
         });
         
-        match self.call_node_agent(node_name, "/api/volumes/get_info", &payload).await {
-            Ok(response) => {
-                let lvol_uuid = response["lvol_uuid"].as_str()
-                    .ok_or("No lvol_uuid in response")?
-                    .to_string();
-                let lvs_name = response["lvs_name"].as_str()
-                    .ok_or("No lvs_name in response")?
-                    .to_string();
-                let size_bytes = response["size_bytes"].as_u64()
-                    .ok_or("No size_bytes in response")?;
-                
-                Ok(VolumeInfo {
-                    volume_id: volume_id.to_string(),
-                    node_name: node_name.to_string(),
-                    lvol_uuid,
-                    lvs_name,
-                    size_bytes,
-                })
-            }
-            Err(_) => {
-                Err(format!("Volume {} not found", volume_id).into())
+        // Try each node in parallel
+        let mut tasks = Vec::new();
+        for node_name in all_nodes {
+            let driver = self.clone();
+            let vid = volume_id.to_string();
+            let payload_clone = payload.clone();
+            
+            tasks.push(tokio::spawn(async move {
+                match driver.call_node_agent(&node_name, "/api/volumes/get_info", &payload_clone).await {
+                    Ok(response) => {
+                        let lvol_uuid = response["lvol_uuid"].as_str()
+                            .map(|s| s.to_string());
+                        let lvs_name = response["lvs_name"].as_str()
+                            .map(|s| s.to_string());
+                        let size_bytes = response["size_bytes"].as_u64();
+                        
+                        if let (Some(lvol_uuid), Some(lvs_name), Some(size_bytes)) = 
+                            (lvol_uuid, lvs_name, size_bytes) {
+                            Some(VolumeInfo {
+                                volume_id: vid,
+                                node_name: node_name.clone(),
+                                lvol_uuid,
+                                lvs_name,
+                                size_bytes,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => None, // Volume not on this node
+                }
+            }));
+        }
+        
+        // Wait for results and return first success
+        for task in tasks {
+            if let Ok(Some(volume_info)) = task.await {
+                println!("✅ [DRIVER] Found volume {} on node: {}", 
+                         volume_id, volume_info.node_name);
+                return Ok(volume_info);
             }
         }
+        
+        println!("❌ [DRIVER] Volume {} not found on any node", volume_id);
+        Err(format!("Volume {} not found on any node", volume_id).into())
     }
 
     /// Setup NVMe-oF target and return connection info
