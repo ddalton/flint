@@ -201,20 +201,31 @@ Based on live testing:
 
 ## Known Limitations
 
-1. **No auto-rebuild** - When a node comes back after failure, manual intervention needed
+1. **No automatic replica re-addition** - When a node comes back after failure, the replica must be manually re-added to the RAID array. Note: SPDK handles the rebuild automatically once `bdev_raid_add_base_bdev` is called, but we don't yet have the monitoring logic to detect recovered nodes and re-establish NVMe-oF connections. The missing code:
+   ```rust
+   async fn start_replica_monitor() {
+       loop {
+           sleep(30s);
+           // Check if missing replicas are back
+           // Re-establish NVMe-oF connections
+           // Call bdev_raid_add_base_bdev
+           // SPDK then auto-rebuilds ✅
+       }
+   }
+   ```
 2. **Minimum 2 replicas** - RAID 1 cannot work with just 1 replica
 3. **RWO only** - ReadWriteOnce access mode (not RWX)
 4. **Node requirement** - Need N nodes for N replicas (strict)
 
 ## Future Enhancements (Not Implemented)
 
-- [ ] Automatic replica rebuild when nodes return
-- [ ] RAID health monitoring with alerts
-- [ ] Dashboard integration for replica status
-- [ ] Rebuild progress reporting
-- [ ] Performance metrics and monitoring
-- [ ] 3-way and N-way mirroring support
-- [ ] Replica rebalancing across cluster
+- [ ] **Automatic replica re-addition** - Background monitor to detect recovered nodes and call `bdev_raid_add_base_bdev` (SPDK auto-rebuilds after that)
+- [ ] **RAID health monitoring** - Periodic health checks and alerts
+- [ ] **Dashboard integration** - Show replica status, RAID health, rebuild progress
+- [ ] **Rebuild progress reporting** - Query SPDK rebuild status and display to user
+- [ ] **Performance metrics** - Latency, throughput, IOPS monitoring
+- [ ] **3-way mirroring** - Already supported in code, needs testing
+- [ ] **Replica rebalancing** - Move replicas to balance cluster load
 
 ## Recommendations
 
