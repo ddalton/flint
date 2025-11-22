@@ -199,6 +199,111 @@ Based on live testing:
 - Existing test: `verify-metadata` PVC working correctly
 - Same metadata format preserved
 
+## Volume Snapshots for Multi-Replica Volumes
+
+### Current Behavior: ⚠️ PARTIAL SUPPORT
+
+The existing snapshot functionality (via the `snapshot/` module) currently:
+
+**For Single-Replica Volumes**: ✅ **WORKS**
+- Snapshot created on the single lvol
+- Restore creates new single-replica volume
+- Tested and operational
+
+**For Multi-Replica Volumes**: ⚠️ **LIMITED**  
+The current snapshot implementation:
+- Uses `get_volume_info()` which returns single-replica metadata
+- Creates snapshot on **only ONE replica** (first one found)
+- Does **NOT** snapshot all replicas
+- Restore creates a **single-replica volume** (not multi-replica)
+
+### Design Options for Multi-Replica Snapshots:
+
+**Option 1: Snapshot All Replicas** (Most Redundant)
+```rust
+async fn create_multi_replica_snapshot(volume_id, snapshot_name) {
+    // Get all replicas from PV
+    let replicas = get_replicas_from_pv(volume_id)?;
+    
+    // Snapshot each replica
+    for (i, replica) in replicas.iter().enumerate() {
+        snapshot_uuid = create_snapshot_on_node(
+            replica.node_name,
+            replica.lvol_uuid,
+            format!("{}_replica_{}", snapshot_name, i)
+        );
+    }
+    
+    // Store snapshot metadata with all replica snapshots
+    // Restore can recreate multi-replica volume from any replica's snapshot
+}
+```
+
+**Option 2: Snapshot One Replica** (Simpler, Current Behavior)
+```rust
+// Snapshot just one replica (e.g., the first one)
+// Restore creates single-replica volume
+// User can then manually create multi-replica if needed
+```
+
+**Option 3: Snapshot with Promotion** (Balanced)
+```rust
+// Snapshot one replica (fast, space-efficient)
+// On restore, optionally promote to multi-replica
+// Metadata indicates it came from multi-replica source
+```
+
+### Recommendation:
+
+For **Phase 1** (current): ✅ **Option 2 is acceptable**
+- Snapshots work but create single-replica restore
+- User can manually create multi-replica from restored volume if needed
+- Simple, predictable behavior
+
+For **Phase 2** (future): **Option 1 or 3**
+- Option 1: Maximum redundancy (snapshot all replicas)
+- Option 3: Balance of efficiency and flexibility
+
+### Current Status:
+
+✅ **Snapshots work for testing** - Creates snapshot of one replica  
+⚠️ **Limitation**: Restore creates single-replica volume (not multi-replica)  
+📝 **Future**: Full multi-replica snapshot support planned
+
+### Usage Note:
+
+If you create a snapshot of a multi-replica volume:
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-snapshot
+spec:
+  volumeSnapshotClassName: flint-snapclass
+  source:
+    persistentVolumeClaimName: multi-replica-volume  # 2-replica volume
+```
+
+The snapshot will be created successfully, but when you restore:
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restored-volume
+spec:
+  dataSource:
+    name: my-snapshot
+    kind: VolumeSnapshot
+  # ...
+```
+
+The restored volume will be **single-replica** (not 2-replica). To get a multi-replica restored volume, you'd need to:
+1. Restore to single-replica PVC
+2. Copy data to new multi-replica PVC
+3. (Future: Automatic promotion during restore)
+
+---
+
 ## Known Limitations
 
 1. **No automatic replica re-addition** - When a node comes back after failure, the replica must be manually re-added to the RAID array. Note: SPDK handles the rebuild automatically once `bdev_raid_add_base_bdev` is called, but we don't yet have the monitoring logic to detect recovered nodes and re-establish NVMe-oF connections. The missing code:
