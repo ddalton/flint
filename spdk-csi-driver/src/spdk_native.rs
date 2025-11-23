@@ -223,15 +223,15 @@ impl SpdkNative {
         }
     }
     
-    /// Create AIO bdev - matches SPDK v25.05.x bdev_aio_create RPC
-    pub async fn create_aio_bdev(&self, filename: &str, name: &str) -> Result<String> {
+    /// Create uring bdev - uses io_uring backend (modern replacement for AIO)
+    pub async fn create_uring_bdev(&self, filename: &str, name: &str) -> Result<String> {
         let params = json!({
             "name": name,
             "filename": filename,
             "block_size": 512
         });
-        
-        let result = self.call_rpc("bdev_aio_create", Some(params)).await?;
+
+        let result = self.call_rpc("bdev_uring_create", Some(params)).await?;
         Ok(result.as_str().unwrap_or(name).to_string())
     }
     

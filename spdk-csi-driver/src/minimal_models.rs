@@ -32,7 +32,7 @@ pub struct DiskInfo {
     pub node_name: String,
     pub pci_address: String,
     pub device_name: String, // e.g. "nvme3n1"
-    pub bdev_name: String,   // e.g. "kernel_nvme3n1"
+    pub bdev_name: String,   // e.g. "uring_nvme3n1"
     pub size_bytes: u64,
     pub free_space: u64,
     pub model: String,

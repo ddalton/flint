@@ -885,7 +885,7 @@ impl SpdkCsiDriver {
                 node_name: node_name.to_string(),
                 pci_address: disk_json["pci_address"].as_str().unwrap_or("unknown").to_string(),
                 device_name: disk_json["device_name"].as_str().unwrap_or("unknown").to_string(),
-                bdev_name: format!("kernel_{}", disk_json["device_name"].as_str().unwrap_or("unknown")),
+                bdev_name: format!("uring_{}", disk_json["device_name"].as_str().unwrap_or("unknown")),
                 size_bytes: disk_json["size_bytes"].as_u64().unwrap_or(0),
                 free_space: disk_json["size_bytes"].as_u64().unwrap_or(0), // Assume all free for uninitialized
                 model: disk_json["model"].as_str().unwrap_or("unknown").to_string(),

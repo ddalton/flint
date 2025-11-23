@@ -356,79 +356,298 @@ impl MinimalDiskService {
     }
 
     /// Ensure a physical device has appropriate SPDK bdev
+    ///
+    /// Strategy for NVMe devices:
+    /// 1. First try SPDK userspace driver (unbind kernel, bind vfio-pci, attach via bdev_nvme_attach_controller)
+    /// 2. If userspace fails, fall back to io_uring (keeps kernel driver, less performance but works everywhere)
+    ///
+    /// Strategy for SATA devices:
+    /// - Always use io_uring (SPDK userspace only supports NVMe)
     async fn ensure_device_bdev_exists(&self, device: &PhysicalDevice) -> Result<String, MinimalStateError> {
-        println!("🔄 [BDEV_RECOVERY] Ensuring bdev exists for device: {}", device.device_name);
+        println!("🔄 [BDEV_RECOVERY] Ensuring bdev exists for device: {} (driver: {})",
+                 device.device_name, device.driver);
 
-        let expected_bdev_name = if device.driver == "nvme" {
-            // Kernel-bound device -> AIO bdev
-            format!("kernel_{}", device.device_name)
-        } else {
-            // Unbound/SPDK-bound device -> would need NVMe controller attach
-            // For now, skip unbound devices in auto-recovery
-            println!("⏭️ [BDEV_RECOVERY] Skipping unbound device: {}", device.device_name);
-            return Err(MinimalStateError::InternalError { 
-                message: "Unbound device skipped".to_string() 
-            });
-        };
+        let correlation_id = format!("{:08x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u32);
 
-        // Check if bdev already exists
-        let bdevs = self.get_spdk_bdevs().await?;
-        if let Some(bdev_list) = bdevs["result"].as_array() {
-            for bdev in bdev_list {
-                if let Some(name) = bdev["name"].as_str() {
-                    if name == expected_bdev_name {
-                        println!("✅ [BDEV_RECOVERY] Bdev already exists: {}", expected_bdev_name);
-                        return Ok(expected_bdev_name);
+        // Check if this is an NVMe device (by device name pattern)
+        let is_nvme_device = device.device_name.starts_with("nvme");
+
+        // For NVMe devices: try SPDK userspace driver first for maximum performance
+        if is_nvme_device {
+            println!("🚀 [BDEV_RECOVERY:{}] NVMe device detected, attempting SPDK userspace driver first", correlation_id);
+
+            // Check if device is already bound to userspace driver (vfio-pci or uio)
+            if device.driver == "vfio-pci" || device.driver == "uio_pci_generic" || device.driver == "igb_uio" {
+                // Device already bound to userspace driver, try to attach via SPDK
+                match self.try_spdk_nvme_attach(device, &correlation_id).await {
+                    Ok(bdev_name) => return Ok(bdev_name),
+                    Err(e) => {
+                        println!("⚠️ [BDEV_RECOVERY:{}] SPDK NVMe attach failed: {}", correlation_id, e);
+                        // Can't fall back to io_uring since device is unbound from kernel
+                        return Err(e);
+                    }
+                }
+            }
+
+            // Device is kernel-bound (nvme driver), try to switch to userspace
+            if device.driver == "nvme" {
+                // First check if an SPDK NVMe bdev already exists for this PCI address
+                let spdk_bdev_name = format!("nvme_{}", device.pci_address.replace(":", "_").replace(".", "_"));
+                let bdevs = self.get_spdk_bdevs().await?;
+                if let Some(bdev_list) = bdevs["result"].as_array() {
+                    for bdev in bdev_list {
+                        if let Some(name) = bdev["name"].as_str() {
+                            if name.starts_with(&spdk_bdev_name) || name.contains(&device.pci_address.replace(":", "_")) {
+                                println!("✅ [BDEV_RECOVERY:{}] SPDK NVMe bdev already exists: {}", correlation_id, name);
+                                return Ok(name.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Try to unbind from kernel and bind to userspace driver
+                match self.try_unbind_and_attach_nvme(device, &correlation_id).await {
+                    Ok(bdev_name) => {
+                        println!("✅ [BDEV_RECOVERY:{}] Successfully using SPDK userspace NVMe driver: {}", correlation_id, bdev_name);
+                        return Ok(bdev_name);
+                    }
+                    Err(e) => {
+                        println!("⚠️ [BDEV_RECOVERY:{}] SPDK userspace driver failed: {}, falling back to io_uring", correlation_id, e);
+                        // Fall through to io_uring fallback
                     }
                 }
             }
         }
 
-        // Create missing AIO bdev for kernel-bound device
-        if device.driver == "nvme" {
-            let correlation_id = format!("{:08x}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as u32);
-            println!("🔧 [BDEV_RECOVERY:{}] Creating AIO bdev: {}", correlation_id, expected_bdev_name);
+        // Fallback path: io_uring for kernel-bound devices (NVMe fallback or SATA)
+        // This works with any block device that has a kernel driver
+        if device.driver == "nvme" || device.driver == "ahci" || device.driver == "ata_piix" || device.driver.contains("sata") {
+            let uring_bdev_name = format!("uring_{}", device.device_name);
+
+            // Check if uring bdev already exists
+            let bdevs = self.get_spdk_bdevs().await?;
+            if let Some(bdev_list) = bdevs["result"].as_array() {
+                for bdev in bdev_list {
+                    if let Some(name) = bdev["name"].as_str() {
+                        if name == uring_bdev_name {
+                            println!("✅ [BDEV_RECOVERY:{}] uring bdev already exists: {}", correlation_id, uring_bdev_name);
+                            return Ok(uring_bdev_name);
+                        }
+                    }
+                }
+            }
+
+            println!("🔧 [BDEV_RECOVERY:{}] Creating io_uring bdev: {} (fallback path)", correlation_id, uring_bdev_name);
             println!("🔧 [BDEV_RECOVERY:{}] Device: /dev/{}, PCI: {}", correlation_id, device.device_name, device.pci_address);
-            println!("🔧 [BDEV_RECOVERY:{}] CORRELATE: Watch SPDK logs for bdev_aio.c create messages and vbdev_lvol.c examine", correlation_id);
-            
+
             let device_path = format!("/dev/{}", device.device_name);
-            
-            let aio_params = serde_json::json!({
-                "method": "bdev_aio_create",
+
+            let uring_params = serde_json::json!({
+                "method": "bdev_uring_create",
                 "params": {
-                    "name": expected_bdev_name,
+                    "name": uring_bdev_name,
                     "filename": device_path
                     // Note: Not specifying block_size - let SPDK auto-detect from device
-                    // This prevents errors when disk size is not a multiple of 4096
                 }
             });
 
-            match self.call_spdk_rpc(&aio_params).await {
+            match self.call_spdk_rpc(&uring_params).await {
                 Ok(_) => {
-                    println!("✅ [BDEV_RECOVERY:{}] Successfully created AIO bdev: {}", correlation_id, expected_bdev_name);
-                    println!("✅ [BDEV_RECOVERY:{}] SPDK will now asynchronously examine this bdev for existing LVS", correlation_id);
-                    return Ok(expected_bdev_name);
+                    println!("✅ [BDEV_RECOVERY:{}] Successfully created uring bdev: {}", correlation_id, uring_bdev_name);
+                    return Ok(uring_bdev_name);
                 }
                 Err(e) if e.to_string().contains("File exists") => {
-                    println!("✅ [BDEV_RECOVERY:{}] AIO bdev already exists: {}", correlation_id, expected_bdev_name);
-                    return Ok(expected_bdev_name);
+                    println!("✅ [BDEV_RECOVERY:{}] uring bdev already exists: {}", correlation_id, uring_bdev_name);
+                    return Ok(uring_bdev_name);
                 }
                 Err(e) => {
-                    println!("⚠️ [BDEV_RECOVERY:{}] Failed to create AIO bdev {}: {}", correlation_id, expected_bdev_name, e);
-                    println!("⚠️ [BDEV_RECOVERY:{}] Error details: {}", correlation_id, e);
-                    return Err(MinimalStateError::SpdkRpcError { 
-                        message: format!("Failed to create AIO bdev: {}", e) 
+                    println!("❌ [BDEV_RECOVERY:{}] Failed to create uring bdev: {}", correlation_id, e);
+                    return Err(MinimalStateError::SpdkRpcError {
+                        message: format!("Failed to create uring bdev: {}", e)
                     });
                 }
             }
         }
 
-        Err(MinimalStateError::InternalError { 
-            message: "Unexpected code path in ensure_device_bdev_exists".to_string() 
+        // Device has unknown/unbound driver and is not suitable for io_uring
+        println!("⏭️ [BDEV_RECOVERY:{}] Skipping device with unsupported driver: {} (driver: {})",
+                 correlation_id, device.device_name, device.driver);
+        Err(MinimalStateError::InternalError {
+            message: format!("Device {} has unsupported driver: {}", device.device_name, device.driver)
         })
+    }
+
+    /// Try to unbind NVMe device from kernel driver and attach via SPDK userspace driver
+    async fn try_unbind_and_attach_nvme(&self, device: &PhysicalDevice, correlation_id: &str) -> Result<String, MinimalStateError> {
+        use std::fs;
+
+        println!("🔧 [SPDK_USERSPACE:{}] Attempting to bind {} to userspace driver", correlation_id, device.pci_address);
+
+        // Step 1: Check if vfio-pci or uio_pci_generic is available
+        let userspace_driver = self.detect_available_userspace_driver().await?;
+        println!("🔧 [SPDK_USERSPACE:{}] Using userspace driver: {}", correlation_id, userspace_driver);
+
+        // Step 2: Get device vendor/device IDs for driver binding
+        let (vendor_id, device_id) = self.get_pci_ids(&device.pci_address)?;
+        println!("🔧 [SPDK_USERSPACE:{}] Device IDs: vendor={}, device={}", correlation_id, vendor_id, device_id);
+
+        // Step 3: Unbind from kernel nvme driver
+        let unbind_path = format!("/sys/bus/pci/devices/{}/driver/unbind", device.pci_address);
+        if std::path::Path::new(&unbind_path).exists() {
+            println!("🔧 [SPDK_USERSPACE:{}] Unbinding from kernel driver...", correlation_id);
+            fs::write(&unbind_path, &device.pci_address)
+                .map_err(|e| MinimalStateError::InternalError {
+                    message: format!("Failed to unbind device {}: {}", device.pci_address, e)
+                })?;
+
+            // Give kernel time to process unbind
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        // Step 4: Add device ID to userspace driver's new_id (required for vfio-pci)
+        let new_id_path = format!("/sys/bus/pci/drivers/{}/new_id", userspace_driver);
+        if std::path::Path::new(&new_id_path).exists() {
+            let id_string = format!("{} {}", vendor_id, device_id);
+            // Ignore error if ID already exists
+            let _ = fs::write(&new_id_path, &id_string);
+        }
+
+        // Step 5: Bind to userspace driver
+        let bind_path = format!("/sys/bus/pci/drivers/{}/bind", userspace_driver);
+        println!("🔧 [SPDK_USERSPACE:{}] Binding to {}...", correlation_id, userspace_driver);
+        fs::write(&bind_path, &device.pci_address)
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to bind device {} to {}: {}", device.pci_address, userspace_driver, e)
+            })?;
+
+        // Give driver time to initialize
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Step 6: Verify binding succeeded
+        let current_driver = self.get_current_driver(&device.pci_address).await
+            .unwrap_or_else(|_| "unknown".to_string());
+        if current_driver != userspace_driver {
+            return Err(MinimalStateError::InternalError {
+                message: format!("Driver binding failed: expected {}, got {}", userspace_driver, current_driver)
+            });
+        }
+
+        println!("✅ [SPDK_USERSPACE:{}] Device bound to {}", correlation_id, userspace_driver);
+
+        // Step 7: Attach via SPDK bdev_nvme_attach_controller
+        self.try_spdk_nvme_attach(device, correlation_id).await
+    }
+
+    /// Try to attach an NVMe device via SPDK's bdev_nvme_attach_controller
+    async fn try_spdk_nvme_attach(&self, device: &PhysicalDevice, correlation_id: &str) -> Result<String, MinimalStateError> {
+        // Generate controller name based on PCI address
+        let controller_name = format!("nvme_{}", device.pci_address.replace(":", "_").replace(".", "_"));
+
+        println!("🔧 [SPDK_USERSPACE:{}] Attaching NVMe controller: {} (PCI: {})",
+                 correlation_id, controller_name, device.pci_address);
+
+        // SPDK expects PCI address in traddr format
+        let attach_params = serde_json::json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": controller_name,
+                "trtype": "pcie",
+                "traddr": device.pci_address
+            }
+        });
+
+        match self.call_spdk_rpc(&attach_params).await {
+            Ok(response) => {
+                // bdev_nvme_attach_controller returns array of created bdev names
+                if let Some(bdevs) = response["result"].as_array() {
+                    if let Some(first_bdev) = bdevs.first() {
+                        let bdev_name = first_bdev.as_str().unwrap_or(&controller_name).to_string();
+                        println!("✅ [SPDK_USERSPACE:{}] NVMe controller attached, bdev: {}", correlation_id, bdev_name);
+                        return Ok(bdev_name);
+                    }
+                }
+                // If result is a string (single bdev name)
+                if let Some(bdev_name) = response["result"].as_str() {
+                    println!("✅ [SPDK_USERSPACE:{}] NVMe controller attached, bdev: {}", correlation_id, bdev_name);
+                    return Ok(bdev_name.to_string());
+                }
+                // Fallback to controller name + n1 (common SPDK naming)
+                let bdev_name = format!("{}n1", controller_name);
+                println!("✅ [SPDK_USERSPACE:{}] NVMe controller attached (assumed bdev: {})", correlation_id, bdev_name);
+                Ok(bdev_name)
+            }
+            Err(e) if e.to_string().contains("already exists") || e.to_string().contains("already attached") => {
+                let bdev_name = format!("{}n1", controller_name);
+                println!("✅ [SPDK_USERSPACE:{}] NVMe controller already attached: {}", correlation_id, bdev_name);
+                Ok(bdev_name)
+            }
+            Err(e) => {
+                println!("❌ [SPDK_USERSPACE:{}] Failed to attach NVMe controller: {}", correlation_id, e);
+                Err(MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to attach NVMe controller: {}", e)
+                })
+            }
+        }
+    }
+
+    /// Detect which userspace driver is available (prefer vfio-pci if IOMMU available)
+    async fn detect_available_userspace_driver(&self) -> Result<String, MinimalStateError> {
+        use std::path::Path;
+
+        // Check if IOMMU is available (vfio-pci requires it)
+        let iommu_groups = std::fs::read_dir("/sys/kernel/iommu_groups")
+            .map(|d| d.count())
+            .unwrap_or(0);
+
+        if iommu_groups > 0 {
+            // IOMMU available, check if vfio-pci driver is loaded
+            if Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
+                return Ok("vfio-pci".to_string());
+            }
+        }
+
+        // Fall back to uio_pci_generic (doesn't require IOMMU, but less secure)
+        if Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
+            return Ok("uio_pci_generic".to_string());
+        }
+
+        // Try igb_uio (legacy DPDK driver)
+        if Path::new("/sys/bus/pci/drivers/igb_uio").exists() {
+            return Ok("igb_uio".to_string());
+        }
+
+        Err(MinimalStateError::InternalError {
+            message: "No userspace driver available (vfio-pci, uio_pci_generic, or igb_uio required)".to_string()
+        })
+    }
+
+    /// Get PCI vendor and device IDs
+    fn get_pci_ids(&self, pci_address: &str) -> Result<(String, String), MinimalStateError> {
+        use std::fs;
+
+        let vendor_path = format!("/sys/bus/pci/devices/{}/vendor", pci_address);
+        let device_path = format!("/sys/bus/pci/devices/{}/device", pci_address);
+
+        let vendor_id = fs::read_to_string(&vendor_path)
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to read vendor ID: {}", e)
+            })?
+            .trim()
+            .trim_start_matches("0x")
+            .to_string();
+
+        let device_id = fs::read_to_string(&device_path)
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to read device ID: {}", e)
+            })?
+            .trim()
+            .trim_start_matches("0x")
+            .to_string();
+
+        Ok((vendor_id, device_id))
     }
 
     /// Wait for SPDK to auto-discover LVS on a bdev (async examination)
@@ -755,7 +974,7 @@ impl MinimalDiskService {
                  bdev_name, product_name, block_size, num_blocks, claimed);
 
         // Filter for storage devices (matches raid_over_lv pattern)
-        if !product_name.contains("NVMe") && !product_name.contains("SSD") && !product_name.contains("AIO") {
+        if !product_name.contains("NVMe") && !product_name.contains("SSD") && !product_name.contains("Uring") {
             println!("🔍 [DISK_FILTER] Skipping bdev '{}' with product: '{}' (not storage)", bdev_name, product_name);
             return Ok(None);
         }
@@ -764,15 +983,15 @@ impl MinimalDiskService {
 
         let size_bytes = block_size * num_blocks;
         
-        // Try to get device name from AIO filename if available, otherwise use bdev name
+        // Try to get device name from uring filename if available, otherwise use bdev name
         let device_name = if let Some(filename) = bdev.get("driver_specific")
-            .and_then(|ds| ds.get("aio"))
-            .and_then(|aio| aio.get("filename"))
+            .and_then(|ds| ds.get("uring"))
+            .and_then(|uring| uring.get("filename"))
             .and_then(|f| f.as_str()) {
             // Extract device name from filename like "/dev/nvme0n1" -> "nvme0n1"
             filename.trim_start_matches("/dev/").to_string()
         } else {
-            bdev_name.trim_start_matches("kernel_").to_string()
+            bdev_name.trim_start_matches("uring_").to_string()
         };
         
         let pci_address = self.extract_pci_from_bdev_name(bdev_name);
@@ -810,8 +1029,8 @@ impl MinimalDiskService {
 
     /// Extract real PCI address from bdev name using system information
     fn extract_pci_from_bdev_name(&self, bdev_name: &str) -> String {
-        // For AIO bdevs like "kernel_nvme0n1", extract device name and map to PCI
-        let device_name = bdev_name.trim_start_matches("kernel_");
+        // For uring bdevs like "uring_nvme0n1", extract device name and map to PCI
+        let device_name = bdev_name.trim_start_matches("uring_");
         
         if device_name.starts_with("nvme") && device_name.ends_with("n1") {
             // Try to read the actual PCI address from sysfs

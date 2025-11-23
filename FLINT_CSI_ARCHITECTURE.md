@@ -246,6 +246,110 @@ graph LR
     HEALTH --> BDEV
 ```
 
+### NVMe Driver Binding Strategy
+
+The disk service implements a **performance-first** strategy for NVMe devices, with automatic fallback for compatibility.
+
+```mermaid
+flowchart TD
+    START[Device Detected] --> IS_NVME{Is NVMe<br/>device?}
+
+    IS_NVME -->|No| SATA[SATA/Other Device]
+    SATA --> URING_SATA[Create io_uring bdev]
+    URING_SATA --> DONE[✅ Device Ready]
+
+    IS_NVME -->|Yes| CHECK_DRIVER{Current<br/>driver?}
+
+    CHECK_DRIVER -->|vfio-pci<br/>uio_pci_generic<br/>igb_uio| SPDK_ATTACH[Attach via<br/>bdev_nvme_attach_controller]
+    SPDK_ATTACH --> DONE
+
+    CHECK_DRIVER -->|nvme<br/>kernel driver| TRY_USERSPACE[Try SPDK Userspace Path]
+
+    TRY_USERSPACE --> DETECT_DRIVER[Detect available<br/>userspace driver]
+    DETECT_DRIVER --> HAS_IOMMU{IOMMU<br/>available?}
+
+    HAS_IOMMU -->|Yes| USE_VFIO[Use vfio-pci]
+    HAS_IOMMU -->|No| USE_UIO[Use uio_pci_generic<br/>or igb_uio]
+
+    USE_VFIO --> UNBIND[Unbind from<br/>kernel nvme driver]
+    USE_UIO --> UNBIND
+
+    UNBIND --> BIND[Bind to<br/>userspace driver]
+    BIND --> ATTACH[bdev_nvme_attach_controller]
+
+    ATTACH -->|Success| DONE
+    ATTACH -->|Failure| FALLBACK[⚠️ Fallback to io_uring]
+    FALLBACK --> URING_NVME[Create io_uring bdev<br/>kernel driver intact]
+    URING_NVME --> DONE
+
+    style DONE fill:#c8e6c9
+    style FALLBACK fill:#fff3e0
+    style SPDK_ATTACH fill:#e1f5fe
+    style URING_SATA fill:#e8f5e8
+```
+
+**Strategy Summary:**
+
+| Device Type | Primary Path | Fallback | Performance |
+|-------------|--------------|----------|-------------|
+| **NVMe SSD** | SPDK userspace driver | io_uring | 🚀 Maximum (userspace) or ⚡ Good (io_uring) |
+| **SATA SSD** | io_uring | None | ⚡ Good |
+
+**SPDK Userspace Driver Benefits:**
+- **Zero kernel overhead**: Bypasses kernel block layer entirely
+- **Polling mode**: No interrupt overhead, sub-10μs latency
+- **Direct NVMe access**: Full NVMe command set support
+- **Optimal for high-IOPS**: 1M+ IOPS per device possible
+
+**io_uring Fallback Benefits:**
+- **No special setup**: Works with standard kernel NVMe driver
+- **No IOMMU required**: Works in VMs without passthrough
+- **Universal compatibility**: Works on any Linux 5.1+ system
+- **Still performant**: ~100K IOPS, good for most workloads
+
+**Userspace Driver Requirements:**
+
+```bash
+# Check IOMMU availability (required for vfio-pci)
+ls /sys/kernel/iommu_groups/ | wc -l
+
+# Load userspace drivers
+modprobe vfio-pci          # Preferred (secure, requires IOMMU)
+modprobe uio_pci_generic   # Fallback (no IOMMU needed)
+
+# Verify driver availability
+ls /sys/bus/pci/drivers/vfio-pci
+ls /sys/bus/pci/drivers/uio_pci_generic
+```
+
+**Automatic Binding Process:**
+
+1. **Detect userspace driver**: Checks vfio-pci (if IOMMU), uio_pci_generic, igb_uio
+2. **Get PCI IDs**: Reads vendor/device from `/sys/bus/pci/devices/{addr}/`
+3. **Unbind kernel driver**: Writes to `/sys/bus/pci/devices/{addr}/driver/unbind`
+4. **Register device ID**: Writes to `/sys/bus/pci/drivers/{driver}/new_id`
+5. **Bind userspace driver**: Writes to `/sys/bus/pci/drivers/{driver}/bind`
+6. **Attach via SPDK**: Calls `bdev_nvme_attach_controller` RPC
+
+**Log Messages:**
+
+```
+🚀 [BDEV_RECOVERY:a1b2c3d4] NVMe device detected, attempting SPDK userspace driver first
+🔧 [SPDK_USERSPACE:a1b2c3d4] Using userspace driver: vfio-pci
+🔧 [SPDK_USERSPACE:a1b2c3d4] Device IDs: vendor=8086, device=0a54
+🔧 [SPDK_USERSPACE:a1b2c3d4] Unbinding from kernel driver...
+🔧 [SPDK_USERSPACE:a1b2c3d4] Binding to vfio-pci...
+✅ [SPDK_USERSPACE:a1b2c3d4] NVMe controller attached, bdev: nvme_0000_3b_00_0n1
+```
+
+**Fallback scenario:**
+```
+🚀 [BDEV_RECOVERY:a1b2c3d4] NVMe device detected, attempting SPDK userspace driver first
+⚠️ [BDEV_RECOVERY:a1b2c3d4] SPDK userspace driver failed: No IOMMU, falling back to io_uring
+🔧 [BDEV_RECOVERY:a1b2c3d4] Creating io_uring bdev: uring_nvme0n1 (fallback path)
+✅ [BDEV_RECOVERY:a1b2c3d4] Successfully created uring bdev: uring_nvme0n1
+```
+
 ### Dashboard Backend (spdk_dashboard_backend_minimal.rs)
 **Real-time data aggregation for frontend**
 
@@ -382,7 +486,7 @@ graph TD
     {
       "pci_address": "0000:3b:00.0",
       "device_name": "nvme3n1", 
-      "bdev_name": "kernel_nvme3n1",
+      "bdev_name": "uring_nvme3n1",
       "size_bytes": 1000204886016,
       "healthy": true,
       "blobstore_initialized": true,
@@ -936,7 +1040,7 @@ graph TD
     APP[Application<br/>fsync/sync] --> FS[Filesystem<br/>ext4/xfs]
     FS --> UBLK[ublk Block Device<br/>UBLK_ATTR_VOLATILE_CACHE]
     UBLK --> LVOL[LVOL Bdev Layer<br/>SPDK_BDEV_IO_TYPE_FLUSH]
-    LVOL --> BASE[Base Bdev<br/>NVMe/AIO]
+    LVOL --> BASE[Base Bdev<br/>NVMe/io_uring]
     BASE --> DISK[(Physical Disk)]
     
     style UBLK fill:#fff3e0
