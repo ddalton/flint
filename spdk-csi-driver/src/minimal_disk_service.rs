@@ -974,7 +974,9 @@ impl MinimalDiskService {
                  bdev_name, product_name, block_size, num_blocks, claimed);
 
         // Filter for storage devices (matches raid_over_lv pattern)
-        if !product_name.contains("NVMe") && !product_name.contains("SSD") && !product_name.contains("Uring") {
+        // Use case-insensitive check for "uring" to match both "Uring" and "URING bdev"
+        let product_upper = product_name.to_uppercase();
+        if !product_upper.contains("NVME") && !product_upper.contains("SSD") && !product_upper.contains("URING") {
             println!("🔍 [DISK_FILTER] Skipping bdev '{}' with product: '{}' (not storage)", bdev_name, product_name);
             return Ok(None);
         }
