@@ -531,7 +531,16 @@ impl MinimalControllerService {
         println!("✅ [CONTROLLER] Found source volume on node: {}, lvol: {}", source_node, source_lvol_uuid);
 
         // Step 2: Create a temporary snapshot of the source volume
-        let snapshot_name = format!("temp_clone_snap_{}", volume_id);
+        // NOTE: SPDK bdev_lvol_clone requires a snapshot, can't clone regular lvol directly
+        // We create a temp snapshot, clone it, then delete the temp snapshot
+        let snapshot_name = format!("temp_pvc_clone_{}", volume_id);
+        
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("📸 [PVC_CLONE] Creating temporary snapshot for cloning");
+        eprintln!("   Source lvol: {}", source_lvol_uuid);
+        eprintln!("   Temp snapshot name: {}", snapshot_name);
+        eprintln!("   (Will be deleted after clone succeeds)");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         let snapshot_payload = serde_json::json!({
             "lvol_name": source_lvol_uuid,  // API expects lvol_name (can be UUID or name)
@@ -541,13 +550,13 @@ impl MinimalControllerService {
         let snapshot_response = self.driver
             .call_node_agent(&source_node, "/api/snapshots/create", &snapshot_payload)
             .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to create temporary snapshot for clone: {}", e)))?;
+            .map_err(|e| tonic::Status::internal(format!("Failed to create temporary snapshot for PVC clone: {}", e)))?;
         
         let snapshot_uuid = snapshot_response["snapshot_uuid"].as_str()
             .ok_or_else(|| tonic::Status::internal("No snapshot UUID in response"))?
             .to_string();
 
-        println!("✅ [CONTROLLER] Created temporary snapshot for cloning: {}", snapshot_uuid);
+        println!("✅ [CONTROLLER] Temporary snapshot created: {}", snapshot_uuid);
 
         // Step 3: Clone the snapshot to create the new volume
         let clone_name = format!("vol_{}", volume_id);
@@ -571,6 +580,25 @@ impl MinimalControllerService {
             .to_string();
 
         println!("✅ [CONTROLLER] Volume {} cloned from {} (clone UUID: {})", volume_id, source_volume_id, clone_uuid);
+
+        // Step 3.5: Delete temporary snapshot (cleanup)
+        // The clone is now independent, we don't need the temp snapshot anymore
+        println!("🧹 [CONTROLLER] Cleaning up temporary snapshot: {}", snapshot_uuid);
+        
+        let delete_payload = serde_json::json!({
+            "snapshot_uuid": snapshot_uuid
+        });
+        
+        match self.driver.call_node_agent(&source_node, "/api/snapshots/delete", &delete_payload).await {
+            Ok(_) => {
+                println!("✅ [CONTROLLER] Temporary snapshot deleted successfully");
+            }
+            Err(e) => {
+                // Log but don't fail - clone succeeded, snapshot cleanup is nice-to-have
+                println!("⚠️ [CONTROLLER] Failed to delete temporary snapshot (non-fatal): {}", e);
+                println!("   Snapshot {} may need manual cleanup", snapshot_uuid);
+            }
+        }
 
         // Step 4: Build volume_context with metadata
         let mut volume_context = std::collections::HashMap::new();
