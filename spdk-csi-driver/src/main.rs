@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use kube::Client;
 use warp::Filter;
+use tracing_subscriber;
 
 // Import minimal state components from library
 use spdk_csi_driver::node_agent::NodeAgent;
@@ -139,6 +140,17 @@ async fn cleanup_ghost_mounts() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing subscriber for better log formatting
+    // This adds timestamps to all println!/eprintln! output
+    // Future: migrate to tracing::info!, tracing::debug!, etc. for proper log levels
+    // Configure via RUST_LOG env var (default: info level)
+    tracing_subscriber::fmt()
+        .with_target(false)  // Don't show module paths (cleaner output)
+        .with_thread_ids(false)  // Don't show thread IDs (cleaner for CSI)
+        .with_line_number(false)  // Don't show line numbers (we have emojis for context)
+        .with_ansi(true)  // Enable colors in terminal
+        .init();
+    
     let kube_client = Client::try_default().await?;
     let node_id = std::env::var("NODE_ID")
         .unwrap_or_else(|_| std::env::var("HOSTNAME").unwrap_or("unknown-node".to_string()));
