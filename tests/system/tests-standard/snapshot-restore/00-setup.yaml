@@ -23,11 +23,27 @@ spec:
         - /bin/sh
         - -c
         - |
-          echo "Snapshot Test - Initial Data" > /data/snapshot-test.txt
-          echo "Timestamp: $(date)" >> /data/snapshot-test.txt
-          echo "This data should be in the snapshot" >> /data/snapshot-test.txt
-          sync
-          echo "Initial data written"
+          set -e  # Exit on any error
+          echo "Writing snapshot test data..."
+          echo "Snapshot Test - Initial Data" > /data/snapshot-test.txt || { echo "ERROR: Failed to write file!"; exit 1; }
+          echo "Timestamp: $(date)" >> /data/snapshot-test.txt || { echo "ERROR: Failed to append to file!"; exit 1; }
+          echo "This data should be in the snapshot" >> /data/snapshot-test.txt || { echo "ERROR: Failed to append to file!"; exit 1; }
+          sync || { echo "ERROR: sync failed!"; exit 1; }
+          
+          # Verify data was written
+          if [ ! -f /data/snapshot-test.txt ]; then
+            echo "ERROR: File does not exist after write!"
+            exit 1
+          fi
+          
+          if ! grep -q "This data should be in the snapshot" /data/snapshot-test.txt; then
+            echo "ERROR: File content is incorrect!"
+            cat /data/snapshot-test.txt
+            exit 1
+          fi
+          
+          echo "✅ Initial data written and verified"
+          cat /data/snapshot-test.txt
       volumeMounts:
         - name: data-volume
           mountPath: /data

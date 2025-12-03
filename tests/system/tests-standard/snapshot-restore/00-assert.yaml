@@ -11,3 +11,12 @@ metadata:
   name: initial-data-writer
 status:
   phase: Succeeded
+---
+# Verify data was actually written before taking snapshot
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - command: kubectl exec initial-data-writer --namespace=${NAMESPACE} -- cat /data/snapshot-test.txt
+    ignoreFailure: false
+  - command: kubectl exec initial-data-writer --namespace=${NAMESPACE} -- sh -c 'grep -q "This data should be in the snapshot" /data/snapshot-test.txt && echo "Data verified in source volume"'
+    ignoreFailure: false
