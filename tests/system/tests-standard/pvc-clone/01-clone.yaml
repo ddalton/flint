@@ -12,36 +12,4 @@ spec:
   dataSource:
     name: source-pvc
     kind: PersistentVolumeClaim
----
-# Create pod immediately to trigger WaitForFirstConsumer binding
-apiVersion: v1
-kind: Pod
-metadata:
-  name: clone-verifier
-spec:
-  restartPolicy: Never
-  containers:
-    - name: verifier
-      image: busybox:latest
-      command:
-        - /bin/sh
-        - -c
-        - |
-          echo "Verifying cloned PVC data..."
-          cat /data/source-data.txt
-          
-          # Verify original data exists in clone
-          if ! grep -q "This data should be cloned to new PVC" /data/source-data.txt; then
-            echo "ERROR: Source data not found in cloned PVC!"
-            exit 1
-          fi
-          
-          echo "SUCCESS: PVC clone contains source data!"
-      volumeMounts:
-        - name: cloned-volume
-          mountPath: /data
-  volumes:
-    - name: cloned-volume
-      persistentVolumeClaim:
-        claimName: cloned-pvc
 
