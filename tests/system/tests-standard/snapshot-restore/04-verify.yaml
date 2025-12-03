@@ -4,6 +4,10 @@ metadata:
   name: snapshot-verifier
 spec:
   restartPolicy: Never
+  # Force pod to same node as source volume to use local ublk (not NVMe-oF)
+  # This avoids thin clone issues with NVMe-oF transport
+  nodeSelector:
+    kubernetes.io/hostname: ublk-1.vpc.cloudera.com
   containers:
     - name: verifier
       image: busybox:latest
