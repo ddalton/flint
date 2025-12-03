@@ -6,7 +6,7 @@ metadata:
   name: {{ .Values.snapshotClass.name }}
   labels:
     {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-driver: {{ .Values.storageClass.provisioner }}
+driver: {{ .Values.driver.name }}
 deletionPolicy: {{ .Values.snapshotClass.deletionPolicy }}
 {{- if .Values.snapshotClass.parameters }}
 parameters:
