@@ -1310,12 +1310,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 true
             } else {
                 // For non-clone volumes, check SPDK allocated clusters
-                // num_allocated_clusters > 0 means lvol has data (don't wipefs)
-                // num_allocated_clusters = 0 means brand new lvol (safe to wipefs)
+                // 
+                // IMPORTANT: Clone detection already ran above, so is_clone=false means:
+                // - NOT a snapshot clone (checked PV attributes)
+                // - NOT a clone detected by SPDK (checked lvol.clone field)
+                // 
+                // So we only get here for regular volumes (not clones)
+                // 
+                // num_allocated_clusters > 0 → Regular volume with data → Skip wipefs
+                // num_allocated_clusters = 0 → Brand new empty volume → Safe to wipefs
+                //
+                // NOTE: We don't need to worry about thin clones with num_allocated_clusters=0
+                // because those would have is_clone=true and been caught above.
                 
-                // We already have the bdev response from clone detection, extract num_allocated_clusters
-                // For local volumes, we queried SPDK. For remote, we skip wipefs anyway.
-                eprintln!("🔍 [WIPEFS_DECISION] Non-clone volume, checking if lvol has been used");
+                eprintln!("🔍 [WIPEFS_DECISION] Regular (non-clone) volume, checking if lvol has been used");
                 
                 // Query SPDK to get current num_allocated_clusters
                 let has_data = if volume_type == "local" {
