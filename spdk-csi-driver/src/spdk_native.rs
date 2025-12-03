@@ -190,7 +190,13 @@ impl SpdkNative {
         let mut response_line = String::new();
         reader.read_line(&mut response_line).await?;
         
-        println!("📥 [SPDK_RPC] Received: {}", response_line.trim());
+        // Log response summary (not full JSON - can be 50KB+ for bdev_get_bdevs)
+        let response_summary = if response_line.len() > 200 {
+            format!("{}... ({} bytes)", &response_line[..200], response_line.len())
+        } else {
+            response_line.trim().to_string()
+        };
+        println!("📥 [SPDK_RPC] Received: {}", response_summary);
         
         let response: RpcResponse = serde_json::from_str(&response_line)?;
         
