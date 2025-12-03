@@ -28,9 +28,17 @@ spec:
           echo "Snapshot Test - Initial Data" > /data/snapshot-test.txt || { echo "ERROR: Failed to write file!"; exit 1; }
           echo "Timestamp: $(date)" >> /data/snapshot-test.txt || { echo "ERROR: Failed to append to file!"; exit 1; }
           echo "This data should be in the snapshot" >> /data/snapshot-test.txt || { echo "ERROR: Failed to append to file!"; exit 1; }
+          
+          # CRITICAL: Ensure data is flushed to storage before snapshot
           sync || { echo "ERROR: sync failed!"; exit 1; }
           
-          # Verify data was written
+          # Additional flush to ensure data reaches SPDK lvol
+          sync /data/snapshot-test.txt || { echo "ERROR: file sync failed!"; exit 1; }
+          
+          # Wait a moment for flush to complete
+          sleep 2
+          
+          # Verify data was written and is readable
           if [ ! -f /data/snapshot-test.txt ]; then
             echo "ERROR: File does not exist after write!"
             exit 1
@@ -42,8 +50,11 @@ spec:
             exit 1
           fi
           
-          echo "✅ Initial data written and verified"
+          echo "✅ Initial data written, flushed, and verified"
           cat /data/snapshot-test.txt
+          
+          # Final sync before pod exits
+          sync
       volumeMounts:
         - name: data-volume
           mountPath: /data
