@@ -20,6 +20,7 @@ spec:
     spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
+      terminationGracePeriodSeconds: 30
       securityContext: {}
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
