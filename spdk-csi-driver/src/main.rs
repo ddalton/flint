@@ -1109,9 +1109,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
         let expected_device_path = format!("/dev/ublkb{}", ublk_id);
         
-        let device_path = if std::path::Path::new(&expected_device_path).exists() {
+        let (device_path, device_already_existed) = if std::path::Path::new(&expected_device_path).exists() {
             println!("✅ [NODE] ublk device already exists (idempotent): {}", expected_device_path);
-            expected_device_path
+            (expected_device_path, true)
         } else {
             // Create ublk device from the bdev
             println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
@@ -1119,7 +1119,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
                 Ok(path) => {
                     println!("✅ [NODE] ublk device created: {}", path);
-                    path
+                    (path, false)
                 }
                 Err(e) => {
                     println!("❌ [NODE] Failed to create ublk device: {}", e);
@@ -1307,9 +1307,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 eprintln!("✅ [FORMATTING_DECISION] SKIPPING wipefs and format");
                 eprintln!("   Reason: Volume is a snapshot clone");
                 eprintln!("   Action: Preserving existing filesystem with snapshot data");
+            } else if device_already_existed {
+                eprintln!("✅ [FORMATTING_DECISION] SKIPPING wipefs (device already existed)");
+                eprintln!("   Reason: ublk device already exists (idempotent restaging)");
+                eprintln!("   Action: Preserving existing data, will check filesystem state");
             } else {
-                eprintln!("🧹 [FORMATTING_DECISION] RUNNING wipefs and will format if needed");
-                eprintln!("   Reason: Volume is new (not a clone)");
+                eprintln!("🧹 [FORMATTING_DECISION] RUNNING wipefs (new ublk device)");
+                eprintln!("   Reason: ublk device just created (may have stale kernel cache)");
                 eprintln!("   Action: Clearing ublk device cache before checking filesystem");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
