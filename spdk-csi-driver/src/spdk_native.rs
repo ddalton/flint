@@ -180,7 +180,8 @@ impl SpdkNative {
         
         // Encode and send request (matches Go client encoder.Encode)
         let request_json = serde_json::to_string(&request)?;
-        println!("🔧 [SPDK_RPC] Sending: {}", request_json);
+        // Note: Request JSON not logged in normal operation (enable for RPC debugging if needed)
+        // Uncomment for debugging: println!("🔧 [SPDK_RPC] Sending: {}", request_json);
         
         stream.write_all(request_json.as_bytes()).await?;
         stream.write_all(b"\n").await?; // SPDK expects newline-delimited JSON
@@ -190,15 +191,17 @@ impl SpdkNative {
         let mut response_line = String::new();
         reader.read_line(&mut response_line).await?;
         
-        // Log response summary (not full JSON - can be 50KB+ for bdev_get_bdevs)
-        let response_summary = if response_line.len() > 200 {
-            format!("{}... ({} bytes)", &response_line[..200], response_line.len())
-        } else {
-            response_line.trim().to_string()
-        };
-        println!("📥 [SPDK_RPC] Received: {}", response_summary);
+        // Note: Response JSON not logged in normal operation (can be 50KB+ for bdev_get_bdevs)
+        // Uncomment for debugging: println!("📥 [SPDK_RPC] Received: {} bytes", response_line.len());
         
-        let response: RpcResponse = serde_json::from_str(&response_line)?;
+        let response: RpcResponse = serde_json::from_str(&response_line).map_err(|e| {
+            // Log on error to help troubleshoot RPC issues
+            eprintln!("❌ [SPDK_RPC] Failed to parse response for method '{}'", method);
+            eprintln!("   Error: {}", e);
+            eprintln!("   Response (first 500 chars): {}", 
+                     if response_line.len() > 500 { &response_line[..500] } else { &response_line });
+            e
+        })?;
         
         // Verify request/response ID match (matches Go client validation)
         if response.id != Some(id) {
