@@ -1109,9 +1109,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
         let expected_device_path = format!("/dev/ublkb{}", ublk_id);
         
-        let (device_path, device_already_existed) = if std::path::Path::new(&expected_device_path).exists() {
+        let device_path = if std::path::Path::new(&expected_device_path).exists() {
             println!("✅ [NODE] ublk device already exists (idempotent): {}", expected_device_path);
-            (expected_device_path, true)
+            expected_device_path
         } else {
             // Create ublk device from the bdev
             println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
@@ -1119,7 +1119,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
                 Ok(path) => {
                     println!("✅ [NODE] ublk device created: {}", path);
-                    (path, false)
+                    path
                 }
                 Err(e) => {
                     println!("❌ [NODE] Failed to create ublk device: {}", e);
@@ -1303,18 +1303,62 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             eprintln!("   Method: {}", if is_clone_from_pv { "PV attributes" } else { "SPDK query" });
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
-            if is_clone {
-                eprintln!("✅ [FORMATTING_DECISION] SKIPPING wipefs and format");
-                eprintln!("   Reason: Volume is a snapshot clone");
-                eprintln!("   Action: Preserving existing filesystem with snapshot data");
-            } else if device_already_existed {
-                eprintln!("✅ [FORMATTING_DECISION] SKIPPING wipefs (device already existed)");
-                eprintln!("   Reason: ublk device already exists (idempotent restaging)");
-                eprintln!("   Action: Preserving existing data, will check filesystem state");
+            // Determine if we should run wipefs based on SPDK metadata
+            // This is the SOURCE OF TRUTH - more reliable than checking device state
+            let should_skip_wipefs = if is_clone {
+                eprintln!("✅ [WIPEFS_DECISION] SKIP: Volume is a snapshot clone");
+                true
             } else {
-                eprintln!("🧹 [FORMATTING_DECISION] RUNNING wipefs (new ublk device)");
-                eprintln!("   Reason: ublk device just created (may have stale kernel cache)");
-                eprintln!("   Action: Clearing ublk device cache before checking filesystem");
+                // For non-clone volumes, check SPDK allocated clusters
+                // num_allocated_clusters > 0 means lvol has data (don't wipefs)
+                // num_allocated_clusters = 0 means brand new lvol (safe to wipefs)
+                
+                // We already have the bdev response from clone detection, extract num_allocated_clusters
+                // For local volumes, we queried SPDK. For remote, we skip wipefs anyway.
+                eprintln!("🔍 [WIPEFS_DECISION] Non-clone volume, checking if lvol has been used");
+                
+                // Query SPDK to get current num_allocated_clusters
+                let has_data = if volume_type == "local" {
+                    let bdev_query = serde_json::json!({
+                        "method": "bdev_get_bdevs",
+                        "params": {"name": bdev_name}
+                    });
+                    
+                    match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
+                        Ok(response) => {
+                            if let Some(bdev_array) = response.get("result").and_then(|r| r.as_array()) {
+                                if let Some(bdev) = bdev_array.iter().find(|b| {
+                                    b.get("name").and_then(|n| n.as_str()) == Some(bdev_name.as_str())
+                                }) {
+                                    let num_allocated = bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
+                                        .as_u64().unwrap_or(0);
+                                    eprintln!("   num_allocated_clusters from SPDK: {}", num_allocated);
+                                    num_allocated > 0
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    // Remote volumes (NVMe-oF) - always skip wipefs
+                    true
+                };
+                
+                if has_data {
+                    eprintln!("✅ [WIPEFS_DECISION] SKIP: Lvol has allocated clusters (contains data)");
+                    true
+                } else {
+                    eprintln!("🧹 [WIPEFS_DECISION] RUN: Lvol is empty (brand new)");
+                    false
+                }
+            };
+            
+            if !should_skip_wipefs {
+                eprintln!("🧹 [NODE] Running wipefs to clear stale ublk kernel cache");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
                     .arg("--all")
