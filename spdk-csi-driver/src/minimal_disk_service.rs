@@ -70,7 +70,7 @@ impl MinimalDiskService {
                         println!("❌ [DEBUG] Filtered out disk: {}", disk_info.device_name);
                     }
                 } else {
-                    println!("❌ [DEBUG] bdev_to_disk_info returned None for bdev {}", i);
+                    // Note: Skipped bdev (lvol, not physical storage) - not logged to reduce noise
                 }
             }
         } else {
@@ -1017,18 +1017,17 @@ impl MinimalDiskService {
         let num_blocks = bdev["num_blocks"].as_u64().unwrap_or(0);
         let claimed = bdev["claimed"].as_bool().unwrap_or(false);
         
-        println!("🔧 [BDEV_TO_DISK] Extracted values: name='{}', product='{}', block_size={}, num_blocks={}, claimed={}", 
-                 bdev_name, product_name, block_size, num_blocks, claimed);
+        // Note: Extracted values not logged (too verbose during discovery with 20+ bdevs)
 
         // Filter for storage devices (matches raid_over_lv pattern)
         // Use case-insensitive check for "uring" to match both "Uring" and "URING bdev"
         let product_upper = product_name.to_uppercase();
         if !product_upper.contains("NVME") && !product_upper.contains("SSD") && !product_upper.contains("URING") {
-            println!("🔍 [DISK_FILTER] Skipping bdev '{}' with product: '{}' (not storage)", bdev_name, product_name);
+            // Note: Skipping non-storage bdevs (lvols) - not logged to reduce noise
             return Ok(None);
         }
         
-        println!("✅ [DISK_FILTER] Including storage bdev: '{}' (product: '{}')", bdev_name, product_name);
+        // Note: Storage bdev inclusion not logged per-bdev (too verbose). Summary logged at end.
 
         let size_bytes = block_size * num_blocks;
         
@@ -1117,14 +1116,10 @@ impl MinimalDiskService {
             println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());
             
             for (i, lvs) in lvs_list.iter().enumerate() {
-                println!("🔧 [LVS_SEARCH_DEBUG] LVS[{}] raw: {}", i, serde_json::to_string(lvs).unwrap_or_else(|_| "JSON error".to_string()));
+                // Note: Raw LVS JSON not logged (verbose). Only checking base_bdev match.
                 
                 if let Some(base_bdev) = lvs["base_bdev"].as_str() {
-                    println!("🔍 [LVS_SEARCH] LVS[{}]: name='{}', base_bdev='{}' (looking for: '{}')", 
-                             i, 
-                             lvs["name"].as_str().unwrap_or("unknown"), 
-                             base_bdev,
-                             bdev_name);
+                    // Note: Per-LVS comparison not logged (verbose). Only log if match found.
                     
                     if base_bdev == bdev_name {
                         let lvs_name = lvs["name"].as_str().unwrap_or("").to_string();
@@ -1138,13 +1133,12 @@ impl MinimalDiskService {
                         return (Some(lvs_name), free_space, lvol_count);
                     }
                 } else {
-                    println!("⚠️ [LVS_SEARCH] LVS[{}] has no base_bdev field!", i);
+                    // Note: LVS without base_bdev field (rare) - not logged to reduce noise
                 }
             }
-            println!("❌ [LVS_SEARCH] No LVS found for bdev: {}", bdev_name);
+            // Note: No LVS on this bdev (not logged - normal for uninitialized disks)
         } else {
-            println!("❌ [LVS_SEARCH] No LVS stores found in SPDK response");
-            println!("🔧 [DEBUG] lvstores structure: {}", serde_json::to_string(lvstores).unwrap_or_else(|_| "JSON error".to_string()));
+            // Note: No LVS stores in cluster - not logged (normal for fresh deployment)
         }
         
         (None, 0, 0)
