@@ -4,6 +4,11 @@ metadata:
   name: post-expansion-pod
 status:
   phase: Succeeded
+  containerStatuses:
+    - name: verifier
+      state:
+        terminated:
+          exitCode: 0
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -14,8 +19,3 @@ status:
   # After pod remount, filesystem should be resized and capacity updated
   capacity:
     storage: 2Gi
-  containerStatuses:
-    - name: verifier
-      state:
-        terminated:
-          exitCode: 0
