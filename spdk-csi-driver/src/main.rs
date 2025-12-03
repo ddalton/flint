@@ -1153,7 +1153,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                             let target_bdev = bdev_array.iter().find(|b| {
                                 // Match by name (UUID)
                                 if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
-                                    if name == bdev_name {
+                                    if name == bdev_name.as_str() {
                                         return true;
                                     }
                                 }
@@ -1161,7 +1161,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                 if let Some(aliases) = b.get("aliases").and_then(|a| a.as_array()) {
                                     for alias in aliases {
                                         if let Some(alias_str) = alias.as_str() {
-                                            if alias_str.contains(bdev_name) || bdev_name.contains(alias_str) {
+                                            if alias_str.contains(bdev_name.as_str()) || bdev_name.contains(alias_str) {
                                                 return true;
                                             }
                                         }
