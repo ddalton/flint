@@ -238,19 +238,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router = router.add_service(NodeServer::new(node_service));
     }
     
-    println!("✅ [CSI] Minimal State SPDK CSI Driver ('{}' mode) starting on {} for node {}", mode, endpoint, node_id);
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("✅ [CSI_SERVER] Minimal State SPDK CSI Driver starting");
+    eprintln!("   Mode: {}", mode);
+    eprintln!("   Endpoint: {}", endpoint);
+    eprintln!("   Node ID: {}", node_id);
+    eprintln!("   Clone Detection: ENABLED (commit c03bba7)");
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     // Handle different endpoint types
     if endpoint.starts_with("unix://") {
         let socket_path = endpoint.trim_start_matches("unix://");
         
+        eprintln!("🔧 [CSI_SERVER] Setting up Unix socket: {}", socket_path);
+        
         // Remove existing socket file if it exists
         if std::path::Path::new(socket_path).exists() {
+            eprintln!("   Removing existing socket file");
             std::fs::remove_file(socket_path)?;
         }
         
         // Create parent directory if it doesn't exist
         if let Some(parent) = std::path::Path::new(socket_path).parent() {
+            eprintln!("   Creating parent directory: {:?}", parent);
             std::fs::create_dir_all(parent)?;
         }
         
@@ -258,10 +268,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use tokio::net::UnixListener;
         use tokio_stream::wrappers::UnixListenerStream;
         
+        eprintln!("   Binding to socket...");
         let listener = UnixListener::bind(socket_path)?;
         let stream = UnixListenerStream::new(listener);
         
-        println!("Listening on unix socket: {}", socket_path);
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("✅ [CSI_SERVER] CSI gRPC server listening on: {}", socket_path);
+        eprintln!("   Waiting for CSI requests from kubelet...");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
         router.serve_with_incoming(stream).await?;
         
     } else if endpoint.starts_with("tcp://") {
@@ -978,13 +993,18 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         request: tonic::Request<spdk_csi_driver::csi::NodeStageVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeStageVolumeResponse>, tonic::Status> {
-        println!("🔵 [GRPC] *** Node.NodeStageVolume CALLED ***");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("🔵 [GRPC] *** NodeStageVolume CALLED ***");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
         let req = request.into_inner();
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         let publish_context = req.publish_context.clone();
         
-        println!("📦 [NODE] Staging volume {} at {}", volume_id, staging_target_path);
+        eprintln!("📦 [NODE_STAGE] Volume ID: {}", volume_id);
+        eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);
+        eprintln!("📦 [NODE_STAGE] Publish context keys: {:?}", publish_context.keys().collect::<Vec<_>>());
 
         // Get volume type from publish context
         let volume_type = publish_context.get("volumeType")
@@ -1101,6 +1121,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // The lvol metadata is the source of truth - no markers needed!
             
             // Query SPDK to check if this is a cloned lvol
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("🔍 [CLONE_DETECTION] Starting clone detection for bdev: {}", bdev_name);
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            
             let is_clone = {
                 let bdev_query = serde_json::json!({
                     "method": "bdev_get_bdevs",
@@ -1109,66 +1133,99 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 });
                 
+                eprintln!("🔍 [CLONE_DETECTION] Calling SPDK RPC: bdev_get_bdevs({})", bdev_name);
+                
                 match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
                     Ok(response) => {
-                        println!("🔍 [NODE] SPDK bdev_get_bdevs response: {}", 
-                                 serde_json::to_string_pretty(&response).unwrap_or_else(|_| "invalid json".to_string()));
+                        eprintln!("✅ [CLONE_DETECTION] SPDK RPC call succeeded");
+                        eprintln!("🔍 [CLONE_DETECTION] SPDK bdev_get_bdevs response:");
+                        eprintln!("{}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "invalid json".to_string()));
                         
                         if let Some(bdev_array) = response.as_array() {
+                            eprintln!("✅ [CLONE_DETECTION] Response is an array with {} elements", bdev_array.len());
+                            
                             if let Some(bdev) = bdev_array.first() {
+                                eprintln!("✅ [CLONE_DETECTION] Got bdev from array");
+                                eprintln!("   product_name: {}", bdev["product_name"].as_str().unwrap_or("unknown"));
+                                
                                 // Check if this is an lvol (has driver_specific.lvol)
                                 let has_lvol_metadata = bdev.get("driver_specific")
                                     .and_then(|ds| ds.get("lvol"))
                                     .is_some();
                                 
+                                eprintln!("   has_lvol_metadata: {}", has_lvol_metadata);
+                                
                                 if !has_lvol_metadata {
-                                    println!("ℹ️ [NODE] bdev is not an lvol (product: {})", 
-                                             bdev["product_name"].as_str().unwrap_or("unknown"));
-                                    println!("ℹ️ [NODE] This is likely an NVMe bdev (remote volume over NVMe-oF)");
-                                    println!("ℹ️ [NODE] Cannot determine clone status from NVMe bdev - treating as new");
+                                    eprintln!("⚠️ [CLONE_DETECTION] NOT AN LVOL!");
+                                    eprintln!("   This is likely an NVMe bdev (remote volume over NVMe-oF)");
+                                    eprintln!("   Cannot determine clone status from NVMe bdev - treating as NEW");
+                                    eprintln!("   RESULT: is_clone = FALSE (will format)");
                                     false
                                 } else {
+                                    eprintln!("✅ [CLONE_DETECTION] This IS an lvol - checking clone field");
                                 
                                     let is_clone = bdev["driver_specific"]["lvol"]["clone"]
                                         .as_bool().unwrap_or(false);
                                     let base_snapshot = bdev["driver_specific"]["lvol"]["base_snapshot"]
                                         .as_str();
+                                    let num_allocated = bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
+                                        .as_u64().unwrap_or(0);
+                                        
+                                    eprintln!("   clone field: {}", is_clone);
+                                    eprintln!("   base_snapshot: {:?}", base_snapshot);
+                                    eprintln!("   num_allocated_clusters: {}", num_allocated);
                                         
                                     if is_clone {
-                                        println!("📋 [NODE] SPDK metadata: clone=true, base_snapshot={:?}", base_snapshot);
-                                        println!("✅ [NODE] This lvol is a snapshot clone - will preserve filesystem");
+                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                                        eprintln!("✅ [CLONE_DETECTION] CLONE DETECTED!");
+                                        eprintln!("   base_snapshot: {:?}", base_snapshot);
+                                        eprintln!("   RESULT: is_clone = TRUE (will PRESERVE filesystem)");
+                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                                     } else {
-                                        println!("🆕 [NODE] SPDK metadata: clone=false (new volume)");
+                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                                        eprintln!("🆕 [CLONE_DETECTION] NOT A CLONE (new volume)");
+                                        eprintln!("   RESULT: is_clone = FALSE (will format)");
+                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                                     }
                                     
                                     is_clone
                                 }
                             } else {
-                                println!("⚠️ [NODE] No bdev found in SPDK response array");
+                                eprintln!("❌ [CLONE_DETECTION] ERROR: No bdev found in SPDK response array");
+                                eprintln!("   RESULT: is_clone = FALSE (will format)");
                                 false
                             }
                         } else {
-                            println!("⚠️ [NODE] SPDK response is not an array");
-                            println!("⚠️ [NODE] Response type: {}", 
+                            eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK response is not an array!");
+                            eprintln!("   Response type: {}", 
                                      if response.is_object() { "object" }
                                      else if response.is_null() { "null" }
                                      else { "other" });
+                            eprintln!("   RESULT: is_clone = FALSE (will format)");
                             false
                         }
                     }
                     Err(e) => {
-                        println!("⚠️ [NODE] Could not query SPDK for clone status: {}", e);
-                        println!("⚠️ [NODE] Assuming not a clone to be safe");
+                        eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK RPC call failed: {}", e);
+                        eprintln!("   Assuming not a clone to be safe");
+                        eprintln!("   RESULT: is_clone = FALSE (will format)");
                         false
                     }
                 }
             };
             
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("📊 [FORMATTING_DECISION] is_clone = {}", is_clone);
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            
             if is_clone {
-                println!("📸 [NODE] Volume is a snapshot clone - PRESERVING clone's filesystem");
-                println!("ℹ️ [NODE] Skipping wipefs (clone already has valid filesystem with data from snapshot)");
+                eprintln!("✅ [FORMATTING_DECISION] SKIPPING wipefs and format");
+                eprintln!("   Reason: Volume is a snapshot clone");
+                eprintln!("   Action: Preserving existing filesystem with snapshot data");
             } else {
-                println!("🧹 [NODE] New volume - clearing ublk device cache before checking filesystem");
+                eprintln!("🧹 [FORMATTING_DECISION] RUNNING wipefs and will format if needed");
+                eprintln!("   Reason: Volume is new (not a clone)");
+                eprintln!("   Action: Clearing ublk device cache before checking filesystem");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
                     .arg("--all")
@@ -1508,8 +1565,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         &self,
         request: tonic::Request<spdk_csi_driver::csi::NodePublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodePublishVolumeResponse>, tonic::Status> {
-        println!("🔵 [GRPC] Node.NodePublishVolume called");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("🔵 [GRPC] *** NodePublishVolume CALLED ***");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
         let req = request.into_inner();
+        eprintln!("📦 [NODE_PUBLISH] Volume ID: {}", req.volume_id);
+        eprintln!("📦 [NODE_PUBLISH] Target path: {}", req.target_path);
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
         let staging_target_path = req.staging_target_path.clone();
