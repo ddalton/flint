@@ -4,6 +4,9 @@ metadata:
   name: data-modifier
 spec:
   restartPolicy: Never
+  # Force to ublk-1 to ensure all snapshot operations use local access
+  nodeSelector:
+    kubernetes.io/hostname: ublk-1.vpc.cloudera.com
   containers:
     - name: modifier
       image: busybox:latest

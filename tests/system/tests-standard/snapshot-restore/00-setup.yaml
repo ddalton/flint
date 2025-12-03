@@ -16,6 +16,9 @@ metadata:
   name: initial-data-writer
 spec:
   restartPolicy: Never
+  # Force to ublk-1 to ensure local access (avoiding NVMe-oF for snapshot tests)
+  nodeSelector:
+    kubernetes.io/hostname: ublk-1.vpc.cloudera.com
   containers:
     - name: writer
       image: busybox:latest
