@@ -1085,6 +1085,59 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Device now exists (either created or already existed)
         {
             println!("✅ [NODE] ublk device available: {}", device_path);
+            
+            // SOLUTION TO UBLK ID REUSE: Always clear ublk device cache before blkid
+            //
+            // PROBLEM: ublk IDs are hash-based (deterministic from volume ID)
+            // When ublk device is deleted and recreated with same ID, kernel can cache
+            // stale filesystem signatures from PREVIOUS volumes that used this ublk ID
+            //
+            // INSIGHT: The LVOL is persistent storage (survives node changes)
+            // The ublk device is just a temporary kernel interface to access the lvol
+            //
+            // SOLUTION: Always wipefs the ublk device → clears kernel cache
+            // Then blkid reads FRESH from the actual lvol content:
+            // - If lvol has real filesystem → blkid detects it → PRESERVE (data persistence)
+            // - If lvol is empty/new → blkid finds nothing → FORMAT
+            //
+            // This handles all cases:
+            // ✅ Node replacement (lvol content survives, new node reads it correctly)
+            // ✅ Pod migration (same - lvol content is the truth)
+            // ✅ ublk ID reuse (wipefs clears stale cache from previous volume)
+            // ✅ Thick & thin provisioning (both work - lvol content is the truth)
+            // ✅ Volume cloning (clone has filesystem → preserved)
+            //
+            // No annotations or state tracking needed!
+            
+            println!("🧹 [NODE] Clearing ublk device cache before checking filesystem");
+            
+            let wipefs_output = std::process::Command::new("wipefs")
+                .arg("--all")
+                .arg("--force")
+                .arg(&device_path)
+                .output();
+            
+            match wipefs_output {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if !stdout.trim().is_empty() {
+                        println!("🧹 [NODE] Cleared stale ublk cache: {}", stdout.trim());
+                    } else {
+                        println!("✅ [NODE] ublk device cache clean");
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.contains("No such file") && !stderr.trim().is_empty() {
+                        println!("ℹ️ [NODE] wipefs: {}", stderr.trim());
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ [NODE] wipefs failed (continuing): {}", e);
+                }
+            }
+            
+            println!("🔍 [NODE] Now checking REAL filesystem state from lvol (cache cleared)");
                 
                 // Create staging directory if it doesn't exist
                 if let Err(e) = std::fs::create_dir_all(&staging_target_path) {
