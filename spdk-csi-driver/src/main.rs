@@ -428,6 +428,7 @@ impl MinimalControllerService {
         
         println!("📝 [CONTROLLER] Storing snapshot-restored volume metadata in PV: node={}, lvol={}", 
                  node_name, clone_uuid);
+        println!("ℹ️ [CONTROLLER] Note: NodeStageVolume will detect this is a clone from SPDK metadata");
         
         // Step 4: Return volume with content_source and metadata populated
         let content_source = spdk_csi_driver::csi::VolumeContentSource {
@@ -1086,58 +1087,95 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         {
             println!("✅ [NODE] ublk device available: {}", device_path);
             
-            // SOLUTION TO UBLK ID REUSE: Always clear ublk device cache before blkid
+            // SOLUTION TO UBLK ID REUSE: Detect clones by querying SPDK metadata
             //
             // PROBLEM: ublk IDs are hash-based (deterministic from volume ID)
             // When ublk device is deleted and recreated with same ID, kernel can cache
             // stale filesystem signatures from PREVIOUS volumes that used this ublk ID
             //
-            // INSIGHT: The LVOL is persistent storage (survives node changes)
-            // The ublk device is just a temporary kernel interface to access the lvol
+            // SOLUTION: 
+            // - Query SPDK to check if this lvol is a clone (has base_snapshot field)
+            // - For CLONED lvols: SKIP wipefs (clone has valid filesystem from snapshot)
+            // - For NEW lvols: wipefs → clears stale ublk cache → format
             //
-            // SOLUTION: Always wipefs the ublk device → clears kernel cache
-            // Then blkid reads FRESH from the actual lvol content:
-            // - If lvol has real filesystem → blkid detects it → PRESERVE (data persistence)
-            // - If lvol is empty/new → blkid finds nothing → FORMAT
-            //
-            // This handles all cases:
-            // ✅ Node replacement (lvol content survives, new node reads it correctly)
-            // ✅ Pod migration (same - lvol content is the truth)
-            // ✅ ublk ID reuse (wipefs clears stale cache from previous volume)
-            // ✅ Thick & thin provisioning (both work - lvol content is the truth)
-            // ✅ Volume cloning (clone has filesystem → preserved)
-            //
-            // No annotations or state tracking needed!
+            // The lvol metadata is the source of truth - no markers needed!
             
-            println!("🧹 [NODE] Clearing ublk device cache before checking filesystem");
-            
-            let wipefs_output = std::process::Command::new("wipefs")
-                .arg("--all")
-                .arg("--force")
-                .arg(&device_path)
-                .output();
-            
-            match wipefs_output {
-                Ok(output) if output.status.success() => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if !stdout.trim().is_empty() {
-                        println!("🧹 [NODE] Cleared stale ublk cache: {}", stdout.trim());
-                    } else {
-                        println!("✅ [NODE] ublk device cache clean");
+            // Query SPDK to check if this is a cloned lvol
+            let is_clone = {
+                let bdev_query = serde_json::json!({
+                    "method": "bdev_get_bdevs",
+                    "params": {
+                        "name": bdev_name
+                    }
+                });
+                
+                match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
+                    Ok(response) => {
+                        if let Some(bdev_array) = response.as_array() {
+                            if let Some(bdev) = bdev_array.first() {
+                                let is_clone = bdev["driver_specific"]["lvol"]["clone"]
+                                    .as_bool().unwrap_or(false);
+                                let base_snapshot = bdev["driver_specific"]["lvol"]["base_snapshot"]
+                                    .as_str();
+                                    
+                                if is_clone {
+                                    println!("📋 [NODE] SPDK metadata: clone=true, base_snapshot={:?}", base_snapshot);
+                                } else {
+                                    println!("🆕 [NODE] SPDK metadata: clone=false (new volume)");
+                                }
+                                
+                                is_clone
+                            } else {
+                                println!("⚠️ [NODE] No bdev found in SPDK response");
+                                false
+                            }
+                        } else {
+                            println!("⚠️ [NODE] Unexpected SPDK response format");
+                            false
+                        }
+                    }
+                    Err(e) => {
+                        println!("⚠️ [NODE] Could not query SPDK for clone status: {}", e);
+                        println!("⚠️ [NODE] Assuming not a clone to be safe");
+                        false
                     }
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stderr.contains("No such file") && !stderr.trim().is_empty() {
-                        println!("ℹ️ [NODE] wipefs: {}", stderr.trim());
+            };
+            
+            if is_clone {
+                println!("📸 [NODE] Volume is a snapshot clone - PRESERVING clone's filesystem");
+                println!("ℹ️ [NODE] Skipping wipefs (clone already has valid filesystem with data from snapshot)");
+            } else {
+                println!("🧹 [NODE] New volume - clearing ublk device cache before checking filesystem");
+                
+                let wipefs_output = std::process::Command::new("wipefs")
+                    .arg("--all")
+                    .arg("--force")
+                    .arg(&device_path)
+                    .output();
+                
+                match wipefs_output {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if !stdout.trim().is_empty() {
+                            println!("🧹 [NODE] Cleared stale ublk cache: {}", stdout.trim());
+                        } else {
+                            println!("✅ [NODE] ublk device cache clean");
+                        }
                     }
-                }
-                Err(e) => {
-                    println!("⚠️ [NODE] wipefs failed (continuing): {}", e);
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.contains("No such file") && !stderr.trim().is_empty() {
+                            println!("ℹ️ [NODE] wipefs: {}", stderr.trim());
+                        }
+                    }
+                    Err(e) => {
+                        println!("⚠️ [NODE] wipefs failed (continuing): {}", e);
+                    }
                 }
             }
             
-            println!("🔍 [NODE] Now checking REAL filesystem state from lvol (cache cleared)");
+            println!("🔍 [NODE] Checking filesystem state from lvol");
                 
                 // Create staging directory if it doesn't exist
                 if let Err(e) = std::fs::create_dir_all(&staging_target_path) {
