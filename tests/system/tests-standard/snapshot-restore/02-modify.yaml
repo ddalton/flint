@@ -4,9 +4,8 @@ metadata:
   name: data-modifier
 spec:
   restartPolicy: Never
-  # Force to ublk-1 to ensure all snapshot operations use local access
-  nodeSelector:
-    kubernetes.io/hostname: ublk-1.vpc.cloudera.com
+  # Let WaitForFirstConsumer schedule pod on same node as volume for local access
+  # nodeSelector removed to allow proper topology-aware scheduling
   containers:
     - name: modifier
       image: busybox:latest

@@ -16,9 +16,8 @@ metadata:
   name: initial-data-writer
 spec:
   restartPolicy: Never
-  # Force to ublk-1 to ensure local access (avoiding NVMe-oF for snapshot tests)
-  nodeSelector:
-    kubernetes.io/hostname: ublk-1.vpc.cloudera.com
+  # Let WaitForFirstConsumer schedule pod on same node as volume for local access
+  # nodeSelector removed to allow proper topology-aware scheduling
   containers:
     - name: writer
       image: busybox:latest

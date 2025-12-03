@@ -441,9 +441,22 @@ impl MinimalControllerService {
             lvs_name.clone(),
         );
         
-        println!("📝 [CONTROLLER] Storing snapshot-restored volume metadata in PV: node={}, lvol={}", 
-                 node_name, clone_uuid);
-        println!("ℹ️ [CONTROLLER] Note: NodeStageVolume will detect this is a clone from SPDK metadata");
+        // CRITICAL: Mark as clone for node-side detection (works for both local and NVMe-oF)
+        volume_context.insert(
+            "flint.csi.storage.io/is-clone".to_string(),
+            "true".to_string(),
+        );
+        volume_context.insert(
+            "flint.csi.storage.io/base-snapshot".to_string(),
+            snapshot_id.to_string(),
+        );
+        
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("📝 [SNAPSHOT_RESTORE] Volume context with clone metadata:");
+        eprintln!("   is-clone: true");
+        eprintln!("   base-snapshot: {}", snapshot_id);
+        eprintln!("   Works for BOTH local lvol and NVMe-oF access");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         // Step 4: Return volume with content_source and metadata populated
         let content_source = spdk_csi_driver::csi::VolumeContentSource {
@@ -1120,12 +1133,33 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             //
             // The lvol metadata is the source of truth - no markers needed!
             
-            // Query SPDK to check if this is a cloned lvol
+            // Check clone status from PV attributes (preferred) or SPDK metadata (fallback)
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("🔍 [CLONE_DETECTION] Starting clone detection for bdev: {}", bdev_name);
+            eprintln!("🔍 [CLONE_DETECTION] Starting clone detection");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
-            let is_clone = {
+            // STEP 1: Check PV attributes (works for both local and NVMe-oF)
+            let is_clone_from_pv = req.volume_context.get("flint.csi.storage.io/is-clone")
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            
+            let is_clone = if is_clone_from_pv {
+                let base_snapshot = req.volume_context.get("flint.csi.storage.io/base-snapshot")
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                    
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("✅ [CLONE_DETECTION] CLONE DETECTED via PV attributes!");
+                eprintln!("   Method: Volume Context (CSI standard)");
+                eprintln!("   is-clone: true");
+                eprintln!("   base-snapshot: {}", base_snapshot);
+                eprintln!("   Works for: Local lvol AND NVMe-oF access");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                true
+            } else {
+                eprintln!("ℹ️ [CLONE_DETECTION] No clone metadata in PV attributes, querying SPDK");
+                
+                // STEP 2: Query SPDK metadata (for local lvols)
                 let bdev_query = serde_json::json!({
                     "method": "bdev_get_bdevs",
                     "params": {
@@ -1135,6 +1169,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 
                 eprintln!("🔍 [CLONE_DETECTION] Calling SPDK RPC: bdev_get_bdevs({})", bdev_name);
                 
+                // This match expression returns bool directly
                 match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
                     Ok(response) => {
                         eprintln!("✅ [CLONE_DETECTION] SPDK RPC call succeeded");
@@ -1254,6 +1289,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             eprintln!("📊 [FORMATTING_DECISION] is_clone = {}", is_clone);
+            eprintln!("   Method: {}", if is_clone_from_pv { "PV attributes" } else { "SPDK query" });
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
             if is_clone {

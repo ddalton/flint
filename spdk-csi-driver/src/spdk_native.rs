@@ -135,13 +135,28 @@ impl SpdkNative {
     
     /// Call SPDK RPC method (matches the Call method from Go client)
     async fn call_rpc(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        eprintln!("🔍 [SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
+        
         // Handle empty parameters like official SPDK CGO bridge
         // "Force Go client to skip 'params' parameter in JSON-RPC call"
         let normalized_params = match &params {
-            Some(Value::Object(map)) if map.is_empty() => None, // Empty object -> nil
-            Some(Value::Array(arr)) if arr.is_empty() => None,  // Empty array -> nil
-            other => other.clone(), // Fix: use clone() instead of cloned()
+            Some(Value::Object(map)) if map.is_empty() => {
+                eprintln!("   Normalized empty object {{}} to None");
+                None // Empty object -> nil
+            }
+            Some(Value::Array(arr)) if arr.is_empty() => {
+                eprintln!("   Normalized empty array [] to None");
+                None  // Empty array -> nil
+            }
+            other => {
+                if other.is_some() {
+                    eprintln!("   Keeping params as-is (not empty): {:?}", other);
+                }
+                other.clone() // Fix: use clone() instead of cloned()
+            }
         };
+        
+        eprintln!("🔍 [SPDK_NATIVE] After normalization: {:?}", normalized_params);
         
         // Validate parameters according to SPDK Go client rules
         if let Some(ref p) = normalized_params {
