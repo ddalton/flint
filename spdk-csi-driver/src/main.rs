@@ -1530,7 +1530,12 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             };
             
             if !should_skip_wipefs {
-                eprintln!("🧹 [NODE] Running wipefs to clear stale ublk kernel cache");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("🧹 [WIPEFS] EXECUTING wipefs --all --force {}", device_path);
+                eprintln!("   Volume: {}", volume_id);
+                eprintln!("   Bdev: {}", bdev_name);
+                eprintln!("   Reason: Brand new empty lvol (num_allocated_clusters = 0)");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
                     .arg("--all")
@@ -1542,21 +1547,33 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     Ok(output) if output.status.success() => {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         if !stdout.trim().is_empty() {
-                            println!("🧹 [NODE] Cleared stale ublk cache: {}", stdout.trim());
+                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            eprintln!("🧹 [WIPEFS] Cleared stale ublk cache:");
+                            eprintln!("{}", stdout.trim());
+                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         } else {
-                            println!("✅ [NODE] ublk device cache clean");
+                            eprintln!("✅ [WIPEFS] No stale cache found (device was clean)");
                         }
                     }
                     Ok(output) => {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         if !stderr.contains("No such file") && !stderr.trim().is_empty() {
-                            println!("ℹ️ [NODE] wipefs: {}", stderr.trim());
+                            eprintln!("ℹ️ [WIPEFS] Output: {}", stderr.trim());
                         }
                     }
                     Err(e) => {
-                        println!("⚠️ [NODE] wipefs failed (continuing): {}", e);
+                        eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
                     }
                 }
+            } else {
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("✅ [WIPEFS] SKIPPED for {}", device_path);
+                eprintln!("   Volume: {}", volume_id);
+                eprintln!("   Reason: {}", 
+                    if is_clone { "Snapshot/PVC clone (preserve data)" }
+                    else { "Lvol has data (num_allocated_clusters > 0)" }
+                );
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             }
             
             println!("🔍 [NODE] Checking filesystem state from lvol");
