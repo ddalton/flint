@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: source-modifier
+spec:
+  restartPolicy: Never
+  containers:
+    - name: modifier
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "MODIFIED: This data should NOT be in the clone" >> /data/source-data.txt
+          sync
+          echo "Source PVC modified after cloning"
+          cat /data/source-data.txt
+      volumeMounts:
+        - name: data-volume
+          mountPath: /data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: source-pvc
+

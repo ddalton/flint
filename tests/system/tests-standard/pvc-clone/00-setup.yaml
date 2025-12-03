@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: source-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: source-writer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Writing data to source PVC..."
+          echo "PVC Clone Test - Source Data" > /data/source-data.txt
+          echo "Timestamp: $(date)" >> /data/source-data.txt
+          echo "This data should be cloned to new PVC" >> /data/source-data.txt
+          sync
+          echo "✅ Source data written successfully"
+          cat /data/source-data.txt
+      volumeMounts:
+        - name: data-volume
+          mountPath: /data
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: source-pvc
+

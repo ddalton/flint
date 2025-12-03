@@ -492,6 +492,131 @@ impl MinimalControllerService {
         println!("🎉 [CONTROLLER] Volume from snapshot created successfully");
         Ok(tonic::Response::new(response))
     }
+
+    /// Create volume from existing volume (PVC clone)
+    async fn create_volume_from_volume(
+        &self,
+        volume_id: &str,
+        source_volume_id: &str,
+        size_bytes: u64,
+    ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
+        println!("🔄 [CONTROLLER] Creating volume {} as clone of {}", volume_id, source_volume_id);
+
+        // Step 1: Get source volume metadata to find which node it's on
+        // Query Kubernetes API for the source PV
+        use kube::{Api, api::ObjectMeta};
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        
+        let pv_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        
+        // Find the source PV (volume_id is already in format "pvc-xxxxx")
+        let source_pv = pv_api.get(source_volume_id)
+            .await
+            .map_err(|e| tonic::Status::not_found(format!("Source volume not found: {}", e)))?;
+        
+        let volume_attributes = source_pv.spec
+            .as_ref()
+            .and_then(|spec| spec.csi.as_ref())
+            .and_then(|csi| csi.volume_attributes.as_ref())
+            .ok_or_else(|| tonic::Status::internal("Source volume missing CSI volume attributes"))?;
+        
+        let source_node = volume_attributes.get("flint.csi.storage.io/node-name")
+            .ok_or_else(|| tonic::Status::internal("Source volume missing node metadata"))?
+            .clone();
+        
+        let source_lvol_uuid = volume_attributes.get("flint.csi.storage.io/lvol-uuid")
+            .ok_or_else(|| tonic::Status::internal("Source volume missing lvol-uuid"))?
+            .clone();
+
+        println!("✅ [CONTROLLER] Found source volume on node: {}, lvol: {}", source_node, source_lvol_uuid);
+
+        // Step 2: Create a temporary snapshot of the source volume
+        let snapshot_name = format!("temp_clone_snap_{}", volume_id);
+        
+        let snapshot_payload = serde_json::json!({
+            "lvol_uuid": source_lvol_uuid,
+            "snapshot_name": snapshot_name
+        });
+        
+        let snapshot_response = self.driver
+            .call_node_agent(&source_node, "/api/snapshots/create", &snapshot_payload)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to create temporary snapshot for clone: {}", e)))?;
+        
+        let snapshot_uuid = snapshot_response["snapshot_uuid"].as_str()
+            .ok_or_else(|| tonic::Status::internal("No snapshot UUID in response"))?
+            .to_string();
+
+        println!("✅ [CONTROLLER] Created temporary snapshot for cloning: {}", snapshot_uuid);
+
+        // Step 3: Clone the snapshot to create the new volume
+        let clone_name = format!("vol_{}", volume_id);
+        
+        let clone_payload = serde_json::json!({
+            "snapshot_uuid": snapshot_uuid,
+            "clone_name": clone_name
+        });
+        
+        let clone_response = self.driver
+            .call_node_agent(&source_node, "/api/snapshots/clone", &clone_payload)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to clone volume: {}", e)))?;
+        
+        let clone_uuid = clone_response["clone_uuid"].as_str()
+            .ok_or_else(|| tonic::Status::internal("No clone UUID in response"))?
+            .to_string();
+        
+        let lvs_name = clone_response["lvs_name"].as_str()
+            .ok_or_else(|| tonic::Status::internal("No lvs_name in clone response"))?
+            .to_string();
+
+        println!("✅ [CONTROLLER] Volume {} cloned from {} (clone UUID: {})", volume_id, source_volume_id, clone_uuid);
+
+        // Step 4: Build volume_context with metadata
+        let mut volume_context = std::collections::HashMap::new();
+        
+        volume_context.insert("flint.csi.storage.io/replica-count".to_string(), "1".to_string());
+        volume_context.insert("flint.csi.storage.io/node-name".to_string(), source_node.clone());
+        volume_context.insert("flint.csi.storage.io/lvol-uuid".to_string(), clone_uuid.clone());
+        volume_context.insert("flint.csi.storage.io/lvs-name".to_string(), lvs_name.clone());
+        
+        // CRITICAL: Mark as clone for node-side detection
+        volume_context.insert("flint.csi.storage.io/is-clone".to_string(), "true".to_string());
+        volume_context.insert("flint.csi.storage.io/source-volume".to_string(), source_volume_id.to_string());
+        volume_context.insert("flint.csi.storage.io/clone-source-type".to_string(), "volume".to_string());
+        
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("📝 [PVC_CLONE] Volume context with clone metadata:");
+        eprintln!("   is-clone: true");
+        eprintln!("   source-volume: {}", source_volume_id);
+        eprintln!("   clone-source-type: volume (PVC clone)");
+        eprintln!("   Works for BOTH local lvol and NVMe-oF access");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        // Step 5: Return volume with content_source and metadata
+        let content_source = spdk_csi_driver::csi::VolumeContentSource {
+            r#type: Some(spdk_csi_driver::csi::volume_content_source::Type::Volume(
+                spdk_csi_driver::csi::volume_content_source::VolumeSource {
+                    volume_id: source_volume_id.to_string(),
+                }
+            )),
+        };
+
+        let actual_size = size_bytes as i64;
+        
+        let response = spdk_csi_driver::csi::CreateVolumeResponse {
+            volume: Some(spdk_csi_driver::csi::Volume {
+                volume_id: volume_id.to_string(),
+                capacity_bytes: actual_size,
+                volume_context,
+                content_source: Some(content_source),
+                accessible_topology: vec![],
+            }),
+        };
+
+        println!("🎉 [CONTROLLER] PVC clone created successfully");
+        Ok(tonic::Response::new(response))
+    }
 }
 
 #[tonic::async_trait]
@@ -504,18 +629,24 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.name.clone();
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
-        // Check if creating from snapshot first (before extracting parameters that move req fields)
+        // Check if creating from snapshot or volume (PVC clone) first
         if let Some(content_source) = &req.volume_content_source {
-            if let Some(snapshot_source) = &content_source.r#type {
+            if let Some(source_type) = &content_source.r#type {
                 use spdk_csi_driver::csi::volume_content_source::Type;
-                if let Type::Snapshot(snapshot) = snapshot_source {
-                    println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
-                    
-                    let size_bytes = req.capacity_range.as_ref()
-                        .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
-                        .unwrap_or(1024 * 1024 * 1024) as u64;
-                    
-                    return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
+                
+                let size_bytes = req.capacity_range.as_ref()
+                    .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
+                    .unwrap_or(1024 * 1024 * 1024) as u64;
+                
+                match source_type {
+                    Type::Snapshot(snapshot) => {
+                        println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
+                        return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
+                    }
+                    Type::Volume(volume_source) => {
+                        println!("🔄 [CONTROLLER] Creating volume from PVC (clone): {}", volume_source.volume_id);
+                        return self.create_volume_from_volume(&volume_id, &volume_source.volume_id, size_bytes).await;
+                    }
                 }
             }
         }
@@ -894,6 +1025,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             ControllerServiceCapability {
                 r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
                     r#type: RpcType::CreateDeleteSnapshot as i32,
+                })),
+            },
+            ControllerServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::controller_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::CloneVolume as i32,
                 })),
             },
             ControllerServiceCapability {

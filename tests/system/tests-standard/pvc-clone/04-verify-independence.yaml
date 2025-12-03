@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: independence-verifier
+spec:
+  restartPolicy: Never
+  containers:
+    - name: verifier
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Verifying clone independence..."
+          cat /data/source-data.txt
+          
+          # Verify original data exists
+          if ! grep -q "This data should be cloned to new PVC" /data/source-data.txt; then
+            echo "ERROR: Original data not found!"
+            exit 1
+          fi
+          
+          # Verify modified data does NOT exist (clone should be independent)
+          if grep -q "MODIFIED" /data/source-data.txt; then
+            echo "ERROR: Clone contains modified source data (not independent)!"
+            exit 1
+          fi
+          
+          echo "SUCCESS: Clone is independent - has original data only!"
+      volumeMounts:
+        - name: cloned-volume
+          mountPath: /data
+  volumes:
+    - name: cloned-volume
+      persistentVolumeClaim:
+        claimName: cloned-pvc
+

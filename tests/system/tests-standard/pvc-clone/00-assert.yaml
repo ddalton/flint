@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: source-pvc
+status:
+  phase: Bound
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: source-writer
+status:
+  phase: Succeeded
+
