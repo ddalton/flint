@@ -540,3 +540,53 @@ When the restored PVC is staged, we should see:
 
 If we DON'T see these logs, or if we see "NOT A CLONE", then we've found the problem!
 
+---
+
+## 🎯 ROOT CAUSE FOUND!
+
+### Bug: SPDK Response Parsing Error
+
+**Symptom:**
+```
+❌ [CLONE_DETECTION] ERROR: SPDK response is not an array!
+```
+
+**The Problem:**
+
+The SPDK RPC response has this structure:
+```json
+{
+  "result": [
+    { ... bdev data ... }
+  ]
+}
+```
+
+But the code was trying to parse `response` directly as an array:
+```rust
+if let Some(bdev_array) = response.as_array() {  // ❌ FAILS!
+```
+
+The response is an **OBJECT** with a `"result"` field, not an array!
+
+**The Fix:**
+
+Extract the `"result"` field first:
+```rust
+let bdev_array = response.get("result")
+    .and_then(|r| r.as_array());
+
+if let Some(bdev_array) = bdev_array {  // ✅ WORKS!
+```
+
+**Impact:**
+
+- Clone detection ALWAYS failed
+- Every restored volume was treated as new
+- Wipefs ran on every clone (clearing COW filesystem)
+- Volume was reformatted (explaining the 39 allocated clusters)
+
+**Status:** Fixed in commit 84566a1+
+
+**Testing:** Rebuild and redeploy to verify clone detection now works correctly.
+

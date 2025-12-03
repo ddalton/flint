@@ -1141,8 +1141,12 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         eprintln!("🔍 [CLONE_DETECTION] SPDK bdev_get_bdevs response:");
                         eprintln!("{}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "invalid json".to_string()));
                         
-                        if let Some(bdev_array) = response.as_array() {
-                            eprintln!("✅ [CLONE_DETECTION] Response is an array with {} elements", bdev_array.len());
+                        // SPDK RPC returns {"result": [...]} not just [...]
+                        let bdev_array = response.get("result")
+                            .and_then(|r| r.as_array());
+                        
+                        if let Some(bdev_array) = bdev_array {
+                            eprintln!("✅ [CLONE_DETECTION] Response.result is an array with {} elements", bdev_array.len());
                             
                             if let Some(bdev) = bdev_array.first() {
                                 eprintln!("✅ [CLONE_DETECTION] Got bdev from array");
@@ -1196,11 +1200,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                 false
                             }
                         } else {
-                            eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK response is not an array!");
-                            eprintln!("   Response type: {}", 
-                                     if response.is_object() { "object" }
-                                     else if response.is_null() { "null" }
-                                     else { "other" });
+                            eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK response.result is not an array!");
+                            eprintln!("   Response has 'result' field: {}", response.get("result").is_some());
+                            if let Some(result) = response.get("result") {
+                                eprintln!("   Result type: {}", 
+                                         if result.is_array() { "array" }
+                                         else if result.is_object() { "object" }
+                                         else if result.is_null() { "null" }
+                                         else { "other" });
+                            } else {
+                                eprintln!("   Response structure: {}", 
+                                         if response.is_object() { "object (no 'result' field)" }
+                                         else if response.is_array() { "array (missing wrapper)" }
+                                         else { "other" });
+                            }
                             eprintln!("   RESULT: is_clone = FALSE (will format)");
                             false
                         }
