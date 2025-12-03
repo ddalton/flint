@@ -14,5 +14,11 @@ status:
 apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
 commands:
-  - command: kubectl get pod snapshot-verifier --namespace=${NAMESPACE} -o jsonpath='{.status.phase}' | grep -v "Error" || (echo "Pod in Error state - failing test"; exit 1)
+  # Use [ ] test instead of grep to avoid kubectl flag parsing issues
+  - command: |
+      PHASE=$(kubectl get pod snapshot-verifier --namespace=${NAMESPACE} -o jsonpath='{.status.phase}')
+      if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
+        echo "Pod in $PHASE state - failing test"
+        exit 1
+      fi
     ignoreFailure: false
