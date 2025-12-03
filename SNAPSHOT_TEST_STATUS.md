@@ -586,7 +586,147 @@ if let Some(bdev_array) = bdev_array {  // ✅ WORKS!
 - Wipefs ran on every clone (clearing COW filesystem)
 - Volume was reformatted (explaining the 39 allocated clusters)
 
-**Status:** Fixed in commit 84566a1+
+**Status:** Fixed in commit 84566a1 (partial), but this fix was incomplete.
 
-**Testing:** Rebuild and redeploy to verify clone detection now works correctly.
+---
+
+## 🎯 SECOND BUG FOUND: Wrong Bdev from Array
+
+### The Enhanced Logs Revealed Another Issue
+
+After fixing the first bug, logs showed:
+```
+✅ [CLONE_DETECTION] Response.result is an array with 24 elements
+✅ [CLONE_DETECTION] Got bdev from array
+⚠️ [CLONE_DETECTION] NOT AN LVOL!  ← WRONG!
+```
+
+### The Problem
+
+When we query SPDK: `bdev_get_bdevs(71b120de-7c7e-4fbf-be34-8ac53ff7df0e)`
+
+SPDK returns **ALL 24 bdevs** in the system, NOT just the one we asked for!
+
+The code was doing:
+```rust
+if let Some(bdev) = bdev_array.first() {  // ❌ Takes first bdev (uring_nvme0n1)
+```
+
+Since the first bdev in the array is always `uring_nvme0n1` (URING bdev, not an lvol), the clone detection would fail with "NOT AN LVOL".
+
+### The Fix (Commit 63a4620)
+
+Search through the array to find the matching bdev:
+```rust
+let target_bdev = bdev_array.iter().find(|b| {
+    // Match by name (UUID)
+    if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+        if name == bdev_name {
+            return true;
+        }
+    }
+    // Also check aliases
+    if let Some(aliases) = b.get("aliases").and_then(|a| a.as_array()) {
+        for alias in aliases {
+            if let Some(alias_str) = alias.as_str() {
+                if alias_str.contains(bdev_name) || bdev_name.contains(alias_str) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+});
+```
+
+### Complete Fix Chain
+
+1. ✅ **Commit 84566a1**: Fixed `response.as_array()` → `response["result"].as_array()`
+2. ✅ **Commit 63a4620**: Fixed `.first()` → `.find(|b| b.name == bdev_name)`
+
+**Status:** Both bugs fixed. Ready for rebuild and test!
+
+---
+
+## 🎯 THIRD BUG FOUND: Node Agent Ignoring SPDK Params
+
+### Enhanced Logging Revealed the Real Issue
+
+After fixing the first two bugs and adding comprehensive logging, we discovered:
+
+**Line 861 in minimal_disk_service.rs:**
+```rust
+"bdev_get_bdevs" => {
+    // Use generic RPC call to get full bdev objects, not just names
+    spdk.call_method("bdev_get_bdevs", None).await  // ❌ Hardcoded None!
+```
+
+**The Problem:**
+
+The node agent HTTP proxy extracts params from the controller's request:
+```json
+{
+  "method": "bdev_get_bdevs",
+  "params": {"name": "71b120de-7c7e-4fbf-be34-8ac53ff7df0e"}
+}
+```
+
+But then **throws away the params** and calls SPDK with `None`!
+
+**Verification:**
+
+Direct SPDK test confirms filtering works when params are passed:
+```bash
+# With name param: returns 1 bdev
+/usr/local/scripts/rpc.py bdev_get_bdevs -b 71b120de... | jq 'length'
+# 1
+
+# Without name param: returns all bdevs  
+/usr/local/scripts/rpc.py bdev_get_bdevs | jq 'length'
+# 24
+```
+
+**The Fix (Commit 63a4620+):**
+
+1. Extract params from incoming request
+2. Forward them to SPDK
+3. Add comprehensive logging to monitor:
+   - What params are received
+   - What's sent to SPDK (via existing "🔧 [SPDK_RPC] Sending:" log)
+   - Whether filtering worked (result array length)
+   - Monitor other RPC methods for regressions
+
+**Regression Safety:**
+
+Added monitoring for other SPDK RPC methods:
+- `bdev_lvol_get_lvstores` - no params, should still work ✓
+- `bdev_nvme_get_controllers` - no params, should still work ✓
+- `bdev_lvol_create` - manually extracts params from rpc_request, unaffected ✓
+
+**Expected Logs After Fix:**
+```
+🔧 [SPDK_PARAMS] Method: bdev_get_bdevs
+   Params from request: {"name": "71b120de-7c7e-4fbf-be34-8ac53ff7df0e"}
+   Will forward to SPDK: YES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [SPDK_RPC] Sending: {"jsonrpc":"2.0","method":"bdev_get_bdevs","params":{"name":"71b120de..."},"id":1}
+📥 [SPDK_RPC] Received: {"jsonrpc":"2.0","id":1,"result":[{...}]}  ← Only 1 bdev!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 1 bdev(s)
+   Requested: name=71b120de-7c7e-4fbf-be34-8ac53ff7df0e
+   Expected: 1 bdev
+   Actual: 1 bdev(s)
+   ✅ FILTERING WORKED!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Complete Fix Summary
+
+Three bugs in clone detection chain:
+
+1. ✅ **Commit 223394e**: Parse `response["result"]` not `response` directly
+2. ✅ **Commit 63a4620**: Search for matching bdev instead of using `.first()`  
+3. ✅ **Commit 63a4620+**: Forward params to SPDK (was hardcoded `None`)
+
+All three bugs prevented clone detection from working. With all fixes in place, snapshot restore should work correctly!
 

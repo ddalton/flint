@@ -855,18 +855,55 @@ impl MinimalDiskService {
 
             // Call method using the new persistent socket client (matches raid_over_lv)
             println!("🔧 [SPDK_RPC] Calling method '{}' with params: {:?}", method, rpc_request.get("params"));
+            
+            // Extract params from the request
+            let params = rpc_request.get("params").cloned();
+            
+            if let Some(ref p) = params {
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("🔍 [SPDK_PARAMS] Method: {}", method);
+                eprintln!("   Params from request: {}", serde_json::to_string_pretty(p).unwrap_or_else(|_| "invalid".to_string()));
+                eprintln!("   Will forward to SPDK: YES");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            } else {
+                eprintln!("🔍 [SPDK_PARAMS] Method: {}, params: None", method);
+            }
+            
             let result = match method {
             "bdev_get_bdevs" => {
-                // Use generic RPC call to get full bdev objects, not just names
-                spdk.call_method("bdev_get_bdevs", None).await
+                // Forward params from request (e.g., {"name": "uuid"} to filter results)
+                eprintln!("🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: {:?}", params);
+                
+                let result = spdk.call_method("bdev_get_bdevs", params.clone()).await
                     .map_err(|e| {
                         let error_msg = format!("SPDK RPC call 'bdev_get_bdevs' failed: {}", e);
                         println!("❌ [SPDK_RPC] {}", error_msg);
                         Box::new(std::io::Error::new(std::io::ErrorKind::Other, error_msg)) as Box<dyn std::error::Error + Send + Sync>
-                    })?
+                    })?;
+                
+                // Log result to verify filtering worked
+                if let Some(result_array) = result.as_array() {
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    eprintln!("✅ [SPDK_FIX] bdev_get_bdevs returned {} bdev(s)", result_array.len());
+                    if let Some(requested_name) = params.as_ref().and_then(|p| p.get("name")) {
+                        eprintln!("   Requested: name={}", requested_name);
+                        eprintln!("   Expected: 1 bdev");
+                        eprintln!("   Actual: {} bdev(s)", result_array.len());
+                        if result_array.len() == 1 {
+                            eprintln!("   ✅ FILTERING WORKED!");
+                        } else if result_array.len() > 1 {
+                            eprintln!("   ⚠️ FILTERING DID NOT WORK - got all bdevs");
+                        }
+                    }
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                }
+                
+                result
             }
             "bdev_lvol_get_lvstores" => {
+                eprintln!("🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)");
                 let lvstores = spdk.get_lvol_stores().await?;
+                eprintln!("✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned {} LVS", lvstores.len());
                 // Convert LvsInfo to serializable format  
                 let serializable_lvstores: Vec<serde_json::Value> = lvstores.into_iter().map(|lvs| {
                     json!({
@@ -882,7 +919,9 @@ impl MinimalDiskService {
                 json!(serializable_lvstores)
             }
             "bdev_nvme_get_controllers" => {
+                eprintln!("🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)");
                 let controllers = spdk.get_nvme_controllers().await?;
+                eprintln!("✅ [SPDK_METHOD] bdev_nvme_get_controllers returned {} controllers", controllers.len());
                 json!(controllers)
             }
             "bdev_lvol_create_lvstore" => {
@@ -896,6 +935,7 @@ impl MinimalDiskService {
                 json!("success")
             }
             "bdev_lvol_create" => {
+                eprintln!("🔧 [SPDK_METHOD] bdev_lvol_create (manual param extraction)");
                 let params = rpc_request["params"].as_object()
                     .ok_or("Missing params for lvol creation")?;
                 let lvs_name = params["lvs_name"].as_str().unwrap_or("");
@@ -904,7 +944,10 @@ impl MinimalDiskService {
                 let size_bytes = size_mib * 1024 * 1024;
                 let thin_provision = params["thin_provision"].as_bool().unwrap_or(false);
                 
+                eprintln!("   lvol_name: {}, size: {} MiB, thin: {}", lvol_name, size_mib, thin_provision);
+                
                 let uuid = spdk.create_lvol(lvs_name, lvol_name, size_bytes, 1048576, thin_provision).await?;
+                eprintln!("✅ [SPDK_METHOD] bdev_lvol_create returned UUID: {}", uuid);
                 json!(uuid)
             }
             "bdev_lvol_delete" => {
