@@ -134,7 +134,11 @@ impl SnapshotService {
         println!("✅ [SNAPSHOT_SERVICE] Clone created with UUID: {}", clone_uuid);
 
         // Get clone details
+        println!("🔍 [SNAPSHOT_SERVICE] Getting clone details for: {}", clone_uuid);
         let clone_info = self.get_snapshot_details(&clone_uuid).await?;
+        
+        println!("📋 [SNAPSHOT_SERVICE] Clone details: lvs_name={:?}, size={} bytes", 
+                 clone_info.lvs_name, clone_info.size_bytes);
 
         Ok(CloneSnapshotResponse {
             clone_uuid,
@@ -307,11 +311,27 @@ impl SnapshotService {
 
     /// Extract LVS name from lvol JSON
     fn extract_lvs_name_from_lvol(&self, lvol: &Value) -> Option<String> {
-        lvol.get("driver_specific")
-            .and_then(|ds| ds.get("lvol"))
-            .and_then(|lv| lv.get("lvol_store_name"))
-            .and_then(|name| name.as_str())
-            .map(|s| s.to_string())
+        println!("🔍 [SNAPSHOT_SERVICE] Extracting LVS name from lvol JSON");
+        
+        // The lvol alias contains the LVS name: "lvs_name/vol_name"
+        let alias = lvol.get("aliases")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|a| a.as_str());
+        
+        if let Some(alias_str) = alias {
+            println!("🔍 [SNAPSHOT_SERVICE] Found alias: {}", alias_str);
+            // Extract LVS name from alias (format: "lvs_name/vol_or_snap_name")
+            if let Some(lvs_name) = alias_str.split('/').next() {
+                println!("✅ [SNAPSHOT_SERVICE] Extracted LVS name from alias: {}", lvs_name);
+                return Some(lvs_name.to_string());
+            }
+        }
+        
+        println!("⚠️ [SNAPSHOT_SERVICE] Could not extract LVS name from lvol JSON");
+        println!("🔧 [SNAPSHOT_SERVICE] Lvol JSON (for debugging): {}", 
+                 serde_json::to_string_pretty(lvol).unwrap_or_else(|_| "invalid json".to_string()));
+        None
     }
 
     /// Calculate lvol size from JSON
