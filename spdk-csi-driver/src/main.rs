@@ -1148,8 +1148,31 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         if let Some(bdev_array) = bdev_array {
                             eprintln!("✅ [CLONE_DETECTION] Response.result is an array with {} elements", bdev_array.len());
                             
-                            if let Some(bdev) = bdev_array.first() {
-                                eprintln!("✅ [CLONE_DETECTION] Got bdev from array");
+                            // IMPORTANT: bdev_get_bdevs returns ALL bdevs even when queried by name
+                            // We must search for the specific bdev by name or UUID
+                            let target_bdev = bdev_array.iter().find(|b| {
+                                // Match by name (UUID)
+                                if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+                                    if name == bdev_name {
+                                        return true;
+                                    }
+                                }
+                                // Also check aliases in case bdev_name is an alias
+                                if let Some(aliases) = b.get("aliases").and_then(|a| a.as_array()) {
+                                    for alias in aliases {
+                                        if let Some(alias_str) = alias.as_str() {
+                                            if alias_str.contains(bdev_name) || bdev_name.contains(alias_str) {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                                false
+                            });
+                            
+                            if let Some(bdev) = target_bdev {
+                                eprintln!("✅ [CLONE_DETECTION] Found matching bdev in array");
+                                eprintln!("   name: {}", bdev["name"].as_str().unwrap_or("unknown"));
                                 eprintln!("   product_name: {}", bdev["product_name"].as_str().unwrap_or("unknown"));
                                 
                                 // Check if this is an lvol (has driver_specific.lvol)
@@ -1195,7 +1218,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     is_clone
                                 }
                             } else {
-                                eprintln!("❌ [CLONE_DETECTION] ERROR: No bdev found in SPDK response array");
+                                eprintln!("❌ [CLONE_DETECTION] ERROR: No matching bdev found in SPDK response");
+                                eprintln!("   Searched for: {}", bdev_name);
+                                eprintln!("   Array has {} bdevs total", bdev_array.len());
                                 eprintln!("   RESULT: is_clone = FALSE (will format)");
                                 false
                             }
