@@ -52,12 +52,12 @@ impl MinimalDiskService {
         let controllers = self.get_spdk_nvme_controllers().await?;
 
         let mut disks = Vec::new();
-        println!("🔧 [DEBUG] bdevs JSON structure: {}", serde_json::to_string_pretty(&bdevs).unwrap_or_else(|_| "JSON error".to_string()));
+        // Note: Full bdevs JSON not logged (too verbose). Count logged below.
         
         if let Some(bdev_list) = bdevs["result"].as_array() {
             println!("🔧 [DEBUG] Found {} bdevs in result array", bdev_list.len());
             for (i, bdev) in bdev_list.iter().enumerate() {
-                println!("🔧 [DEBUG] Processing bdev {}: {}", i, serde_json::to_string(bdev).unwrap_or_else(|_| "JSON error".to_string()));
+                // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
                 
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
                     println!("🔧 [DEBUG] Created DiskInfo: name={}, pci={}, healthy={}", disk_info.device_name, disk_info.pci_address, disk_info.healthy);
@@ -181,7 +181,7 @@ impl MinimalDiskService {
             }
         });
 
-        println!("🔧 [LVOL_CREATE_DEBUG] Calling SPDK bdev_lvol_create with params: {}", serde_json::to_string_pretty(&create_params).unwrap_or_default());
+        // Note: Create params not logged (verbose). Key values logged above and result logged below.
 
         let response = self.call_spdk_rpc(&create_params).await
             .map_err(|e| {
@@ -860,11 +860,15 @@ impl MinimalDiskService {
             let params = rpc_request.get("params").cloned();
             
             if let Some(ref p) = params {
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🔍 [SPDK_PARAMS] Method: {}", method);
-                eprintln!("   Params from request: {}", serde_json::to_string_pretty(p).unwrap_or_else(|_| "invalid".to_string()));
-                eprintln!("   Will forward to SPDK: YES");
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                // Log params summary (not full JSON to reduce verbosity)
+                let param_summary = if let Some(name) = p.get("name") {
+                    format!("name={}", name)
+                } else if let Some(obj) = p.as_object() {
+                    format!("{} keys", obj.len())
+                } else {
+                    "complex".to_string()
+                };
+                eprintln!("🔍 [SPDK_PARAMS] Method: {}, params: {}", method, param_summary);
             } else {
                 eprintln!("🔍 [SPDK_PARAMS] Method: {}, params: None", method);
             }
@@ -1005,7 +1009,7 @@ impl MinimalDiskService {
 
     /// Convert SPDK bdev JSON to our DiskInfo structure
     async fn bdev_to_disk_info(&self, bdev: &Value, lvstores: &Value, _controllers: &Value) -> Result<Option<DiskInfo>, MinimalStateError> {
-        println!("🔧 [BDEV_TO_DISK] Raw bdev JSON: {}", serde_json::to_string(bdev).unwrap_or_else(|_| "JSON error".to_string()));
+        // Note: Raw bdev JSON not logged (too verbose). Only log extracted values.
         
         let bdev_name = bdev["name"].as_str().unwrap_or("");
         let product_name = bdev["product_name"].as_str().unwrap_or("");
@@ -1107,7 +1111,7 @@ impl MinimalDiskService {
     /// Find LVS information for a bdev - Enhanced with recovery logic
     fn find_lvs_for_bdev(&self, bdev_name: &str, lvstores: &Value) -> (Option<String>, u64, u32) {
         println!("🔍 [LVS_SEARCH] Looking for LVS on bdev: {}", bdev_name);
-        println!("🔧 [LVS_SEARCH_DEBUG] Full lvstores response: {}", serde_json::to_string(lvstores).unwrap_or_else(|_| "JSON error".to_string()));
+        // Note: Full lvstores response not logged (verbose). Count and matches logged below.
         
         if let Some(lvs_list) = lvstores["result"].as_array() {
             println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());

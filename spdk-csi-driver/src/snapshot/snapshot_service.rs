@@ -329,8 +329,8 @@ impl SnapshotService {
         }
         
         println!("⚠️ [SNAPSHOT_SERVICE] Could not extract LVS name from lvol JSON");
-        println!("🔧 [SNAPSHOT_SERVICE] Lvol JSON (for debugging): {}", 
-                 serde_json::to_string_pretty(lvol).unwrap_or_else(|_| "invalid json".to_string()));
+        println!("   Aliases: {:?}", lvol.get("aliases"));
+        // Note: Full lvol JSON not logged (too verbose)
         None
     }
 

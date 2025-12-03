@@ -1185,8 +1185,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
                     Ok(response) => {
                         eprintln!("✅ [CLONE_DETECTION] SPDK RPC call succeeded");
-                        eprintln!("🔍 [CLONE_DETECTION] SPDK bdev_get_bdevs response:");
-                        eprintln!("{}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "invalid json".to_string()));
+                        // Note: Full bdev list not logged (too verbose). Only log summary.
                         
                         // SPDK RPC returns {"result": [...]} not just [...]
                         let bdev_array = response.get("result")
