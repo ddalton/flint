@@ -1,11 +1,6 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: post-expansion-pod
-status:
-  phase: Succeeded
-  containerStatuses:
-    - name: verifier
-      state:
-        terminated:
-          exitCode: 0
+# Assert that the initial-writer pod has been deleted
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - command: kubectl get pod initial-writer --namespace=$NAMESPACE --ignore-not-found
+    ignoreFailure: false

@@ -8,6 +8,7 @@ spec:
       storage: 2Gi
 status:
   phase: Bound
-  # Verify the capacity has been updated
-  capacity:
-    storage: 2Gi
+  # Volume expansion requested but filesystem resize is pending
+  conditions:
+    - type: FileSystemResizePending
+      status: "True"

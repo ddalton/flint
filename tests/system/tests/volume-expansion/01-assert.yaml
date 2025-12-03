@@ -4,3 +4,10 @@ metadata:
   name: initial-writer
 status:
   phase: Succeeded
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: expandable-pvc
+status:
+  phase: Bound

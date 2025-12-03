@@ -3,4 +3,4 @@ kind: PersistentVolumeClaim
 metadata:
   name: expandable-pvc
 status:
-  phase: Bound
+  phase: Pending

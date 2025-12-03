@@ -1552,10 +1552,82 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
     async fn node_expand_volume(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodeExpandVolumeRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodeExpandVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeExpandVolumeResponse>, tonic::Status> {
-        println!("🔵 [GRPC] Node.NodeExpandVolume called");
-        Err(tonic::Status::unimplemented("Node expand volume not implemented"))
+        let req = request.into_inner();
+        println!("🔵 [GRPC] Node.NodeExpandVolume called for volume: {}", req.volume_id);
+        println!("   Volume path: {}", req.volume_path);
+        println!("   Capacity range: {:?}", req.capacity_range);
+        
+        // Get the target capacity
+        let target_bytes = req.capacity_range
+            .as_ref()
+            .and_then(|cr| Some(cr.required_bytes))
+            .unwrap_or(0);
+        
+        println!("   Target capacity: {} bytes", target_bytes);
+        
+        // The volume_path is the mount point (e.g., /var/lib/kubelet/pods/.../volumes/...)
+        // We need to find the underlying block device and resize the filesystem
+        
+        // Find the block device for this mount point
+        let findmnt_output = std::process::Command::new("findmnt")
+            .args(&["-n", "-o", "SOURCE", &req.volume_path])
+            .output()
+            .map_err(|e| tonic::Status::internal(format!("Failed to find block device: {}", e)))?;
+        
+        if !findmnt_output.status.success() {
+            return Err(tonic::Status::internal("Failed to find mount source"));
+        }
+        
+        let block_device = String::from_utf8_lossy(&findmnt_output.stdout).trim().to_string();
+        println!("   Block device: {}", block_device);
+        
+        // Detect filesystem type
+        let blkid_output = std::process::Command::new("blkid")
+            .args(&["-o", "value", "-s", "TYPE", &block_device])
+            .output()
+            .map_err(|e| tonic::Status::internal(format!("Failed to detect filesystem: {}", e)))?;
+        
+        let fs_type = String::from_utf8_lossy(&blkid_output.stdout).trim().to_string();
+        println!("   Detected filesystem type: {}", fs_type);
+        
+        // Resize based on filesystem type
+        // The underlying block device should already be resized by ControllerExpandVolume
+        let result = if fs_type == "ext4" || fs_type == "ext3" || fs_type == "ext2" {
+            // For ext filesystems, use resize2fs on the block device
+            println!("   Running resize2fs on {}", block_device);
+            std::process::Command::new("resize2fs")
+                .arg(&block_device)
+                .output()
+        } else if fs_type == "xfs" {
+            // For XFS, use xfs_growfs on the mount point
+            println!("   Running xfs_growfs on {}", req.volume_path);
+            std::process::Command::new("xfs_growfs")
+                .arg(&req.volume_path)
+                .output()
+        } else {
+            return Err(tonic::Status::unimplemented(format!("Unsupported filesystem type: {}", fs_type)));
+        };
+        
+        match result {
+            Ok(output) if output.status.success() => {
+                println!("✅ [GRPC] Filesystem resized successfully");
+                println!("   Output: {}", String::from_utf8_lossy(&output.stdout));
+                Ok(tonic::Response::new(spdk_csi_driver::csi::NodeExpandVolumeResponse {
+                    capacity_bytes: target_bytes,
+                }))
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("❌ [GRPC] Filesystem resize failed: {}", stderr);
+                Err(tonic::Status::internal(format!("Filesystem resize failed: {}", stderr)))
+            }
+            Err(e) => {
+                eprintln!("❌ [GRPC] Failed to execute resize command: {}", e);
+                Err(tonic::Status::internal(format!("Failed to execute resize command: {}", e)))
+            }
+        }
     }
 
     async fn node_get_capabilities(
@@ -1571,9 +1643,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     r#type: RpcType::StageUnstageVolume as i32,
                 })),
             },
+            NodeServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::node_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::ExpandVolume as i32,
+                })),
+            },
         ];
         
-        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume capability");
+        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume capabilities");
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetCapabilitiesResponse { capabilities }))
     }
 
