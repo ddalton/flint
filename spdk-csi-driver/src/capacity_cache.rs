@@ -244,14 +244,18 @@ impl CapacityCache {
 
                 println!("🔄 [CACHE] Background refresh starting...");
 
-                // Get all cached nodes
-                let nodes: Vec<String> = {
-                    let cache_lock = cache.cache.read().await;
-                    cache_lock.keys().cloned().collect()
+                // Get all nodes in the cluster (not just cached ones)
+                // This ensures nodes that failed during warm_up still get refreshed
+                let nodes = match driver.get_all_nodes().await {
+                    Ok(nodes) => nodes,
+                    Err(e) => {
+                        println!("⚠️ [CACHE] Failed to get cluster nodes: {}", e);
+                        continue;
+                    }
                 };
 
                 if nodes.is_empty() {
-                    println!("⚠️ [CACHE] No nodes in cache to refresh");
+                    println!("⚠️ [CACHE] No nodes in cluster to refresh");
                     continue;
                 }
 
