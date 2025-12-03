@@ -394,9 +394,42 @@ impl MinimalControllerService {
         
         let actual_size = response["size_bytes"].as_i64().unwrap_or(size_bytes as i64);
         
-        println!("✅ [CONTROLLER] Volume {} created from snapshot (clone UUID: {})", volume_id, clone_uuid);
+        // Get lvs_name from the response (node agent provides this from snapshot info)
+        let lvs_name = response["lvs_name"].as_str()
+            .ok_or_else(|| tonic::Status::internal(format!(
+                "No lvs_name in clone response. Clone UUID: {}. This should not happen - the snapshot service should populate lvs_name",
+                clone_uuid
+            )))?
+            .to_string();
         
-        // Step 3: Return volume with content_source populated
+        println!("✅ [CONTROLLER] Volume {} created from snapshot (clone UUID: {}, lvs: {})", 
+                 volume_id, clone_uuid, lvs_name);
+        
+        // Step 3: Build volume_context with metadata (critical for attach operations)
+        let mut volume_context = std::collections::HashMap::new();
+        
+        // Single replica (snapshot clones are always single replica)
+        volume_context.insert(
+            "flint.csi.storage.io/replica-count".to_string(),
+            "1".to_string(),
+        );
+        volume_context.insert(
+            "flint.csi.storage.io/node-name".to_string(),
+            node_name.clone(),
+        );
+        volume_context.insert(
+            "flint.csi.storage.io/lvol-uuid".to_string(),
+            clone_uuid.clone(),
+        );
+        volume_context.insert(
+            "flint.csi.storage.io/lvs-name".to_string(),
+            lvs_name.clone(),
+        );
+        
+        println!("📝 [CONTROLLER] Storing snapshot-restored volume metadata in PV: node={}, lvol={}", 
+                 node_name, clone_uuid);
+        
+        // Step 4: Return volume with content_source and metadata populated
         let content_source = spdk_csi_driver::csi::VolumeContentSource {
             r#type: Some(spdk_csi_driver::csi::volume_content_source::Type::Snapshot(
                 spdk_csi_driver::csi::volume_content_source::SnapshotSource {
@@ -409,7 +442,7 @@ impl MinimalControllerService {
             volume: Some(spdk_csi_driver::csi::Volume {
                 volume_id: volume_id.to_string(),
                 capacity_bytes: actual_size,
-                volume_context: std::collections::HashMap::new(),
+                volume_context,  // Now includes metadata!
                 content_source: Some(content_source),
                 accessible_topology: vec![],
             }),

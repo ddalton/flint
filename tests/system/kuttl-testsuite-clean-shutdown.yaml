@@ -1,0 +1,14 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+metadata:
+  name: flint-csi-clean-shutdown-test
+# Configuration for clean-shutdown test (must run in isolation)
+testDirs:
+  - tests/
+timeout: 300
+# Run sequentially (only one test anyway)
+parallel: 1
+# Suppress logs for cleaner output
+suppress:
+  - events
+

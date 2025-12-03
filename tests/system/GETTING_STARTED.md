@@ -15,25 +15,33 @@ A complete, production-ready test framework for testing CSI drivers on Kubernete
 ## Quick Start
 
 ### 1. Prerequisites Check
-```bash
-# Run the interactive setup script
-./quick-start.sh
-```
 
-This script will:
-- Verify kubectl is installed
-- Check cluster connectivity
-- Install Kuttl if needed
-- Detect your storage class
-- Update test manifests automatically
+⚠️ **CRITICAL**: Before running tests, ensure:
+- ✅ ublk kernel module is loaded on all worker nodes
+- ✅ CSI driver pods restarted after loading ublk module
+- ✅ kubectl configured with cluster access
+- ✅ Kuttl installed
+
+```bash
+# Verify ublk module on each node
+ssh user@worker-node "lsmod | grep ublk"
+
+# If not loaded, load it and restart CSI pods (see Troubleshooting section)
+```
 
 ### 2. Run Your First Test
 ```bash
 # Run a single test
 make test-rwo
 
-# Or run all tests
+# Or run all tests (standard tests in parallel, then clean-shutdown separately)
 make test
+
+# Or run individual test suites
+make test-multi-replica
+make test-clean-shutdown   # Runs in isolation
+make test-snapshot
+make test-expand
 ```
 
 ### 3. View Results
@@ -52,9 +60,9 @@ Tests pod migration between nodes with data persistence
 - **Use Case**: Simulates pod rescheduling or node failures
 - **Duration**: ~2-3 minutes
 
-### 2. **RWX Multi-Pod** (`tests/rwx-multi-pod/`)
-Tests concurrent access from multiple pods
-- **Use Case**: Shared file systems, collaborative workloads
+### 2. **Multi-Replica** (`tests/multi-replica/`)
+Tests multi-replica volume support
+- **Use Case**: High availability storage with multiple replicas
 - **Duration**: ~2-3 minutes
 
 ### 3. **Volume Expansion** (`tests/volume-expansion/`)
@@ -95,15 +103,18 @@ spec:
 
 | Command | Description |
 |---------|-------------|
-| `make test` | Run all tests |
+| `make test` | Run all tests (standard + clean-shutdown) |
 | `make test-rwo` | Run RWO migration test |
-| `make test-rwx` | Run RWX multi-pod test |
+| `make test-multi-replica` | Run multi-replica test |
+| `make test-clean-shutdown` | Run clean shutdown test (isolated) |
+| `make test-snapshot` | Run snapshot restore test |
 | `make test-expand` | Run volume expansion test |
 | `make test-single TEST=<name>` | Run specific test |
 | `make test-verbose` | Run with detailed output |
 | `make debug` | Keep resources on failure |
 | `make clean` | Remove test namespaces |
 | `make list-tests` | Show available tests |
+| `make restart-csi` | Restart CSI driver pods |
 
 ## Understanding Test Structure
 
@@ -160,16 +171,7 @@ Kuttl executes files in alphabetical order, waiting for assertions before procee
 
 ## CI/CD Integration
 
-A complete GitHub Actions workflow is included in `.github/workflows/csi-tests.yaml`.
-
-It automatically:
-- Creates a Kind cluster
-- Installs your CSI driver
-- Runs all tests
-- Collects logs on failure
-- Uploads results
-
-Just push to your repo and it runs!
+You can integrate these tests into your CI/CD pipeline. See the **CI/CD Integration** section in `README.md` for a GitHub Actions example that you can adapt for your needs.
 
 ## Debugging Failed Tests
 
@@ -197,7 +199,38 @@ Edit `kuttl-testsuite.yaml`:
 timeout: 600  # Increase from 300 to 600 seconds
 ```
 
-## Common Issues
+## Common Issues & Troubleshooting
+
+### Critical: UBLK Driver Setup
+
+⚠️ **Before running tests**, ensure the ublk kernel module is loaded on all worker nodes.
+
+**Symptoms**:
+- Tests fail with `MountVolume.MountDevice failed`
+- Error: `SPDK RPC call 'ublk_start_disk' failed: Code=-19 Msg=No such device`
+
+**Fix**:
+```bash
+# 1. Load ublk module on ALL worker nodes
+ssh user@worker-node
+sudo modprobe ublk_drv
+lsmod | grep ublk
+
+# Make it persistent
+echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
+
+# 2. Restart CSI driver pods (REQUIRED after loading module)
+kubectl delete pods -n flint-system -l app=flint-csi-node
+kubectl delete pods -n flint-system -l app=flint-csi-controller
+
+# 3. Wait for restart
+kubectl wait --for=condition=ready pod -l app=flint-csi-node -n flint-system --timeout=120s
+
+# 4. Clean up test namespaces and retry
+kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs kubectl delete ns
+```
+
+### Other Common Problems
 
 | Problem | Solution |
 |---------|----------|
@@ -206,19 +239,20 @@ timeout: 600  # Increase from 300 to 600 seconds
 | Anti-affinity fails | Need 2+ nodes in cluster |
 | Snapshot test fails | Install snapshot CRDs and controller |
 | Test timeout | Increase timeout in `kuttl-testsuite.yaml` |
+| Mount device failed | **See UBLK Driver Setup above** |
 
 ## Next Steps
 
-1. ✅ Run `./quick-start.sh` to validate setup
+1. ✅ Ensure ublk module is loaded and CSI pods restarted
 2. ✅ Run `make test-rwo` to verify basic functionality
 3. ✅ Review test results
-4. ✅ Customize tests for your specific CSI driver features
-5. ✅ Add tests to your CI/CD pipeline
+4. ✅ Run additional tests (`make test` for all)
+5. ✅ Customize tests for your specific needs
 
 ## Documentation
 
-- **README.md** - Comprehensive documentation
-- **PROJECT_STRUCTURE.md** - Detailed project overview
+- **README.md** - Comprehensive documentation with troubleshooting
+- **Test READMEs** - Each test directory has detailed documentation
 - **Kuttl Docs** - https://kuttl.dev/
 
 ## Support
@@ -233,4 +267,4 @@ If tests fail:
 
 **Happy Testing! 🚀**
 
-Your CSI driver testing framework is ready to use. Start with `./quick-start.sh` and you'll be running tests in minutes.
+Your Flint CSI driver testing framework is ready to use. Ensure ublk is loaded, restart CSI pods with `make restart-csi`, and run tests with `make test`.

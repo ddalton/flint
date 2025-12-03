@@ -44,9 +44,12 @@ install: ## Install kuttl (requires kubectl krew)
 	kubectl krew install kuttl
 	@echo "✅ Kuttl installed successfully"
 
-test: check-kubeconfig check-kuttl ## Run all tests
-	@echo "Running all CSI driver tests..."
+test: check-kubeconfig check-kuttl ## Run all tests (standard tests in parallel, clean-shutdown separately)
+	@echo "Running standard CSI driver tests..."
 	kubectl kuttl test --config kuttl-testsuite.yaml
+	@echo ""
+	@echo "Running clean-shutdown test (must run in isolation)..."
+	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
 
 test-verbose: check-kubeconfig check-kuttl ## Run all tests with verbose output
 	@echo "Running all CSI driver tests (verbose)..."
@@ -63,11 +66,17 @@ test-single: check-kubeconfig check-kuttl ## Run a single test (usage: make test
 test-rwo: check-kubeconfig check-kuttl ## Run RWO PVC migration test
 	kubectl kuttl test --test rwo-pvc-migration
 
-test-rwx: check-kubeconfig check-kuttl ## Run RWX multi-pod test
-	kubectl kuttl test --test rwx-multi-pod
+test-multi-replica: check-kubeconfig check-kuttl ## Run multi-replica test
+	kubectl kuttl test --test multi-replica
 
 test-expand: check-kubeconfig check-kuttl ## Run volume expansion test
 	kubectl kuttl test --test volume-expansion
+
+test-clean-shutdown: check-kubeconfig check-kuttl ## Run clean shutdown test (runs in isolation)
+	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+
+test-snapshot: check-kubeconfig check-kuttl ## Run snapshot restore test
+	kubectl kuttl test --test snapshot-restore
 
 clean: ## Clean up test namespaces (kuttl-test-*)
 	@echo "Cleaning up test namespaces..."
@@ -98,3 +107,16 @@ validate: ## Validate YAML syntax
 list-tests: ## List all available tests
 	@echo "Available tests:"
 	@find tests -mindepth 1 -maxdepth 1 -type d -exec basename {} \;
+
+restart-csi: check-kubeconfig ## Restart Flint CSI driver pods (required after loading ublk module)
+	@echo "Restarting Flint CSI driver pods..."
+	@echo "Deleting node agent pods..."
+	kubectl delete pods -n flint-system -l app=flint-csi-node --ignore-not-found
+	@echo "Deleting controller pods..."
+	kubectl delete pods -n flint-system -l app=flint-csi-controller --ignore-not-found
+	@echo "Waiting for pods to restart..."
+	@kubectl wait --for=condition=ready pod -l app=flint-csi-node -n flint-system --timeout=120s || true
+	@kubectl wait --for=condition=ready pod -l app=flint-csi-controller -n flint-system --timeout=120s || true
+	@echo "✅ CSI driver pods restarted"
+	@echo ""
+	@kubectl get pods -n flint-system

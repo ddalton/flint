@@ -2,14 +2,14 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestSuite
 metadata:
   name: flint-csi-driver-tests
-# Global configuration for all tests
+# Global configuration for all tests (excludes clean-shutdown which must run separately)
+# We use tests-standard directory to separate tests that can run in parallel
 testDirs:
-  - tests/
+  - tests-standard/
 timeout: 300
-# Parallel execution (set to 1 for sequential if tests interfere with each other)
+# Parallel execution
 parallel: 4
 # Suppress logs for cleaner output (set to 0 for debugging)
 suppress:
   - events
-# Start kind cluster automatically (optional - remove if using existing cluster)
-# kindContext: csi-test-cluster
+# Note: clean-shutdown test runs separately via kuttl-testsuite-clean-shutdown.yaml
