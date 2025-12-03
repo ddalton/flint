@@ -1126,24 +1126,28 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                                     let fs_size = block_count * block_size;
                                                     
                                                     if fs_size > 0 && device_size > 0 {
-                                                        let size_diff = if fs_size > device_size {
-                                                            fs_size - device_size
+                                                        // CRITICAL: Only reformat if filesystem thinks it's LARGER than device
+                                                        // If device > filesystem, that's normal during volume expansion
+                                                        // (NodeExpandVolume will resize the filesystem later)
+                                                        if fs_size > device_size {
+                                                            let size_diff = fs_size - device_size;
+                                                            let diff_percent = (size_diff as f64 / device_size as f64) * 100.0;
+                                                            
+                                                            if diff_percent > 10.0 {
+                                                                println!("⚠️ [NODE] GEOMETRY MISMATCH DETECTED!");
+                                                                println!("⚠️ [NODE] Device size: {} bytes", device_size);
+                                                                println!("⚠️ [NODE] Filesystem thinks: {} bytes", fs_size);
+                                                                println!("⚠️ [NODE] Difference: {:.1}%", diff_percent);
+                                                                println!("🔧 [NODE] This indicates ublk ID reuse - will reformat to fix");
+                                                                needs_reformat = true;
+                                                            }
+                                                        } else if device_size > fs_size {
+                                                            let diff_percent = ((device_size - fs_size) as f64 / device_size as f64) * 100.0;
+                                                            println!("✅ [NODE] Device larger than filesystem (diff: {:.1}%) - normal for expansion", diff_percent);
+                                                            println!("   Device: {} bytes, Filesystem: {} bytes", device_size, fs_size);
+                                                            println!("   NodeExpandVolume will resize filesystem after mounting");
                                                         } else {
-                                                            device_size - fs_size
-                                                        };
-                                                        
-                                                        // If difference is more than 10%, we have geometry mismatch
-                                                        let diff_percent = (size_diff as f64 / device_size as f64) * 100.0;
-                                                        
-                                                        if diff_percent > 10.0 {
-                                                            println!("⚠️ [NODE] GEOMETRY MISMATCH DETECTED!");
-                                                            println!("⚠️ [NODE] Device size: {} bytes", device_size);
-                                                            println!("⚠️ [NODE] Filesystem thinks: {} bytes", fs_size);
-                                                            println!("⚠️ [NODE] Difference: {:.1}%", diff_percent);
-                                                            println!("🔧 [NODE] This indicates ublk ID reuse - will reformat to fix");
-                                                            needs_reformat = true;
-                                                        } else {
-                                                            println!("✅ [NODE] Filesystem size matches device (diff: {:.1}%)", diff_percent);
+                                                            println!("✅ [NODE] Filesystem size matches device exactly");
                                                         }
                                                     }
                                                 }
