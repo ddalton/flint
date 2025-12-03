@@ -534,7 +534,7 @@ impl MinimalControllerService {
         let snapshot_name = format!("temp_clone_snap_{}", volume_id);
         
         let snapshot_payload = serde_json::json!({
-            "lvol_uuid": source_lvol_uuid,
+            "lvol_name": source_lvol_uuid,  // API expects lvol_name (can be UUID or name)
             "snapshot_name": snapshot_name
         });
         
