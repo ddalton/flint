@@ -1111,26 +1111,48 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 
                 match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
                     Ok(response) => {
+                        println!("🔍 [NODE] SPDK bdev_get_bdevs response: {}", 
+                                 serde_json::to_string_pretty(&response).unwrap_or_else(|_| "invalid json".to_string()));
+                        
                         if let Some(bdev_array) = response.as_array() {
                             if let Some(bdev) = bdev_array.first() {
-                                let is_clone = bdev["driver_specific"]["lvol"]["clone"]
-                                    .as_bool().unwrap_or(false);
-                                let base_snapshot = bdev["driver_specific"]["lvol"]["base_snapshot"]
-                                    .as_str();
-                                    
-                                if is_clone {
-                                    println!("📋 [NODE] SPDK metadata: clone=true, base_snapshot={:?}", base_snapshot);
-                                } else {
-                                    println!("🆕 [NODE] SPDK metadata: clone=false (new volume)");
-                                }
+                                // Check if this is an lvol (has driver_specific.lvol)
+                                let has_lvol_metadata = bdev.get("driver_specific")
+                                    .and_then(|ds| ds.get("lvol"))
+                                    .is_some();
                                 
-                                is_clone
+                                if !has_lvol_metadata {
+                                    println!("ℹ️ [NODE] bdev is not an lvol (product: {})", 
+                                             bdev["product_name"].as_str().unwrap_or("unknown"));
+                                    println!("ℹ️ [NODE] This is likely an NVMe bdev (remote volume over NVMe-oF)");
+                                    println!("ℹ️ [NODE] Cannot determine clone status from NVMe bdev - treating as new");
+                                    false
+                                } else {
+                                
+                                    let is_clone = bdev["driver_specific"]["lvol"]["clone"]
+                                        .as_bool().unwrap_or(false);
+                                    let base_snapshot = bdev["driver_specific"]["lvol"]["base_snapshot"]
+                                        .as_str();
+                                        
+                                    if is_clone {
+                                        println!("📋 [NODE] SPDK metadata: clone=true, base_snapshot={:?}", base_snapshot);
+                                        println!("✅ [NODE] This lvol is a snapshot clone - will preserve filesystem");
+                                    } else {
+                                        println!("🆕 [NODE] SPDK metadata: clone=false (new volume)");
+                                    }
+                                    
+                                    is_clone
+                                }
                             } else {
-                                println!("⚠️ [NODE] No bdev found in SPDK response");
+                                println!("⚠️ [NODE] No bdev found in SPDK response array");
                                 false
                             }
                         } else {
-                            println!("⚠️ [NODE] Unexpected SPDK response format");
+                            println!("⚠️ [NODE] SPDK response is not an array");
+                            println!("⚠️ [NODE] Response type: {}", 
+                                     if response.is_object() { "object" }
+                                     else if response.is_null() { "null" }
+                                     else { "other" });
                             false
                         }
                     }
