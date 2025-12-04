@@ -703,9 +703,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 .unwrap_or(1) // Persistent: use StorageClass default
         };
 
-        let thin_provision = req.parameters.get("thinProvision")
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(false);
+        // For ephemeral volumes, default to thin provisioning (more efficient for temporary data)
+        let thin_provision = if is_ephemeral {
+            req.parameters.get("thinProvision")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(true) // Ephemeral: default to thin (allocate on write)
+        } else {
+            req.parameters.get("thinProvision")
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false) // Persistent: use StorageClass default
+        };
 
         println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, Ephemeral: {}", 
                  volume_id, size_bytes, replica_count, thin_provision, is_ephemeral);
