@@ -685,6 +685,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         if is_ephemeral {
             println!("📦 [CONTROLLER] Creating EPHEMERAL volume (will be deleted with Pod)");
+            println!("📦 [CONTROLLER] Accessibility requirements: {:?}", req.accessibility_requirements);
         }
 
         // Extract parameters for normal volume creation
