@@ -14,11 +14,11 @@ status:
 apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
 commands:
-  - command: |
-      PHASE=$(kubectl get pod clone-verifier --namespace=${NAMESPACE} -o jsonpath='{.status.phase}')
+  - script: |
+      PHASE=$(kubectl get pod clone-verifier -o jsonpath='{.status.phase}')
       if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
-        echo "Pod in $PHASE state - failing test"
+        echo "❌ Pod in $PHASE state - failing test"
         exit 1
       fi
-    ignoreFailure: false
+      echo "✅ Pod status check passed (Phase: $PHASE)"
 
