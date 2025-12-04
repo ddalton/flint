@@ -1817,10 +1817,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 uuid
             } else {
                 // Create the lvol
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 println!("📦 [NODE_PUBLISH] Creating ephemeral lvol on local node");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
                 let size_str = req.volume_context.get("size")
                     .ok_or_else(|| tonic::Status::invalid_argument("Missing 'size' in volumeAttributes"))?;
+                
+                println!("📊 [NODE_PUBLISH] Size from volumeAttributes: {}", size_str);
                 
                 let size_bytes = if size_str.ends_with("Gi") {
                     size_str.trim_end_matches("Gi").parse::<u64>()
@@ -1832,19 +1836,38 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     size_str.parse().map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))?
                 };
                 
+                println!("📊 [NODE_PUBLISH] Parsed size: {} bytes ({} MiB)", size_bytes, size_bytes / 1024 / 1024);
+                
+                println!("🔍 [NODE_PUBLISH] Querying SPDK for available LVS...");
                 let lvstores = spdk.get_lvol_stores().await
                     .map_err(|e| tonic::Status::internal(format!("Failed to get LVS: {}", e)))?;
                 
+                println!("📊 [NODE_PUBLISH] Found {} LVS on node", lvstores.len());
+                
                 let lvs_name = if !lvstores.is_empty() {
-                    lvstores[0].name.clone()
+                    let name = lvstores[0].name.clone();
+                    println!("✅ [NODE_PUBLISH] Selected LVS: {}", name);
+                    println!("   LVS free space: {} MiB", lvstores[0].free_clusters * lvstores[0].cluster_size / 1024 / 1024);
+                    name
                 } else {
                     return Err(tonic::Status::internal("No LVS available on this node"));
                 };
                 
-                let uuid = spdk.create_lvol(&lvs_name, &lvol_name, size_bytes, 1048576, true).await
-                    .map_err(|e| tonic::Status::internal(format!("Failed to create lvol: {}", e)))?;
+                println!("🔧 [NODE_PUBLISH] Calling SPDK bdev_lvol_create:");
+                println!("   lvs_name: {}", lvs_name);
+                println!("   lvol_name: {}", lvol_name);
+                println!("   size_in_mib: {}", size_bytes / 1024 / 1024);
+                println!("   thin_provision: true");
                 
+                let uuid = spdk.create_lvol(&lvs_name, &lvol_name, size_bytes, 1048576, true).await
+                    .map_err(|e| {
+                        println!("❌ [NODE_PUBLISH] SPDK bdev_lvol_create failed: {}", e);
+                        tonic::Status::internal(format!("Failed to create lvol: {}", e))
+                    })?;
+                
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 println!("✅ [NODE_PUBLISH] Created ephemeral lvol: {} (UUID: {})", lvol_name, uuid);
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 uuid
             };
             
