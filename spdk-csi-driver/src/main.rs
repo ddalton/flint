@@ -1771,6 +1771,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
         let staging_target_path = req.staging_target_path.clone();
+        let readonly = req.readonly;
         
         // Check if this is an ephemeral volume
         let is_ephemeral = req.volume_context.get("csi.storage.k8s.io/ephemeral")
@@ -1783,6 +1784,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("📋 [NODE] Publishing volume {} to {}", volume_id, target_path);
         }
         println!("📋 [NODE] Staging path: {}", staging_target_path);
+        if readonly {
+            println!("📋 [NODE] Mount mode: READ-ONLY (ROX)");
+        }
 
         // Create target directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&target_path) {
@@ -1926,8 +1930,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     return Err(tonic::Status::internal(format!("Format failed: {}", error)));
                 }
                 
-                let mount_output = std::process::Command::new("mount")
-                    .args([&device_path, &target_path])
+                let mut mount_cmd = std::process::Command::new("mount");
+                if readonly {
+                    mount_cmd.args(["-o", "ro", &device_path, &target_path]);
+                } else {
+                    mount_cmd.args([&device_path, &target_path]);
+                }
+                let mount_output = mount_cmd
                     .output()
                     .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
                 
@@ -1948,8 +1957,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 return Err(tonic::Status::internal(format!("ublk device {} not found", device_path)));
             }
             
-            let mount_output = std::process::Command::new("mount")
-                .args(["--bind", &device_path, &target_path])
+            let mut mount_cmd = std::process::Command::new("mount");
+            if readonly {
+                mount_cmd.args(["--bind", "-o", "ro", &device_path, &target_path]);
+            } else {
+                mount_cmd.args(["--bind", &device_path, &target_path]);
+            }
+            let mount_output = mount_cmd
                 .output()
                 .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
 
@@ -1968,8 +1982,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 return Err(tonic::Status::internal(format!("Staging path {} not found", staging_target_path)));
             }
             
-            let mount_output = std::process::Command::new("mount")
-                .args(["--bind", &staging_target_path, &target_path])
+            let mut mount_cmd = std::process::Command::new("mount");
+            if readonly {
+                mount_cmd.args(["--bind", "-o", "ro", &staging_target_path, &target_path]);
+            } else {
+                mount_cmd.args(["--bind", &staging_target_path, &target_path]);
+            }
+            let mount_output = mount_cmd
                 .output()
                 .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
 

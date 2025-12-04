@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-pod-1
+  labels:
+    test: rox-reader
+spec:
+  restartPolicy: Never
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                test: rox-reader
+            topologyKey: kubernetes.io/hostname
+  containers:
+    - name: reader
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          cat /data/test-file.txt
+          sleep 20
+      volumeMounts:
+        - name: data
+          mountPath: /data
+          readOnly: true
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: test-pvc
+        readOnly: true
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-pod-2
+  labels:
+    test: rox-reader
+spec:
+  restartPolicy: Never
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                test: rox-reader
+            topologyKey: kubernetes.io/hostname
+  containers:
+    - name: reader
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          cat /data/test-file.txt
+          sleep 20
+      volumeMounts:
+        - name: data
+          mountPath: /data
+          readOnly: true
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: test-pvc
+        readOnly: true
+
