@@ -7,6 +7,20 @@ spec:
   serviceAccountName: flint-csi-node
   hostNetwork: true
   containers:
+  # Proxy sidecar to expose controller socket via TCP
+  - name: controller-proxy
+    image: alpine/socat:latest
+    command:
+      - sh
+      - -c
+      - |
+        # Wait for controller pod to be ready
+        while ! nc -z flint-csi-controller-grpc.flint-system.svc.cluster.local 10000 2>/dev/null; do
+          echo "Waiting for controller socket proxy..."
+          sleep 2
+        done
+        echo "✅ Controller proxy ready, forwarding to localhost:10000"
+        socat TCP-LISTEN:10001,reuseaddr,fork TCP:flint-csi-controller-grpc.flint-system.svc.cluster.local:10000
   - name: sanity-tester
     image: golang:1.23
     command:
@@ -48,21 +62,28 @@ spec:
         echo "✅ csi-sanity ready"
         echo ""
         
-        # Clean up any previous test directories
-        rm -rf /tmp/sanity-staging /tmp/sanity-mount
-        mkdir -p /tmp/sanity-staging /tmp/sanity-mount
+        # Clean up any previous test artifacts (but don't create directories - let csi-sanity do it)
+        rm -rf /tmp/csi-sanity-*
         
-        echo "✅ Test directories created"
+        echo "✅ Test environment cleaned"
         echo ""
         
-        # Run sanity tests (node service only - controller is in separate pod)
-        # Skip controller tests since they're not available on this socket
+        # Give controller proxy time to start
+        echo "Waiting for controller proxy sidecar..."
+        sleep 5
+        echo "✅ Starting tests with controller endpoint at 127.0.0.1:10001"
+        echo ""
+        
+        # Run sanity tests with BOTH endpoints
+        # Node socket: Unix socket on local node
+        # Controller socket: TCP to controller pod via proxy
         csi-sanity \
           --csi.endpoint=unix:///csi/csi.sock \
-          --csi.stagingdir=/tmp/sanity-staging \
-          --csi.mountdir=/tmp/sanity-mount \
+          --csi.controllerendpoint=tcp://127.0.0.1:10001 \
+          --csi.stagingdir=/tmp/csi-sanity-staging \
+          --csi.mountdir=/tmp/csi-sanity-mount \
           --csi.testvolumesize=1073741824 \
-          --ginkgo.skip='Controller|GroupController|Snapshot' \
+          --ginkgo.skip='GroupController|Modify' \
           --ginkgo.v || true
         
         echo ""

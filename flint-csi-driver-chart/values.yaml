@@ -62,6 +62,12 @@ driver:
   # Requires Kubernetes v1.25+ (or v1.21-v1.24 with CSIInlineVolume feature gate)
   enableEphemeral: true
   
+  # CSI Sanity testing support
+  # Exposes controller gRPC socket via TCP for csi-sanity test suite
+  # Only enable in test/dev environments
+  enableSanityTestProxy: false
+  sanityProxyPort: 10000
+  
   # Topology configuration
   # Set to true for self-managed clusters that allow topology.kubernetes.io/hostname labels
   # Set to false for managed clusters (Rancher, EKS, GKE, AKS) that protect these labels

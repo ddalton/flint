@@ -1,0 +1,17 @@
+# Service to expose controller CSI socket for CSI Sanity testing
+# Only deploy this when running sanity tests
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-csi-controller-grpc
+  namespace: flint-system
+spec:
+  selector:
+    app: flint-csi-controller
+  ports:
+  - name: grpc-proxy
+    port: 10000
+    targetPort: 10000
+    protocol: TCP
+  type: ClusterIP
+

@@ -111,6 +111,22 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+        {{- if .Values.driver.enableSanityTestProxy }}
+        # Proxy sidecar for CSI Sanity testing - exposes Unix socket via TCP
+        - name: grpc-proxy
+          image: alpine/socat:latest
+          command:
+            - socat
+            - TCP-LISTEN:{{ .Values.driver.sanityProxyPort }},reuseaddr,fork
+            - UNIX-CONNECT:/csi/csi.sock
+          ports:
+          - containerPort: {{ .Values.driver.sanityProxyPort }}
+            name: grpc-proxy
+            protocol: TCP
+          volumeMounts:
+          - name: socket-dir
+            mountPath: /csi
+        {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
