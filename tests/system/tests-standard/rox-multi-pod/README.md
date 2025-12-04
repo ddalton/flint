@@ -1,60 +1,41 @@
-# ROX (ReadOnlyMany) Multi-Pod Test
+# Read-Only Multi-Pod Test
 
 ## Purpose
 
-Validates that Flint CSI driver correctly supports read-only volume mounts, allowing multiple pods on different nodes to simultaneously mount and read from the same volume.
+Validates that Flint CSI driver correctly supports read-only volume mounts (`readonly: true` flag), allowing multiple pods to simultaneously mount and read from the same volume.
 
 ## Test Scenario
 
 1. ✅ Create PVC and write test data
-2. ✅ Mount volume read-only on multiple pods simultaneously
+2. ✅ Mount volume read-only on multiple pods simultaneously (same node)
 3. ✅ Verify both pods can read the data
-4. ✅ Verify read-only enforcement (implicit via mount options)
+4. ✅ Implicit read-only enforcement via `-o ro` mount option
+
+## What This Tests
+
+This tests the `readonly` flag in `NodePublishVolume`, which adds `-o ro` to mount commands. This is different from full ReadOnlyMany (ROX) access mode support, which would require additional CSI capabilities for multi-node attachment.
+
+**Current implementation**: Multiple pods on same node can mount read-only  
+**Future**: Full ROX (ReadOnlyMany) for multi-node read-only access
 
 ## Test Flow
 
 ```
 Step 00: Create PVC (RWO)
-  └─ PVC bound successfully
-
-Step 01: Write data to volume
-  ├─ Pod writes test data
-  └─ Pod completes successfully
-
+Step 01: Write data + assert PVC bound and writer succeeded  
 Step 02: Delete writer pod
-  └─ Volume unmounted
-
-Step 03: Create multiple reader pods with readOnly mounts
-  ├─ Pod 1 on node-1 (read-only mount)
-  ├─ Pod 2 on node-2 (read-only mount)
-  └─ Both pods running simultaneously
-
+Step 03: Create 2 reader pods with readOnly mounts (prefer same node)
 Step 04: Cleanup
-  ├─ Delete reader pods
-  └─ Delete PVC
 ```
 
 ## Success Criteria
 
 | Check | Expected Result |
 |-------|----------------|
-| PVC creation | PVC binds successfully |
-| Data write | Writer pod completes |
-| Multi-node readers | Both pods running simultaneously |
+| PVC creation | PVC binds when writer pod starts |
+| Data write | Writer pod completes successfully |
+| Multiple readers | Both pods running simultaneously with readonly mounts |
 | Read-only mounts | Volumes mounted with `-o ro` flag |
-
-## What This Tests
-
-### CSI Driver Functionality
-- ✅ **Read-only mount support** - `readonly` flag passed to NodePublishVolume
-- ✅ **Multi-attach for read** - Same volume accessible from multiple nodes (read-only)
-- ✅ **Mount options** - Proper `-o ro` passed to mount command
-
-### Real-World ROX Use Cases
-- Shared configuration files
-- Static datasets (ML training data)
-- Content distribution (static websites)
-- Read-only reference data
 
 ## Running the Test
 

@@ -1011,9 +1011,54 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
     async fn validate_volume_capabilities(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::ValidateVolumeCapabilitiesRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::ValidateVolumeCapabilitiesRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ValidateVolumeCapabilitiesResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("Validate volume capabilities not implemented"))
+        use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
+        
+        let req = request.into_inner();
+        println!("🔵 [CONTROLLER] ValidateVolumeCapabilities for volume: {}", req.volume_id);
+        
+        // Check if volume exists
+        let _volume_info = self.driver.get_volume_info(&req.volume_id).await
+            .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+        
+        // Supported access modes
+        let supported_modes = vec![
+            Mode::SingleNodeWriter,      // RWO - single node read-write
+            Mode::MultiNodeReaderOnly,    // ROX - multi-node read-only
+        ];
+        
+        // Validate requested capabilities
+        let mut confirmed = None;
+        for cap in &req.volume_capabilities {
+            if let Some(access_mode) = &cap.access_mode {
+                let mode = Mode::try_from(access_mode.mode).unwrap_or(Mode::Unknown);
+                if !supported_modes.contains(&mode) {
+                    println!("⚠️ [CONTROLLER] Unsupported access mode: {:?}", mode);
+                    return Ok(tonic::Response::new(
+                        spdk_csi_driver::csi::ValidateVolumeCapabilitiesResponse {
+                            confirmed: None,
+                            message: format!("Access mode {:?} not supported", mode),
+                        }
+                    ));
+                }
+            }
+        }
+        
+        // All capabilities are supported
+        confirmed = Some(spdk_csi_driver::csi::validate_volume_capabilities_response::Confirmed {
+            volume_context: req.volume_context.clone(),
+            volume_capabilities: req.volume_capabilities.clone(),
+            parameters: req.parameters.clone(),
+        });
+        
+        println!("✅ [CONTROLLER] Volume capabilities validated successfully");
+        Ok(tonic::Response::new(
+            spdk_csi_driver::csi::ValidateVolumeCapabilitiesResponse {
+                confirmed,
+                message: String::new(),
+            }
+        ))
     }
 
     async fn list_volumes(

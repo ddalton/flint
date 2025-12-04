@@ -6,6 +6,7 @@ metadata:
     test: rox-reader
 spec:
   restartPolicy: Never
+  # Try to schedule on different nodes for true multi-node ROX testing
   affinity:
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -42,6 +43,7 @@ metadata:
     test: rox-reader
 spec:
   restartPolicy: Never
+  # Try to schedule on different node than reader-pod-1
   affinity:
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -69,4 +71,3 @@ spec:
       persistentVolumeClaim:
         claimName: test-pvc
         readOnly: true
-
