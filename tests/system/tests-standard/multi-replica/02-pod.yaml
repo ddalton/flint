@@ -18,8 +18,7 @@ spec:
         md5sum /data/testfile > /data/checksum
         echo "✅ Data written successfully"
         cat /data/checksum
-        echo "=== Sleeping to keep pod alive ==="
-        sleep 3600
+        echo "=== Test complete ==="
     volumeMounts:
     - name: storage
       mountPath: /data
