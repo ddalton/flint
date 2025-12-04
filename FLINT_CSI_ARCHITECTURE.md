@@ -31,6 +31,7 @@ Flint is a Kubernetes CSI (Container Storage Interface) driver that provides hig
 - 📸 **Volume Snapshots**: Copy-on-write snapshots with instant restore
 - 📏 **Volume Expansion**: Zero-downtime dynamic resizing
 - 💾 **Flexible Provisioning**: Configurable thick/thin provisioning
+- 🎭 **Ephemeral Volumes**: CSI inline volumes with automatic lifecycle management
 
 ### Architecture Principles
 
@@ -1195,6 +1196,12 @@ crds:
   installSpdkCRDs: false
   installSnapshotCRDs: true
 
+# CSI Driver Configuration
+driver:
+  name: "flint.csi.storage.io"
+  # Ephemeral volume support (CSI inline volumes)
+  enableEphemeral: true
+
 # Image Configuration
 images:
   repository: your-registry.com/flint
@@ -1219,6 +1226,44 @@ storageClass:
     # Default replica count
     numReplicas: "2"
 ```
+
+### CSIDriver Object Configuration
+
+The CSIDriver object is configured with the following critical settings:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: flint.csi.storage.io
+spec:
+  # attachRequired: true is REQUIRED for multi-node persistent volumes
+  # - Persistent volumes: ControllerPublishVolume sets up NVMe-oF for cross-node access
+  # - Ephemeral volumes: Kubernetes automatically skips attach/detach (per CSI KEP-20190122)
+  attachRequired: true
+  
+  podInfoOnMount: true
+  
+  # Support both persistent (PVC) and ephemeral (inline) volumes
+  volumeLifecycleModes:
+    - Persistent  # PVC-based volumes with CreateVolume
+    - Ephemeral   # Pod inline volumes created on-demand
+  
+  fsGroupPolicy: ReadWriteOnceWithFSType
+```
+
+**Why `attachRequired: true`?**
+
+| Setting | Persistent Volumes | Ephemeral Volumes | Multi-Node Support |
+|---------|-------------------|-------------------|---------------------|
+| `attachRequired: false` | ❌ Broken for cross-node | ✅ Works | ❌ No NVMe-oF |
+| `attachRequired: true` | ✅ Works (NVMe-oF) | ✅ Works (skipped) | ✅ Full support |
+
+With `attachRequired: true`:
+- **Persistent volumes:** ControllerPublishVolume IS called → Sets up NVMe-oF for volumes on different nodes
+- **Ephemeral volumes:** Kubernetes automatically skips ControllerPublishVolume → Creates lvol on local node
+
+This is the **correct configuration** per [Kubernetes CSI KEP-20190122](https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/20190122-csi-inline-volumes.md).
 
 ### Environment Setup
 
@@ -1247,6 +1292,124 @@ storageClass:
   ]
 }
 ```
+
+---
+
+## Ephemeral Inline Volumes
+
+Flint supports **CSI ephemeral inline volumes** - volumes declared directly in Pod specs without creating PVCs. These volumes are automatically created when the Pod starts and deleted when the Pod terminates.
+
+### Usage Example
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+  - name: app
+    image: nginx
+    volumeMounts:
+    - name: scratch
+      mountPath: /tmp/scratch
+  volumes:
+  - name: scratch
+    csi:
+      driver: flint.csi.storage.io
+      fsType: ext4
+      volumeAttributes:
+        size: "1Gi"
+```
+
+**No PVC needed!** The volume is provisioned automatically and tied to the Pod's lifecycle.
+
+### Ephemeral Volume Flow
+
+For ephemeral inline volumes, Kubernetes takes a different path:
+
+```mermaid
+sequenceDiagram
+    participant K as Kubernetes
+    participant N as Node Service
+    participant S as SPDK
+    
+    Note over K: Pod scheduled to Node X
+    
+    K->>N: NodePublishVolume (on Node X)
+    Note over N: No ControllerPublish (skipped for ephemeral)
+    Note over N: No NodeStage (skipped with attachRequired=true)
+    
+    N->>S: Query for lvol (get_bdev_by_name)
+    S-->>N: Not found (ENODEV)
+    
+    N->>S: create_lvol (thin provisioned)
+    S-->>N: lvol UUID
+    
+    N->>S: create_ublk_device
+    S-->>N: /dev/ublkbXXX
+    
+    N->>N: Format filesystem (mkfs.ext4)
+    N->>N: Mount to target path
+    N-->>K: Success
+    
+    Note over K: Pod runs with ephemeral volume
+    
+    K->>N: Pod deleted → NodeUnpublishVolume
+    N->>N: Unmount
+    N->>S: delete_ublk_device
+    N-->>K: Success
+    
+    K->>K: DeleteVolume (automatic)
+    Note over S: Lvol deleted, space reclaimed
+```
+
+### Key Characteristics
+
+| Feature | Persistent (PVC) | Ephemeral (Inline) |
+|---------|------------------|---------------------|
+| **Declaration** | Separate PVC object | Inline in Pod spec |
+| **Lifecycle** | Independent of Pod | Tied to Pod |
+| **CreateVolume** | Called by external-provisioner | **NOT called** |
+| **ControllerPublish** | Called if attachRequired=true | **Skipped by Kubernetes** |
+| **NodeStage** | Called | **Skipped** (with attachRequired=true) |
+| **NodePublish** | Mount from staging | **Create + mount directly** |
+| **Cleanup** | Manual or reclaim policy | **Automatic** on Pod deletion |
+| **Thin Provisioning** | Optional (StorageClass) | **Default** (efficient for temp data) |
+| **Multi-replica** | Supported | Single replica only |
+| **Node Affinity** | Based on topology | **Always local** to Pod's node |
+
+### Implementation Details
+
+**Lvol Naming:**
+- Persistent: `vol_{pvc-uid}` (e.g., `vol_pvc-abc123...`)
+- Ephemeral: `eph_{last-56-chars-of-csi-volume-id}` (SPDK 64-char limit)
+
+**Detection:**
+- Kubernetes sets `csi.storage.k8s.io/ephemeral: "true"` in `volume_context`
+- Driver checks this in NodePublishVolume to determine behavior
+
+**Idempotency:**
+- NodePublishVolume checks if lvol exists before creating
+- Safe for kubelet retries
+
+### Use Cases
+
+✅ **Temporary scratch space** for data processing  
+✅ **Build caches** for CI/CD pipelines  
+✅ **Test data** for integration tests  
+✅ **Per-pod isolated storage** that doesn't persist  
+
+### Testing
+
+A comprehensive KUTTL test validates the complete ephemeral volume lifecycle:
+
+```bash
+cd tests/system
+kubectl kuttl test --test ephemeral-inline
+```
+
+See `tests/system/tests-standard/ephemeral-inline/README.md` for details.
 
 ---
 
