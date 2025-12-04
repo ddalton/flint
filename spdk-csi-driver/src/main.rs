@@ -1354,40 +1354,70 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
             } else {
-                // Regular volume - ALWAYS wipefs (clears SPDK block reuse + kernel cache)
+                // Regular volume - check if filesystem exists first
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🧹 [CACHE_CLEAR] Regular volume - wipefs");
+                eprintln!("🧹 [CACHE_CLEAR] Regular volume - checking for existing filesystem");
                 eprintln!("   Device: {}", device_path);
                 eprintln!("   Volume: {}", volume_id);
                 eprintln!("   filesystem-initialized: false");
-                eprintln!("   Action: wipefs (clears SPDK block reuse + kernel cache)");
-                eprintln!("   Critical: Prevents mounting corrupted SPDK recycled blocks!");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
-                let wipefs_output = std::process::Command::new("wipefs")
-                    .arg("--all")
-                    .arg("--force")
+                // STEP 1: Flush cache first
+                let _ = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
+                eprintln!("✅ [CACHE_CLEAR] Cache flushed");
+                
+                // STEP 2: Check if filesystem exists (after cache clear)
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let blkid_check = std::process::Command::new("blkid")
                     .arg(&device_path)
                     .output();
                 
-                match wipefs_output {
-                    Ok(output) if output.status.success() => {
+                let has_filesystem = blkid_check
+                    .as_ref()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false);
+                
+                if has_filesystem {
+                    // Existing filesystem - skip wipefs (restaging)
+                    if let Ok(output) = blkid_check {
                         let stdout = String::from_utf8_lossy(&output.stdout);
-                        if !stdout.trim().is_empty() {
-                            eprintln!("🧹 [WIPEFS] Cleared SPDK block reuse signatures:");
-                            eprintln!("{}", stdout.trim());
-                        } else {
-                            eprintln!("✅ [WIPEFS] Device was clean (no SPDK block reuse)");
-                        }
+                        eprintln!("📁 [CACHE_CLEAR] Filesystem found: {}", stdout.trim());
                     }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        if !stderr.contains("No such file") && !stderr.trim().is_empty() {
-                            eprintln!("ℹ️ [WIPEFS] Output: {}", stderr.trim());
+                    eprintln!("✅ [CACHE_CLEAR] SKIPPING wipefs - preserving existing filesystem");
+                    eprintln!("   Reason: Regular volume being restaged (data must be preserved)");
+                } else {
+                    // No filesystem - run wipefs (brand new volume or SPDK block reuse)
+                    eprintln!("📁 [CACHE_CLEAR] No filesystem found - safe to wipefs");
+                    eprintln!("🧹 [CACHE_CLEAR] Running wipefs to clear SPDK block reuse");
+                    
+                    let wipefs_output = std::process::Command::new("wipefs")
+                        .arg("--all")
+                        .arg("--force")
+                        .arg(&device_path)
+                        .output();
+                    
+                    match wipefs_output {
+                        Ok(output) if output.status.success() => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            if !stdout.trim().is_empty() {
+                                eprintln!("🧹 [WIPEFS] Cleared SPDK block reuse signatures:");
+                                eprintln!("{}", stdout.trim());
+                            } else {
+                                eprintln!("✅ [WIPEFS] Device was clean");
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if !stderr.contains("No such file") && !stderr.trim().is_empty() {
+                                eprintln!("ℹ️ [WIPEFS] Output: {}", stderr.trim());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
+                        }
                     }
                 }
             }
