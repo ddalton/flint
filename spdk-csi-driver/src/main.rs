@@ -1264,13 +1264,29 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 println!("✅ [NODE] Local volume - using bdev from publish_context: {}", bdev_name);
                 bdev_name.clone()
             } else {
-                // Ephemeral volume (attachRequired=false) - get volume info directly
-                println!("📦 [NODE] Ephemeral volume - querying volume info");
-                let volume_info = self.driver.get_volume_info(&volume_id).await
-                    .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
-                println!("✅ [NODE] Found ephemeral volume: node={}, lvol={}", 
-                         volume_info.node_name, volume_info.lvol_uuid);
-                volume_info.lvol_uuid
+                // Ephemeral volume (attachRequired=false) - query SPDK directly
+                println!("📦 [NODE] Ephemeral volume - querying local SPDK");
+                
+                // The lvol name follows convention: vol_{volume_id}
+                let lvol_name = format!("vol_{}", volume_id);
+                
+                // Query SPDK to find this lvol and get its UUID
+                let spdk_params = serde_json::json!({
+                    "method": "bdev_get_bdevs",
+                    "params": {
+                        "name": lvol_name
+                    }
+                });
+                
+                let bdev_response = self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &spdk_params).await
+                    .map_err(|e| tonic::Status::not_found(format!("Ephemeral volume not found: {}", e)))?;
+                
+                let lvol_uuid = bdev_response["result"][0]["uuid"].as_str()
+                    .ok_or_else(|| tonic::Status::internal("Failed to get lvol UUID from SPDK"))?
+                    .to_string();
+                
+                println!("✅ [NODE] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
+                lvol_uuid
             };
             bdev
         } else if volume_type == "remote" {
@@ -1821,19 +1837,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("📦 [NODE] No staging path - ephemeral volume, mounting directly");
             
             // For ephemeral volumes, NodeStageVolume is not called, so we need to:
-            // 1. Get volume info
+            // 1. Query SPDK directly for volume info (no PV exists for ephemeral volumes)
             // 2. Create ublk device  
             // 3. Format filesystem
             // 4. Mount to target
             
-            let volume_info = self.driver.get_volume_info(&volume_id).await
-                .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+            // Query local SPDK for ephemeral volume (no PV exists)
+            println!("📦 [NODE] Querying local SPDK for ephemeral volume: {}", volume_id);
+            
+            // The lvol name follows convention: vol_{volume_id}
+            let lvol_name = format!("vol_{}", volume_id);
+            
+            // Query SPDK via node agent to find this lvol
+            let spdk_params = serde_json::json!({
+                "method": "bdev_get_bdevs",
+                "params": {
+                    "name": lvol_name
+                }
+            });
+            
+            let bdev_response = self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &spdk_params).await
+                .map_err(|e| tonic::Status::not_found(format!("Ephemeral volume not found in SPDK: {}", e)))?;
+            
+            let lvol_uuid = bdev_response["result"][0]["uuid"].as_str()
+                .ok_or_else(|| tonic::Status::internal("Failed to get lvol UUID from SPDK"))?
+                .to_string();
+            
+            println!("✅ [NODE] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
             
             let ublk_id = self.driver.generate_ublk_id(&volume_id);
-            println!("📦 [NODE] Creating ublk device {} for lvol {}", ublk_id, volume_info.lvol_uuid);
+            println!("📦 [NODE] Creating ublk device {} for lvol {}", ublk_id, lvol_uuid);
             
             // Create ublk device
-            self.driver.create_ublk_device(&volume_info.lvol_uuid, ublk_id).await
+            self.driver.create_ublk_device(&lvol_uuid, ublk_id).await
                 .map_err(|e| tonic::Status::internal(format!("Failed to create ublk device: {}", e)))?;
             
             let device_path = format!("/dev/ublkb{}", ublk_id);
