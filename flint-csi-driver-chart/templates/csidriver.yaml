@@ -5,10 +5,10 @@ metadata:
   labels:
     {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
 spec:
-  # attachRequired: false means volumes are local to the node and don't need 
-  # ControllerPublishVolume/ControllerUnpublishVolume calls
-  # This is correct for SPDK local volumes and required for ephemeral volumes
-  attachRequired: false
+  # attachRequired: true means ControllerPublishVolume/ControllerUnpublishVolume
+  # are called to set up cross-node access (NVMe-oF) for persistent volumes
+  # Ephemeral inline volumes automatically skip attach/detach (Kubernetes behavior)
+  attachRequired: true
   podInfoOnMount: true
   volumeLifecycleModes:
     - Persistent
