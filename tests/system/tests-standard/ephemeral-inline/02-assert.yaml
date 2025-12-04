@@ -20,12 +20,12 @@ commands:
       
       # Check CSI controller logs for ephemeral volume deletion
       echo "Checking CSI controller logs for volume deletion..."
-      CONTROLLER_POD=$(kubectl get pod -n kube-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+      CONTROLLER_POD=$(kubectl get pod -n flint-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
       
       # Look for deletion in recent logs
-      kubectl logs -n kube-system $CONTROLLER_POD --tail=100 | tail -30
+      kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | tail -30
       
-      if kubectl logs -n kube-system $CONTROLLER_POD --tail=100 | grep -q "Deleting volume"; then
+      if kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | grep -q "Deleting volume"; then
         echo "✅ Volume deletion detected in controller logs"
       else
         echo "ℹ️ Volume deletion not found in recent logs (might have been cleaned up earlier)"

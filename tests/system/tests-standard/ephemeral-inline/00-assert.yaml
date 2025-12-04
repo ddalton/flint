@@ -25,7 +25,7 @@ commands:
       fi
       
       # Verify controller pod is running
-      if kubectl get pod -n kube-system -l app=flint-csi-controller | grep -q "Running"; then
+      if kubectl get pod -n flint-system -l app=flint-csi-controller | grep -q "Running"; then
         echo "✅ Flint CSI controller is running"
       else
         echo "❌ Flint CSI controller is not running"

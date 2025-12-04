@@ -51,11 +51,11 @@ commands:
       
       # Verify volume was created (check CSI driver logs)
       echo "Checking CSI controller logs for ephemeral volume creation..."
-      CONTROLLER_POD=$(kubectl get pod -n kube-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+      CONTROLLER_POD=$(kubectl get pod -n flint-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
       echo "Controller pod: $CONTROLLER_POD"
       
       # Look for ephemeral volume creation in logs
-      if kubectl logs -n kube-system $CONTROLLER_POD --tail=200 | grep -q "EPHEMERAL"; then
+      if kubectl logs -n flint-system $CONTROLLER_POD --tail=200 | grep -q "EPHEMERAL"; then
         echo "✅ Ephemeral volume creation detected in controller logs"
       else
         echo "ℹ️ Could not find ephemeral volume marker in logs (might be normal)"
