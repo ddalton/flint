@@ -504,7 +504,7 @@ impl MinimalControllerService {
 
         // Step 1: Get source volume metadata to find which node it's on
         // Query Kubernetes API for the source PV
-        use kube::{Api, api::ObjectMeta};
+        use kube::Api;
         use k8s_openapi::api::core::v1::PersistentVolume;
         
         let pv_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
@@ -678,7 +678,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
 
         // Check if this is an ephemeral volume (CSI inline volume)
-        let is_ephemeral = req.volume_context.get("csi.storage.k8s.io/ephemeral")
+        // For CreateVolume, Kubernetes passes this through the parameters field
+        let is_ephemeral = req.parameters.get("csi.storage.k8s.io/ephemeral")
             .map(|v| v == "true")
             .unwrap_or(false);
 
