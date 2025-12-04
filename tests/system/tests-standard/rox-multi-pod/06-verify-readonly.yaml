@@ -1,0 +1,22 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - command: |
+      echo "=== Verifying both pods can access ROX volume ==="
+      
+      # Verify data is readable from both pods
+      if kubectl logs reader-pod-1 | grep -q "ROX_TEST_DATA"; then
+        echo "✅ Reader pod 1 can read data"
+      else
+        echo "❌ Reader pod 1 cannot read data"
+        exit 1
+      fi
+      
+      if kubectl logs reader-pod-2 | grep -q "ROX_TEST_DATA"; then
+        echo "✅ Reader pod 2 can read data"
+      else
+        echo "❌ Reader pod 2 cannot read data"
+        exit 1
+      fi
+      
+      echo "✅ Both pods successfully reading from ROX PVC"

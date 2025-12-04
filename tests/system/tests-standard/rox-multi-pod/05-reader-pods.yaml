@@ -32,7 +32,7 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: test-pvc
+        claimName: rox-pvc
         readOnly: true
 ---
 apiVersion: v1
@@ -69,5 +69,5 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: test-pvc
+        claimName: rox-pvc
         readOnly: true

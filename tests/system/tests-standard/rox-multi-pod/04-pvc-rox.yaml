@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rox-pvc
+spec:
+  accessModes:
+    - ReadOnlyMany  # ROX - multi-node read-only
+  storageClassName: flint
+  dataSource:
+    name: rox-source-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  resources:
+    requests:
+      storage: 1Gi

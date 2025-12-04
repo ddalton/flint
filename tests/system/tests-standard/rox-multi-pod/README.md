@@ -1,41 +1,64 @@
-# Read-Only Multi-Pod Test
+# ReadOnlyMany (ROX) Multi-Node Test
 
 ## Purpose
 
-Validates that Flint CSI driver correctly supports read-only volume mounts (`readonly: true` flag), allowing multiple pods to simultaneously mount and read from the same volume.
+Validates that Flint CSI driver correctly supports ReadOnlyMany (ROX) access mode, allowing multiple pods on different nodes to simultaneously mount and read from the same volume.
 
-## Test Scenario
+## Test Workflow
 
-1. ✅ Create PVC and write test data
-2. ✅ Mount volume read-only on multiple pods simultaneously (same node)
-3. ✅ Verify both pods can read the data
-4. ✅ Implicit read-only enforcement via `-o ro` mount option
+ROX volumes are created from snapshots:
 
-## What This Tests
+1. ✅ Create RWO PVC and write test data
+2. ✅ Create snapshot of the RWO volume
+3. ✅ Create ReadOnlyMany PVC from snapshot  
+4. ✅ Multiple pods mount ROX PVC simultaneously (different nodes)
+5. ✅ Verify all pods can read the data
 
-This tests the `readonly` flag in `NodePublishVolume`, which adds `-o ro` to mount commands. This is different from full ReadOnlyMany (ROX) access mode support, which would require additional CSI capabilities for multi-node attachment.
+## Why Snapshots?
 
-**Current implementation**: Multiple pods on same node can mount read-only  
-**Future**: Full ROX (ReadOnlyMany) for multi-node read-only access
+In Kubernetes, a PVC can only have ONE access mode. You cannot have a single PVC that is both ReadWriteOnce and ReadOnlyMany. The standard workflow for ROX is:
+
+- **Source PVC**: ReadWriteOnce (for writing data)
+- **Snapshot**: Capture the data
+- **ROX PVC**: ReadOnlyMany (created from snapshot for reading)
 
 ## Test Flow
 
 ```
-Step 00: Create PVC (RWO)
-Step 01: Write data + assert PVC bound and writer succeeded  
-Step 02: Delete writer pod
-Step 03: Create 2 reader pods with readOnly mounts (prefer same node)
-Step 04: Cleanup
+Step 00: Create RWO PVC
+Step 01: Write data + assert bound
+Step 02: Create snapshot  
+Step 03: Delete writer pod
+Step 04: Create ROX PVC from snapshot + assert bound
+Step 05: Create 2 reader pods (anti-affinity for different nodes)
+Step 06: Verify both pods can read data
+Step 07: Cleanup
 ```
 
 ## Success Criteria
 
 | Check | Expected Result |
 |-------|----------------|
-| PVC creation | PVC binds when writer pod starts |
-| Data write | Writer pod completes successfully |
-| Multiple readers | Both pods running simultaneously with readonly mounts |
-| Read-only mounts | Volumes mounted with `-o ro` flag |
+| RWO PVC creation | PVC binds successfully |
+| Data write | Writer pod completes |
+| Snapshot creation | Snapshot readyToUse=true |
+| ROX PVC creation | ROX PVC binds from snapshot |
+| Multi-node readers | Pods on different nodes, both Running |
+| Data access | All pods read identical data |
+
+## What This Tests
+
+### CSI Driver Functionality
+- ✅ **ReadOnlyMany support** - MULTI_NODE_READER_ONLY capability
+- ✅ **Snapshot restoration** - Create volume from snapshot
+- ✅ **Multi-node attachment** - Same volume on multiple nodes
+- ✅ **Read-only mounts** - Proper `-o ro` mount options
+
+### Real-World ROX Use Cases
+- Shared configuration across pods
+- ML training data distribution
+- Static website content distribution
+- Shared read-only databases
 
 ## Running the Test
 
@@ -45,4 +68,4 @@ KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml 
 ```
 
 ## Expected Duration
-- **Total time**: ~30-40 seconds
+- **Total time**: ~60-80 seconds (includes snapshot creation)
