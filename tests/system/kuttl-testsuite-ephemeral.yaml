@@ -1,0 +1,11 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+metadata:
+  name: flint-ephemeral-test
+testDirs:
+  - tests-standard/
+timeout: 300
+parallel: 1
+suppress:
+  - events
+skipDelete: false
