@@ -453,20 +453,21 @@ impl MinimalControllerService {
             lvs_name.clone(),
         );
         
-        // CRITICAL: Mark as clone for node-side detection (works for both local and NVMe-oF)
+        // CRITICAL: Mark filesystem as initialized (clone has filesystem from snapshot)
+        // This tells the node to SKIP wipefs (preserve data)
         volume_context.insert(
-            "flint.csi.storage.io/is-clone".to_string(),
+            "flint.csi.storage.io/filesystem-initialized".to_string(),
             "true".to_string(),
         );
         volume_context.insert(
-            "flint.csi.storage.io/base-snapshot".to_string(),
+            "flint.csi.storage.io/source-snapshot".to_string(),
             snapshot_id.to_string(),
         );
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        eprintln!("📝 [SNAPSHOT_RESTORE] Volume context with clone metadata:");
-        eprintln!("   is-clone: true");
-        eprintln!("   base-snapshot: {}", snapshot_id);
+        eprintln!("📝 [SNAPSHOT_RESTORE] Volume context with filesystem metadata:");
+        eprintln!("   filesystem-initialized: true");
+        eprintln!("   source-snapshot: {}", snapshot_id);
         eprintln!("   Works for BOTH local lvol and NVMe-oF access");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
@@ -608,16 +609,15 @@ impl MinimalControllerService {
         volume_context.insert("flint.csi.storage.io/lvol-uuid".to_string(), clone_uuid.clone());
         volume_context.insert("flint.csi.storage.io/lvs-name".to_string(), lvs_name.clone());
         
-        // CRITICAL: Mark as clone for node-side detection
-        volume_context.insert("flint.csi.storage.io/is-clone".to_string(), "true".to_string());
+        // CRITICAL: Mark filesystem as initialized (clone has filesystem from source PVC)
+        // This tells the node to SKIP wipefs (preserve data)
+        volume_context.insert("flint.csi.storage.io/filesystem-initialized".to_string(), "true".to_string());
         volume_context.insert("flint.csi.storage.io/source-volume".to_string(), source_volume_id.to_string());
-        volume_context.insert("flint.csi.storage.io/clone-source-type".to_string(), "volume".to_string());
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        eprintln!("📝 [PVC_CLONE] Volume context with clone metadata:");
-        eprintln!("   is-clone: true");
+        eprintln!("📝 [PVC_CLONE] Volume context with filesystem metadata:");
+        eprintln!("   filesystem-initialized: true");
         eprintln!("   source-volume: {}", source_volume_id);
-        eprintln!("   clone-source-type: volume (PVC clone)");
         eprintln!("   Works for BOTH local lvol and NVMe-oF access");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -1302,239 +1302,58 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // When ublk device is deleted and recreated with same ID, kernel can cache
             // stale filesystem signatures from PREVIOUS volumes that used this ublk ID
             //
-            // SOLUTION: 
-            // - Query SPDK to check if this lvol is a clone (has base_snapshot field)
-            // - For CLONED lvols: SKIP wipefs (clone has valid filesystem from snapshot)
-            // - For NEW lvols: wipefs → clears stale ublk cache → format
+            // UNIFIED SOLUTION: Single "filesystem-initialized" attribute
+            // - Controller sets filesystem-initialized=true for clones (snapshot/PVC)
+            // - Node runs wipefs ONLY on brand new volumes (filesystem-initialized missing or false)
+            // - Works for thin AND non-thin volumes (doesn't depend on allocation semantics)
             //
-            // The lvol metadata is the source of truth - no markers needed!
             
-            // Check clone status from PV attributes (preferred) or SPDK metadata (fallback)
+            // Check filesystem-initialized status from volume context
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("🔍 [CLONE_DETECTION] Starting clone detection");
+            eprintln!("🔍 [WIPEFS_DECISION] Checking filesystem-initialized attribute");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
-            // STEP 1: Check PV attributes (works for both local and NVMe-oF)
-            let is_clone_from_pv = req.volume_context.get("flint.csi.storage.io/is-clone")
+            let fs_initialized = req.volume_context.get("flint.csi.storage.io/filesystem-initialized")
                 .map(|v| v == "true")
                 .unwrap_or(false);
             
-            let is_clone = if is_clone_from_pv {
-                let base_snapshot = req.volume_context.get("flint.csi.storage.io/base-snapshot")
+            let should_skip_wipefs = if fs_initialized {
+                // Filesystem exists (from snapshot, PVC clone, or previously formatted)
+                let source = req.volume_context.get("flint.csi.storage.io/source-snapshot")
+                    .or_else(|| req.volume_context.get("flint.csi.storage.io/source-volume"))
                     .map(|s| s.as_str())
-                    .unwrap_or("unknown");
-                    
+                    .unwrap_or("previously formatted");
+                
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("✅ [CLONE_DETECTION] CLONE DETECTED via PV attributes!");
-                eprintln!("   Method: Volume Context (CSI standard)");
-                eprintln!("   is-clone: true");
-                eprintln!("   base-snapshot: {}", base_snapshot);
-                eprintln!("   Works for: Local lvol AND NVMe-oF access");
+                eprintln!("✅ [WIPEFS_DECISION] SKIP - Filesystem already initialized");
+                eprintln!("   filesystem-initialized: true");
+                eprintln!("   Source: {}", source);
+                eprintln!("   NEVER run wipefs on initialized volumes (preserves data)");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 true
             } else {
-                eprintln!("ℹ️ [CLONE_DETECTION] No clone metadata in PV attributes, querying SPDK");
-                
-                // STEP 2: Query SPDK metadata (for local lvols)
-                let bdev_query = serde_json::json!({
-                    "method": "bdev_get_bdevs",
-                    "params": {
-                        "name": bdev_name
-                    }
-                });
-                
-                eprintln!("🔍 [CLONE_DETECTION] Calling SPDK RPC: bdev_get_bdevs({})", bdev_name);
-                
-                // This match expression returns bool directly
-                match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
-                    Ok(response) => {
-                        eprintln!("✅ [CLONE_DETECTION] SPDK RPC call succeeded");
-                        // Note: Full bdev list not logged (too verbose). Only log summary.
-                        
-                        // SPDK RPC returns {"result": [...]} not just [...]
-                        let bdev_array = response.get("result")
-                            .and_then(|r| r.as_array());
-                        
-                        if let Some(bdev_array) = bdev_array {
-                            eprintln!("✅ [CLONE_DETECTION] Response.result is an array with {} elements", bdev_array.len());
-                            
-                            // IMPORTANT: bdev_get_bdevs returns ALL bdevs even when queried by name
-                            // We must search for the specific bdev by name or UUID
-                            let target_bdev = bdev_array.iter().find(|b| {
-                                // Match by name (UUID)
-                                if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
-                                    if name == bdev_name.as_str() {
-                                        return true;
-                                    }
-                                }
-                                // Also check aliases in case bdev_name is an alias
-                                if let Some(aliases) = b.get("aliases").and_then(|a| a.as_array()) {
-                                    for alias in aliases {
-                                        if let Some(alias_str) = alias.as_str() {
-                                            if alias_str.contains(bdev_name.as_str()) || bdev_name.contains(alias_str) {
-                                                return true;
-                                            }
-                                        }
-                                    }
-                                }
-                                false
-                            });
-                            
-                            if let Some(bdev) = target_bdev {
-                                eprintln!("✅ [CLONE_DETECTION] Found matching bdev in array");
-                                eprintln!("   name: {}", bdev["name"].as_str().unwrap_or("unknown"));
-                                eprintln!("   product_name: {}", bdev["product_name"].as_str().unwrap_or("unknown"));
-                                
-                                // Check if this is an lvol (has driver_specific.lvol)
-                                let has_lvol_metadata = bdev.get("driver_specific")
-                                    .and_then(|ds| ds.get("lvol"))
-                                    .is_some();
-                                
-                                eprintln!("   has_lvol_metadata: {}", has_lvol_metadata);
-                                
-                                if !has_lvol_metadata {
-                                    eprintln!("⚠️ [CLONE_DETECTION] NOT AN LVOL!");
-                                    eprintln!("   This is likely an NVMe bdev (remote volume over NVMe-oF)");
-                                    eprintln!("   Cannot determine clone status from NVMe bdev - treating as NEW");
-                                    eprintln!("   RESULT: is_clone = FALSE (will format)");
-                                    false
-                                } else {
-                                    eprintln!("✅ [CLONE_DETECTION] This IS an lvol - checking clone field");
-                                
-                                    let is_clone = bdev["driver_specific"]["lvol"]["clone"]
-                                        .as_bool().unwrap_or(false);
-                                    let base_snapshot = bdev["driver_specific"]["lvol"]["base_snapshot"]
-                                        .as_str();
-                                    let num_allocated = bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
-                                        .as_u64().unwrap_or(0);
-                                        
-                                    eprintln!("   clone field: {}", is_clone);
-                                    eprintln!("   base_snapshot: {:?}", base_snapshot);
-                                    eprintln!("   num_allocated_clusters: {}", num_allocated);
-                                        
-                                    if is_clone {
-                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                        eprintln!("✅ [CLONE_DETECTION] CLONE DETECTED!");
-                                        eprintln!("   base_snapshot: {:?}", base_snapshot);
-                                        eprintln!("   RESULT: is_clone = TRUE (will PRESERVE filesystem)");
-                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                    } else {
-                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                        eprintln!("🆕 [CLONE_DETECTION] NOT A CLONE (new volume)");
-                                        eprintln!("   RESULT: is_clone = FALSE (will format)");
-                                        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                                    }
-                                    
-                                    is_clone
-                                }
-                            } else {
-                                eprintln!("❌ [CLONE_DETECTION] ERROR: No matching bdev found in SPDK response");
-                                eprintln!("   Searched for: {}", bdev_name);
-                                eprintln!("   Array has {} bdevs total", bdev_array.len());
-                                eprintln!("   RESULT: is_clone = FALSE (will format)");
-                                false
-                            }
-                        } else {
-                            eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK response.result is not an array!");
-                            eprintln!("   Response has 'result' field: {}", response.get("result").is_some());
-                            if let Some(result) = response.get("result") {
-                                eprintln!("   Result type: {}", 
-                                         if result.is_array() { "array" }
-                                         else if result.is_object() { "object" }
-                                         else if result.is_null() { "null" }
-                                         else { "other" });
-                            } else {
-                                eprintln!("   Response structure: {}", 
-                                         if response.is_object() { "object (no 'result' field)" }
-                                         else if response.is_array() { "array (missing wrapper)" }
-                                         else { "other" });
-                            }
-                            eprintln!("   RESULT: is_clone = FALSE (will format)");
-                            false
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("❌ [CLONE_DETECTION] ERROR: SPDK RPC call failed: {}", e);
-                        eprintln!("   Assuming not a clone to be safe");
-                        eprintln!("   RESULT: is_clone = FALSE (will format)");
-                        false
-                    }
-                }
+                // Brand new volume - safe to wipefs
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("🧹 [WIPEFS_DECISION] RUN - Brand new volume");
+                eprintln!("   filesystem-initialized: false");
+                eprintln!("   Safe to clear any stale kernel cache");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                false
             };
             
-            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("📊 [FORMATTING_DECISION] is_clone = {}", is_clone);
-            eprintln!("   Method: {}", if is_clone_from_pv { "PV attributes" } else { "SPDK query" });
-            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            
-            // Determine if we should run wipefs based on SPDK metadata
-            // This is the SOURCE OF TRUTH - more reliable than checking device state
-            let should_skip_wipefs = if is_clone {
-                eprintln!("✅ [WIPEFS_DECISION] SKIP: Volume is a snapshot clone");
-                true
-            } else {
-                // For non-clone volumes, check SPDK allocated clusters
-                // 
-                // IMPORTANT: Clone detection already ran above, so is_clone=false means:
-                // - NOT a snapshot clone (checked PV attributes)
-                // - NOT a clone detected by SPDK (checked lvol.clone field)
-                // 
-                // So we only get here for regular volumes (not clones)
-                // 
-                // num_allocated_clusters > 0 → Regular volume with data → Skip wipefs
-                // num_allocated_clusters = 0 → Brand new empty volume → Safe to wipefs
-                //
-                // NOTE: We don't need to worry about thin clones with num_allocated_clusters=0
-                // because those would have is_clone=true and been caught above.
-                
-                eprintln!("🔍 [WIPEFS_DECISION] Regular (non-clone) volume, checking if lvol has been used");
-                
-                // Query SPDK to get current num_allocated_clusters
-                let has_data = if volume_type == "local" {
-                    let bdev_query = serde_json::json!({
-                        "method": "bdev_get_bdevs",
-                        "params": {"name": bdev_name}
-                    });
-                    
-                    match self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &bdev_query).await {
-                        Ok(response) => {
-                            if let Some(bdev_array) = response.get("result").and_then(|r| r.as_array()) {
-                                if let Some(bdev) = bdev_array.iter().find(|b| {
-                                    b.get("name").and_then(|n| n.as_str()) == Some(bdev_name.as_str())
-                                }) {
-                                    let num_allocated = bdev["driver_specific"]["lvol"]["num_allocated_clusters"]
-                                        .as_u64().unwrap_or(0);
-                                    eprintln!("   num_allocated_clusters from SPDK: {}", num_allocated);
-                                    num_allocated > 0
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        }
-                        Err(_) => false,
-                    }
-                } else {
-                    // Remote volumes (NVMe-oF) - always skip wipefs
-                    true
-                };
-                
-                if has_data {
-                    eprintln!("✅ [WIPEFS_DECISION] SKIP: Lvol has allocated clusters (contains data)");
-                    true
-                } else {
-                    eprintln!("🧹 [WIPEFS_DECISION] RUN: Lvol is empty (brand new)");
-                    false
-                }
-            };
+            // CRITICAL: ALWAYS clear kernel cache to avoid stale filesystem detection
+            // Two approaches depending on whether volume has existing filesystem:
+            // 1. New volumes: wipefs (clears signatures + cache)
+            // 2. Existing filesystem: blockdev --flushbufs (clears cache only, safe)
             
             if !should_skip_wipefs {
+                // Brand new volume - use wipefs to clear signatures AND cache
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🧹 [WIPEFS] EXECUTING wipefs --all --force {}", device_path);
+                eprintln!("🧹 [CACHE_CLEAR] WIPEFS for brand new volume");
+                eprintln!("   Device: {}", device_path);
                 eprintln!("   Volume: {}", volume_id);
-                eprintln!("   Bdev: {}", bdev_name);
-                eprintln!("   Reason: Brand new empty lvol (num_allocated_clusters = 0)");
+                eprintln!("   Method: wipefs (clears signatures + kernel cache)");
+                eprintln!("   Reason: Brand new volume (filesystem-initialized=false)");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
@@ -1547,12 +1366,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     Ok(output) if output.status.success() => {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         if !stdout.trim().is_empty() {
-                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                            eprintln!("🧹 [WIPEFS] Cleared stale ublk cache:");
+                            eprintln!("🧹 [WIPEFS] Cleared stale signatures:");
                             eprintln!("{}", stdout.trim());
-                            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         } else {
-                            eprintln!("✅ [WIPEFS] No stale cache found (device was clean)");
+                            eprintln!("✅ [WIPEFS] Device was clean (no stale signatures)");
                         }
                     }
                     Ok(output) => {
@@ -1566,14 +1383,35 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
             } else {
+                // Volume has existing filesystem (clone/snapshot) - use blockdev to flush cache only
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("✅ [WIPEFS] SKIPPED for {}", device_path);
+                eprintln!("🧹 [CACHE_CLEAR] BLOCKDEV FLUSH for volume with existing filesystem");
+                eprintln!("   Device: {}", device_path);
                 eprintln!("   Volume: {}", volume_id);
-                eprintln!("   Reason: {}", 
-                    if is_clone { "Snapshot/PVC clone (preserve data)" }
-                    else { "Lvol has data (num_allocated_clusters > 0)" }
-                );
+                eprintln!("   Method: blockdev --flushbufs (safe, preserves data)");
+                eprintln!("   Reason: Clear stale kernel cache without destroying filesystem");
+                eprintln!("   Critical: Prevents blkid from seeing wrong/stale filesystem!");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                
+                // Use blockdev --flushbufs to clear kernel cache without modifying device
+                let flush_output = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
+                
+                match flush_output {
+                    Ok(output) if output.status.success() => {
+                        eprintln!("✅ [BLOCKDEV] Kernel cache flushed successfully");
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("⚠️ [BLOCKDEV] Flush returned error (continuing): {}", stderr.trim());
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ [BLOCKDEV] Flush command failed (continuing): {}", e);
+                        eprintln!("   This may cause blkid to see stale filesystem - mounting may fail");
+                    }
+                }
             }
             
             println!("🔍 [NODE] Checking filesystem state from lvol");
