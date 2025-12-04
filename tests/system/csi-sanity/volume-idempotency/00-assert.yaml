@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: idempotency-test-pvc
-status:
-  phase: Bound
-
