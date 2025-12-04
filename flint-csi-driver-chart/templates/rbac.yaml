@@ -101,7 +101,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "list", "patch"]  # Added "list" for attachRequired=false
   # Removed SPDK CRD permissions for node components - no longer needed
   # Node agents now use direct SPDK queries via Unix sockets
 ---
