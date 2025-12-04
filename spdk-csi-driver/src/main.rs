@@ -1246,76 +1246,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 // Persistent volume: From ControllerPublishVolume
                 println!("✅ [NODE_STAGE] Local volume - using bdev from publish_context: {}", bdev_name);
                 bdev_name.clone()
-            } else if is_ephemeral {
-                // EPHEMERAL VOLUME ONLY: CREATE lvol on local node (no Controller creates it)
-                println!("📦 [NODE_STAGE] Ephemeral volume - creating on local node: {}", self.driver.node_id);
-                
-                // The lvol name follows convention: vol_{volume_id}
-                let lvol_name = format!("vol_{}", volume_id);
-                
-                // Use SPDK Unix socket directly (we're on the node)
-                let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
-                let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
-                    .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
-                
-                // Check if lvol already exists (idempotency)
-                let existing_bdev = spdk.get_bdev_by_name(&lvol_name).await
-                    .map_err(|e| tonic::Status::internal(format!("Failed to query SPDK: {}", e)))?;
-                
-                let lvol_uuid = if let Some(bdev_info) = existing_bdev {
-                    // Lvol already exists - use it
-                    let uuid = bdev_info["uuid"].as_str()
-                        .ok_or_else(|| tonic::Status::internal("Missing UUID in bdev info"))?
-                        .to_string();
-                    println!("✅ [NODE_STAGE] Ephemeral volume already exists: {}", uuid);
-                    uuid
-                } else {
-                    // Need to create the lvol - extract size from volume_context
-                    println!("📦 [NODE_STAGE] Creating new ephemeral lvol");
-                    
-                    let size_str = volume_context.get("size")
-                        .ok_or_else(|| tonic::Status::invalid_argument("Missing 'size' in volumeAttributes for ephemeral volume"))?;
-                    
-                    // Parse size (e.g., "100Mi", "1Gi")
-                    let size_bytes = if size_str.ends_with("Gi") {
-                        let num: u64 = size_str.trim_end_matches("Gi").parse()
-                            .map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))?;
-                        num * 1024 * 1024 * 1024
-                    } else if size_str.ends_with("Mi") {
-                        let num: u64 = size_str.trim_end_matches("Mi").parse()
-                            .map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))?;
-                        num * 1024 * 1024
-                    } else {
-                        // Assume bytes
-                        size_str.parse()
-                            .map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))?
-                    };
-                    
-                    println!("📊 [NODE_STAGE] Size: {} bytes (from {})", size_bytes, size_str);
-                    
-                    // Get available LVS on this node
-                    let lvstores = spdk.get_lvol_stores().await
-                        .map_err(|e| tonic::Status::internal(format!("Failed to get LVS: {}", e)))?;
-                    
-                    let lvs_name = if !lvstores.is_empty() {
-                        lvstores[0].name.clone()
-                    } else {
-                        return Err(tonic::Status::internal("No LVS available on this node for ephemeral volume"));
-                    };
-                    
-                    println!("📦 [NODE_STAGE] Using LVS: {}", lvs_name);
-                    
-                    // Create lvol (thin provisioned by default for ephemeral)
-                    let uuid = spdk.create_lvol(&lvs_name, &lvol_name, size_bytes, 1048576, true).await
-                        .map_err(|e| tonic::Status::internal(format!("Failed to create ephemeral lvol: {}", e)))?;
-                    
-                    println!("✅ [NODE_STAGE] Created ephemeral lvol: {} (UUID: {})", lvol_name, uuid);
-                    uuid
-                };
-                
-                lvol_uuid
             } else {
-                // Not ephemeral but publish_context is empty - this shouldn't happen
+                // publish_context is empty but not ephemeral - shouldn't happen for persistent volumes
                 return Err(tonic::Status::invalid_argument(
                     "Local volume with empty publish_context but not marked as ephemeral"));
             };
@@ -1860,9 +1792,115 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             false // Default to filesystem
         };
 
-        // NodeStageVolume is always called (we advertise STAGE_UNSTAGE_VOLUME capability)
-        // So staging_target_path should always be present
-        if is_block_volume {
+        // Check if staging was skipped
+        // With attachRequired=false, Kubernetes skips NodeStageVolume for ephemeral volumes
+        // even though we advertise STAGE_UNSTAGE_VOLUME capability
+        let staging_skipped = staging_target_path.is_empty();
+        
+        if staging_skipped && is_ephemeral {
+            // EPHEMERAL VOLUME with no staging: Create lvol and mount directly
+            println!("📦 [NODE_PUBLISH] Ephemeral volume - NodeStageVolume was skipped, creating lvol now");
+            
+            let lvol_name = format!("vol_{}", volume_id);
+            let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
+            let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
+            
+            // Check if lvol already exists (idempotency)
+            let lvol_uuid = if let Some(bdev_info) = spdk.get_bdev_by_name(&lvol_name).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to query SPDK: {}", e)))? {
+                // Already exists
+                let uuid = bdev_info["uuid"].as_str()
+                    .ok_or_else(|| tonic::Status::internal("Missing UUID"))?
+                    .to_string();
+                println!("✅ [NODE_PUBLISH] Ephemeral volume already exists: {}", uuid);
+                uuid
+            } else {
+                // Create the lvol
+                println!("📦 [NODE_PUBLISH] Creating ephemeral lvol on local node");
+                
+                let size_str = req.volume_context.get("size")
+                    .ok_or_else(|| tonic::Status::invalid_argument("Missing 'size' in volumeAttributes"))?;
+                
+                let size_bytes = if size_str.ends_with("Gi") {
+                    size_str.trim_end_matches("Gi").parse::<u64>()
+                        .map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))? * 1024 * 1024 * 1024
+                } else if size_str.ends_with("Mi") {
+                    size_str.trim_end_matches("Mi").parse::<u64>()
+                        .map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))? * 1024 * 1024
+                } else {
+                    size_str.parse().map_err(|e| tonic::Status::invalid_argument(format!("Invalid size: {}", e)))?
+                };
+                
+                let lvstores = spdk.get_lvol_stores().await
+                    .map_err(|e| tonic::Status::internal(format!("Failed to get LVS: {}", e)))?;
+                
+                let lvs_name = if !lvstores.is_empty() {
+                    lvstores[0].name.clone()
+                } else {
+                    return Err(tonic::Status::internal("No LVS available on this node"));
+                };
+                
+                let uuid = spdk.create_lvol(&lvs_name, &lvol_name, size_bytes, 1048576, true).await
+                    .map_err(|e| tonic::Status::internal(format!("Failed to create lvol: {}", e)))?;
+                
+                println!("✅ [NODE_PUBLISH] Created ephemeral lvol: {} (UUID: {})", lvol_name, uuid);
+                uuid
+            };
+            
+            // Create ublk device
+            let ublk_id = self.driver.generate_ublk_id(&volume_id);
+            self.driver.create_ublk_device(&lvol_uuid, ublk_id).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to create ublk device: {}", e)))?;
+            
+            let device_path = format!("/dev/ublkb{}", ublk_id);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            
+            if is_block_volume {
+                // Block mode - bind mount
+                let mount_output = std::process::Command::new("mount")
+                    .args(["--bind", &device_path, &target_path])
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
+                
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
+                }
+            } else {
+                // Format and mount filesystem
+                let fs_type = req.volume_capability
+                    .as_ref()
+                    .and_then(|vc| {
+                        if let Some(spdk_csi_driver::csi::volume_capability::AccessType::Mount(ref m)) = vc.access_type {
+                            Some(m.fs_type.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "ext4".to_string());
+                
+                let format_output = std::process::Command::new(format!("mkfs.{}", fs_type))
+                    .arg(&device_path)
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to format: {}", e)))?;
+                
+                if !format_output.status.success() {
+                    let error = String::from_utf8_lossy(&format_output.stderr);
+                    return Err(tonic::Status::internal(format!("Format failed: {}", error)));
+                }
+                
+                let mount_output = std::process::Command::new("mount")
+                    .args([&device_path, &target_path])
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
+                
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
+                }
+            }
+        } else if is_block_volume {
             // Block volume - bind mount the device directly
             let ublk_id = self.driver.generate_ublk_id(&volume_id);
             let device_path = format!("/dev/ublkb{}", ublk_id);
