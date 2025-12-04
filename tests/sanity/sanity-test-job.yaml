@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: csi-sanity-test
+  namespace: flint-system
+spec:
+  serviceAccountName: flint-csi-node
+  hostNetwork: true
+  containers:
+  - name: sanity-tester
+    image: golang:1.21
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        
+        echo "==================================================================="
+        echo "Installing csi-sanity test suite..."
+        echo "==================================================================="
+        go install github.com/kubernetes-csi/csi-test/cmd/csi-sanity@latest
+        
+        echo ""
+        echo "==================================================================="
+        echo "Running CSI Sanity Tests Against Flint Driver"
+        echo "==================================================================="
+        echo "CSI Socket: /csi/csi.sock"
+        echo "Node ID: $NODE_ID"
+        echo "==================================================================="
+        echo ""
+        
+        # Wait for CSI socket to be available
+        while [ ! -S /csi/csi.sock ]; do
+          echo "Waiting for CSI socket..."
+          sleep 2
+        done
+        
+        echo "✅ CSI socket found"
+        echo ""
+        
+        # Run sanity tests
+        mkdir -p /tmp/sanity-staging /tmp/sanity-mount
+        
+        /root/go/bin/csi-sanity \
+          --csi.endpoint=unix:///csi/csi.sock \
+          --csi.stagingdir=/tmp/sanity-staging \
+          --csi.mountdir=/tmp/sanity-mount \
+          --csi.testvolumesize=1073741824 \
+          --ginkgo.v \
+          --ginkgo.fail-fast=false || true
+        
+        echo ""
+        echo "==================================================================="
+        echo "CSI Sanity tests completed"
+        echo "==================================================================="
+        echo ""
+        echo "Keeping pod running for log inspection..."
+        echo "View logs with: kubectl logs -n flint-system csi-sanity-test"
+        echo ""
+        sleep 3600
+    env:
+    - name: NODE_ID
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    volumeMounts:
+    - name: socket-dir
+      mountPath: /csi
+    - name: pods-mount-dir
+      mountPath: /var/lib/kubelet/pods
+      mountPropagation: Bidirectional
+    - name: device-dir
+      mountPath: /dev
+      mountPropagation: HostToContainer
+    securityContext:
+      privileged: true
+  volumes:
+  - name: socket-dir
+    hostPath:
+      path: /var/lib/kubelet/plugins/flint.csi.storage.io
+      type: DirectoryOrCreate
+  - name: pods-mount-dir
+    hostPath:
+      path: /var/lib/kubelet/pods
+      type: Directory
+  - name: device-dir
+    hostPath:
+      path: /dev
+      type: Directory
+  restartPolicy: Never
+  # Schedule on a specific node if needed
+  nodeSelector: {}
+  tolerations:
+  - operator: Exists
+
