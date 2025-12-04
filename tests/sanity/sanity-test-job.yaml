@@ -55,14 +55,15 @@ spec:
         echo "✅ Test directories created"
         echo ""
         
-        # Run sanity tests
+        # Run sanity tests (node service only - controller is in separate pod)
+        # Skip controller tests since they're not available on this socket
         csi-sanity \
           --csi.endpoint=unix:///csi/csi.sock \
           --csi.stagingdir=/tmp/sanity-staging \
           --csi.mountdir=/tmp/sanity-mount \
           --csi.testvolumesize=1073741824 \
-          --ginkgo.v \
-          --ginkgo.fail-fast=false || true
+          --ginkgo.skip='Controller|GroupController|Snapshot' \
+          --ginkgo.v || true
         
         echo ""
         echo "==================================================================="
