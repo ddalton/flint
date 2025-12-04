@@ -1341,59 +1341,25 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 false
             };
             
-            // CRITICAL: ALWAYS clear kernel cache to avoid stale filesystem detection
-            // Two approaches depending on whether volume has existing filesystem:
-            // 1. New volumes: wipefs (clears signatures + cache)
-            // 2. Existing filesystem: blockdev --flushbufs (clears cache only, safe)
+            // CRITICAL: Smart cache clearing to prevent data loss
+            // 
+            // STRATEGY:
+            // 1. For clones (filesystem-initialized=true): Use blockdev only (preserves data)
+            // 2. For regular volumes: Clear cache FIRST, check REAL state, then decide
+            //
+            // Wait a moment for device to be ready
+            std::thread::sleep(std::time::Duration::from_millis(300));
             
-            if !should_skip_wipefs {
-                // Brand new volume - use wipefs to clear signatures AND cache
+            if should_skip_wipefs {
+                // Clone/snapshot with filesystem - use blockdev only (safe, preserves data)
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🧹 [CACHE_CLEAR] WIPEFS for brand new volume");
-                eprintln!("   Device: {}", device_path);
-                eprintln!("   Volume: {}", volume_id);
-                eprintln!("   Method: wipefs (clears signatures + kernel cache)");
-                eprintln!("   Reason: Brand new volume (filesystem-initialized=false)");
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                
-                let wipefs_output = std::process::Command::new("wipefs")
-                    .arg("--all")
-                    .arg("--force")
-                    .arg(&device_path)
-                    .output();
-                
-                match wipefs_output {
-                    Ok(output) if output.status.success() => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        if !stdout.trim().is_empty() {
-                            eprintln!("🧹 [WIPEFS] Cleared stale signatures:");
-                            eprintln!("{}", stdout.trim());
-                        } else {
-                            eprintln!("✅ [WIPEFS] Device was clean (no stale signatures)");
-                        }
-                    }
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        if !stderr.contains("No such file") && !stderr.trim().is_empty() {
-                            eprintln!("ℹ️ [WIPEFS] Output: {}", stderr.trim());
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
-                    }
-                }
-            } else {
-                // Volume has existing filesystem (clone/snapshot) - use blockdev to flush cache only
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🧹 [CACHE_CLEAR] BLOCKDEV FLUSH for volume with existing filesystem");
+                eprintln!("🧹 [CACHE_CLEAR] BLOCKDEV FLUSH for clone/snapshot");
                 eprintln!("   Device: {}", device_path);
                 eprintln!("   Volume: {}", volume_id);
                 eprintln!("   Method: blockdev --flushbufs (safe, preserves data)");
-                eprintln!("   Reason: Clear stale kernel cache without destroying filesystem");
-                eprintln!("   Critical: Prevents blkid from seeing wrong/stale filesystem!");
+                eprintln!("   Reason: filesystem-initialized=true (clone/snapshot)");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
-                // Use blockdev --flushbufs to clear kernel cache without modifying device
                 let flush_output = std::process::Command::new("blockdev")
                     .arg("--flushbufs")
                     .arg(&device_path)
@@ -1409,8 +1375,86 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                     Err(e) => {
                         eprintln!("⚠️ [BLOCKDEV] Flush command failed (continuing): {}", e);
-                        eprintln!("   This may cause blkid to see stale filesystem - mounting may fail");
                     }
+                }
+            } else {
+                // Regular volume (filesystem-initialized=false or missing)
+                // MUST clear cache FIRST, then check REAL device state
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("🧹 [CACHE_CLEAR] STEP 1: Flush kernel cache to see REAL device state");
+                eprintln!("   Device: {}", device_path);
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                
+                // STEP 1: ALWAYS flush cache first
+                let _ = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
+                
+                eprintln!("✅ [CACHE_CLEAR] Cache flushed, now checking REAL device state...");
+                
+                // STEP 2: Check REAL device state (after cache clear)
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let blkid_check = std::process::Command::new("blkid")
+                    .arg(&device_path)
+                    .output();
+                
+                let has_real_filesystem = blkid_check
+                    .map(|output| {
+                        if output.status.success() {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            eprintln!("📁 [CACHE_CLEAR] blkid detected filesystem: {}", stdout.trim());
+                            true
+                        } else {
+                            eprintln!("📁 [CACHE_CLEAR] blkid found no filesystem (device is empty)");
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                
+                // STEP 3: Decide based on REAL state
+                if !has_real_filesystem {
+                    // No real filesystem - safe to wipefs (clears SPDK block reuse)
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    eprintln!("🧹 [CACHE_CLEAR] STEP 2: WIPEFS (no filesystem detected)");
+                    eprintln!("   Device: {}", device_path);
+                    eprintln!("   Reason: Brand new volume, safe to clear any SPDK block reuse");
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    
+                    let wipefs_output = std::process::Command::new("wipefs")
+                        .arg("--all")
+                        .arg("--force")
+                        .arg(&device_path)
+                        .output();
+                    
+                    match wipefs_output {
+                        Ok(output) if output.status.success() => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            if !stdout.trim().is_empty() {
+                                eprintln!("🧹 [WIPEFS] Cleared stale signatures:");
+                                eprintln!("{}", stdout.trim());
+                            } else {
+                                eprintln!("✅ [WIPEFS] Device was clean");
+                            }
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if !stderr.contains("No such file") && !stderr.trim().is_empty() {
+                                eprintln!("ℹ️ [WIPEFS] Output: {}", stderr.trim());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
+                        }
+                    }
+                } else {
+                    // Has real filesystem - skip wipefs (preserve data!)
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    eprintln!("✅ [CACHE_CLEAR] SKIPPING wipefs - real filesystem detected");
+                    eprintln!("   Device: {}", device_path);
+                    eprintln!("   Reason: Volume has filesystem (restaging), preserving data");
+                    eprintln!("   Action: Cache already flushed in STEP 1");
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 }
             }
             
