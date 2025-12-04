@@ -1801,7 +1801,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // EPHEMERAL VOLUME with no staging: Create lvol and mount directly
             println!("📦 [NODE_PUBLISH] Ephemeral volume - NodeStageVolume was skipped, creating lvol now");
             
-            let lvol_name = format!("vol_{}", volume_id);
+            // For ephemeral volumes, use a shorter name (SPDK has ~64 char limit)
+            // Extract last 56 chars of volume_id (keeps it unique while fitting limit)
+            let short_volume_id = if volume_id.len() > 56 {
+                &volume_id[volume_id.len() - 56..]
+            } else {
+                volume_id.as_str()
+            };
+            let lvol_name = format!("eph_{}", short_volume_id);
+            println!("📦 [NODE_PUBLISH] Using short lvol name: {} (len: {})", lvol_name, lvol_name.len());
             let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
             let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
                 .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
