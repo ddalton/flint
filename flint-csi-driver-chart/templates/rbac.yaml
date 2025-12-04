@@ -99,6 +99,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "nodes", "pods", "events"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "patch"]
   # Removed SPDK CRD permissions for node components - no longer needed
   # Node agents now use direct SPDK queries via Unix sockets
 ---
