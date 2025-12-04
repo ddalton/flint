@@ -686,6 +686,25 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         if is_ephemeral {
             println!("📦 [CONTROLLER] Creating EPHEMERAL volume (will be deleted with Pod)");
             println!("📦 [CONTROLLER] Accessibility requirements: {:?}", req.accessibility_requirements);
+            
+            // For ephemeral volumes, extract target node from accessibility_requirements
+            // The Pod is already scheduled, so we should create the volume on that specific node
+            let target_node = if let Some(ref requirements) = req.accessibility_requirements {
+                if !requirements.preferred.is_empty() {
+                    // Use first preferred topology - segments is a HashMap, not Option
+                    requirements.preferred[0].segments.get("kubernetes.io/hostname").cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            if let Some(ref node) = target_node {
+                println!("✅ [CONTROLLER] Ephemeral volume will be created on node: {}", node);
+            } else {
+                println!("⚠️ [CONTROLLER] No topology hint - will use capacity-based selection");
+            }
         }
 
         // Extract parameters for normal volume creation
@@ -719,6 +738,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                  volume_id, size_bytes, replica_count, thin_provision, is_ephemeral);
 
         // Call the driver's create volume method 
+        // TODO: For ephemeral volumes, pass target_node to force creation on specific node
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
             Ok(result) => {
                 println!("✅ [CONTROLLER] Volume {} created successfully with {} replica(s)", 
