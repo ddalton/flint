@@ -332,7 +332,21 @@ impl SpdkNative {
             "name": name
         });
         
-        let result = self.call_rpc("bdev_get_bdevs", Some(params)).await?;
+        // SPDK returns error Code=-19 (ENODEV) when bdev doesn't exist
+        // We should return Ok(None) instead of propagating the error
+        let result = match self.call_rpc("bdev_get_bdevs", Some(params)).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("Code=-19") || err_str.contains("No such device") {
+                    // Bdev doesn't exist - this is OK, return None
+                    return Ok(None);
+                } else {
+                    // Real error - propagate it
+                    return Err(e);
+                }
+            }
+        };
         
         // SPDK returns an array with 0 or 1 element when queried by name
         if let Some(bdev_list) = result.as_array() {
