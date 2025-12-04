@@ -1247,9 +1247,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 println!("✅ [NODE_STAGE] Local volume - using bdev from publish_context: {}", bdev_name);
                 bdev_name.clone()
             } else {
-                // publish_context is empty but not ephemeral - shouldn't happen for persistent volumes
-                return Err(tonic::Status::invalid_argument(
-                    "Local volume with empty publish_context but not marked as ephemeral"));
+                // Persistent volume with empty publish_context (attachRequired=false)
+                // Query PV metadata to get lvol UUID
+                println!("📦 [NODE_STAGE] Persistent local volume - querying PV metadata");
+                let volume_info = self.driver.get_volume_info(&volume_id).await
+                    .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+                println!("✅ [NODE_STAGE] Found volume: node={}, lvol={}", 
+                         volume_info.node_name, volume_info.lvol_uuid);
+                volume_info.lvol_uuid
             };
             bdev
         } else if volume_type == "remote" {
