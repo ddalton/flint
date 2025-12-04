@@ -1293,27 +1293,25 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 bdev_name.clone()
             } else {
                 // Ephemeral volume (attachRequired=false) - query SPDK directly
-                println!("📦 [NODE] Ephemeral volume - querying local SPDK");
+                println!("📦 [NODE_STAGE] Ephemeral volume - querying local SPDK");
                 
                 // The lvol name follows convention: vol_{volume_id}
                 let lvol_name = format!("vol_{}", volume_id);
                 
-                // Query SPDK to find this lvol and get its UUID
-                let spdk_params = serde_json::json!({
-                    "method": "bdev_get_bdevs",
-                    "params": {
-                        "name": lvol_name
-                    }
-                });
+                // Use SPDK Unix socket directly (we're on the node)
+                let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
+                let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
+                    .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
                 
-                let bdev_response = self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &spdk_params).await
-                    .map_err(|e| tonic::Status::not_found(format!("Ephemeral volume not found: {}", e)))?;
+                let bdev_info = spdk.get_bdev_by_name(&lvol_name).await
+                    .map_err(|e| tonic::Status::internal(format!("Failed to query SPDK: {}", e)))?
+                    .ok_or_else(|| tonic::Status::not_found(format!("Ephemeral volume {} not found in SPDK", lvol_name)))?;
                 
-                let lvol_uuid = bdev_response["result"][0]["uuid"].as_str()
-                    .ok_or_else(|| tonic::Status::internal("Failed to get lvol UUID from SPDK"))?
+                let lvol_uuid = bdev_info["uuid"].as_str()
+                    .ok_or_else(|| tonic::Status::internal("Missing UUID in bdev info"))?
                     .to_string();
                 
-                println!("✅ [NODE] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
+                println!("✅ [NODE_STAGE] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
                 lvol_uuid
             };
             bdev
@@ -1871,27 +1869,25 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // 4. Mount to target
             
             // Query local SPDK for ephemeral volume (no PV exists)
-            println!("📦 [NODE] Querying local SPDK for ephemeral volume: {}", volume_id);
+            println!("📦 [NODE_PUBLISH] Querying local SPDK for ephemeral volume: {}", volume_id);
             
             // The lvol name follows convention: vol_{volume_id}
             let lvol_name = format!("vol_{}", volume_id);
             
-            // Query SPDK via node agent to find this lvol
-            let spdk_params = serde_json::json!({
-                "method": "bdev_get_bdevs",
-                "params": {
-                    "name": lvol_name
-                }
-            });
+            // Use SPDK Unix socket directly (we're on the node)
+            let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
+            let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
             
-            let bdev_response = self.driver.call_node_agent(&self.driver.node_id, "/api/spdk/rpc", &spdk_params).await
-                .map_err(|e| tonic::Status::not_found(format!("Ephemeral volume not found in SPDK: {}", e)))?;
+            let bdev_info = spdk.get_bdev_by_name(&lvol_name).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to query SPDK: {}", e)))?
+                .ok_or_else(|| tonic::Status::not_found(format!("Ephemeral volume {} not found in SPDK", lvol_name)))?;
             
-            let lvol_uuid = bdev_response["result"][0]["uuid"].as_str()
-                .ok_or_else(|| tonic::Status::internal("Failed to get lvol UUID from SPDK"))?
+            let lvol_uuid = bdev_info["uuid"].as_str()
+                .ok_or_else(|| tonic::Status::internal("Missing UUID in bdev info"))?
                 .to_string();
             
-            println!("✅ [NODE] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
+            println!("✅ [NODE_PUBLISH] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
             
             let ublk_id = self.driver.generate_ublk_id(&volume_id);
             println!("📦 [NODE] Creating ublk device {} for lvol {}", ublk_id, lvol_uuid);

@@ -325,6 +325,25 @@ impl SpdkNative {
         Ok(bdevs)
     }
     
+    /// Get a specific bdev by name - efficient SPDK query with name parameter
+    /// Returns the full bdev info as JSON if found, None if not found
+    pub async fn get_bdev_by_name(&self, name: &str) -> Result<Option<Value>> {
+        let params = json!({
+            "name": name
+        });
+        
+        let result = self.call_rpc("bdev_get_bdevs", Some(params)).await?;
+        
+        // SPDK returns an array with 0 or 1 element when queried by name
+        if let Some(bdev_list) = result.as_array() {
+            if !bdev_list.is_empty() {
+                return Ok(Some(bdev_list[0].clone()));
+            }
+        }
+        
+        Ok(None)
+    }
+    
     /// Create logical volume - matches SPDK v25.05.x bdev_lvol_create RPC
     pub async fn create_lvol(&self, lvs_name: &str, lvol_name: &str, size: u64, _cluster_size: u64, thin_provision: bool) -> Result<String> {
         // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
