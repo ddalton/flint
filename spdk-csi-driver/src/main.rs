@@ -677,68 +677,23 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }
         }
 
-        // Check if this is an ephemeral volume (CSI inline volume)
-        // For CreateVolume, Kubernetes passes this through the parameters field
-        let is_ephemeral = req.parameters.get("csi.storage.k8s.io/ephemeral")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        if is_ephemeral {
-            println!("📦 [CONTROLLER] Creating EPHEMERAL volume (will be deleted with Pod)");
-            println!("📦 [CONTROLLER] Accessibility requirements: {:?}", req.accessibility_requirements);
-            
-            // For ephemeral volumes, extract target node from accessibility_requirements
-            // The Pod is already scheduled, so we should create the volume on that specific node
-            let target_node = if let Some(ref requirements) = req.accessibility_requirements {
-                if !requirements.preferred.is_empty() {
-                    // Use first preferred topology - segments is a HashMap, not Option
-                    requirements.preferred[0].segments.get("kubernetes.io/hostname").cloned()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            
-            if let Some(ref node) = target_node {
-                println!("✅ [CONTROLLER] Ephemeral volume will be created on node: {}", node);
-            } else {
-                println!("⚠️ [CONTROLLER] No topology hint - will use capacity-based selection");
-            }
-        }
-
-        // Extract parameters for normal volume creation
+        // Extract parameters for volume creation
         let size_bytes = req.capacity_range
             .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
             .unwrap_or(1024 * 1024 * 1024) as u64; // Default 1GB
 
-        // For ephemeral volumes, optimize by defaulting to single replica unless specified
-        let replica_count = if is_ephemeral {
-            req.parameters.get("numReplicas")
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1) // Ephemeral: default to single replica for fast Pod startup
-        } else {
-            req.parameters.get("numReplicas")
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1) // Persistent: use StorageClass default
-        };
+        let replica_count = req.parameters.get("numReplicas")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1);
 
-        // For ephemeral volumes, default to thin provisioning (more efficient for temporary data)
-        let thin_provision = if is_ephemeral {
-            req.parameters.get("thinProvision")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(true) // Ephemeral: default to thin (allocate on write)
-        } else {
-            req.parameters.get("thinProvision")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(false) // Persistent: use StorageClass default
-        };
+        let thin_provision = req.parameters.get("thinProvision")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, Ephemeral: {}", 
-                 volume_id, size_bytes, replica_count, thin_provision, is_ephemeral);
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}", 
+                 volume_id, size_bytes, replica_count, thin_provision);
 
-        // Call the driver's create volume method 
-        // TODO: For ephemeral volumes, pass target_node to force creation on specific node
+        // Call the driver's create volume method
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
             Ok(result) => {
                 println!("✅ [CONTROLLER] Volume {} created successfully with {} replica(s)", 
@@ -1905,104 +1860,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             false // Default to filesystem
         };
 
-        // Check if staging was skipped (happens with attachRequired=false for ephemeral volumes)
-        let staging_skipped = staging_target_path.is_empty();
-        
-        if staging_skipped {
-            // EPHEMERAL VOLUME: No staging - mount directly
-            println!("📦 [NODE] No staging path - ephemeral volume, mounting directly");
-            
-            // For ephemeral volumes, NodeStageVolume is not called, so we need to:
-            // 1. Query SPDK directly for volume info (no PV exists for ephemeral volumes)
-            // 2. Create ublk device  
-            // 3. Format filesystem
-            // 4. Mount to target
-            
-            // Query local SPDK for ephemeral volume (no PV exists)
-            println!("📦 [NODE_PUBLISH] Querying local SPDK for ephemeral volume: {}", volume_id);
-            
-            // The lvol name follows convention: vol_{volume_id}
-            let lvol_name = format!("vol_{}", volume_id);
-            
-            // Use SPDK Unix socket directly (we're on the node)
-            let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
-            let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
-                .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
-            
-            let bdev_info = spdk.get_bdev_by_name(&lvol_name).await
-                .map_err(|e| tonic::Status::internal(format!("Failed to query SPDK: {}", e)))?
-                .ok_or_else(|| tonic::Status::not_found(format!("Ephemeral volume {} not found in SPDK", lvol_name)))?;
-            
-            let lvol_uuid = bdev_info["uuid"].as_str()
-                .ok_or_else(|| tonic::Status::internal("Missing UUID in bdev info"))?
-                .to_string();
-            
-            println!("✅ [NODE_PUBLISH] Found ephemeral volume: lvol={}, uuid={}", lvol_name, lvol_uuid);
-            
-            let ublk_id = self.driver.generate_ublk_id(&volume_id);
-            println!("📦 [NODE] Creating ublk device {} for lvol {}", ublk_id, lvol_uuid);
-            
-            // Create ublk device
-            self.driver.create_ublk_device(&lvol_uuid, ublk_id).await
-                .map_err(|e| tonic::Status::internal(format!("Failed to create ublk device: {}", e)))?;
-            
-            let device_path = format!("/dev/ublkb{}", ublk_id);
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            
-            if is_block_volume {
-                // Block mode - bind mount device
-                println!("📋 [NODE] Ephemeral block volume - bind mounting {}", device_path);
-                let mount_output = std::process::Command::new("mount")
-                    .args(["--bind", &device_path, &target_path])
-                    .output()
-                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
-                
-                if !mount_output.status.success() {
-                    let error = String::from_utf8_lossy(&mount_output.stderr);
-                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
-                }
-            } else {
-                // Filesystem mode - format and mount
-                let fs_type = req.volume_capability
-                    .as_ref()
-                    .and_then(|vc| {
-                        if let Some(spdk_csi_driver::csi::volume_capability::AccessType::Mount(ref m)) = vc.access_type {
-                            Some(m.fs_type.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "ext4".to_string());
-                
-                println!("📦 [NODE] Formatting ephemeral volume with {}", fs_type);
-                
-                // Format the device
-                let format_cmd = format!("mkfs.{}", fs_type);
-                let format_output = std::process::Command::new(&format_cmd)
-                    .arg(&device_path)
-                    .output()
-                    .map_err(|e| tonic::Status::internal(format!("Failed to format: {}", e)))?;
-                
-                if !format_output.status.success() {
-                    let error = String::from_utf8_lossy(&format_output.stderr);
-                    return Err(tonic::Status::internal(format!("Format failed: {}", error)));
-                }
-                
-                println!("✅ [NODE] Device formatted, mounting to {}", target_path);
-                
-                // Mount directly to target
-                let mount_output = std::process::Command::new("mount")
-                    .args([&device_path, &target_path])
-                    .output()
-                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
-                
-                if !mount_output.status.success() {
-                    let error = String::from_utf8_lossy(&mount_output.stderr);
-                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
-                }
-            }
-        } else if is_block_volume {
-            // WITH STAGING: Block volume - bind mount the device directly
+        // NodeStageVolume is always called (we advertise STAGE_UNSTAGE_VOLUME capability)
+        // So staging_target_path should always be present
+        if is_block_volume {
+            // Block volume - bind mount the device directly
             let ublk_id = self.driver.generate_ublk_id(&volume_id);
             let device_path = format!("/dev/ublkb{}", ublk_id);
             
@@ -2024,7 +1885,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
             }
         } else {
-            // WITH STAGING: Filesystem volume - bind mount from staging path
+            // Filesystem volume - bind mount from staging path
             println!("📋 [NODE] Filesystem volume - bind mounting staging path to target");
             
             // Verify staging path exists and is mounted
