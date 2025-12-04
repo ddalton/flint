@@ -472,6 +472,278 @@ graph TD
 
 ---
 
+## Device Management and Kernel Cache
+
+### ublk Device ID System
+
+Flint uses deterministic hash-based ublk device IDs for consistent device naming:
+
+```mermaid
+graph LR
+    VID[Volume ID<br/>pvc-abc123] --> HASH[Hash Function]
+    HASH --> UBLK_ID[ublk ID: 5]
+    UBLK_ID --> DEV[Device Path<br/>/dev/ublkb5]
+    
+    style VID fill:#e3f2fd
+    style UBLK_ID fill:#fff3e0
+    style DEV fill:#c8e6c9
+```
+
+**Benefits:**
+- ✅ Same volume always gets same device path
+- ✅ Predictable device naming
+- ✅ Simplified volume tracking
+
+**Challenge:**
+- ⚠️ Device path reuse when volumes are deleted/recreated
+- ⚠️ Kernel caches block device metadata by path
+- ⚠️ SPDK reuses storage blocks from deleted volumes
+
+### The Dual Cache Problem
+
+When ublk devices are reused, two separate caching issues can occur:
+
+#### Problem 1: Kernel Block Device Cache
+
+```
+Timeline:
+1. Volume A created → /dev/ublkb5 → formatted ext4
+2. Kernel caches: "ublkb5 = ext4 filesystem"
+3. Volume A deleted → ublk device destroyed
+4. Volume B (XFS snapshot clone) created → same ublk ID → /dev/ublkb5
+5. Kernel STILL has cached: "ublkb5 = ext4" ❌
+6. blkid sees STALE ext4 instead of real XFS
+7. Mount fails with "bad superblock" ❌
+```
+
+#### Problem 2: SPDK Block Reuse
+
+```
+Timeline:
+1. Volume A created → SPDK allocates clusters 100-199
+2. Format ext4 → writes superblock, signatures to clusters
+3. Delete Volume A → clusters marked free
+4. SPDK UNMAP command → DOES NOT guarantee zero! ⚠️
+5. Create Volume B (new) → SPDK allocates clusters 100-199 (same!)
+6. Clusters STILL contain ext4 signatures from Volume A ❌
+7. blkid sees REAL old ext4 signatures on device
+8. System tries to mount stale filesystem → CORRUPTION ❌
+```
+
+### Unified Solution: filesystem-initialized Attribute
+
+The driver uses a single `filesystem-initialized` attribute to coordinate safe cache clearing:
+
+```mermaid
+graph TD
+    START[NodeStageVolume<br/>ublk device created] --> CHECK{filesystem-initialized<br/>attribute set?}
+    
+    CHECK -->|false/missing| NEW[Brand New Volume]
+    CHECK -->|true| EXISTING[Clone/Snapshot<br/>or Previously Formatted]
+    
+    NEW --> WIPEFS[wipefs --all --force]
+    WIPEFS --> WIPEFS_RESULT[✅ Signatures erased<br/>✅ Kernel cache cleared]
+    
+    EXISTING --> BLOCKDEV[blockdev --flushbufs]
+    BLOCKDEV --> BLOCKDEV_RESULT[✅ Kernel cache cleared<br/>✅ Data preserved]
+    
+    WIPEFS_RESULT --> BLKID[blkid checks filesystem]
+    BLOCKDEV_RESULT --> BLKID
+    
+    BLKID --> FORMAT{Has valid<br/>filesystem?}
+    FORMAT -->|No| MK_FS[Format new filesystem]
+    FORMAT -->|Yes| MOUNT[Mount existing filesystem]
+    
+    MK_FS --> MOUNT
+    MOUNT --> DONE[✅ Volume Ready]
+    
+    style NEW fill:#fff3e0
+    style EXISTING fill:#e8f5e8
+    style WIPEFS fill:#ffcdd2
+    style BLOCKDEV fill:#c8e6c9
+    style DONE fill:#c8e6c9
+```
+
+### Controller Side: Setting filesystem-initialized
+
+The CSI controller sets the attribute for volumes with existing filesystems:
+
+**CreateVolumeFromSnapshot:**
+```rust
+volume_context.insert(
+    "flint.csi.storage.io/filesystem-initialized",
+    "true"  // Clone has filesystem from snapshot
+);
+volume_context.insert(
+    "flint.csi.storage.io/source-snapshot",
+    snapshot_id
+);
+```
+
+**CreateVolumeFromVolume (PVC Clone):**
+```rust
+volume_context.insert(
+    "flint.csi.storage.io/filesystem-initialized", 
+    "true"  // Clone has filesystem from source PVC
+);
+volume_context.insert(
+    "flint.csi.storage.io/source-volume",
+    source_volume_id
+);
+```
+
+**CreateVolume (New):**
+```rust
+// No filesystem-initialized attribute
+// Node will format and run wipefs
+```
+
+### Node Side: Cache Clearing Logic
+
+**Implementation** (`src/main.rs` in NodeStageVolume):
+
+```rust
+let fs_initialized = req.volume_context
+    .get("flint.csi.storage.io/filesystem-initialized")
+    .map(|v| v == "true")
+    .unwrap_or(false);
+
+if !fs_initialized {
+    // Brand new volume - clear signatures + cache
+    eprintln!("🧹 [CACHE_CLEAR] WIPEFS for brand new volume");
+    Command::new("wipefs")
+        .args(&["--all", "--force", device_path])
+        .output()?;
+} else {
+    // Clone/snapshot - clear cache only (preserve data!)
+    eprintln!("🧹 [CACHE_CLEAR] BLOCKDEV FLUSH for volume with existing filesystem");
+    Command::new("blockdev")
+        .args(&["--flushbufs", device_path])
+        .output()?;
+}
+
+// Now blkid will see the REAL filesystem (not stale cache)
+let blkid_output = Command::new("blkid").arg(device_path).output()?;
+```
+
+### Why Two Different Tools?
+
+| Tool | What It Does | When to Use | Why |
+|------|-------------|-------------|-----|
+| **wipefs** | Writes zeros to signature locations on device | New volumes | Clears SPDK block reuse + kernel cache |
+| **blockdev --flushbufs** | Clears kernel's in-memory cache | Clones/snapshots | Safe (no writes), preserves filesystem |
+
+**wipefs (for new volumes):**
+- ✅ Physically overwrites old signatures on device
+- ✅ Handles SPDK block reuse (clusters with old data)
+- ✅ Clears kernel cache as side effect
+- ✅ Works regardless of SSD's UNMAP behavior
+- ❌ Would destroy clone's filesystem if used incorrectly
+
+**blockdev --flushbufs (for clones):**
+- ✅ Clears kernel's stale cache
+- ✅ Read-only operation (no writes to device)
+- ✅ Preserves clone's valid filesystem
+- ✅ Forces kernel to re-read device
+- ❌ Doesn't clear physical signatures (but clones have valid data)
+
+### Critical Issue: SPDK clear_method: "unmap"
+
+When creating new lvols, SPDK uses `clear_method: "unmap"`:
+
+```rust
+let params = json!({
+    "lvs_name": lvs_name,
+    "lvol_name": lvol_name,
+    "size_in_mib": size_in_mib,
+    "thin_provision": thin_provision,
+    "clear_method": "unmap"  // ⚠️ Does NOT guarantee zeros!
+});
+```
+
+**The Problem:**
+- UNMAP/TRIM behavior is **device-dependent**
+- Some SSDs zero blocks on UNMAP ✅
+- Some SSDs leave old data intact ❌
+- Reading unmapped blocks = **undefined behavior**
+
+**Why wipefs is required:**
+```bash
+# New lvol created from recycled SPDK clusters
+# Clusters might still have ext4 from previous lvol!
+
+$ blkid /dev/ublkb7
+/dev/ublkb7: UUID="..." TYPE="ext4"  # OLD signatures still there!
+
+# wipefs physically overwrites signature locations
+$ wipefs --all --force /dev/ublkb7
+
+$ blkid /dev/ublkb7
+# (no output - device is clean) ✅
+```
+
+### Decision Matrix
+
+| Scenario | Problem | filesystem-initialized | Tool Used | Result |
+|----------|---------|------------------------|-----------|--------|
+| **New volume (non-thin)** | SPDK block reuse with old signatures | false | `wipefs` | ✅ Device physically clean |
+| **New volume (thin)** | Kernel cache from ublk reuse | false | `wipefs` | ✅ Cache + any signatures cleared |
+| **Snapshot clone** | Kernel cache from ublk reuse | true | `blockdev --flushbufs` | ✅ Cache cleared, XFS preserved |
+| **PVC clone** | Kernel cache from ublk reuse | true | `blockdev --flushbufs` | ✅ Cache cleared, data preserved |
+| **Volume restage** | Kernel cache potentially stale | false (legacy) | `wipefs` | ✅ Cache cleared, blkid sees real fs |
+
+### Log Messages
+
+**New volume (wipefs):**
+```
+🧹 [CACHE_CLEAR] WIPEFS for brand new volume
+   Device: /dev/ublkb5
+   Volume: pvc-abc123
+   Method: wipefs (clears signatures + kernel cache)
+   Reason: Brand new volume (filesystem-initialized=false)
+🧹 [WIPEFS] Cleared stale signatures:
+/dev/ublkb5: 2 bytes were erased at offset 0x00000438 (ext4): 53 ef
+```
+
+**Clone/snapshot (blockdev):**
+```
+🧹 [CACHE_CLEAR] BLOCKDEV FLUSH for volume with existing filesystem
+   Device: /dev/ublkb5
+   Volume: pvc-restored-123
+   Method: blockdev --flushbufs (safe, preserves data)
+   Reason: Clear stale kernel cache without destroying filesystem
+   Critical: Prevents blkid from seeing wrong/stale filesystem!
+✅ [BLOCKDEV] Kernel cache flushed successfully
+```
+
+### Benefits
+
+**Performance:**
+- ✅ Eliminated ~150 lines of complex SPDK metadata queries
+- ✅ Removed 2 expensive RPC calls from staging path
+- ✅ Simple boolean decision vs complex clone detection
+
+**Reliability:**
+- ✅ Works for thin and non-thin volumes
+- ✅ Works for local and remote (NVMe-oF) volumes
+- ✅ Handles both kernel cache AND SPDK block reuse
+- ✅ Safe for all volume types
+
+**Maintainability:**
+- ✅ Single unified attribute
+- ✅ Clear decision logic
+- ✅ Prominent logging for debugging
+- ✅ Well-documented behavior
+
+### References
+
+For detailed technical explanation:
+- **WIPEFS_SOLUTION_PLAN.md** - Original design document
+- **WIPEFS_IMPLEMENTATION_SUMMARY.md** - Implementation details
+- **UBLK_KERNEL_CACHE_ISSUE.md** - Deep dive on kernel cache problem
+
+---
+
 ## API Reference
 
 ### Node Agent REST API
