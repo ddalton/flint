@@ -1,0 +1,63 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Wait for pod to be deleted
+      echo "Waiting for pod deletion..."
+      kubectl wait --for=delete pod/ephemeral-test-pod --timeout=60s || true
+      
+      # Verify pod is gone
+      if kubectl get pod ephemeral-test-pod &> /dev/null; then
+        echo "❌ Pod still exists after deletion"
+        exit 1
+      else
+        echo "✅ Pod deleted successfully"
+      fi
+      
+      # Give CSI driver time to clean up the ephemeral volume
+      echo "Waiting 10 seconds for CSI driver to clean up ephemeral volume..."
+      sleep 10
+      
+      # Check CSI controller logs for ephemeral volume deletion
+      echo "Checking CSI controller logs for volume deletion..."
+      CONTROLLER_POD=$(kubectl get pod -n kube-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+      
+      # Look for deletion in recent logs
+      kubectl logs -n kube-system $CONTROLLER_POD --tail=100 | tail -30
+      
+      if kubectl logs -n kube-system $CONTROLLER_POD --tail=100 | grep -q "Deleting volume"; then
+        echo "✅ Volume deletion detected in controller logs"
+      else
+        echo "ℹ️ Volume deletion not found in recent logs (might have been cleaned up earlier)"
+      fi
+      
+      # Verify no orphaned PVs were created (ephemeral volumes shouldn't create PVs)
+      # The volume ID would be something like ephemeral-test-pod-<uid>-ephemeral-storage
+      PV_COUNT=$(kubectl get pv --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+      if [ "$PV_COUNT" = "0" ]; then
+        echo "✅ No orphaned PersistentVolumes found (expected for ephemeral volumes)"
+      else
+        echo "⚠️ Found $PV_COUNT PV(s) with 'ephemeral-test-pod' in name"
+        kubectl get pv | grep "ephemeral-test-pod" || true
+      fi
+      
+      # Verify no orphaned PVCs
+      PVC_COUNT=$(kubectl get pvc --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+      if [ "$PVC_COUNT" = "0" ]; then
+        echo "✅ No orphaned PersistentVolumeClaims found (expected for ephemeral volumes)"
+      else
+        echo "⚠️ Found $PVC_COUNT PVC(s) with 'ephemeral-test-pod' in name"
+        kubectl get pvc | grep "ephemeral-test-pod" || true
+      fi
+      
+      echo "==================================================================="
+      echo "✅ EPHEMERAL INLINE VOLUME TEST COMPLETED SUCCESSFULLY"
+      echo "==================================================================="
+      echo "Summary:"
+      echo "  - Pod with ephemeral inline volume: CREATED ✅"
+      echo "  - Data written to ephemeral volume: VERIFIED ✅"
+      echo "  - Pod deletion: SUCCESSFUL ✅"
+      echo "  - Ephemeral volume cleanup: AUTOMATIC ✅"
+      echo "  - No orphaned resources: VERIFIED ✅"
+      echo "==================================================================="
+

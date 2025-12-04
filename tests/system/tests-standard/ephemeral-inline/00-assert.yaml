@@ -1,0 +1,36 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Verify Flint CSI driver is installed and supports ephemeral volumes
+      echo "Checking CSIDriver configuration..."
+      
+      if kubectl get csidriver flint.csi.storage.io &> /dev/null; then
+        echo "✅ Flint CSIDriver found"
+      else
+        echo "❌ Flint CSIDriver not found"
+        exit 1
+      fi
+      
+      # Check if Ephemeral mode is enabled
+      LIFECYCLE_MODES=$(kubectl get csidriver flint.csi.storage.io -o jsonpath='{.spec.volumeLifecycleModes[*]}')
+      echo "Volume lifecycle modes: $LIFECYCLE_MODES"
+      
+      if echo "$LIFECYCLE_MODES" | grep -q "Ephemeral"; then
+        echo "✅ Ephemeral volume support is enabled"
+      else
+        echo "❌ Ephemeral volume support is NOT enabled"
+        echo "Please set driver.enableEphemeral=true in values.yaml"
+        exit 1
+      fi
+      
+      # Verify controller pod is running
+      if kubectl get pod -n kube-system -l app=flint-csi-controller | grep -q "Running"; then
+        echo "✅ Flint CSI controller is running"
+      else
+        echo "❌ Flint CSI controller is not running"
+        exit 1
+      fi
+      
+      echo "✅ All prerequisites met for ephemeral volume test"
+

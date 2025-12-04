@@ -1,0 +1,65 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # Wait for pod to start
+      echo "Waiting for pod to start..."
+      kubectl wait --for=condition=Ready pod/ephemeral-test-pod --timeout=120s || true
+      
+      # Check pod status
+      POD_STATUS=$(kubectl get pod ephemeral-test-pod -o jsonpath='{.status.phase}')
+      echo "Pod status: $POD_STATUS"
+      
+      if [ "$POD_STATUS" = "Running" ] || [ "$POD_STATUS" = "Succeeded" ]; then
+        echo "✅ Pod is running/succeeded"
+      else
+        echo "⚠️ Pod status: $POD_STATUS"
+        echo "Pod events:"
+        kubectl describe pod ephemeral-test-pod | tail -30
+        echo "Pod logs:"
+        kubectl logs ephemeral-test-pod || echo "No logs available yet"
+      fi
+      
+      # Wait for pod to complete
+      echo "Waiting for pod to complete..."
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/ephemeral-test-pod --timeout=120s
+      
+      # Verify pod completed successfully
+      POD_STATUS=$(kubectl get pod ephemeral-test-pod -o jsonpath='{.status.phase}')
+      if [ "$POD_STATUS" = "Succeeded" ]; then
+        echo "✅ Pod completed successfully"
+      else
+        echo "❌ Pod failed with status: $POD_STATUS"
+        kubectl logs ephemeral-test-pod
+        exit 1
+      fi
+      
+      # Check the logs to verify ephemeral volume worked
+      echo "Checking pod logs..."
+      kubectl logs ephemeral-test-pod
+      
+      if kubectl logs ephemeral-test-pod | grep -q "Ephemeral volume test successful"; then
+        echo "✅ Ephemeral volume test successful"
+      else
+        echo "❌ Ephemeral volume test failed"
+        exit 1
+      fi
+      
+      # Get the node where pod ran
+      NODE=$(kubectl get pod ephemeral-test-pod -o jsonpath='{.spec.nodeName}')
+      echo "✅ Pod ran on node: $NODE"
+      
+      # Verify volume was created (check CSI driver logs)
+      echo "Checking CSI controller logs for ephemeral volume creation..."
+      CONTROLLER_POD=$(kubectl get pod -n kube-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+      echo "Controller pod: $CONTROLLER_POD"
+      
+      # Look for ephemeral volume creation in logs
+      if kubectl logs -n kube-system $CONTROLLER_POD --tail=200 | grep -q "EPHEMERAL"; then
+        echo "✅ Ephemeral volume creation detected in controller logs"
+      else
+        echo "ℹ️ Could not find ephemeral volume marker in logs (might be normal)"
+      fi
+      
+      echo "✅ Ephemeral inline volume test PASSED - Pod successfully used ephemeral volume"
+

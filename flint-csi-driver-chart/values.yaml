@@ -28,22 +28,22 @@ csiSidecars:
   repository: registry.k8s.io/sig-storage
   externalProvisioner:
     name: csi-provisioner
-    tag: v3.1.0
+    tag: v3.6.0  # Upgraded from v3.1.0 for better ephemeral volume support
   externalAttacher:
     name: csi-attacher
-    tag: v3.4.0
+    tag: v4.4.0  # Upgraded from v3.4.0 for latest features
   externalResizer:
     name: csi-resizer
-    tag: v1.4.0
+    tag: v1.9.0  # Upgraded from v1.4.0 for latest features
   externalSnapshotter:
     name: csi-snapshotter
-    tag: v6.1.0
+    tag: v6.3.0  # Upgraded from v6.1.0 for latest features
   nodeDriverRegistrar:
     name: csi-node-driver-registrar
-    tag: v2.5.0
+    tag: v2.9.0  # Upgraded from v2.5.0 for ephemeral volume fixes
   livenessprobe:
     name: livenessprobe
-    tag: v2.7.0
+    tag: v2.11.0  # Upgraded from v2.7.0 for latest features
 
 # Verbosity of the Flint CSI driver logging.
 # 5 is the default. 9 is the most verbose.
@@ -55,6 +55,12 @@ priorityClassName: ""
 # CSI Driver configuration
 driver:
   name: "flint.csi.storage.io"
+  
+  # Ephemeral volume support (CSI inline volumes)
+  # When enabled, Pods can declare Flint volumes directly in their spec without creating PVCs
+  # Ephemeral volumes are automatically created on Pod start and deleted on Pod termination
+  # Requires Kubernetes v1.25+ (or v1.21-v1.24 with CSIInlineVolume feature gate)
+  enableEphemeral: true
   
   # Topology configuration
   # Set to true for self-managed clusters that allow topology.kubernetes.io/hostname labels

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ephemeral-test-pod
+  labels:
+    app: ephemeral-test
+$patch: delete
+

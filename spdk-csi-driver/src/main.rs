@@ -677,21 +677,37 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }
         }
 
+        // Check if this is an ephemeral volume (CSI inline volume)
+        let is_ephemeral = req.volume_context.get("csi.storage.k8s.io/ephemeral")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if is_ephemeral {
+            println!("📦 [CONTROLLER] Creating EPHEMERAL volume (will be deleted with Pod)");
+        }
+
         // Extract parameters for normal volume creation
         let size_bytes = req.capacity_range
             .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
             .unwrap_or(1024 * 1024 * 1024) as u64; // Default 1GB
 
-        let replica_count = req.parameters.get("numReplicas")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1);
+        // For ephemeral volumes, optimize by defaulting to single replica unless specified
+        let replica_count = if is_ephemeral {
+            req.parameters.get("numReplicas")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(1) // Ephemeral: default to single replica for fast Pod startup
+        } else {
+            req.parameters.get("numReplicas")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(1) // Persistent: use StorageClass default
+        };
 
         let thin_provision = req.parameters.get("thinProvision")
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}", 
-                 volume_id, size_bytes, replica_count, thin_provision);
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, Ephemeral: {}", 
+                 volume_id, size_bytes, replica_count, thin_provision, is_ephemeral);
 
         // Call the driver's create volume method 
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
@@ -1742,7 +1758,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let target_path = req.target_path.clone();
         let staging_target_path = req.staging_target_path.clone();
         
-        println!("📋 [NODE] Publishing volume {} to {}", volume_id, target_path);
+        // Check if this is an ephemeral volume
+        let is_ephemeral = req.volume_context.get("csi.storage.k8s.io/ephemeral")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        
+        if is_ephemeral {
+            println!("📦 [NODE] Publishing EPHEMERAL volume {} to {}", volume_id, target_path);
+        } else {
+            println!("📋 [NODE] Publishing volume {} to {}", volume_id, target_path);
+        }
         println!("📋 [NODE] Staging path: {}", staging_target_path);
 
         // Create target directory if it doesn't exist

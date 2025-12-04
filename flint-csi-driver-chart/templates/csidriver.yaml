@@ -9,4 +9,7 @@ spec:
   podInfoOnMount: true
   volumeLifecycleModes:
     - Persistent
+    {{- if .Values.driver.enableEphemeral }}
+    - Ephemeral
+    {{- end }}
   fsGroupPolicy: ReadWriteOnceWithFSType
