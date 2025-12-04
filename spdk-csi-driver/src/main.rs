@@ -453,7 +453,12 @@ impl MinimalControllerService {
             lvs_name.clone(),
         );
         
-        // Store source snapshot for reference (informational only)
+        // CRITICAL: Mark filesystem as initialized (clone has filesystem from snapshot)
+        // Without this, node can't distinguish SPDK block reuse from real filesystem
+        volume_context.insert(
+            "flint.csi.storage.io/filesystem-initialized".to_string(),
+            "true".to_string(),
+        );
         volume_context.insert(
             "flint.csi.storage.io/source-snapshot".to_string(),
             snapshot_id.to_string(),
@@ -461,8 +466,8 @@ impl MinimalControllerService {
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [SNAPSHOT_RESTORE] Volume context populated:");
+        eprintln!("   filesystem-initialized: true");
         eprintln!("   source-snapshot: {}", snapshot_id);
-        eprintln!("   Note: Node will auto-detect filesystem via blkid");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         // Step 4: Return volume with content_source and metadata populated
@@ -603,13 +608,15 @@ impl MinimalControllerService {
         volume_context.insert("flint.csi.storage.io/lvol-uuid".to_string(), clone_uuid.clone());
         volume_context.insert("flint.csi.storage.io/lvs-name".to_string(), lvs_name.clone());
         
-        // Store source volume for reference (informational only)
+        // CRITICAL: Mark filesystem as initialized (clone has filesystem from source PVC)
+        // Without this, node can't distinguish SPDK block reuse from real filesystem
+        volume_context.insert("flint.csi.storage.io/filesystem-initialized".to_string(), "true".to_string());
         volume_context.insert("flint.csi.storage.io/source-volume".to_string(), source_volume_id.to_string());
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [PVC_CLONE] Volume context populated:");
+        eprintln!("   filesystem-initialized: true");
         eprintln!("   source-volume: {}", source_volume_id);
-        eprintln!("   Note: Node will auto-detect filesystem via blkid");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         // Step 5: Return volume with content_source and metadata
@@ -1301,75 +1308,60 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             
             // UNIFIED CACHE CLEARING LOGIC
             // 
-            // STRATEGY (works for ALL volume types):
-            // STEP 1: ALWAYS clear kernel cache first (blockdev --flushbufs)
-            // STEP 2: Check REAL device state with blkid (after cache clear)
-            // STEP 3: Only run wipefs if NO filesystem detected
+            // CRITICAL: Must use filesystem-initialized attribute!
+            // blkid CANNOT distinguish:
+            // - SPDK block reuse (old corrupted signatures) vs
+            // - Real valid filesystem (clone/restage)
             //
-            // This naturally handles:
-            // - Brand new volumes: no filesystem → wipefs (clears SPDK block reuse)
-            // - Clones: has filesystem from snapshot → skip wipefs (preserves data)
-            // - Restaged volumes: has filesystem → skip wipefs (preserves data)
-            //
-            // No need for filesystem-initialized attribute!
+            // STRATEGY:
+            // - Clones (filesystem-initialized=true): blockdev only, skip wipefs
+            // - Regular volumes: ALWAYS wipefs (clears SPDK block reuse)
             //
             
             // Wait a moment for device to be ready
             std::thread::sleep(std::time::Duration::from_millis(300));
             
-            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("🧹 [CACHE_CLEAR] STEP 1: Flush kernel cache to see REAL device state");
-            eprintln!("   Device: {}", device_path);
-            eprintln!("   Volume: {}", volume_id);
-            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            
-            // STEP 1: ALWAYS flush cache first (critical - prevents seeing stale signatures)
-            let flush_result = std::process::Command::new("blockdev")
-                .arg("--flushbufs")
-                .arg(&device_path)
-                .output();
-            
-            match flush_result {
-                Ok(output) if output.status.success() => {
-                    eprintln!("✅ [CACHE_CLEAR] Kernel cache flushed successfully");
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("⚠️ [CACHE_CLEAR] Flush returned error (continuing): {}", stderr.trim());
-                }
-                Err(e) => {
-                    eprintln!("⚠️ [CACHE_CLEAR] Flush command failed (continuing): {}", e);
-                }
-            }
-            
-            // STEP 2: Check REAL device state (after cache clear)
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            
-            eprintln!("🔍 [CACHE_CLEAR] STEP 2: Checking REAL device state with blkid...");
-            let blkid_check = std::process::Command::new("blkid")
-                .arg(&device_path)
-                .output();
-            
-            let has_real_filesystem = blkid_check
-                .map(|output| {
-                    if output.status.success() {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        eprintln!("📁 [CACHE_CLEAR] ✅ Filesystem detected: {}", stdout.trim());
-                        true
-                    } else {
-                        eprintln!("📁 [CACHE_CLEAR] ✅ No filesystem found (brand new volume)");
-                        false
-                    }
-                })
+            // Check filesystem-initialized attribute
+            let fs_initialized = req.volume_context.get("flint.csi.storage.io/filesystem-initialized")
+                .map(|v| v == "true")
                 .unwrap_or(false);
             
-            // STEP 3: Decide based on REAL state
-            if !has_real_filesystem {
-                // No real filesystem - safe to wipefs (clears SPDK block reuse)
+            if fs_initialized {
+                // Clone/snapshot - only flush cache (preserve clone filesystem!)
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("🧹 [CACHE_CLEAR] STEP 3: Running WIPEFS (brand new volume)");
+                eprintln!("🧹 [CACHE_CLEAR] Clone/Snapshot - blockdev flush only");
                 eprintln!("   Device: {}", device_path);
-                eprintln!("   Reason: No filesystem detected - safe to clear SPDK block reuse");
+                eprintln!("   Volume: {}", volume_id);
+                eprintln!("   filesystem-initialized: true");
+                eprintln!("   Action: blockdev --flushbufs (preserves clone filesystem)");
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                
+                let flush_output = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
+                
+                match flush_output {
+                    Ok(output) if output.status.success() => {
+                        eprintln!("✅ [BLOCKDEV] Kernel cache flushed successfully");
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("⚠️ [BLOCKDEV] Flush error (continuing): {}", stderr.trim());
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ [BLOCKDEV] Flush failed (continuing): {}", e);
+                    }
+                }
+            } else {
+                // Regular volume - ALWAYS wipefs (clears SPDK block reuse + kernel cache)
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                eprintln!("🧹 [CACHE_CLEAR] Regular volume - wipefs");
+                eprintln!("   Device: {}", device_path);
+                eprintln!("   Volume: {}", volume_id);
+                eprintln!("   filesystem-initialized: false");
+                eprintln!("   Action: wipefs (clears SPDK block reuse + kernel cache)");
+                eprintln!("   Critical: Prevents mounting corrupted SPDK recycled blocks!");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 
                 let wipefs_output = std::process::Command::new("wipefs")
@@ -1382,10 +1374,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     Ok(output) if output.status.success() => {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         if !stdout.trim().is_empty() {
-                            eprintln!("🧹 [WIPEFS] Cleared stale signatures:");
+                            eprintln!("🧹 [WIPEFS] Cleared SPDK block reuse signatures:");
                             eprintln!("{}", stdout.trim());
                         } else {
-                            eprintln!("✅ [WIPEFS] Device was clean (no signatures to clear)");
+                            eprintln!("✅ [WIPEFS] Device was clean (no SPDK block reuse)");
                         }
                     }
                     Ok(output) => {
@@ -1398,14 +1390,6 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         eprintln!("⚠️ [WIPEFS] Command failed (continuing): {}", e);
                     }
                 }
-            } else {
-                // Has real filesystem - skip wipefs (preserve data!)
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                eprintln!("✅ [CACHE_CLEAR] STEP 3: SKIPPING wipefs - filesystem exists");
-                eprintln!("   Device: {}", device_path);
-                eprintln!("   Reason: Filesystem detected (clone/restage) - preserving data");
-                eprintln!("   Action: Cache already flushed, device ready for use");
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             }
             
             println!("🔍 [NODE] Checking filesystem state from lvol");
