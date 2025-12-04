@@ -1210,9 +1210,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);
         eprintln!("📦 [NODE_STAGE] Publish context keys: {:?}", publish_context.keys().collect::<Vec<_>>());
 
-        // Get volume type from publish context
-        let volume_type = publish_context.get("volumeType")
-            .ok_or_else(|| tonic::Status::invalid_argument("No volumeType in publish context"))?;
+        // For ephemeral volumes (attachRequired=false), publish_context is empty
+        // because ControllerPublishVolume is never called. Treat as local volume.
+        let volume_type = if publish_context.is_empty() {
+            println!("📦 [NODE_STAGE] Empty publish_context - treating as local ephemeral volume");
+            "local"
+        } else {
+            publish_context.get("volumeType")
+                .ok_or_else(|| tonic::Status::invalid_argument("No volumeType in publish context"))?
+        };
 
         let bdev_name = if volume_type == "multi-replica" {
             // MULTI-REPLICA: Create RAID 1 from replicas
@@ -1243,10 +1249,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
         } else if volume_type == "local" {
             // Local volume - bdev is the lvol UUID
-            let bdev = publish_context.get("bdevName")
-                .ok_or_else(|| tonic::Status::invalid_argument("No bdevName in publish context"))?;
-            println!("✅ [NODE] Local volume - using bdev: {}", bdev);
-            bdev.clone()
+            let bdev = if let Some(bdev_name) = publish_context.get("bdevName") {
+                // From ControllerPublishVolume
+                println!("✅ [NODE] Local volume - using bdev from publish_context: {}", bdev_name);
+                bdev_name.clone()
+            } else {
+                // Ephemeral volume (attachRequired=false) - get volume info directly
+                println!("📦 [NODE] Ephemeral volume - querying volume info");
+                let volume_info = self.driver.get_volume_info(&volume_id).await
+                    .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+                println!("✅ [NODE] Found ephemeral volume: node={}, lvol={}", 
+                         volume_info.node_name, volume_info.lvol_uuid);
+                volume_info.lvol_uuid
+            };
+            bdev
         } else if volume_type == "remote" {
             // Remote volume - need to connect to NVMe-oF target first
             println!("🌐 [NODE] Remote volume - connecting to NVMe-oF target");
