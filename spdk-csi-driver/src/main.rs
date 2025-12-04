@@ -1205,15 +1205,25 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         let publish_context = req.publish_context.clone();
+        let volume_context = req.volume_context.clone();
         
         eprintln!("📦 [NODE_STAGE] Volume ID: {}", volume_id);
         eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);
         eprintln!("📦 [NODE_STAGE] Publish context keys: {:?}", publish_context.keys().collect::<Vec<_>>());
 
+        // Check if this is an ephemeral volume
+        let is_ephemeral = volume_context.get("csi.storage.k8s.io/ephemeral")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        
+        if is_ephemeral {
+            println!("📦 [NODE_STAGE] Ephemeral volume detected (no PV exists)");
+        }
+
         // For ephemeral volumes (attachRequired=false), publish_context is empty
         // because ControllerPublishVolume is never called. Treat as local volume.
         let volume_type = if publish_context.is_empty() {
-            println!("📦 [NODE_STAGE] Empty publish_context - treating as local ephemeral volume");
+            println!("📦 [NODE_STAGE] Empty publish_context - treating as local volume");
             "local"
         } else {
             publish_context.get("volumeType")
@@ -1590,7 +1600,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     
                                     // CRITICAL: Update PV to mark filesystem as initialized
                                     // This prevents wipefs from running on future restaging
-                                    if !fs_initialized {
+                                    // Skip for ephemeral volumes (no PV exists)
+                                    if !fs_initialized && !is_ephemeral {
                                         println!("📝 [NODE] Updating PV to mark filesystem as initialized...");
                                         match self.driver.update_pv_filesystem_initialized(&volume_id).await {
                                             Ok(_) => {
@@ -1601,6 +1612,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                                 println!("   Volume will work but wipefs may run on next restaging");
                                             }
                                         }
+                                    } else if is_ephemeral {
+                                        println!("ℹ️ [NODE] Skipping PV update (ephemeral volume - no PV exists)");
                                     }
                                 }
                                 
