@@ -23,7 +23,7 @@ spec:
         - -c
         - |
           cat /data/test-file.txt
-          sleep 20
+          sleep 3600
       volumeMounts:
         - name: data
           mountPath: /data
@@ -59,7 +59,7 @@ spec:
         - -c
         - |
           cat /data/test-file.txt
-          sleep 20
+          sleep 3600
       volumeMounts:
         - name: data
           mountPath: /data
