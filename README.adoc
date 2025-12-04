@@ -1,137 +1,258 @@
-= Node Preparation
+= Flint CSI Driver
+:toc:
+:toclevels: 2
 
-// Enable hugepages (required for SPDK)
+Kubernetes CSI driver providing high-performance local storage using SPDK (Storage Performance Development Kit) with multi-replica support, snapshots, and volume cloning.
+
+== Prerequisites
+
+=== Hardware Requirements
+
+Each worker node must have:
+
+* **Additional disk(s)** separate from the root filesystem
+** These disks will be dedicated to SPDK for volume storage
+** NVMe devices recommended for best performance
+** Example: `/dev/nvme1n1`, `/dev/sdb`, etc.
+* **2GB+ RAM** for hugepages (1024 pages of 2MB each)
+
+⚠️ **IMPORTANT**: The root filesystem disk cannot be used by SPDK. You must have at least one additional disk per node.
+
+=== Software Requirements
+
+* **Kubernetes cluster** (1.21+) with kubectl access
+* **Helm 3** installed locally
+* **KUBECONFIG** pointing to your cluster
+* **ublk kernel module** loaded on all worker nodes:
++
 [source,bash]
 ----
-echo 'vm.nr_hugepages=1024' >> /etc/sysctl.conf
-sysctl -p
+# Load kernel module on each node
+sudo modprobe ublk_drv
+
+# Make it persistent across reboots
+echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
 ----
 
-// Load required kernel modules
+== Installation
+
+=== 1. Set Your Kubeconfig
+
 [source,bash]
 ----
-modprobe vfio-pci
-modprobe uio_pci_generic
+export KUBECONFIG=/path/to/your/kubeconfig
 ----
 
-// Ensure NVMe devices are available
+=== 2. Update Helm Chart Values
+
+Edit `flint-csi-driver-chart/values.yaml` and configure:
+
+[source,yaml]
+----
+images:
+  repository: docker-sandbox.infra.cloudera.com/ddalton  # Your container registry
+  flintCsiDriver:
+    tag: latest
+  spdkTarget:
+    tag: latest
+
+dashboard:
+  enabled: true  # Enable web UI for disk management
+  frontend:
+    tag: latest
+----
+
+=== 3. Install via Helm
+
 [source,bash]
 ----
-lspci | grep -i nvme
+helm install flint-csi ./flint-csi-driver-chart \
+  --namespace flint-system \
+  --create-namespace
 ----
 
-= Component Responsibilities
-== Controller (Deployment)
+=== 4. Verify Installation
 
-┌─────────────────────────────────────┐
-│            Controller               │
-│  ┌─────────────────────────────────┐│
-│  │     Volume Management           ││
-│  │  • CreateVolume/DeleteVolume    ││
-│  │  • RAID configuration           ││
-│  │  • Replica scheduling           ││
-│  └─────────────────────────────────┘│
-│  ┌─────────────────────────────────┐│
-│  │     Health & Rebuild            ││
-│  │  • Replica health monitoring    ││
-│  │  • Rebuild orchestration        ││
-│  │  • Failure detection            ││
-│  └─────────────────────────────────┘│
-└─────────────────────────────────────┘
+[source,bash]
+----
+# Check all pods are running
+kubectl get pods -n flint-system
 
-== Node Agent (DaemonSet)
+# Verify CSI driver registration
+kubectl get csidrivers flint.csi.storage.io
 
-┌─────────────────────────────────────┐
-│           Node Agent                │
-│  ┌─────────────────────────────────┐│
-│  │     Device Discovery            ││
-│  │  • NVMe device detection        ││
-│  │  • SPDK attachment              ││
-│  │  • Capacity reporting           ││
-│  └─────────────────────────────────┘│
-│  ┌─────────────────────────────────┐│
-│  │     Local Management            ││
-│  │  • Blobstore initialization     ││
-│  │  • Health monitoring            ││
-│  │  • I/O statistics               ││
-│  └─────────────────────────────────┘│
-└─────────────────────────────────────┘
+# Check storage class
+kubectl get storageclass flint
+----
 
-Communication Flow
-Discovery Process
-Node Agent → Local SPDK → SpdkDisk CRD → Controller
-     ↓
-1. Discover NVMe devices via lspci/SPDK RPC
-2. Create/update SpdkDisk resources in Kubernetes
-3. Controller watches SpdkDisk changes
-4. Controller uses discovered disks for volume operations
-Volume Operations
-CSI Request → Controller → SpdkDisk CRDs → Volume Creation
-                ↓
-1. Controller receives CSI volume request
-2. Queries available SpdkDisk resources
-3. Selects optimal disks based on criteria
-4. Creates RAID configuration using selected disks
-Implementation Details
-Node Agent Capabilities
+Expected output:
+----
+NAME                           READY   STATUS    RESTARTS   AGE
+flint-csi-controller-xxx       7/7     Running   0          2m
+flint-csi-node-xxx             3/3     Running   0          2m
+flint-dashboard-xxx            2/2     Running   0          2m
+----
 
-Hardware Discovery: Direct access to PCI devices and sysfs
-SPDK Integration: Local RPC communication with SPDK daemon
-Resource Management: Creates/updates Kubernetes CRDs
-Health Monitoring: Real-time device health and performance metrics
+== Disk Setup
 
-Controller Capabilities
+After installation, initialize your SPDK disks using the web dashboard:
 
-Volume Orchestration: Manages volume lifecycle across nodes
-Replica Management: Handles RAID configuration and rebuilds
-Policy Enforcement: Applies placement and redundancy policies
-Global Monitoring: Cluster-wide health and performance tracking
+=== 1. Access the Dashboard
 
-Deployment Topology
+[source,bash]
+----
+# Port-forward to access the dashboard
+kubectl port-forward -n flint-system svc/flint-dashboard 3000:3000
 
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                       │
-│                                                             │
-│  ┌─────────────────┐     ┌─────────────────────────────────┐│
-│  │   Controller    │────▶│         SpdkDisk CRDs           ││
-│  │  (Deployment)   │     │     (Cluster Resource)          ││
-│  └─────────────────┘     └─────────────────────────────────┘│
-│           │                              ▲                  │
-│           │                              │                  │
-│           ▼                              │                  │
-│  ┌─────────────────────────────────────────────────────────┐│
-│  │                Node Agent DaemonSet                     ││
-│  │                                                         ││
-│  │  Node 1          Node 2          Node 3                 ││
-│  │ ┌─────────┐     ┌─────────┐     ┌─────────┐             ││
-│  │ │Agent+CSI│     │Agent+CSI│     │Agent+CSI│             ││
-│  │ │  SPDK   │     │  SPDK   │     │  SPDK   │             ││
-│  │ │ NVMe    │     │ NVMe    │     │ NVMe    │             ││
-│  │ └─────────┘     └─────────┘     └─────────┘             ││
-│  └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
+# Open in browser
+open http://localhost:3000
+----
 
-= UI application
+=== 2. Initialize Disks
 
-npm create vite@latest spdk-dashboard -- --template react-ts
+1. Navigate to the **"Disk Setup"** tab in the dashboard
+2. View all discovered disks on your nodes
+3. Select the disks you want to use for storage
+4. Click **"Initialize"** to prepare them for SPDK
+   ** This creates a blobstore on each disk
+   ** The disk will be formatted (all data will be lost)
+5. Verify disks show as **"Ready"** status
 
-cd spdk-dashboard
+⚠️ **WARNING**: Initializing a disk will erase all existing data on it.
 
-# Install the base dependencies
-npm install
+== Usage
 
-# Install the additional libraries your dashboard needs
-npm install recharts lucide-react
+=== Create a Persistent Volume Claim
 
-# Install Tailwind CSS
-npm install -D tailwindcss postcss autoprefixer
+[source,yaml]
+----
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: flint
+  resources:
+    requests:
+      storage: 10Gi
+----
 
-npm uninstall tailwindcss
-npm install -D tailwindcss@^3.4.0
+[source,bash]
+----
+kubectl apply -f my-pvc.yaml
+kubectl get pvc my-pvc
+----
 
+=== Use in a Pod
 
-~/Documents/spdk-dashboard/src/App.tsx
+[source,yaml]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: my-pvc
+----
 
-npm run dev
+== Features
 
+* **High Performance**: SPDK userspace I/O eliminates kernel overhead
+* **Multi-Replica Volumes**: Configure 2+ replicas for high availability
+* **Volume Snapshots**: Create snapshots and restore from them
+* **Volume Cloning**: Clone existing volumes for fast copies
+* **Volume Expansion**: Expand volumes online without downtime
+* **Ephemeral Volumes**: CSI inline volumes for temporary storage
+* **Web Dashboard**: Visual management and monitoring
 
+== Testing
+
+Run the comprehensive test suite:
+
+[source,bash]
+----
+cd tests/system
+
+# Run all standard tests (parallel execution)
+KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml
+
+# Or run individual tests
+kubectl kuttl test --test rwo-pvc-migration
+kubectl kuttl test --test multi-replica
+kubectl kuttl test --test snapshot-restore
+kubectl kuttl test --test volume-expansion
+kubectl kuttl test --test pvc-clone
+kubectl kuttl test --test ephemeral-inline
+----
+
+See link:tests/system/README.md[tests/system/README.md] for details.
+
+== Troubleshooting
+
+=== Pods Stuck in Pending
+
+Check if CSI driver pods are running:
+[source,bash]
+----
+kubectl get pods -n flint-system
+kubectl logs -n flint-system -l app=flint-csi-node --tail=50
+----
+
+=== Volumes Not Mounting
+
+Verify disks are initialized:
+[source,bash]
+----
+# Check dashboard or query nodes directly
+kubectl exec -n flint-system flint-csi-node-xxx -c flint-csi-driver -- \
+  curl localhost:8081/api/disks/list
+----
+
+=== UBLK Module Not Loaded
+
+If you see "No such device" errors:
+[source,bash]
+----
+# Load on all worker nodes
+ssh <node> 'sudo modprobe ublk_drv && lsmod | grep ublk'
+
+# Restart CSI driver pods after loading module
+kubectl delete pods -n flint-system -l app=flint-csi-node
+----
+
+== Uninstallation
+
+[source,bash]
+----
+# Delete all PVCs using Flint first
+kubectl delete pvc --all -A
+
+# Uninstall Helm release
+helm uninstall flint-csi -n flint-system
+
+# Optional: Delete namespace
+kubectl delete namespace flint-system
+----
+
+== Architecture
+
+For detailed architecture documentation, see link:FLINT_CSI_ARCHITECTURE.md[FLINT_CSI_ARCHITECTURE.md].
+
+== Multi-Replica Setup
+
+For high availability configuration, see link:MULTI_REPLICA_QUICKSTART.md[MULTI_REPLICA_QUICKSTART.md].
+
+== License
+
+Copyright © 2024 Cloudera, Inc.
