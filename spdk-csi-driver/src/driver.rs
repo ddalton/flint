@@ -1061,19 +1061,18 @@ impl SpdkCsiDriver {
     }
 
     /// Update PV to mark filesystem as initialized (after formatting)
+    /// Uses annotations (mutable) instead of volumeAttributes (immutable)
     pub async fn update_pv_filesystem_initialized(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::{Api, api::Patch, api::PatchParams};
         
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
         
-        // Update the PV's volumeAttributes
+        // Use annotations (mutable) instead of spec (immutable)
         let patch = serde_json::json!({
-            "spec": {
-                "csi": {
-                    "volumeAttributes": {
-                        "flint.csi.storage.io/filesystem-initialized": "true"
-                    }
+            "metadata": {
+                "annotations": {
+                    "flint.csi.storage.io/filesystem-initialized": "true"
                 }
             }
         });
@@ -1081,6 +1080,25 @@ impl SpdkCsiDriver {
         pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
         
         Ok(())
+    }
+
+    /// Check if PV has filesystem-initialized annotation
+    pub async fn check_pv_filesystem_initialized(&self, volume_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        
+        match pvs.get(volume_id).await {
+            Ok(pv) => {
+                let initialized = pv.metadata.annotations
+                    .and_then(|annot| annot.get("flint.csi.storage.io/filesystem-initialized").cloned())
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                Ok(initialized)
+            }
+            Err(_) => Ok(false)
+        }
     }
 
     /// Parse Kubernetes quantity string (e.g., "1Gi", "500Mi") to bytes

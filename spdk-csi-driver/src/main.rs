@@ -1321,10 +1321,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // Wait a moment for device to be ready
             std::thread::sleep(std::time::Duration::from_millis(300));
             
-            // Check filesystem-initialized attribute
-            let fs_initialized = req.volume_context.get("flint.csi.storage.io/filesystem-initialized")
+            // Check filesystem-initialized from volume_context (clones) OR PV annotations (regular volumes)
+            let fs_initialized_from_context = req.volume_context.get("flint.csi.storage.io/filesystem-initialized")
                 .map(|v| v == "true")
                 .unwrap_or(false);
+            
+            // Also check PV annotations (set after formatting regular volumes)
+            let fs_initialized_from_pv = self.driver.check_pv_filesystem_initialized(&volume_id).await.unwrap_or(false);
+            
+            let fs_initialized = fs_initialized_from_context || fs_initialized_from_pv;
+            
+            if fs_initialized {
+                eprintln!("✅ [WIPEFS_CHECK] filesystem-initialized detected");
+                eprintln!("   From volume_context: {}", fs_initialized_from_context);
+                eprintln!("   From PV annotations: {}", fs_initialized_from_pv);
+            } else {
+                eprintln!("🆕 [WIPEFS_CHECK] Brand new volume (no filesystem-initialized marker)");
+            }
             
             if fs_initialized {
                 // Filesystem exists (clone/snapshot/previously formatted) - only flush cache
