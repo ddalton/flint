@@ -1050,6 +1050,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             volume_context: req.volume_context.clone(),
             volume_capabilities: req.volume_capabilities.clone(),
             parameters: req.parameters.clone(),
+            mutable_parameters: req.mutable_parameters.clone(),
         });
         
         println!("✅ [CONTROLLER] Volume capabilities validated successfully");

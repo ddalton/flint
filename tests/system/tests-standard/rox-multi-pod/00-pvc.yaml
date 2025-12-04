@@ -5,7 +5,6 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-    - ReadOnlyMany  # Declare support for both RWO and ROX
   storageClassName: flint
   resources:
     requests:
