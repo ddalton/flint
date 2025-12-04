@@ -1060,6 +1060,29 @@ impl SpdkCsiDriver {
         Err("PV not found".into())
     }
 
+    /// Update PV to mark filesystem as initialized (after formatting)
+    pub async fn update_pv_filesystem_initialized(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::{Api, api::Patch, api::PatchParams};
+        
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        
+        // Update the PV's volumeAttributes
+        let patch = serde_json::json!({
+            "spec": {
+                "csi": {
+                    "volumeAttributes": {
+                        "flint.csi.storage.io/filesystem-initialized": "true"
+                    }
+                }
+            }
+        });
+        
+        pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        
+        Ok(())
+    }
+
     /// Parse Kubernetes quantity string (e.g., "1Gi", "500Mi") to bytes
     fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let quantity_str = quantity_str.trim();
