@@ -60,15 +60,13 @@ impl MinimalDiskService {
                 // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
                 
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
-                    println!("🔧 [DEBUG] Created DiskInfo: name={}, pci={}, healthy={}", disk_info.device_name, disk_info.pci_address, disk_info.healthy);
+                    // Note: Per-disk details not logged (verbose). Summary logged at end.
                     
                     // Filter out system disks and non-storage devices
                     if self.is_storage_disk(&disk_info).await? {
-                        println!("✅ [DEBUG] Added disk to list: {}", disk_info.device_name);
                         disks.push(disk_info);
-                    } else {
-                        println!("❌ [DEBUG] Filtered out disk: {}", disk_info.device_name);
                     }
+                    // Note: Filtered disks not logged (normal filtering)
                 } else {
                     // Note: Skipped bdev (lvol, not physical storage) - not logged to reduce noise
                 }
