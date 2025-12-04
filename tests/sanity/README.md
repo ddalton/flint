@@ -76,11 +76,38 @@ The Flint driver should pass:
 
 ## Known Limitations
 
+### Split Controller/Node Architecture
+
+Flint uses a **split deployment** model:
+- **Controller pod**: Identity + Controller services (separate gRPC socket)
+- **Node pods**: Identity + Node services (per-node gRPC socket)
+
+**CSI Sanity expects all three services on ONE socket**, making full suite testing challenging.
+
+### Alternatives for Testing:
+
+1. **KUTTL Integration Tests** ✅ (Recommended)
+   - Complete end-to-end testing in real Kubernetes
+   - Tests: `tests/system/tests-standard/`
+   - Covers: PVC, ephemeral, snapshots, cloning, expansion, multi-replica
+
+2. **Per-Service CSI Sanity Testing** (Partial)
+   - Test Controller service separately
+   - Test Node service separately  
+   - Some cross-service tests won't work
+
+3. **Custom Test Mode** (Future)
+   - Run driver in "combined" mode for testing only
+   - Single socket with all three services
+
+### Test Limitations:
+
 Some tests may be skipped or fail due to Flint-specific constraints:
 
 1. **Topology tests**: Requires specific cluster configuration
-2. **Access mode tests**: RWX not yet fully supported
+2. **Access mode tests**: RWX not yet fully supported  
 3. **Volume cloning**: Requires source volume to exist
+4. **Group snapshots**: Not implemented
 
 ## Interpreting Results
 

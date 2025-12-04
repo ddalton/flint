@@ -18,7 +18,14 @@ spec:
         echo "==================================================================="
         echo "Installing csi-sanity test suite..."
         echo "==================================================================="
-        go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest
+        
+        # Clone and build csi-test from source
+        cd /tmp
+        git clone --depth 1 https://github.com/kubernetes-csi/csi-test.git
+        cd csi-test/cmd/csi-sanity
+        go build -o /usr/local/bin/csi-sanity .
+        
+        echo "✅ csi-sanity built and installed to /usr/local/bin/csi-sanity"
         
         echo ""
         echo "==================================================================="
@@ -38,10 +45,18 @@ spec:
         echo "✅ CSI socket found"
         echo ""
         
-        # Run sanity tests
+        echo "✅ csi-sanity ready"
+        echo ""
+        
+        # Clean up any previous test directories
+        rm -rf /tmp/sanity-staging /tmp/sanity-mount
         mkdir -p /tmp/sanity-staging /tmp/sanity-mount
         
-        /root/go/bin/csi-sanity \
+        echo "✅ Test directories created"
+        echo ""
+        
+        # Run sanity tests
+        csi-sanity \
           --csi.endpoint=unix:///csi/csi.sock \
           --csi.stagingdir=/tmp/sanity-staging \
           --csi.mountdir=/tmp/sanity-mount \
