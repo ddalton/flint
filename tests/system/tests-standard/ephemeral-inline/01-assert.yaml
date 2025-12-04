@@ -7,17 +7,19 @@ commands:
       kubectl wait --for=condition=Ready pod/ephemeral-test-pod --timeout=120s || true
       
       # Check pod status
-      POD_STATUS=$(kubectl get pod ephemeral-test-pod -o jsonpath='{.status.phase}')
+      POD_STATUS=$(kubectl get pod ephemeral-test-pod -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
       echo "Pod status: $POD_STATUS"
       
       if [ "$POD_STATUS" = "Running" ] || [ "$POD_STATUS" = "Succeeded" ]; then
         echo "✅ Pod is running/succeeded"
+      elif [ "$POD_STATUS" = "NotFound" ]; then
+        echo "ℹ️ Pod not found yet, will wait..."
       else
         echo "⚠️ Pod status: $POD_STATUS"
         echo "Pod events:"
-        kubectl describe pod ephemeral-test-pod | tail -30
+        kubectl describe pod ephemeral-test-pod 2>/dev/null | tail -30 || echo "Pod not found"
         echo "Pod logs:"
-        kubectl logs ephemeral-test-pod || echo "No logs available yet"
+        kubectl logs ephemeral-test-pod 2>/dev/null || echo "No logs available yet"
       fi
       
       # Wait for pod to complete
