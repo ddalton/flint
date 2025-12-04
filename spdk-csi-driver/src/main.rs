@@ -1805,16 +1805,94 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
         }
 
-        // Determine if this is a filesystem or block volume
-        let is_block_volume = if let Some(volume_capability) = req.volume_capability {
+        // Determine if this is a filesystem or block volume  
+        let is_block_volume = if let Some(ref volume_capability) = req.volume_capability {
             matches!(volume_capability.access_type, 
                 Some(spdk_csi_driver::csi::volume_capability::AccessType::Block(_)))
         } else {
             false // Default to filesystem
         };
 
-        if is_block_volume {
-            // Block volume - bind mount the device directly
+        // Check if staging was skipped (happens with attachRequired=false for ephemeral volumes)
+        let staging_skipped = staging_target_path.is_empty();
+        
+        if staging_skipped {
+            // EPHEMERAL VOLUME: No staging - mount directly
+            println!("📦 [NODE] No staging path - ephemeral volume, mounting directly");
+            
+            // For ephemeral volumes, NodeStageVolume is not called, so we need to:
+            // 1. Get volume info
+            // 2. Create ublk device  
+            // 3. Format filesystem
+            // 4. Mount to target
+            
+            let volume_info = self.driver.get_volume_info(&volume_id).await
+                .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+            
+            let ublk_id = self.driver.generate_ublk_id(&volume_id);
+            println!("📦 [NODE] Creating ublk device {} for lvol {}", ublk_id, volume_info.lvol_uuid);
+            
+            // Create ublk device
+            self.driver.create_ublk_device(&volume_info.lvol_uuid, ublk_id).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to create ublk device: {}", e)))?;
+            
+            let device_path = format!("/dev/ublkb{}", ublk_id);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            
+            if is_block_volume {
+                // Block mode - bind mount device
+                println!("📋 [NODE] Ephemeral block volume - bind mounting {}", device_path);
+                let mount_output = std::process::Command::new("mount")
+                    .args(["--bind", &device_path, &target_path])
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
+                
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
+                }
+            } else {
+                // Filesystem mode - format and mount
+                let fs_type = req.volume_capability
+                    .as_ref()
+                    .and_then(|vc| {
+                        if let Some(spdk_csi_driver::csi::volume_capability::AccessType::Mount(ref m)) = vc.access_type {
+                            Some(m.fs_type.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "ext4".to_string());
+                
+                println!("📦 [NODE] Formatting ephemeral volume with {}", fs_type);
+                
+                // Format the device
+                let format_cmd = format!("mkfs.{}", fs_type);
+                let format_output = std::process::Command::new(&format_cmd)
+                    .arg(&device_path)
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to format: {}", e)))?;
+                
+                if !format_output.status.success() {
+                    let error = String::from_utf8_lossy(&format_output.stderr);
+                    return Err(tonic::Status::internal(format!("Format failed: {}", error)));
+                }
+                
+                println!("✅ [NODE] Device formatted, mounting to {}", target_path);
+                
+                // Mount directly to target
+                let mount_output = std::process::Command::new("mount")
+                    .args([&device_path, &target_path])
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
+                
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
+                }
+            }
+        } else if is_block_volume {
+            // WITH STAGING: Block volume - bind mount the device directly
             let ublk_id = self.driver.generate_ublk_id(&volume_id);
             let device_path = format!("/dev/ublkb{}", ublk_id);
             
@@ -1836,7 +1914,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
             }
         } else {
-            // Filesystem volume - bind mount from staging path
+            // WITH STAGING: Filesystem volume - bind mount from staging path
             println!("📋 [NODE] Filesystem volume - bind mounting staging path to target");
             
             // Verify staging path exists and is mounted
