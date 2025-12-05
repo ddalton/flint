@@ -116,16 +116,34 @@ async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
 }
 
 /// Handle a TCP connection
-async fn handle_tcp_connection(mut stream: TcpStream, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 65536];
+/// 
+/// Performance optimizations:
+/// - Uses BufWriter to batch writes and reduce syscalls
+/// - Uses BytesMut for zero-copy buffer reuse
+/// - Avoids unnecessary flushes (let BufWriter and OS handle batching)
+async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
+    use bytes::BytesMut;
+    use tokio::io::BufWriter;
+    
+    // Set TCP_NODELAY to reduce latency for small messages
+    // This is important for NFS since many operations are small
+    stream.set_nodelay(true)?;
+    
+    // Split stream for independent reading and buffered writing
+    let (reader, writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
+    let mut writer = BufWriter::with_capacity(128 * 1024, writer);
+    
+    // Reusable buffer for requests - avoids allocations
+    let mut buf = BytesMut::with_capacity(128 * 1024);
     
     loop {
         // Read RPC record marker (4 bytes: 1 bit last-fragment + 31 bits length)
         let mut marker_buf = [0u8; 4];
-        match stream.read_exact(&mut marker_buf).await {
+        match reader.read_exact(&mut marker_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Connection closed
+                // Connection closed gracefully
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -135,23 +153,40 @@ async fn handle_tcp_connection(mut stream: TcpStream, fs: Arc<LocalFilesystem>) 
         let _is_last = (marker & 0x80000000) != 0;
         let length = (marker & 0x7FFFFFFF) as usize;
         
-        if length > buf.len() {
-            buf.resize(length, 0);
+        // Prevent oversized allocations (DoS protection)
+        if length > 4 * 1024 * 1024 {
+            warn!("Rejecting oversized RPC message: {} bytes", length);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RPC message too large",
+            ));
         }
         
-        // Read RPC message
-        stream.read_exact(&mut buf[..length]).await?;
+        // Ensure capacity and read message
+        buf.clear();
+        buf.reserve(length);
+        unsafe { buf.set_len(length); }
+        reader.read_exact(&mut buf[..length]).await?;
         
-        // Process the RPC call
-        let request = Bytes::copy_from_slice(&buf[..length]);
+        // Zero-copy: split off the request bytes
+        let request = buf.split().freeze();
+        
+        // Process the RPC call (async, may take time)
         let reply = dispatch(request, fs.clone()).await;
         
-        // Send reply with record marker
+        // Write reply with record marker
         let reply_len = reply.len() as u32;
         let reply_marker = 0x80000000 | reply_len; // Last fragment + length
-        stream.write_all(&reply_marker.to_be_bytes()).await?;
-        stream.write_all(&reply).await?;
-        stream.flush().await?;
+        writer.write_all(&reply_marker.to_be_bytes()).await?;
+        writer.write_all(&reply).await?;
+        
+        // CRITICAL: Don't flush after every request!
+        // BufWriter will batch writes for better performance
+        // The OS TCP stack will also handle Nagle's algorithm
+        // Only flush on connection close (which happens automatically)
+        //
+        // If you need lower latency at cost of throughput, enable TCP_NODELAY
+        // and/or add periodic flushes
     }
 }
 

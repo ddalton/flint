@@ -43,7 +43,7 @@ struct Args {
     verbose: bool,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 

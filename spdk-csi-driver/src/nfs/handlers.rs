@@ -308,10 +308,16 @@ pub async fn handle_write(
             // Count of bytes written
             enc.encode_u32(written);
             
-            // How data was committed (FILE_SYNC = 2, data is stable)
-            enc.encode_u32(2);
+            // How data was committed:
+            // UNSTABLE = 0: data in cache, needs COMMIT (BEST PERFORMANCE)
+            // DATA_SYNC = 1: data committed, metadata may not be
+            // FILE_SYNC = 2: both data and metadata committed
+            // 
+            // We return UNSTABLE for maximum performance - client will call COMMIT
+            enc.encode_u32(0);
             
             // Write verifier (for detecting server reboots)
+            // TODO: Use actual server boot time or persistent counter
             enc.encode_u64(0);
             
             reply.finish()
@@ -783,8 +789,8 @@ pub async fn handle_readdirplus(
     
     debug!("READDIRPLUS: cookie={}, maxcount={}", cookie, maxcount);
     
-    // Read directory
-    match fs.readdir(&dir_handle, cookie, maxcount).await {
+    // Read directory with handles (optimized - avoids N extra lookup calls)
+    match fs.readdir_plus(&dir_handle, cookie, maxcount).await {
         Ok(entries) => {
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
@@ -799,7 +805,8 @@ pub async fn handle_readdirplus(
             enc.encode_u64(0);
             
             // Encode entries with file handles and attributes
-            for entry in &entries {
+            // PERFORMANCE: Using readdir_plus() avoids N extra lookup() syscalls
+            for (entry, child_fh) in &entries {
                 enc.encode_bool(true); // value_follows
                 
                 // File ID
@@ -820,18 +827,9 @@ pub async fn handle_readdirplus(
                 }
                 
                 // Name handle (optional - we provide it)
-                // Look up the child to get its file handle
-                match fs.lookup(&dir_handle, &entry.name).await {
-                    Ok((child_fh, _)) => {
-                        debug!("READDIRPLUS: Got handle for {}", entry.name);
-                        enc.encode_bool(true);
-                        child_fh.encode(enc);
-                    }
-                    Err(e) => {
-                        warn!("READDIRPLUS: Failed to get handle for {}: {}", entry.name, e);
-                        enc.encode_bool(false);
-                    }
-                }
+                // Already obtained from readdir_plus(), no extra syscall needed!
+                enc.encode_bool(true);
+                child_fh.encode(enc);
             }
             enc.encode_bool(false); // no more entries
             
