@@ -641,6 +641,109 @@ pub async fn handle_readdir(
     }
 }
 
+/// Handle READDIRPLUS procedure (Procedure 17)
+/// RFC 1813 Section 3.3.17 - Like READDIR but also returns file handles and attributes
+pub async fn handle_readdirplus(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS READDIRPLUS");
+    
+    // Decode directory handle
+    let dir_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode cookie (resume point)
+    let cookie = match dec.decode_u64() {
+        Ok(c) => c,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode cookie verifier (we ignore for simplicity)
+    let _cookieverf = match dec.decode_u64() {
+        Ok(c) => c,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode dircount (max directory bytes)
+    let _dircount = match dec.decode_u32() {
+        Ok(c) => c,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode maxcount (max response bytes including attributes)
+    let maxcount = match dec.decode_u32() {
+        Ok(c) => c,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    debug!("READDIRPLUS: cookie={}, maxcount={}", cookie, maxcount);
+    
+    // Read directory
+    match fs.readdir(&dir_handle, cookie, maxcount).await {
+        Ok(entries) => {
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // Directory attributes (optional, we skip)
+            enc.encode_bool(false);
+            
+            // Cookie verifier
+            enc.encode_u64(0);
+            
+            // Encode entries with file handles and attributes
+            for entry in &entries {
+                enc.encode_bool(true); // value_follows
+                
+                // File ID
+                enc.encode_u64(entry.fileid);
+                
+                // Name
+                enc.encode_string(&entry.name);
+                
+                // Cookie
+                enc.encode_u64(entry.cookie);
+                
+                // Name attributes (optional - we provide them)
+                if let Some(ref attr) = entry.attr {
+                    enc.encode_bool(true);
+                    attr.encode(enc);
+                } else {
+                    enc.encode_bool(false);
+                }
+                
+                // Name handle (optional - we provide it)
+                // Look up the child to get its file handle
+                if let Ok((child_fh, _)) = fs.lookup(&dir_handle, &entry.name).await {
+                    enc.encode_bool(true);
+                    child_fh.encode(enc);
+                } else {
+                    enc.encode_bool(false);
+                }
+            }
+            enc.encode_bool(false); // no more entries
+            
+            // EOF (true if all entries returned)
+            enc.encode_bool(true);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("READDIRPLUS failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
 /// Handle FSSTAT procedure (Procedure 18)
 /// RFC 1813 Section 3.3.18
 pub async fn handle_fsstat(

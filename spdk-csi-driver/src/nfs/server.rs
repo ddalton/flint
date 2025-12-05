@@ -255,6 +255,7 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
         Some(Procedure::Remove) => handlers::handle_remove(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Rmdir) => handlers::handle_rmdir(fs.clone(), &call, &mut dec).await,
         Some(Procedure::ReadDir) => handlers::handle_readdir(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::ReadDirPlus) => handlers::handle_readdirplus(fs.clone(), &call, &mut dec).await,
         Some(Procedure::FsStat) => handlers::handle_fsstat(fs.clone(), &call, &mut dec).await,
         Some(Procedure::FsInfo) => handlers::handle_fsinfo(fs.clone(), &call, &mut dec).await,
         Some(Procedure::PathConf) => handlers::handle_pathconf(fs, &call, &mut dec).await,

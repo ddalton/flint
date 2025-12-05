@@ -48,6 +48,7 @@ impl Procedure {
             12 => Some(Self::Remove),
             13 => Some(Self::Rmdir),
             16 => Some(Self::ReadDir),
+            17 => Some(Self::ReadDirPlus),
             18 => Some(Self::FsStat),
             19 => Some(Self::FsInfo),
             20 => Some(Self::PathConf),
