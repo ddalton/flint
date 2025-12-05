@@ -280,6 +280,184 @@ impl LocalFilesystem {
     pub fn fsinfo(&self) -> FsInfo {
         FsInfo::default_config()
     }
+    
+    /// Set file mode (permissions)
+    pub async fn setattr_mode(&self, fh: &FileHandle, mode: u32) -> io::Result<()> {
+        let path = self.resolve(fh)?;
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            tokio::fs::set_permissions(&path, perms).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Rename a file or directory
+    pub async fn rename(
+        &self,
+        from_dir: &FileHandle,
+        from_name: &str,
+        to_dir: &FileHandle,
+        to_name: &str,
+    ) -> io::Result<()> {
+        let from_dir_path = self.resolve(from_dir)?;
+        let to_dir_path = self.resolve(to_dir)?;
+        
+        let from_path = from_dir_path.join(from_name);
+        let to_path = to_dir_path.join(to_name);
+        
+        // Validate both paths are within export
+        if !from_path.starts_with(&self.root) || !to_path.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Path traversal attempt",
+            ));
+        }
+        
+        fs::rename(&from_path, &to_path).await
+    }
+    
+    /// Commit data to stable storage (fsync)
+    pub async fn commit(&self, fh: &FileHandle) -> io::Result<()> {
+        let path = self.resolve(fh)?;
+        
+        // Open and sync the file
+        let file = fs::File::open(&path).await?;
+        file.sync_all().await?;
+        
+        Ok(())
+    }
+    
+    /// Create a symbolic link
+    pub async fn symlink(
+        &self,
+        dir_fh: &FileHandle,
+        name: &str,
+        target: &str,
+    ) -> io::Result<(FileHandle, FileAttr)> {
+        let dir_path = self.resolve(dir_fh)?;
+        let link_path = dir_path.join(name);
+        
+        // Validate path
+        if !link_path.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Path traversal attempt",
+            ));
+        }
+        
+        // Create symlink
+        #[cfg(unix)]
+        tokio::fs::symlink(target, &link_path).await?;
+        
+        #[cfg(not(unix))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Symlinks not supported on this platform",
+        ));
+        
+        // Get file handle and attributes
+        let fh = self.handle_cache.lookup_child(dir_fh, name)?;
+        let attr = self.getattr(&fh).await?;
+        
+        Ok((fh, attr))
+    }
+    
+    /// Read a symbolic link target
+    pub async fn readlink(&self, fh: &FileHandle) -> io::Result<String> {
+        let path = self.resolve(fh)?;
+        
+        let target = fs::read_link(&path).await?;
+        Ok(target.to_string_lossy().to_string())
+    }
+    
+    /// Create a hard link
+    pub async fn link(
+        &self,
+        file_fh: &FileHandle,
+        dir_fh: &FileHandle,
+        name: &str,
+    ) -> io::Result<FileAttr> {
+        let file_path = self.resolve(file_fh)?;
+        let dir_path = self.resolve(dir_fh)?;
+        let link_path = dir_path.join(name);
+        
+        // Validate path
+        if !link_path.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Path traversal attempt",
+            ));
+        }
+        
+        // Create hard link
+        fs::hard_link(&file_path, &link_path).await?;
+        
+        // Return updated attributes of the original file
+        self.getattr(file_fh).await
+    }
+    
+    /// Create a special file (FIFO or socket)
+    /// ftype: 6=socket, 7=fifo, 3=block device (not supported), 4=char device (not supported)
+    pub async fn mknod(
+        &self,
+        dir_fh: &FileHandle,
+        name: &str,
+        ftype: u32,
+    ) -> io::Result<(FileHandle, FileAttr)> {
+        let dir_path = self.resolve(dir_fh)?;
+        let file_path = dir_path.join(name);
+        
+        // Validate path
+        if !file_path.starts_with(&self.root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Path traversal attempt",
+            ));
+        }
+        
+        #[cfg(unix)]
+        {
+            use nix::sys::stat::{mknod, SFlag, Mode};
+            
+            let sflag = match ftype {
+                6 => SFlag::S_IFSOCK, // Socket
+                7 => SFlag::S_IFIFO,  // FIFO/named pipe
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Only FIFO and socket creation supported",
+                    ));
+                }
+            };
+            
+            // Create the special file
+            mknod(
+                file_path.as_path(),
+                sflag,
+                Mode::from_bits_truncate(0o666),
+                0,
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            
+            // Get file handle and attributes
+            let fh = self.handle_cache.lookup_child(dir_fh, name)?;
+            let attr = self.getattr(&fh).await?;
+            
+            Ok((fh, attr))
+        }
+        
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MKNOD not supported on this platform",
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

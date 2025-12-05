@@ -821,6 +821,387 @@ pub async fn handle_fsinfo(
     reply.finish()
 }
 
+/// Handle READLINK procedure (Procedure 5)
+/// RFC 1813 Section 3.3.5
+pub async fn handle_readlink(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS READLINK");
+    
+    // Decode symlink file handle
+    let symlink_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode file handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Read the symlink target
+    match fs.readlink(&symlink_handle).await {
+        Ok(target) => {
+            let attrs = fs.getattr(&symlink_handle).await.ok();
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // Symlink attributes (optional)
+            if let Some(attr) = attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+            
+            // Symlink target path
+            enc.encode_string(&target);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("READLINK failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
+/// Handle SYMLINK procedure (Procedure 10)
+/// RFC 1813 Section 3.3.10
+pub async fn handle_symlink(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS SYMLINK");
+    
+    // Decode directory handle
+    let dir_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode symlink name
+    let name = match dec.decode_string() {
+        Ok(n) => n,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode sattr3 (we ignore but must decode)
+    if let Err(e) = decode_sattr3(dec) {
+        warn!("Failed to decode sattr3: {}", e);
+        return ReplyBuilder::garbage_args(call.xid);
+    }
+    
+    // Decode target path
+    let target = match dec.decode_string() {
+        Ok(t) => t,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    debug!("SYMLINK: name={}, target={}", name, target);
+    
+    // Create symlink
+    match fs.symlink(&dir_handle, &name, &target).await {
+        Ok((file_handle, attrs)) => {
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // File handle (optional)
+            enc.encode_bool(true);
+            file_handle.encode(enc);
+            
+            // Object attributes (optional)
+            enc.encode_bool(true);
+            attrs.encode(enc);
+            
+            // Directory attributes (we skip)
+            enc.encode_bool(false);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("SYMLINK failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
+/// Handle MKNOD procedure (Procedure 11)
+/// RFC 1813 Section 3.3.11 - Create special files (FIFO, socket)
+pub async fn handle_mknod(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS MKNOD");
+    
+    // Decode directory handle
+    let dir_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode name
+    let name = match dec.decode_string() {
+        Ok(n) => n,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode type (what kind of special file)
+    let ftype = match dec.decode_u32() {
+        Ok(t) => t,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode sattr3
+    if let Err(e) = decode_sattr3(dec) {
+        warn!("Failed to decode sattr3: {}", e);
+        return ReplyBuilder::garbage_args(call.xid);
+    }
+    
+    // For device files, decode device specifier (major, minor)
+    if ftype == 3 || ftype == 4 {
+        // Block or char device - decode but we don't support creating these
+        let _ = dec.decode_u32(); // major
+        let _ = dec.decode_u32(); // minor
+        
+        warn!("MKNOD: Device file creation not supported");
+        return error_reply(call.xid, NFS3Status::NotSupported);
+    }
+    
+    debug!("MKNOD: name={}, type={}", name, ftype);
+    
+    // Create the special file
+    match fs.mknod(&dir_handle, &name, ftype).await {
+        Ok((file_handle, attrs)) => {
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // File handle (optional)
+            enc.encode_bool(true);
+            file_handle.encode(enc);
+            
+            // Object attributes (optional)
+            enc.encode_bool(true);
+            attrs.encode(enc);
+            
+            // Directory attributes (we skip)
+            enc.encode_bool(false);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("MKNOD failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
+/// Handle LINK procedure (Procedure 15)
+/// RFC 1813 Section 3.3.15
+pub async fn handle_link(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS LINK");
+    
+    // Decode file handle (file to link from)
+    let file_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode file handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode link directory handle
+    let dir_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode link name
+    let name = match dec.decode_string() {
+        Ok(n) => n,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    debug!("LINK: name={}", name);
+    
+    // Create hard link
+    match fs.link(&file_handle, &dir_handle, &name).await {
+        Ok(attrs) => {
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // File attributes (optional)
+            enc.encode_bool(true);
+            attrs.encode(enc);
+            
+            // Directory attributes (we skip)
+            enc.encode_bool(false);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("LINK failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
+/// Handle RENAME procedure (Procedure 14)
+/// RFC 1813 Section 3.3.14
+pub async fn handle_rename(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS RENAME");
+    
+    // Decode from directory handle
+    let from_dir = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode from_dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode from name
+    let from_name = match dec.decode_string() {
+        Ok(n) => n,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Decode to directory handle
+    let to_dir = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode to_dir handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode to name
+    let to_name = match dec.decode_string() {
+        Ok(n) => n,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    debug!("RENAME: {} -> {}", from_name, to_name);
+    
+    // Rename
+    match fs.rename(&from_dir, &from_name, &to_dir, &to_name).await {
+        Ok(()) => {
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // From directory attributes (optional, we skip)
+            enc.encode_bool(false);
+            
+            // To directory attributes (optional, we skip)
+            enc.encode_bool(false);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("RENAME failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
+/// Handle COMMIT procedure (Procedure 21)
+/// RFC 1813 Section 3.3.21
+pub async fn handle_commit(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS COMMIT");
+    
+    // Decode file handle
+    let file_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode file handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode offset and count (we ignore - commit entire file)
+    let _offset = match dec.decode_u64() {
+        Ok(o) => o,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    let _count = match dec.decode_u32() {
+        Ok(c) => c,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    // Commit (sync to disk)
+    match fs.commit(&file_handle).await {
+        Ok(()) => {
+            let attrs = fs.getattr(&file_handle).await.ok();
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            
+            // Status: NFS3_OK
+            enc.encode_u32(NFS3Status::Ok as u32);
+            
+            // File attributes before (we skip)
+            enc.encode_bool(false);
+            
+            // File attributes after
+            if let Some(attr) = attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+            
+            // Write verifier (for detecting server reboots)
+            enc.encode_u64(0);
+            
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("COMMIT failed: {}", e);
+            error_reply(call.xid, NFS3Status::from_io_error(&e))
+        }
+    }
+}
+
 /// Handle PATHCONF procedure (Procedure 20)
 /// RFC 1813 Section 3.3.20 - Retrieve POSIX information
 pub async fn handle_pathconf(

@@ -30,6 +30,7 @@ pub mod protocol;     // NFSv3 protocol types
 pub mod filehandle;   // File handle management
 pub mod vfs;          // Filesystem backend
 pub mod handlers;     // NFSv3 operation handlers
+pub mod setattr;      // SETATTR handler
 pub mod server;       // TCP/UDP server
 pub mod portmap;      // Portmapper registration
 

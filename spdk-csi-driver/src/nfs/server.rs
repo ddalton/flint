@@ -8,6 +8,7 @@ use super::handlers;
 use super::portmap;
 use super::protocol::Procedure;
 use super::rpc::{CallMessage, ReplyBuilder, NFS_PROGRAM, NFS_VERSION, MOUNT_PROGRAM, MOUNT_VERSION};
+use super::setattr;
 use super::vfs::LocalFilesystem;
 use super::xdr::XdrDecoder;
 use bytes::Bytes;
@@ -246,19 +247,26 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
     match Procedure::from_u32(call.procedure) {
         Some(Procedure::Null) => handlers::handle_null(&call),
         Some(Procedure::GetAttr) => handlers::handle_getattr(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::SetAttr) => setattr::handle_setattr(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Lookup) => handlers::handle_lookup(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Access) => handlers::handle_access(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::ReadLink) => handlers::handle_readlink(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Read) => handlers::handle_read(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Write) => handlers::handle_write(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Create) => handlers::handle_create(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Mkdir) => handlers::handle_mkdir(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Symlink) => handlers::handle_symlink(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Mknod) => handlers::handle_mknod(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Remove) => handlers::handle_remove(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Rmdir) => handlers::handle_rmdir(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Rename) => handlers::handle_rename(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Link) => handlers::handle_link(fs.clone(), &call, &mut dec).await,
         Some(Procedure::ReadDir) => handlers::handle_readdir(fs.clone(), &call, &mut dec).await,
         Some(Procedure::ReadDirPlus) => handlers::handle_readdirplus(fs.clone(), &call, &mut dec).await,
         Some(Procedure::FsStat) => handlers::handle_fsstat(fs.clone(), &call, &mut dec).await,
         Some(Procedure::FsInfo) => handlers::handle_fsinfo(fs.clone(), &call, &mut dec).await,
-        Some(Procedure::PathConf) => handlers::handle_pathconf(fs, &call, &mut dec).await,
+        Some(Procedure::PathConf) => handlers::handle_pathconf(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Commit) => handlers::handle_commit(fs, &call, &mut dec).await,
         // Procedures we don't implement yet
         Some(_) | None => {
             warn!("Unsupported NFS procedure: {}", call.procedure);
