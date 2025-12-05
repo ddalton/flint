@@ -213,10 +213,35 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
 /// Dispatch NFS procedure
 async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
     // Create decoder positioned at procedure arguments
-    // Skip: xid(4) + msg_type(4) + rpc_version(4) + program(4) + version(4) + procedure(4)
-    //       + cred_flavor(4) + cred_len(4) + cred_body + verf_flavor(4) + verf_len(4) + verf_body
-    // For simplicity with null auth: skip 40 bytes (assumes null cred and verf)
-    let mut dec = XdrDecoder::new(request.slice(40..));
+    // We need to skip the RPC header to get to the procedure-specific args
+    // The CallMessage::decode already parsed the header, so we need to 
+    // calculate where the args start
+    
+    let mut dec = XdrDecoder::new(request);
+    
+    // Skip RPC call header fields that were already parsed
+    let _ = dec.decode_u32(); // xid
+    let _ = dec.decode_u32(); // msg_type
+    let _ = dec.decode_u32(); // rpc_version
+    let _ = dec.decode_u32(); // program
+    let _ = dec.decode_u32(); // version
+    let _ = dec.decode_u32(); // procedure
+    
+    // Skip credentials (variable length)
+    let _ = dec.decode_u32(); // cred_flavor
+    let cred_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((cred_len + 3) / 4) {
+        let _ = dec.decode_u32(); // skip cred body (in 4-byte chunks)
+    }
+    
+    // Skip verifier (variable length)
+    let _ = dec.decode_u32(); // verf_flavor
+    let verf_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((verf_len + 3) / 4) {
+        let _ = dec.decode_u32(); // skip verf body (in 4-byte chunks)
+    }
+    
+    // Now dec is positioned at procedure arguments
     
     match Procedure::from_u32(call.procedure) {
         Some(Procedure::Null) => handlers::handle_null(&call),
@@ -241,8 +266,31 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
 
 /// Dispatch MOUNT protocol procedure
 /// For now, we implement a minimal MOUNT protocol that accepts all mount requests
-async fn dispatch_mount(call: CallMessage, _request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
+async fn dispatch_mount(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
     debug!("MOUNT procedure: {}", call.procedure);
+    
+    // Parse request to skip RPC header (same as dispatch_nfs)
+    let mut dec = XdrDecoder::new(request);
+    let _ = dec.decode_u32(); // xid
+    let _ = dec.decode_u32(); // msg_type
+    let _ = dec.decode_u32(); // rpc_version
+    let _ = dec.decode_u32(); // program
+    let _ = dec.decode_u32(); // version
+    let _ = dec.decode_u32(); // procedure
+    
+    // Skip credentials
+    let _ = dec.decode_u32(); // cred_flavor
+    let cred_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((cred_len + 3) / 4) {
+        let _ = dec.decode_u32();
+    }
+    
+    // Skip verifier
+    let _ = dec.decode_u32(); // verf_flavor
+    let verf_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((verf_len + 3) / 4) {
+        let _ = dec.decode_u32();
+    }
     
     match call.procedure {
         0 => {
@@ -251,6 +299,10 @@ async fn dispatch_mount(call: CallMessage, _request: Bytes, fs: Arc<LocalFilesys
         }
         1 => {
             // MNT - Mount a filesystem
+            // Decode the directory path being mounted
+            let _dirpath = dec.decode_string().unwrap_or_else(|_| "/".to_string());
+            debug!("MNT request for path: {}", _dirpath);
+            
             // Return success with root file handle
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
