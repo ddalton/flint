@@ -383,28 +383,54 @@ pub async fn handle_create(
     // Create file
     match fs.create(&dir_handle, &name, file_mode).await {
         Ok((file_handle, attrs)) => {
+            debug!("CREATE succeeded: {}", name);
+            
+            // Get directory attributes after
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // File handle
+            // post_op_fh3 (file handle)
             enc.encode_bool(true); // handle_follows
             file_handle.encode(enc);
             
-            // Object attributes
+            // post_op_attr (object attributes)
             enc.encode_bool(true); // obj_attributes_follow
             attrs.encode(enc);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // dir_wcc (wcc_data for parent directory):
+            enc.encode_bool(false); // pre_op_attr (skip)
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true); // post_op_attr
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("CREATE failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // post_op_fh3 (no handle on failure)
+            enc.encode_bool(false);
+            
+            // post_op_attr (no attributes on failure)
+            enc.encode_bool(false);
+            
+            // dir_wcc (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
@@ -447,28 +473,54 @@ pub async fn handle_mkdir(
     // Create directory
     match fs.mkdir(&dir_handle, &name, dir_mode).await {
         Ok((file_handle, attrs)) => {
+            debug!("MKDIR succeeded: {}", name);
+            
+            // Get parent directory attributes after
+            let parent_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // File handle
+            // post_op_fh3 (new directory handle)
             enc.encode_bool(true); // handle_follows
             file_handle.encode(enc);
             
-            // Object attributes
+            // post_op_attr (new directory attributes)
             enc.encode_bool(true); // obj_attributes_follow
             attrs.encode(enc);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // dir_wcc (parent directory wcc_data):
+            enc.encode_bool(false); // pre_op_attr (skip)
+            if let Some(attr) = parent_attrs {
+                enc.encode_bool(true); // post_op_attr
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("MKDIR failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // post_op_fh3 (no handle on failure)
+            enc.encode_bool(false);
+            
+            // post_op_attr (no attributes on failure)
+            enc.encode_bool(false);
+            
+            // dir_wcc (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
@@ -957,28 +1009,49 @@ pub async fn handle_symlink(
     // Create symlink
     match fs.symlink(&dir_handle, &name, &target).await {
         Ok((file_handle, attrs)) => {
+            debug!("SYMLINK succeeded: {} -> {}", name, target);
+            
+            // Get directory attributes after
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // File handle (optional)
+            // post_op_fh3
             enc.encode_bool(true);
             file_handle.encode(enc);
             
-            // Object attributes (optional)
+            // post_op_attr
             enc.encode_bool(true);
             attrs.encode(enc);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // dir_wcc:
+            enc.encode_bool(false); // pre_op_attr
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("SYMLINK failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            enc.encode_bool(false); // post_op_fh3
+            enc.encode_bool(false); // post_op_attr
+            enc.encode_bool(false); // dir_wcc pre
+            enc.encode_bool(false); // dir_wcc post
+            
+            reply.finish()
         }
     }
 }
@@ -1034,28 +1107,49 @@ pub async fn handle_mknod(
     // Create the special file
     match fs.mknod(&dir_handle, &name, ftype).await {
         Ok((file_handle, attrs)) => {
+            debug!("MKNOD succeeded: {} (type {})", name, ftype);
+            
+            // Get directory attributes after
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // File handle (optional)
+            // post_op_fh3
             enc.encode_bool(true);
             file_handle.encode(enc);
             
-            // Object attributes (optional)
+            // post_op_attr
             enc.encode_bool(true);
             attrs.encode(enc);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // dir_wcc:
+            enc.encode_bool(false); // pre_op_attr
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("MKNOD failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            enc.encode_bool(false); // post_op_fh3
+            enc.encode_bool(false); // post_op_attr
+            enc.encode_bool(false); // dir_wcc pre
+            enc.encode_bool(false); // dir_wcc post
+            
+            reply.finish()
         }
     }
 }
