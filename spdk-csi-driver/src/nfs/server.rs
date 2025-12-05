@@ -5,6 +5,7 @@
 //! and sends replies.
 
 use super::handlers;
+use super::portmap;
 use super::protocol::Procedure;
 use super::rpc::{CallMessage, ReplyBuilder, NFS_PROGRAM, NFS_VERSION, MOUNT_PROGRAM, MOUNT_VERSION};
 use super::vfs::LocalFilesystem;
@@ -63,6 +64,9 @@ impl NfsServer {
         info!("🚀 Starting NFS server on {}", addr);
         info!("📂 Exporting: {:?}", self.config.export_path);
         info!("💾 Volume ID: {}", self.config.volume_id);
+        
+        // Register with portmapper
+        portmap::register_with_portmapper(self.config.bind_port).await?;
         
         // Start TCP and UDP servers concurrently
         let tcp_handle = {

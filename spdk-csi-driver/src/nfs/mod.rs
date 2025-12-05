@@ -31,6 +31,7 @@ pub mod filehandle;   // File handle management
 pub mod vfs;          // Filesystem backend
 pub mod handlers;     // NFSv3 operation handlers
 pub mod server;       // TCP/UDP server
+pub mod portmap;      // Portmapper registration
 
 #[cfg(test)]
 mod tests;            // Integration tests
