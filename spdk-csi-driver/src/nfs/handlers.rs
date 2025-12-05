@@ -499,15 +499,12 @@ pub async fn handle_remove(
     
     debug!("REMOVE: name={}", name);
     
-    // Get directory attributes before
-    let dir_attrs_before = fs.getattr(&dir_handle).await.ok();
-    
     // Remove file
     match fs.remove(&dir_handle, &name).await {
         Ok(()) => {
             debug!("REMOVE succeeded for: {}", name);
             
-            // Get directory attributes after
+            // Get directory attributes after for post_op_attr
             let dir_attrs_after = fs.getattr(&dir_handle).await.ok();
             
             let mut reply = ReplyBuilder::success(call.xid);
@@ -516,15 +513,11 @@ pub async fn handle_remove(
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // Directory attributes before (optional)
-            if let Some(attr) = dir_attrs_before {
-                enc.encode_bool(true);
-                attr.encode(enc);
-            } else {
-                enc.encode_bool(false);
-            }
+            // wcc_data structure:
+            // - pre_op_attr before (optional - we skip for simplicity)
+            enc.encode_bool(false);
             
-            // Directory attributes after (optional)
+            // - post_op_attr after (optional - full attributes)
             if let Some(attr) = dir_attrs_after {
                 enc.encode_bool(true);
                 attr.encode(enc);
@@ -541,8 +534,9 @@ pub async fn handle_remove(
             let enc = reply.encoder();
             enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
             
-            // Directory attributes (optional)
-            enc.encode_bool(false);
+            // wcc_data (we skip both)
+            enc.encode_bool(false); // pre_op_attr
+            enc.encode_bool(false); // post_op_attr
             
             reply.finish()
         }
