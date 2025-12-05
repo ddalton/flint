@@ -25,20 +25,22 @@ pub async fn handle_getattr(
     call: &CallMessage,
     dec: &mut XdrDecoder,
 ) -> Bytes {
-    debug!("NFS GETATTR");
-    
     // Decode file handle
     let file_handle = match FileHandle::decode(dec) {
         Ok(fh) => fh,
         Err(e) => {
-            warn!("Failed to decode file handle: {}", e);
+            warn!("GETATTR: Failed to decode file handle: {}", e);
             return error_reply(call.xid, NFS3Status::BadHandle);
         }
     };
     
+    debug!("NFS GETATTR for handle: {:?}", file_handle);
+    
     // Get attributes from filesystem
     match fs.getattr(&file_handle).await {
         Ok(attrs) => {
+            debug!("GETATTR succeeded: type={:?}, size={}", attrs.file_type, attrs.size);
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
@@ -51,7 +53,8 @@ pub async fn handle_getattr(
             reply.finish()
         }
         Err(e) => {
-            warn!("GETATTR failed: {}", e);
+            warn!("GETATTR failed: {} (kind: {:?})", e, e.kind());
+            warn!("  File handle that failed: {:?}", file_handle);
             error_reply(call.xid, NFS3Status::from_io_error(&e))
         }
     }

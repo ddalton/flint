@@ -62,25 +62,62 @@ impl HandleCache {
         // Extract inode from file handle
         let inode = self.handle_to_inode(handle)?;
         
+        tracing::trace!("Resolving file handle for inode {}", inode);
+        
         // Look up in cache
         if let Some(rel_path) = self.inode_to_path.read().unwrap().get(&inode) {
             let resolved = self.root.join(rel_path);
-            tracing::debug!("Resolved inode {} to path: {:?} (cached)", inode, resolved);
-            return Ok(resolved);
+            
+            // Verify the path still exists and has the same inode
+            if let Ok(metadata) = std::fs::metadata(&resolved) {
+                if metadata.ino() == inode {
+                    tracing::debug!("✓ Resolved inode {} to path: {:?} (cached, verified)", inode, resolved);
+                    return Ok(resolved);
+                } else {
+                    tracing::warn!("Cache STALE: inode {} cached to {:?}, but path has inode {}", 
+                                   inode, resolved, metadata.ino());
+                    // Remove stale entry
+                    self.inode_to_path.write().unwrap().remove(&inode);
+                    self.path_to_inode.write().unwrap().remove(rel_path);
+                }
+            } else {
+                tracing::warn!("Cache STALE: inode {} cached to {:?}, but path no longer exists", 
+                               inode, resolved);
+                // Remove stale entry
+                self.inode_to_path.write().unwrap().remove(&inode);
+                self.path_to_inode.write().unwrap().remove(rel_path);
+            }
         }
         
-        // Not in cache - search the filesystem to find it
-        tracing::debug!("Inode {} not in cache, searching filesystem...", inode);
+        // Not in cache or cache was stale - search the filesystem to find it
+        tracing::info!("Inode {} not in valid cache, searching filesystem...", inode);
+        tracing::info!("  Export root: {:?}", self.root);
+        tracing::info!("  Current cache size: {} entries", self.inode_to_path.read().unwrap().len());
+        tracing::info!("  Cached inodes: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
         
         match self.find_by_inode(inode) {
             Ok(path) => {
-                tracing::debug!("Found inode {} at path: {:?}", inode, path);
+                tracing::info!("✓ Found inode {} at path: {:?} (filesystem search)", inode, path);
                 Ok(path)
             }
             Err(e) => {
-                tracing::warn!("Stale file handle: inode {} not found on disk", inode);
-                tracing::debug!("Cache contents: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
-                Err(e)
+                tracing::error!("✗ STALE FILE HANDLE: inode {} not found anywhere!", inode);
+                tracing::error!("  Searched in: {:?}", self.root);
+                tracing::error!("  Cache contents: {:?}", 
+                               self.inode_to_path.read().unwrap().iter()
+                                   .map(|(k, v)| format!("{}→{:?}", k, v))
+                                   .collect::<Vec<_>>());
+                
+                // Check if root directory exists
+                match std::fs::metadata(&self.root) {
+                    Ok(m) => tracing::error!("  Root directory exists, inode: {}", m.ino()),
+                    Err(e) => tracing::error!("  Root directory ERROR: {}", e),
+                }
+                
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Stale file handle: inode {} not found (likely from old mount)", inode)
+                ))
             }
         }
     }
@@ -223,6 +260,21 @@ impl HandleCache {
         let mut inode_bytes = [0u8; 8];
         inode_bytes.copy_from_slice(&bytes[0..8]);
         Ok(u64::from_le_bytes(inode_bytes))
+    }
+    
+    /// Clear the cache (useful when export directory is recreated)
+    pub fn clear_cache(&self) {
+        tracing::info!("Clearing file handle cache");
+        self.inode_to_path.write().unwrap().clear();
+        self.path_to_inode.write().unwrap().clear();
+        
+        // Re-register root
+        if let Ok(metadata) = std::fs::metadata(&self.root) {
+            let root_inode = metadata.ino();
+            self.inode_to_path.write().unwrap().insert(root_inode, PathBuf::from(""));
+            self.path_to_inode.write().unwrap().insert(PathBuf::from(""), root_inode);
+            tracing::info!("Re-cached root with inode {}", root_inode);
+        }
     }
 }
 

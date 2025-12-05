@@ -104,12 +104,14 @@ async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
     
     loop {
         let (stream, peer) = listener.accept().await?;
-        debug!("TCP connection from {}", peer);
+        info!("📡 New TCP connection from {}", peer);
         
         let fs = fs.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_connection(stream, fs).await {
-                warn!("TCP connection error: {}", e);
+            if let Err(e) = handle_tcp_connection(stream, fs, peer).await {
+                warn!("TCP connection from {} error: {}", peer, e);
+            } else {
+                info!("✓ TCP connection from {} closed cleanly", peer);
             }
         });
     }
@@ -121,7 +123,7 @@ async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
 /// - Uses BufWriter to batch writes and reduce syscalls
 /// - Uses BytesMut for zero-copy buffer reuse
 /// - Avoids unnecessary flushes (let BufWriter and OS handle batching)
-async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
+async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer: std::net::SocketAddr) -> std::io::Result<()> {
     use bytes::BytesMut;
     use tokio::io::BufWriter;
     
@@ -172,7 +174,9 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>) -> s
         let request = buf.split().freeze();
         
         // Process the RPC call (async, may take time)
+        debug!("Processing request from {}, length={} bytes", peer, length);
         let reply = dispatch(request, fs.clone()).await;
+        debug!("Reply ready for {}, length={} bytes", peer, reply.len());
         
         // Write reply with record marker
         let reply_len = reply.len() as u32;
@@ -226,9 +230,21 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
     };
     
     debug!(
-        "RPC: program={}, version={}, procedure={}",
-        call.program, call.version, call.procedure
+        "RPC: xid={}, program={}, version={}, procedure={}",
+        call.xid, call.program, call.version, call.procedure
     );
+    
+    // Add program name for better debugging
+    let prog_name = match call.program {
+        100003 => "NFS",
+        100005 => "MOUNT",
+        100227 => "NLM", // Network Lock Manager
+        _ => "UNKNOWN",
+    };
+    
+    if prog_name == "UNKNOWN" || prog_name == "NLM" {
+        debug!("RPC call for program {} ({})", prog_name, call.program);
+    }
     
     // Check program and version
     if call.program == NFS_PROGRAM && call.version == NFS_VERSION {
