@@ -144,6 +144,11 @@ impl HandleCache {
             .unwrap_or(Path::new(""))
             .to_path_buf();
         
+        tracing::debug!(
+            "Caching file handle: inode={}, name={}, rel_path={:?}",
+            inode, name, rel_path
+        );
+        
         self.inode_to_path.write().unwrap().insert(inode, rel_path.clone());
         self.path_to_inode.write().unwrap().insert(rel_path, inode);
         

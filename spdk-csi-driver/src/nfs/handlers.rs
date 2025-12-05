@@ -821,11 +821,16 @@ pub async fn handle_readdirplus(
                 
                 // Name handle (optional - we provide it)
                 // Look up the child to get its file handle
-                if let Ok((child_fh, _)) = fs.lookup(&dir_handle, &entry.name).await {
-                    enc.encode_bool(true);
-                    child_fh.encode(enc);
-                } else {
-                    enc.encode_bool(false);
+                match fs.lookup(&dir_handle, &entry.name).await {
+                    Ok((child_fh, _)) => {
+                        debug!("READDIRPLUS: Got handle for {}", entry.name);
+                        enc.encode_bool(true);
+                        child_fh.encode(enc);
+                    }
+                    Err(e) => {
+                        warn!("READDIRPLUS: Failed to get handle for {}: {}", entry.name, e);
+                        enc.encode_bool(false);
+                    }
                 }
             }
             enc.encode_bool(false); // no more entries
