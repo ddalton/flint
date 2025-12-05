@@ -65,7 +65,9 @@ impl LocalFilesystem {
     /// Get file attributes
     pub async fn getattr(&self, fh: &FileHandle) -> io::Result<FileAttr> {
         let path = self.resolve(fh)?;
-        let metadata = fs::metadata(&path).await?;
+        
+        // Use symlink_metadata to NOT follow symlinks (lstat behavior)
+        let metadata = fs::symlink_metadata(&path).await?;
         
         use std::os::unix::fs::MetadataExt;
         let fileid = metadata.ino();
