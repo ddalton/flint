@@ -516,7 +516,7 @@ mod tests {
         let normalized = match &empty_object {
             Some(Value::Object(map)) if map.is_empty() => None,
             Some(Value::Array(arr)) if arr.is_empty() => None,
-            other => other.cloned(),
+            other => other.clone(),
         };
         
         assert_eq!(normalized, None, "Empty object should normalize to None");
@@ -526,7 +526,7 @@ mod tests {
         let normalized = match &empty_array {
             Some(Value::Object(map)) if map.is_empty() => None,
             Some(Value::Array(arr)) if arr.is_empty() => None,
-            other => other.cloned(),
+            other => other.clone(),
         };
         
         assert_eq!(normalized, None, "Empty array should normalize to None");
@@ -536,7 +536,7 @@ mod tests {
         let normalized = match &non_empty {
             Some(Value::Object(map)) if map.is_empty() => None,
             Some(Value::Array(arr)) if arr.is_empty() => None,
-            other => other.cloned(),
+            other => other.clone(),
         };
         
         assert_eq!(normalized, non_empty, "Non-empty object should remain unchanged");

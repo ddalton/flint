@@ -1302,6 +1302,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+dependencies = [
+ "bitflags 2.9.1",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2040,11 +2051,14 @@ name = "spdk-csi-driver"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
  "chrono",
  "clap",
  "futures",
  "k8s-openapi",
  "kube",
+ "nix",
  "prost",
  "prost-build",
  "prost-types",
@@ -2053,6 +2067,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tonic",

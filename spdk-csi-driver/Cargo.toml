@@ -12,6 +12,14 @@ edition = "2021"
 name = "csi-driver"
 path = "src/main.rs"
 
+[[bin]]
+name = "flint-nfs-server"
+path = "src/nfs_main.rs"
+
+[[bin]]
+name = "nfs-test-client"
+path = "tests/nfs_client_test.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
@@ -40,9 +48,16 @@ prost-types = "0.12"
 regex = "1.0"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
+bytes = "1.0"
+async-trait = "0.1"
+nix = { version = "0.27", features = ["fs"] }
+thiserror = "1.0"
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation
+
+[dev-dependencies]
+tempfile = "3.0"
 
 [build-dependencies]
 tonic-build = "0.10"
