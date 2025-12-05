@@ -572,20 +572,43 @@ pub async fn handle_rmdir(
     // Remove directory
     match fs.rmdir(&dir_handle, &name).await {
         Ok(()) => {
+            debug!("RMDIR succeeded for: {}", name);
+            
+            // Get directory attributes after
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // Directory attributes (we skip)
+            // wcc_data for directory:
+            // - pre_op_attr (we skip)
             enc.encode_bool(false);
+            
+            // - post_op_attr (provide if available)
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("RMDIR failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // wcc_data (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
@@ -1075,24 +1098,47 @@ pub async fn handle_link(
     // Create hard link
     match fs.link(&file_handle, &dir_handle, &name).await {
         Ok(attrs) => {
+            debug!("LINK succeeded: {}", name);
+            
+            // Get directory attributes after
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // File attributes (optional)
+            // File attributes (post_op_attr - updated link count)
             enc.encode_bool(true);
             attrs.encode(enc);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // linkdir_wcc (wcc_data):
+            enc.encode_bool(false); // pre_op_attr
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("LINK failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // File attributes (skip)
+            enc.encode_bool(false);
+            
+            // linkdir_wcc (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
@@ -1141,23 +1187,54 @@ pub async fn handle_rename(
     // Rename
     match fs.rename(&from_dir, &from_name, &to_dir, &to_name).await {
         Ok(()) => {
+            debug!("RENAME succeeded: {} -> {}", from_name, to_name);
+            
+            // Get directory attributes after
+            let from_dir_attrs = fs.getattr(&from_dir).await.ok();
+            let to_dir_attrs = fs.getattr(&to_dir).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // From directory attributes (optional, we skip)
-            enc.encode_bool(false);
+            // fromdir_wcc (wcc_data):
+            enc.encode_bool(false); // pre_op_attr
+            if let Some(attr) = from_dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
-            // To directory attributes (optional, we skip)
-            enc.encode_bool(false);
+            // todir_wcc (wcc_data):
+            enc.encode_bool(false); // pre_op_attr
+            if let Some(attr) = to_dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
             warn!("RENAME failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // fromdir_wcc (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            // todir_wcc (skip both)
+            enc.encode_bool(false);
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
