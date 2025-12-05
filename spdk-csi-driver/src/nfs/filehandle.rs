@@ -64,11 +64,15 @@ impl HandleCache {
         
         // Look up in cache
         if let Some(rel_path) = self.inode_to_path.read().unwrap().get(&inode) {
-            return Ok(self.root.join(rel_path));
+            let resolved = self.root.join(rel_path);
+            tracing::debug!("Resolved inode {} to path: {:?}", inode, resolved);
+            return Ok(resolved);
         }
         
         // Not in cache - this could happen after server restart
         // For now, return an error (stale file handle)
+        tracing::warn!("Stale file handle: inode {} not in cache", inode);
+        tracing::debug!("Cache contents: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "Stale file handle",
