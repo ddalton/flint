@@ -2,7 +2,7 @@
 # Bulletproof concurrent performance test for Linux
 # Tests 10 clients writing different files concurrently
 
-set -e
+set -ex  # -e = exit on error, -x = print commands
 
 EXPORT_DIR="/tmp/nfs-perf-export"
 MOUNT_DIR="/tmp/nfs-perf-mount"
@@ -34,10 +34,11 @@ test_version() {
     mkdir -p $EXPORT_DIR $MOUNT_DIR
     sleep 2
     
-    # Start server
+    # Start server with verbose logging
     echo "Starting NFS server..."
-    $BINARY --export-path $EXPORT_DIR --volume-id test > /tmp/$VERSION-test.log 2>&1 &
+    $BINARY --export-path $EXPORT_DIR --volume-id test --verbose > /tmp/$VERSION-test.log 2>&1 &
     local SERVER_PID=$!
+    echo "  Server PID: $SERVER_PID, logs: /tmp/$VERSION-test.log"
     sleep 5
     
     # Verify server running
@@ -46,7 +47,11 @@ test_version() {
         cat /tmp/$VERSION-test.log
         return 1
     fi
-    echo "✓ Server running (PID: $SERVER_PID)"
+    echo "✓ Server running"
+    
+    # Show recent server output
+    echo "  Server status:"
+    tail -3 /tmp/$VERSION-test.log | sed 's/^/    /'
     
     # Mount (always unmount first to prevent double-mount)
     umount $MOUNT_DIR 2>/dev/null || true
@@ -74,7 +79,21 @@ test_version() {
     END=$(date +%s)
     DURATION=$((END - START))
     
+    # Check if server is still running
+    if ! ps -p $SERVER_PID > /dev/null; then
+        echo "❌ Server died during test!"
+        echo "Server logs:"
+        tail -30 /tmp/$VERSION-test.log | sed 's/^/    /'
+        return 1
+    fi
+    
     echo "✓ Completed in ${DURATION}s"
+    
+    # Show any errors from server logs
+    if grep -qi "error\|panic\|fatal" /tmp/$VERSION-test.log; then
+        echo "⚠️  Server errors detected:"
+        grep -i "error\|panic\|fatal" /tmp/$VERSION-test.log | tail -10 | sed 's/^/    /'
+    fi
     
     # Calculate throughput
     THROUGHPUT=$((1000 / DURATION))
@@ -83,6 +102,12 @@ test_version() {
     # Verify files were written
     FILE_COUNT=$(ls $MOUNT_DIR/file_* 2>/dev/null | wc -l)
     echo "  Files written: $FILE_COUNT/10"
+    
+    # Show server log summary
+    echo ""
+    echo "Server log summary (last 20 lines):"
+    tail -20 /tmp/$VERSION-test.log | sed 's/^/  /'
+    echo ""
     
     cleanup
     
