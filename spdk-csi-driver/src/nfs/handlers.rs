@@ -499,23 +499,52 @@ pub async fn handle_remove(
     
     debug!("REMOVE: name={}", name);
     
+    // Get directory attributes before
+    let dir_attrs_before = fs.getattr(&dir_handle).await.ok();
+    
     // Remove file
     match fs.remove(&dir_handle, &name).await {
         Ok(()) => {
+            debug!("REMOVE succeeded for: {}", name);
+            
+            // Get directory attributes after
+            let dir_attrs_after = fs.getattr(&dir_handle).await.ok();
+            
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
             
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
             
-            // Directory attributes (we skip)
-            enc.encode_bool(false);
+            // Directory attributes before (optional)
+            if let Some(attr) = dir_attrs_before {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+            
+            // Directory attributes after (optional)
+            if let Some(attr) = dir_attrs_after {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
             
             reply.finish()
         }
         Err(e) => {
-            warn!("REMOVE failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+            warn!("REMOVE failed for {}: {} (kind: {:?})", name, e, e.kind());
+            
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+            
+            // Directory attributes (optional)
+            enc.encode_bool(false);
+            
+            reply.finish()
         }
     }
 }
