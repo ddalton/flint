@@ -347,17 +347,38 @@ pub async fn handle_create(
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
     
-    // Decode create mode
-    let _mode = match dec.decode_u32() {
+    // Decode create mode (UNCHECKED=0, GUARDED=1, EXCLUSIVE=2)
+    let create_mode = match dec.decode_u32() {
         Ok(m) => m,
-        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+        Err(e) => {
+            warn!("Failed to decode create mode: {}", e);
+            return ReplyBuilder::garbage_args(call.xid);
+        }
     };
     
-    // For UNCHECKED and GUARDED modes, decode sattr3 (set attributes)
-    // For simplicity, we just skip the attributes and use default mode
-    let file_mode = 0o644u32;
+    // Decode sattr3 (set attributes) - RFC 1813 Section 3.3.8
+    // For UNCHECKED and GUARDED modes, we need to decode the sattr3 structure
+    let file_mode = if create_mode == 2 {
+        // EXCLUSIVE mode: has createverf3 instead of sattr3
+        match dec.decode_u64() {
+            Ok(_) => 0o644u32,
+            Err(e) => {
+                warn!("Failed to decode createverf3: {}", e);
+                return ReplyBuilder::garbage_args(call.xid);
+            }
+        }
+    } else {
+        // UNCHECKED or GUARDED: decode sattr3
+        match decode_sattr3(dec) {
+            Ok(mode) => mode,
+            Err(e) => {
+                warn!("Failed to decode sattr3: {}", e);
+                return ReplyBuilder::garbage_args(call.xid);
+            }
+        }
+    };
     
-    debug!("CREATE: name={}", name);
+    debug!("CREATE: name={}, mode={:#o}, create_mode={}", name, file_mode, create_mode);
     
     // Create file
     match fs.create(&dir_handle, &name, file_mode).await {
@@ -412,10 +433,16 @@ pub async fn handle_mkdir(
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
     
-    // Decode attributes (we skip and use default mode)
-    let dir_mode = 0o755u32;
+    // Decode sattr3 (set attributes)
+    let dir_mode = match decode_sattr3(dec) {
+        Ok(mode) => mode,
+        Err(e) => {
+            warn!("Failed to decode sattr3: {}", e);
+            return ReplyBuilder::garbage_args(call.xid);
+        }
+    };
     
-    debug!("MKDIR: name={}", name);
+    debug!("MKDIR: name={}, mode={:#o}", name, dir_mode);
     
     // Create directory
     match fs.mkdir(&dir_handle, &name, dir_mode).await {
@@ -743,5 +770,49 @@ fn error_reply(xid: u32, status: NFS3Status) -> Bytes {
     let enc = reply.encoder();
     enc.encode_u32(status as u32);
     reply.finish()
+}
+
+/// Decode sattr3 structure (set attributes) - RFC 1813 Section 1.3.3
+/// For simplicity, we decode but ignore most fields and just extract mode if present
+fn decode_sattr3(dec: &mut XdrDecoder) -> Result<u32, String> {
+    // mode: optional<u32>
+    let mode = if dec.decode_bool()? {
+        Some(dec.decode_u32()?)
+    } else {
+        None
+    };
+    
+    // uid: optional<u32>
+    if dec.decode_bool()? {
+        let _ = dec.decode_u32()?;
+    }
+    
+    // gid: optional<u32>
+    if dec.decode_bool()? {
+        let _ = dec.decode_u32()?;
+    }
+    
+    // size: optional<u64>
+    if dec.decode_bool()? {
+        let _ = dec.decode_u64()?;
+    }
+    
+    // atime: optional<time_how>
+    let atime_how = dec.decode_u32()?;
+    if atime_how == 2 {
+        // SET_TO_CLIENT_TIME
+        let _ = dec.decode_u32()?; // seconds
+        let _ = dec.decode_u32()?; // nanoseconds
+    }
+    
+    // mtime: optional<time_how>
+    let mtime_how = dec.decode_u32()?;
+    if mtime_how == 2 {
+        // SET_TO_CLIENT_TIME
+        let _ = dec.decode_u32()?; // seconds
+        let _ = dec.decode_u32()?; // nanoseconds
+    }
+    
+    Ok(mode.unwrap_or(0o644))
 }
 
