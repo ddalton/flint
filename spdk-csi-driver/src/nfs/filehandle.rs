@@ -65,17 +65,71 @@ impl HandleCache {
         // Look up in cache
         if let Some(rel_path) = self.inode_to_path.read().unwrap().get(&inode) {
             let resolved = self.root.join(rel_path);
-            tracing::debug!("Resolved inode {} to path: {:?}", inode, resolved);
+            tracing::debug!("Resolved inode {} to path: {:?} (cached)", inode, resolved);
             return Ok(resolved);
         }
         
-        // Not in cache - this could happen after server restart
-        // For now, return an error (stale file handle)
-        tracing::warn!("Stale file handle: inode {} not in cache", inode);
-        tracing::debug!("Cache contents: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
+        // Not in cache - search the filesystem to find it
+        tracing::debug!("Inode {} not in cache, searching filesystem...", inode);
+        
+        match self.find_by_inode(inode) {
+            Ok(path) => {
+                tracing::debug!("Found inode {} at path: {:?}", inode, path);
+                Ok(path)
+            }
+            Err(e) => {
+                tracing::warn!("Stale file handle: inode {} not found on disk", inode);
+                tracing::debug!("Cache contents: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
+                Err(e)
+            }
+        }
+    }
+    
+    /// Find a file by inode number by recursively searching the export
+    /// This is a fallback for when the cache doesn't have the mapping
+    fn find_by_inode(&self, target_inode: u64) -> Result<PathBuf, std::io::Error> {
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+        
+        // Start from root and search
+        self.search_dir_for_inode(&self.root, target_inode)
+    }
+    
+    /// Recursively search a directory for a specific inode
+    fn search_dir_for_inode(&self, dir: &Path, target_inode: u64) -> Result<PathBuf, std::io::Error> {
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+        
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = entry.metadata()?;
+            
+            if metadata.ino() == target_inode {
+                // Found it! Cache the mapping
+                let rel_path = path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                
+                self.inode_to_path.write().unwrap().insert(target_inode, rel_path.clone());
+                self.path_to_inode.write().unwrap().insert(rel_path, target_inode);
+                
+                tracing::debug!("Cached found inode {} -> {:?}", target_inode, path);
+                return Ok(path);
+            }
+            
+            // Recurse into subdirectories (but limit depth for safety)
+            if metadata.is_dir() {
+                if let Ok(found) = self.search_dir_for_inode(&path, target_inode) {
+                    return Ok(found);
+                }
+            }
+        }
+        
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "Stale file handle",
+            "Inode not found in export",
         ))
     }
     
