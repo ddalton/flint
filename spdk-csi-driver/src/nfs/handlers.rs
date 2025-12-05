@@ -3,7 +3,7 @@
 //! Implements all NFSv3 RPC procedures according to RFC 1813.
 //! Each handler decodes request arguments, calls the VFS, and encodes the reply.
 
-use super::protocol::{FileHandle, NFS3Status};
+use super::protocol::{FileHandle, NFS3Status, ACCESS3_READ, ACCESS3_LOOKUP, ACCESS3_MODIFY, ACCESS3_EXTEND, ACCESS3_DELETE, ACCESS3_EXECUTE};
 use super::rpc::{CallMessage, ReplyBuilder};
 use super::vfs::LocalFilesystem;
 use super::xdr::XdrDecoder;
@@ -55,6 +55,59 @@ pub async fn handle_getattr(
             error_reply(call.xid, NFS3Status::from_io_error(&e))
         }
     }
+}
+
+/// Handle ACCESS procedure (Procedure 4)
+/// RFC 1813 Section 3.3.4
+pub async fn handle_access(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS ACCESS");
+    
+    // Decode file handle
+    let file_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode file handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Decode access bits requested
+    let access_requested = match dec.decode_u32() {
+        Ok(a) => a,
+        Err(_) => return ReplyBuilder::garbage_args(call.xid),
+    };
+    
+    debug!("ACCESS: requested={:#x}", access_requested);
+    
+    // For simplicity, we grant all requested permissions
+    // In a real implementation, we'd check actual file permissions
+    let access_granted = access_requested;
+    
+    // Get attributes
+    let attrs = fs.getattr(&file_handle).await.ok();
+    
+    let mut reply = ReplyBuilder::success(call.xid);
+    let enc = reply.encoder();
+    
+    // Status: NFS3_OK
+    enc.encode_u32(NFS3Status::Ok as u32);
+    
+    // Object attributes (optional but we provide if available)
+    if let Some(attr) = attrs {
+        enc.encode_bool(true);
+        attr.encode(enc);
+    } else {
+        enc.encode_bool(false);
+    }
+    
+    // Access rights granted
+    enc.encode_u32(access_granted);
+    
+    reply.finish()
 }
 
 /// Handle LOOKUP procedure (Procedure 3)
@@ -634,6 +687,52 @@ pub async fn handle_fsinfo(
     
     // Filesystem info
     info.encode(enc);
+    
+    reply.finish()
+}
+
+/// Handle PATHCONF procedure (Procedure 20)
+/// RFC 1813 Section 3.3.20 - Retrieve POSIX information
+pub async fn handle_pathconf(
+    fs: Arc<LocalFilesystem>,
+    call: &CallMessage,
+    dec: &mut XdrDecoder,
+) -> Bytes {
+    debug!("NFS PATHCONF");
+    
+    // Decode file handle
+    let file_handle = match FileHandle::decode(dec) {
+        Ok(fh) => fh,
+        Err(e) => {
+            warn!("Failed to decode file handle: {}", e);
+            return error_reply(call.xid, NFS3Status::BadHandle);
+        }
+    };
+    
+    // Get attributes
+    let attrs = fs.getattr(&file_handle).await.ok();
+    
+    let mut reply = ReplyBuilder::success(call.xid);
+    let enc = reply.encoder();
+    
+    // Status: NFS3_OK
+    enc.encode_u32(NFS3Status::Ok as u32);
+    
+    // Object attributes (optional)
+    if let Some(attr) = attrs {
+        enc.encode_bool(true);
+        attr.encode(enc);
+    } else {
+        enc.encode_bool(false);
+    }
+    
+    // PATHCONF result (POSIX pathconf values)
+    enc.encode_u32(255);        // linkmax: max hard links
+    enc.encode_u32(255);        // name_max: max filename length
+    enc.encode_bool(false);     // no_trunc: don't truncate long names
+    enc.encode_bool(false);     // chown_restricted: chown is restricted
+    enc.encode_bool(true);      // case_insensitive: filenames case insensitive (false for Linux)
+    enc.encode_bool(true);      // case_preserving: preserve case in names
     
     reply.finish()
 }

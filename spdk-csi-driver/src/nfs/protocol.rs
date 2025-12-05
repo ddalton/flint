@@ -40,6 +40,7 @@ impl Procedure {
             0 => Some(Self::Null),
             1 => Some(Self::GetAttr),
             3 => Some(Self::Lookup),
+            4 => Some(Self::Access),
             6 => Some(Self::Read),
             7 => Some(Self::Write),
             8 => Some(Self::Create),
@@ -49,10 +50,19 @@ impl Procedure {
             16 => Some(Self::ReadDir),
             18 => Some(Self::FsStat),
             19 => Some(Self::FsInfo),
+            20 => Some(Self::PathConf),
             _ => None,
         }
     }
 }
+
+// ACCESS procedure constants (RFC 1813 Section 3.3.4)
+pub const ACCESS3_READ: u32 = 0x0001;
+pub const ACCESS3_LOOKUP: u32 = 0x0002;
+pub const ACCESS3_MODIFY: u32 = 0x0004;
+pub const ACCESS3_EXTEND: u32 = 0x0008;
+pub const ACCESS3_DELETE: u32 = 0x0010;
+pub const ACCESS3_EXECUTE: u32 = 0x0020;
 
 /// NFS status codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

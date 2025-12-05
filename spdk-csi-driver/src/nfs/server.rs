@@ -245,8 +245,9 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
     
     match Procedure::from_u32(call.procedure) {
         Some(Procedure::Null) => handlers::handle_null(&call),
-        Some(Procedure::GetAttr) => handlers::handle_getattr(fs, &call, &mut dec).await,
+        Some(Procedure::GetAttr) => handlers::handle_getattr(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Lookup) => handlers::handle_lookup(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::Access) => handlers::handle_access(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Read) => handlers::handle_read(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Write) => handlers::handle_write(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Create) => handlers::handle_create(fs.clone(), &call, &mut dec).await,
@@ -255,7 +256,8 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
         Some(Procedure::Rmdir) => handlers::handle_rmdir(fs.clone(), &call, &mut dec).await,
         Some(Procedure::ReadDir) => handlers::handle_readdir(fs.clone(), &call, &mut dec).await,
         Some(Procedure::FsStat) => handlers::handle_fsstat(fs.clone(), &call, &mut dec).await,
-        Some(Procedure::FsInfo) => handlers::handle_fsinfo(fs, &call, &mut dec).await,
+        Some(Procedure::FsInfo) => handlers::handle_fsinfo(fs.clone(), &call, &mut dec).await,
+        Some(Procedure::PathConf) => handlers::handle_pathconf(fs, &call, &mut dec).await,
         // Procedures we don't implement yet
         Some(_) | None => {
             warn!("Unsupported NFS procedure: {}", call.procedure);
