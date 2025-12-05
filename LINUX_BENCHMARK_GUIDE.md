@@ -29,18 +29,22 @@ git log --oneline -1
 ```bash
 cd spdk-csi-driver
 
-# First, stash the optimizations temporarily
-git stash push -m "temp" src/nfs/handlers.rs src/nfs/server.rs src/nfs/vfs.rs src/nfs_main.rs
+# Get the commit hash of the optimizations
+OPTIMIZED_COMMIT=$(git rev-parse HEAD)
+echo "Optimized commit: $OPTIMIZED_COMMIT"
+
+# Get the previous commit (before optimizations)
+BASELINE_COMMIT=$(git rev-parse HEAD~1)
+echo "Baseline commit: $BASELINE_COMMIT"
 
 # Build BASELINE (unoptimized) version
+git checkout $BASELINE_COMMIT
 cargo build --release --bin flint-nfs-server
 cp target/release/flint-nfs-server target/release/flint-nfs-server.baseline
 echo "✅ Baseline version built"
 
-# Restore optimizations
-git stash pop
-
 # Build OPTIMIZED version
+git checkout $OPTIMIZED_COMMIT
 cargo build --release --bin flint-nfs-server
 cp target/release/flint-nfs-server target/release/flint-nfs-server.optimized
 echo "✅ Optimized version built"
