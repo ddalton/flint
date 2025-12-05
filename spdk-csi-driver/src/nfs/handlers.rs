@@ -3,7 +3,7 @@
 //! Implements all NFSv3 RPC procedures according to RFC 1813.
 //! Each handler decodes request arguments, calls the VFS, and encodes the reply.
 
-use super::protocol::{FileHandle, NFS3Status, ACCESS3_READ, ACCESS3_LOOKUP, ACCESS3_MODIFY, ACCESS3_EXTEND, ACCESS3_DELETE, ACCESS3_EXECUTE};
+use super::protocol::{FileHandle, NFS3Status};
 use super::rpc::{CallMessage, ReplyBuilder};
 use super::vfs::LocalFilesystem;
 use super::xdr::XdrDecoder;
