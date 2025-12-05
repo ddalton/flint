@@ -180,13 +180,11 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>) -> s
         writer.write_all(&reply_marker.to_be_bytes()).await?;
         writer.write_all(&reply).await?;
         
-        // CRITICAL: Don't flush after every request!
-        // BufWriter will batch writes for better performance
-        // The OS TCP stack will also handle Nagle's algorithm
-        // Only flush on connection close (which happens automatically)
-        //
-        // If you need lower latency at cost of throughput, enable TCP_NODELAY
-        // and/or add periodic flushes
+        // Flush to ensure client receives the reply
+        // Note: This reduces throughput slightly but is necessary for correctness.
+        // Without flush, BufWriter batches replies and clients timeout waiting.
+        // Future optimization: Selective flushing for critical operations only.
+        writer.flush().await?;
     }
 }
 
