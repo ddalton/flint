@@ -267,8 +267,8 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
         Some(Procedure::FsInfo) => handlers::handle_fsinfo(fs.clone(), &call, &mut dec).await,
         Some(Procedure::PathConf) => handlers::handle_pathconf(fs.clone(), &call, &mut dec).await,
         Some(Procedure::Commit) => handlers::handle_commit(fs, &call, &mut dec).await,
-        // Procedures we don't implement yet
-        Some(_) | None => {
+        // Unknown procedure number
+        None => {
             warn!("Unsupported NFS procedure: {}", call.procedure);
             ReplyBuilder::proc_unavail(call.xid)
         }
