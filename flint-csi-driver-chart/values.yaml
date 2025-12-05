@@ -20,6 +20,11 @@ images:
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (v25.05.x)
     tag: latest
+  # NFS Server for ReadWriteMany (RWX) volumes
+  flintNfsServer:
+    name: flint-nfs-server  # NFS server binary (exports SPDK volumes over NFS)
+    tag: latest
+    pullPolicy: IfNotPresent
   # Legacy images (no longer used in minimal state architecture)
   # flintCsiController: replaced by flintCsiDriver with CSI_MODE=controller
   # nodeAgent: replaced by flintCsiDriver with CSI_MODE=node
@@ -196,3 +201,38 @@ dashboard:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ReadWriteMany (RWX) support via NFS server
+# EXPERIMENTAL: This feature is in beta and disabled by default
+# When enabled, RWX PVCs will automatically deploy an NFS server pod
+# that exports the underlying SPDK volume over NFS
+nfs:
+  # Enable NFS server support for ReadWriteMany volumes
+  # Set to false to maintain existing RWO-only behavior (zero regression)
+  enabled: false
+  
+  # NFS server port (standard NFS port, do not change unless required)
+  port: 2049
+  
+  # Resource limits for NFS server pods
+  # These pods run on nodes with volume replicas for local access
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  
+  # Namespace for NFS server pods (defaults to CSI driver namespace)
+  namespace: ""  # Empty means use .Release.Namespace
+  
+  # Labels to apply to NFS server pods (for monitoring/selection)
+  podLabels:
+    app: flint-nfs-server
+  
+  # Annotations for NFS server pods
+  podAnnotations: {}
+  
+  # Image pull secrets for NFS server (if registry requires authentication)
+  imagePullSecrets: []

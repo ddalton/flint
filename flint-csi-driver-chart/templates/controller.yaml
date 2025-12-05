@@ -47,6 +47,37 @@ spec:
             - name: ENABLE_DASHBOARD
               value: "false"
             {{- end }}
+            {{- if .Values.nfs.enabled }}
+            # NFS server configuration for ReadWriteMany (RWX) volumes
+            - name: NFS_ENABLED
+              value: "true"
+            - name: NFS_IMAGE_REPOSITORY
+              value: {{ .Values.images.repository | quote }}
+            - name: NFS_IMAGE_NAME
+              value: {{ .Values.images.flintNfsServer.name | quote }}
+            - name: NFS_IMAGE_TAG
+              value: {{ .Values.images.flintNfsServer.tag | quote }}
+            - name: NFS_IMAGE_PULL_POLICY
+              value: {{ .Values.images.flintNfsServer.pullPolicy | quote }}
+            - name: NFS_SERVER_PORT
+              value: {{ .Values.nfs.port | default 2049 | quote }}
+            - name: NFS_NAMESPACE
+              value: {{ .Values.nfs.namespace | default .Release.Namespace | quote }}
+            {{- if .Values.nfs.resources }}
+            - name: NFS_MEMORY_REQUEST
+              value: {{ .Values.nfs.resources.requests.memory | default "128Mi" | quote }}
+            - name: NFS_CPU_REQUEST
+              value: {{ .Values.nfs.resources.requests.cpu | default "100m" | quote }}
+            - name: NFS_MEMORY_LIMIT
+              value: {{ .Values.nfs.resources.limits.memory | default "256Mi" | quote }}
+            - name: NFS_CPU_LIMIT
+              value: {{ .Values.nfs.resources.limits.cpu | default "500m" | quote }}
+            {{- end }}
+            {{- else }}
+            # NFS support disabled - existing RWO-only behavior maintained
+            - name: NFS_ENABLED
+              value: "false"
+            {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"
           ports:

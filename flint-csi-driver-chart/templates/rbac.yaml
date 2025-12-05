@@ -16,8 +16,19 @@ metadata:
   name: flint-csi-controller
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
+    resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  # Pod management permissions (required for NFS server pods in RWX volumes)
+  # Only used when nfs.enabled=true in Helm values
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes/status"]
     verbs: ["patch", "update"]
