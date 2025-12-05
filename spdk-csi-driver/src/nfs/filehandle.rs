@@ -188,8 +188,8 @@ impl HandleCache {
             ));
         }
         
-        // Get child's inode
-        let metadata = std::fs::metadata(&child_path)?;
+        // Get child's inode (use symlink_metadata to not follow symlinks)
+        let metadata = std::fs::symlink_metadata(&child_path)?;
         let inode = metadata.ino();
         
         // Cache the mapping
