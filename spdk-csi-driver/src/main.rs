@@ -690,8 +690,29 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}", 
-                 volume_id, size_bytes, replica_count, thin_provision);
+        // Check if ReadWriteMany (RWX) is requested
+        let is_rwx = req.volume_capabilities.iter().any(|cap| {
+            if let Some(access_mode) = &cap.access_mode {
+                use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
+                access_mode.mode == Mode::MultiNodeMultiWriter as i32
+            } else {
+                false
+            }
+        });
+        
+        if is_rwx {
+            println!("📡 [RWX] ReadWriteMany access mode detected for volume: {}", volume_id);
+            if !spdk_csi_driver::rwx_nfs::is_nfs_enabled() {
+                println!("❌ [RWX] NFS support is disabled (nfs.enabled=false)");
+                return Err(tonic::Status::failed_precondition(
+                    "ReadWriteMany volumes require NFS support. Please set nfs.enabled=true in Helm values."
+                ));
+            }
+            println!("✅ [RWX] NFS support is enabled, will create NFS-exportable volume");
+        }
+
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}", 
+                 volume_id, size_bytes, replica_count, thin_provision, is_rwx);
 
         // Call the driver's create volume method
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
@@ -737,6 +758,29 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     );
                 }
                 
+                // Add NFS metadata if RWX is requested
+                if is_rwx {
+                    volume_context.insert(
+                        "nfs.flint.io/enabled".to_string(),
+                        "true".to_string(),
+                    );
+                    
+                    // Store all replica nodes (for NFS pod node affinity)
+                    let replica_nodes: Vec<String> = result.replicas
+                        .iter()
+                        .map(|r| r.node_name.clone())
+                        .collect();
+                    let replica_nodes_str = replica_nodes.join(",");
+                    
+                    volume_context.insert(
+                        "nfs.flint.io/replica-nodes".to_string(),
+                        replica_nodes_str.clone(),
+                    );
+                    
+                    println!("📡 [RWX] NFS metadata added to volume context");
+                    println!("   Replica nodes (for NFS pod affinity): {}", replica_nodes_str);
+                }
+                
                 let response = spdk_csi_driver::csi::CreateVolumeResponse {
                     volume: Some(spdk_csi_driver::csi::Volume {
                         volume_id: volume_id.clone(),
@@ -763,6 +807,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.volume_id.clone();
         
         println!("🗑️ [CONTROLLER] Deleting volume: {}", volume_id);
+        
+        // Delete NFS server pod if this is an NFS-enabled volume
+        // This is safe to call even if pod doesn't exist
+        let _ = spdk_csi_driver::rwx_nfs::delete_nfs_server_pod(
+            self.driver.kube_client.clone(),
+            &volume_id
+        ).await;
         
         // Check if this is a multi-replica volume
         match self.driver.get_replicas_from_pv(&volume_id).await {
@@ -882,6 +933,82 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         println!("📤 [CONTROLLER] Publishing volume {} to node {}", volume_id, node_id);
 
         let mut publish_context = std::collections::HashMap::new();
+
+        // Check if this is an NFS-enabled volume (RWX)
+        // Note: volume_context is in req.volume_context (from PV.spec.csi.volumeAttributes)
+        let is_nfs_enabled = req.volume_context
+            .get("nfs.flint.io/enabled")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        
+        if is_nfs_enabled {
+            println!("📡 [RWX] NFS-enabled volume detected");
+            
+            // Parse replica nodes from volume_context
+            let replica_nodes = match spdk_csi_driver::rwx_nfs::parse_replica_nodes(&req.volume_context) {
+                Ok(nodes) => nodes,
+                Err(e) => {
+                    println!("❌ [RWX] Failed to parse replica nodes: {}", e);
+                    return Err(e);
+                }
+            };
+            
+            // Check if NFS pod already exists
+            let pod_exists = spdk_csi_driver::rwx_nfs::nfs_pod_exists(
+                self.driver.kube_client.clone(),
+                &volume_id
+            ).await?;
+            
+            if !pod_exists {
+                println!("🚀 [RWX] Creating NFS server pod for volume: {}", volume_id);
+                
+                // We need the PVC name to mount it in the NFS pod
+                // The PVC name is typically derived from the volume_id or passed in volume_context
+                let pvc_name = req.volume_context
+                    .get("csi.storage.k8s.io/pvc/name")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("pvc-{}", volume_id));
+                
+                // Create NFS server pod
+                spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
+                    self.driver.kube_client.clone(),
+                    &volume_id,
+                    &pvc_name,
+                    &replica_nodes
+                ).await?;
+            } else {
+                println!("ℹ️  [RWX] NFS server pod already exists for volume: {}", volume_id);
+            }
+            
+            // Wait for NFS pod to be ready and get its IP
+            println!("⏳ [RWX] Waiting for NFS pod to be ready...");
+            let (nfs_node, nfs_ip) = spdk_csi_driver::rwx_nfs::wait_for_nfs_pod_ready(
+                self.driver.kube_client.clone(),
+                &volume_id
+            ).await?;
+            
+            println!("✅ [RWX] NFS server ready at {}:{}", nfs_ip, 2049);
+            
+            // Add NFS connection info to publish_context
+            publish_context.insert("nfs.flint.io/server-ip".to_string(), nfs_ip);
+            publish_context.insert("nfs.flint.io/server-node".to_string(), nfs_node);
+            publish_context.insert("nfs.flint.io/export-path".to_string(), 
+                                   format!("/exports/{}", volume_id));
+            publish_context.insert("nfs.flint.io/port".to_string(), "2049".to_string());
+            
+            // For RWX volumes, we don't need to setup NVMe-oF to client nodes
+            // Client nodes will mount NFS instead
+            publish_context.insert("volumeType".to_string(), "nfs".to_string());
+            publish_context.insert("volumeId".to_string(), volume_id.clone());
+            
+            println!("✅ [CONTROLLER] NFS volume {} published successfully", volume_id);
+            
+            let response = spdk_csi_driver::csi::ControllerPublishVolumeResponse {
+                publish_context,
+            };
+            
+            return Ok(tonic::Response::new(response));
+        }
 
         // Check if this is a multi-replica volume
         match self.driver.get_replicas_from_pv(&volume_id).await {
@@ -1837,6 +1964,53 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Create target directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&target_path) {
             println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
+        }
+
+        // Check if this is an NFS volume (RWX)
+        let nfs_server_ip = req.publish_context.get("nfs.flint.io/server-ip");
+        if let Some(server_ip) = nfs_server_ip {
+            println!("📡 [RWX] NFS volume detected - mounting NFS export");
+            
+            let export_path = req.publish_context
+                .get("nfs.flint.io/export-path")
+                .ok_or_else(|| tonic::Status::internal("Missing NFS export path"))?;
+            let port = req.publish_context
+                .get("nfs.flint.io/port")
+                .map(|s| s.as_str())
+                .unwrap_or("2049");
+            
+            println!("   Server: {}", server_ip);
+            println!("   Export: {}", export_path);
+            println!("   Port: {}", port);
+            
+            // Mount NFS
+            let nfs_source = format!("{}:{}", server_ip, export_path);
+            let mut mount_cmd = std::process::Command::new("mount");
+            mount_cmd.args(&[
+                "-t", "nfs",
+                "-o", &format!("vers=3,tcp,port={}", port),
+                &nfs_source,
+                &target_path,
+            ]);
+            
+            if readonly {
+                mount_cmd.args(&["-o", "ro"]);
+            }
+            
+            let mount_output = mount_cmd
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute NFS mount: {}", e)))?;
+            
+            if !mount_output.status.success() {
+                let error = String::from_utf8_lossy(&mount_output.stderr);
+                println!("❌ [RWX] NFS mount failed: {}", error);
+                return Err(tonic::Status::internal(format!("NFS mount failed: {}", error)));
+            }
+            
+            println!("✅ [RWX] NFS volume mounted successfully at {}", target_path);
+            
+            let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
+            return Ok(response);
         }
 
         // Determine if this is a filesystem or block volume  
