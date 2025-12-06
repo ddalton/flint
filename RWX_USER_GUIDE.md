@@ -91,7 +91,7 @@ graph TB
 ### NFS Server Pod
 
 - **Naming**: `flint-nfs-<volume-id>`
-- **Image**: `flint-nfs-server` (configured in Helm values)
+- **Image**: Same as CSI driver image (includes `flint-nfs-server` binary)
 - **Placement**: Runs on a node with the volume replica (for local access)
 - **Port**: 2049 (standard NFS port)
 - **Lifecycle**: Automatically created/deleted with the PVC
@@ -120,12 +120,16 @@ nfs:
   # Namespace for NFS pods (default: same as CSI driver)
   namespace: ""
 
-# NFS server image configuration
-images:
-  flintNfsServer:
-    name: flint-nfs-server
-    tag: latest
-    pullPolicy: IfNotPresent
+# NFS server uses the same image as the CSI driver by default
+# The flint-csi-driver image includes both binaries:
+#   - /usr/local/bin/csi-driver (CSI controller/node)
+#   - /usr/local/bin/flint-nfs-server (NFS server for RWX)
+# Override only if you need a separate NFS server image:
+# images:
+#   flintNfsServer:
+#     name: flint-nfs-server-custom
+#     tag: v1.0.0
+#     pullPolicy: IfNotPresent
 ```
 
 ### StorageClass Parameters
@@ -212,12 +216,14 @@ kubectl describe pod flint-nfs-<volume-id>
 ```
 
 **Common Causes**:
-1. **Image pull error**: NFS server image not available
-   - Solution: Build and push `flint-nfs-server` image
+1. **Image pull error**: CSI driver image not available
+   - Solution: Verify CSI driver image is accessible (NFS server uses same image)
 2. **Insufficient resources**: Node doesn't have enough CPU/memory
    - Solution: Adjust `nfs.resources` in Helm values
 3. **RBAC issues**: Controller doesn't have pod create permissions
    - Solution: Verify RBAC configuration (should be automatic)
+4. **Volume mount failure**: PVC can't be mounted in NFS pod
+   - Solution: Check if volume was created successfully
 
 ### Pods Can't Mount NFS
 
