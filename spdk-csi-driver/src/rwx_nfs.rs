@@ -24,14 +24,14 @@
 //! - Feature disabled by default
 //! - Comprehensive logging for visibility
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::env;
-use kube::{Api, Client, api::{PostParams, DeleteParams, ListParams}};
+use kube::{Api, Client, api::{PostParams, DeleteParams}};
 use k8s_openapi::api::core::v1::{
     Pod, PodSpec, Container, VolumeMount, Volume,
     PersistentVolumeClaimVolumeSource, ContainerPort,
     Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm,
-    NodeSelectorRequirement, ResourceRequirements, ResourceList,
+    NodeSelectorRequirement, ResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use tokio::time::{sleep, Duration};
@@ -189,11 +189,11 @@ pub async fn create_nfs_server_pod(
     };
     
     // Build resource requirements
-    let mut requests = HashMap::new();
+    let mut requests = BTreeMap::new();
     requests.insert("memory".to_string(), Quantity(config.resources.memory_request.clone()));
     requests.insert("cpu".to_string(), Quantity(config.resources.cpu_request.clone()));
     
-    let mut limits = HashMap::new();
+    let mut limits = BTreeMap::new();
     limits.insert("memory".to_string(), Quantity(config.resources.memory_limit.clone()));
     limits.insert("cpu".to_string(), Quantity(config.resources.cpu_limit.clone()));
     
