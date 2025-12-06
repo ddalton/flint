@@ -21,10 +21,12 @@ images:
     name: spdk-tgt          # SPDK target daemon (v25.05.x)
     tag: latest
   # NFS Server for ReadWriteMany (RWX) volumes
-  flintNfsServer:
-    name: flint-nfs-server  # NFS server binary (exports SPDK volumes over NFS)
-    tag: latest
-    pullPolicy: IfNotPresent
+  # By default, uses the same image as flintCsiDriver (which includes flint-nfs-server binary)
+  # Uncomment to override with a separate NFS server image
+  # flintNfsServer:
+  #   name: flint-nfs-server
+  #   tag: latest
+  #   pullPolicy: IfNotPresent
   # Legacy images (no longer used in minimal state architecture)
   # flintCsiController: replaced by flintCsiDriver with CSI_MODE=controller
   # nodeAgent: replaced by flintCsiDriver with CSI_MODE=node

@@ -51,6 +51,15 @@ spec:
             # NFS server configuration for ReadWriteMany (RWX) volumes
             - name: NFS_ENABLED
               value: "true"
+            # NFS server uses CSI driver image (includes flint-nfs-server binary)
+            # Can be overridden with nfs.image.* if a separate image is needed
+            - name: IMAGE_REPOSITORY
+              value: {{ .Values.images.repository | quote }}
+            - name: CSI_DRIVER_IMAGE_NAME
+              value: {{ .Values.images.flintCsiDriver.name | quote }}
+            - name: CSI_DRIVER_IMAGE_TAG
+              value: {{ .Values.images.flintCsiDriver.tag | quote }}
+            {{- if .Values.images.flintNfsServer }}
             - name: NFS_IMAGE_REPOSITORY
               value: {{ .Values.images.repository | quote }}
             - name: NFS_IMAGE_NAME
@@ -59,6 +68,7 @@ spec:
               value: {{ .Values.images.flintNfsServer.tag | quote }}
             - name: NFS_IMAGE_PULL_POLICY
               value: {{ .Values.images.flintNfsServer.pullPolicy | quote }}
+            {{- end }}
             - name: NFS_SERVER_PORT
               value: {{ .Values.nfs.port | default 2049 | quote }}
             - name: NFS_NAMESPACE

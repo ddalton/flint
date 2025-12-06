@@ -77,12 +77,17 @@ impl NfsConfig {
             return None;
         }
         
+        // Use CSI driver image (which includes flint-nfs-server binary)
+        // This simplifies deployment - only one image to build/maintain
         let repository = env::var("NFS_IMAGE_REPOSITORY")
-            .unwrap_or_else(|_| "docker-sandbox.infra.cloudera.com/ddalton".to_string());
+            .unwrap_or_else(|_| env::var("IMAGE_REPOSITORY")
+                .unwrap_or_else(|_| "docker-sandbox.infra.cloudera.com/ddalton".to_string()));
         let name = env::var("NFS_IMAGE_NAME")
-            .unwrap_or_else(|_| "flint-nfs-server".to_string());
+            .unwrap_or_else(|_| env::var("CSI_DRIVER_IMAGE_NAME")
+                .unwrap_or_else(|_| "flint-driver".to_string()));
         let tag = env::var("NFS_IMAGE_TAG")
-            .unwrap_or_else(|_| "latest".to_string());
+            .unwrap_or_else(|_| env::var("CSI_DRIVER_IMAGE_TAG")
+                .unwrap_or_else(|_| "latest".to_string()));
         let image = format!("{}/{}:{}", repository, name, tag);
         
         let config = Self {
@@ -230,6 +235,8 @@ pub async fn create_nfs_server_pod(
                 name: "nfs-server".to_string(),
                 image: Some(config.image.clone()),
                 image_pull_policy: Some(config.pull_policy.clone()),
+                // Override entrypoint to use flint-nfs-server instead of csi-driver
+                command: Some(vec!["/usr/local/bin/flint-nfs-server".to_string()]),
                 args: Some(vec![
                     "--export-path".to_string(),
                     "/mnt/volume".to_string(),

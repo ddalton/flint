@@ -32,8 +32,9 @@ COPY --chown=65532:65532 src/ ./src/
 COPY --chown=65532:65532 build.rs ./
 COPY --chown=65532:65532 proto/ ./proto/
 
-# Build the CSI driver binary
+# Build the CSI driver binary and NFS server binary
 RUN cargo build --release --bin csi-driver
+RUN cargo build --release --bin flint-nfs-server
 
 # --- Runtime image ---
 FROM ubuntu:24.04
@@ -50,7 +51,9 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the built binary from the builder stage
+# Copy the built binaries from the builder stage
 COPY --from=builder /app/target/release/csi-driver /usr/local/bin/
+COPY --from=builder /app/target/release/flint-nfs-server /usr/local/bin/
 
+# Default entrypoint is CSI driver (NFS server is invoked by controller when needed)
 ENTRYPOINT ["/usr/local/bin/csi-driver"]
