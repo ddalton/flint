@@ -1,0 +1,91 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-1
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+    - sh
+    - -c
+    - |
+      echo "Starting writer-1 at $(date)" | tee /data/writer-1.log
+      for i in $(seq 1 10); do
+        echo "writer-1: Message $i at $(date)" >> /data/shared.log
+        echo "writer-1: Progress $i/10" >> /data/writer-1.log
+        sleep 1
+      done
+      echo "writer-1: Completed at $(date)" | tee -a /data/writer-1.log
+      # Keep running to verify data
+      tail -f /dev/null
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: rwx-test-pvc
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-2
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+    - sh
+    - -c
+    - |
+      echo "Starting writer-2 at $(date)" | tee /data/writer-2.log
+      for i in $(seq 1 10); do
+        echo "writer-2: Message $i at $(date)" >> /data/shared.log
+        echo "writer-2: Progress $i/10" >> /data/writer-2.log
+        sleep 1
+      done
+      echo "writer-2: Completed at $(date)" | tee -a /data/writer-2.log
+      # Keep running to verify data
+      tail -f /dev/null
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: rwx-test-pvc
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-3
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+    - sh
+    - -c
+    - |
+      echo "Starting writer-3 at $(date)" | tee /data/writer-3.log
+      for i in $(seq 1 10); do
+        echo "writer-3: Message $i at $(date)" >> /data/shared.log
+        echo "writer-3: Progress $i/10" >> /data/writer-3.log
+        sleep 1
+      done
+      echo "writer-3: Completed at $(date)" | tee -a /data/writer-3.log
+      # Keep running to verify data
+      tail -f /dev/null
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: rwx-test-pvc
+  restartPolicy: Never
+

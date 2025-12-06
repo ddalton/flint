@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-verifier
+spec:
+  containers:
+  - name: verifier
+    image: busybox
+    command:
+    - sh
+    - -c
+    - |
+      echo "=== RWX Verification Test ==="
+      
+      # Wait for writers to complete (15 seconds)
+      sleep 15
+      
+      echo ""
+      echo "1. Checking if shared.log exists and has data from all 3 writers..."
+      if [ ! -f /data/shared.log ]; then
+        echo "FAIL: shared.log does not exist"
+        exit 1
+      fi
+      
+      # Count messages from each writer
+      writer1_count=$(grep -c "writer-1:" /data/shared.log || true)
+      writer2_count=$(grep -c "writer-2:" /data/shared.log || true)
+      writer3_count=$(grep -c "writer-3:" /data/shared.log || true)
+      
+      echo "   writer-1 messages: $writer1_count"
+      echo "   writer-2 messages: $writer2_count"
+      echo "   writer-3 messages: $writer3_count"
+      
+      if [ "$writer1_count" -lt 5 ] || [ "$writer2_count" -lt 5 ] || [ "$writer3_count" -lt 5 ]; then
+        echo "FAIL: Not enough messages from all writers"
+        exit 1
+      fi
+      
+      echo "PASS: All writers wrote to shared file"
+      
+      echo ""
+      echo "2. Checking individual writer logs..."
+      for i in 1 2 3; do
+        if [ ! -f /data/writer-$i.log ]; then
+          echo "FAIL: writer-$i.log does not exist"
+          exit 1
+        fi
+        if ! grep -q "Completed" /data/writer-$i.log; then
+          echo "FAIL: writer-$i did not complete"
+          exit 1
+        fi
+        echo "   writer-$i.log: OK"
+      done
+      
+      echo "PASS: All individual logs verified"
+      
+      echo ""
+      echo "3. Display sample of concurrent writes from shared.log:"
+      head -30 /data/shared.log
+      
+      echo ""
+      echo "=== ALL TESTS PASSED ==="
+      echo "RWX volume successfully shared across 3 pods"
+      
+      # Create success marker
+      echo "SUCCESS" > /data/test-complete
+      
+      exit 0
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: rwx-test-pvc
+  restartPolicy: Never
+
