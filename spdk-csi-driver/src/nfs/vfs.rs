@@ -441,14 +441,41 @@ impl LocalFilesystem {
     /// Set file mode (permissions)
     pub async fn setattr_mode(&self, fh: &FileHandle, mode: u32) -> io::Result<()> {
         let path = self.resolve(fh)?;
-        
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(mode);
             tokio::fs::set_permissions(&path, perms).await?;
         }
-        
+
+        Ok(())
+    }
+
+    /// Set file size (truncate/extend)
+    ///
+    /// Used by ftruncate() - extends or truncates file to specified size.
+    /// Uses spawn_blocking for positioned operations to avoid blocking tokio runtime.
+    pub async fn setattr_size(&self, fh: &FileHandle, size: u64) -> io::Result<()> {
+        let path = self.resolve(fh)?;
+
+        // Use spawn_blocking for file operations to avoid blocking tokio runtime
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)?;
+
+            // Set file length (truncate or extend with zeros)
+            file.set_len(size)?;
+
+            // Sync to ensure size change is committed
+            file.sync_all()?;
+
+            Ok::<_, io::Error>(())
+        })
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))??;
+
         Ok(())
     }
     

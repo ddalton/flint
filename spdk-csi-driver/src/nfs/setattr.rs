@@ -31,22 +31,39 @@ pub async fn handle_setattr(
     };
     
     // Decode sattr3 (attributes to set)
-    let set_mode = decode_setattr_fields(dec);
-    
+    let (set_mode, set_size) = decode_setattr_fields(dec);
+
     // Decode guard (optional time check)
     let _guard_check = match dec.decode_bool() {
         Ok(b) => b,
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
-    
-    debug!("SETATTR: mode={:?}", set_mode);
-    
+
+    debug!("SETATTR: mode={:?}, size={:?}", set_mode, set_size);
+
     // Apply the changes
-    let result = if let Some(mode) = set_mode {
-        fs.setattr_mode(&file_handle, mode).await
-    } else {
-        Ok(()) // No changes requested
-    };
+    let result = async {
+        match (set_mode, set_size) {
+            (Some(mode), Some(size)) => {
+                // Set both mode and size
+                fs.setattr_mode(&file_handle, mode).await?;
+                fs.setattr_size(&file_handle, size).await
+            }
+            (Some(mode), None) => {
+                // Set mode only
+                fs.setattr_mode(&file_handle, mode).await
+            }
+            (None, Some(size)) => {
+                // Set size only (truncate/extend)
+                fs.setattr_size(&file_handle, size).await
+            }
+            (None, None) => {
+                // No changes requested
+                Ok(())
+            }
+        }
+    }
+    .await;
     
     match result {
         Ok(()) => {
@@ -81,44 +98,46 @@ pub async fn handle_setattr(
     }
 }
 
-/// Decode sattr3 and extract mode if present
-fn decode_setattr_fields(dec: &mut XdrDecoder) -> Option<u32> {
+/// Decode sattr3 and extract mode and size if present
+fn decode_setattr_fields(dec: &mut XdrDecoder) -> (Option<u32>, Option<u64>) {
     // mode
     let mode = if dec.decode_bool().unwrap_or(false) {
         dec.decode_u32().ok()
     } else {
         None
     };
-    
+
     // uid
     if dec.decode_bool().unwrap_or(false) {
         let _ = dec.decode_u32();
     }
-    
+
     // gid
     if dec.decode_bool().unwrap_or(false) {
         let _ = dec.decode_u32();
     }
-    
-    // size
-    if dec.decode_bool().unwrap_or(false) {
-        let _ = dec.decode_u64();
-    }
-    
+
+    // size (for truncate/ftruncate)
+    let size = if dec.decode_bool().unwrap_or(false) {
+        dec.decode_u64().ok()
+    } else {
+        None
+    };
+
     // atime
     let atime_how = dec.decode_u32().unwrap_or(0);
     if atime_how == 2 {
         let _ = dec.decode_u32();
         let _ = dec.decode_u32();
     }
-    
+
     // mtime
     let mtime_how = dec.decode_u32().unwrap_or(0);
     if mtime_how == 2 {
         let _ = dec.decode_u32();
         let _ = dec.decode_u32();
     }
-    
-    mode
+
+    (mode, size)
 }
 
