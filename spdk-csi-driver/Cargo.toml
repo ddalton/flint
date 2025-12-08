@@ -53,6 +53,7 @@ async-trait = "0.1"
 nix = { version = "0.27", features = ["fs"] }
 thiserror = "1.0"
 rand = "0.8"
+dashmap = "6.0"
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

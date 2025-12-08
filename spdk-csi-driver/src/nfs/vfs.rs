@@ -266,27 +266,64 @@ impl LocalFilesystem {
     
     /// Read directory entries
     pub async fn readdir(&self, dir_fh: &FileHandle, cookie: u64, _count: u32) -> io::Result<Vec<DirEntry>> {
+        use tracing::info;
+        info!(">>> VFS readdir: cookie={}", cookie);
         let dir_path = self.resolve(dir_fh)?;
-        
+        info!(">>> VFS readdir: resolved path = {:?}", dir_path);
+
         let mut entries = Vec::new();
-        let mut read_dir = fs::read_dir(&dir_path).await?;
-        
         let mut current_cookie = 0u64;
-        
+
+        // Get directory metadata for "." and ".." entries
+        info!(">>> VFS readdir: getting directory metadata");
+        let dir_metadata = fs::metadata(&dir_path).await?;
+        info!("<<< VFS readdir: got directory metadata");
+        use std::os::unix::fs::MetadataExt;
+        let dir_fileid = dir_metadata.ino();
+
+        // Add "." entry (cookie 1)
+        current_cookie += 1;
+        if cookie < current_cookie {
+            entries.push(DirEntry {
+                fileid: dir_fileid,
+                name: ".".to_string(),
+                cookie: current_cookie,
+                attr: Some(FileAttr::from_metadata(&dir_metadata.clone().into(), dir_fileid)),
+            });
+        }
+
+        // Add ".." entry (cookie 2)
+        // For simplicity, use same inode as current directory (RFC allows this for root)
+        current_cookie += 1;
+        if cookie < current_cookie {
+            entries.push(DirEntry {
+                fileid: dir_fileid,
+                name: "..".to_string(),
+                cookie: current_cookie,
+                attr: Some(FileAttr::from_metadata(&dir_metadata.into(), dir_fileid)),
+            });
+        }
+
+        // Add actual directory entries (cookie 3+)
+        info!(">>> VFS readdir: opening directory");
+        let mut read_dir = fs::read_dir(&dir_path).await?;
+        info!("<<< VFS readdir: directory opened");
+
+        info!(">>> VFS readdir: iterating entries");
         while let Some(entry) = read_dir.next_entry().await? {
             current_cookie += 1;
-            
+
             // Skip entries before the requested cookie
             if current_cookie <= cookie {
                 continue;
             }
-            
+
             let name = entry.file_name().to_string_lossy().to_string();
+            info!(">>> VFS readdir: processing entry: {}", name);
             let metadata = entry.metadata().await?;
-            
-            use std::os::unix::fs::MetadataExt;
+
             let fileid = metadata.ino();
-            
+
             entries.push(DirEntry {
                 fileid,
                 name,
@@ -294,53 +331,84 @@ impl LocalFilesystem {
                 attr: Some(FileAttr::from_metadata(&metadata.into(), fileid)),
             });
         }
-        
+
+        info!("<<< VFS readdir: completed, {} total entries", entries.len());
         Ok(entries)
     }
     
     /// Read directory entries with file handles (optimized for READDIRPLUS)
-    /// 
+    ///
     /// Returns entries along with their file handles, avoiding N extra lookup() calls.
     /// This provides 2-3x improvement for READDIRPLUS operations.
-    pub async fn readdir_plus(&self, dir_fh: &FileHandle, cookie: u64, _count: u32) 
+    pub async fn readdir_plus(&self, dir_fh: &FileHandle, cookie: u64, _count: u32)
         -> io::Result<Vec<(DirEntry, FileHandle)>> {
         let dir_path = self.resolve(dir_fh)?;
-        
+
         let mut entries = Vec::new();
-        let mut read_dir = fs::read_dir(&dir_path).await?;
-        
         let mut current_cookie = 0u64;
-        
+
+        // Get directory metadata for "." and ".." entries
+        let dir_metadata = fs::metadata(&dir_path).await?;
+        use std::os::unix::fs::MetadataExt;
+        let dir_fileid = dir_metadata.ino();
+
+        // Add "." entry (cookie 1)
+        current_cookie += 1;
+        if cookie < current_cookie {
+            let dot_entry = DirEntry {
+                fileid: dir_fileid,
+                name: ".".to_string(),
+                cookie: current_cookie,
+                attr: Some(FileAttr::from_metadata(&dir_metadata.clone().into(), dir_fileid)),
+            };
+            entries.push((dot_entry, dir_fh.clone()));
+        }
+
+        // Add ".." entry (cookie 2)
+        // For simplicity, use same file handle as current directory
+        current_cookie += 1;
+        if cookie < current_cookie {
+            let dotdot_entry = DirEntry {
+                fileid: dir_fileid,
+                name: "..".to_string(),
+                cookie: current_cookie,
+                attr: Some(FileAttr::from_metadata(&dir_metadata.into(), dir_fileid)),
+            };
+            entries.push((dotdot_entry, dir_fh.clone()));
+        }
+
+        // Add actual directory entries (cookie 3+)
+        let mut read_dir = fs::read_dir(&dir_path).await?;
+
         while let Some(entry) = read_dir.next_entry().await? {
             current_cookie += 1;
-            
+
             // Skip entries before the requested cookie
             if current_cookie <= cookie {
                 continue;
             }
-            
+
             let name = entry.file_name().to_string_lossy().to_string();
             let metadata = entry.metadata().await?;
-            
-            use std::os::unix::fs::MetadataExt;
+
             let fileid = metadata.ino();
-            
+
             // Create file handle directly without extra stat() syscall
             let child_fh = match self.handle_cache.lookup_child(dir_fh, &name) {
                 Ok(fh) => fh,
                 Err(_) => continue, // Skip entries we can't create handles for
             };
-            
+
             let dir_entry = DirEntry {
                 fileid,
                 name,
                 cookie: current_cookie,
                 attr: Some(FileAttr::from_metadata(&metadata.into(), fileid)),
             };
-            
+
             entries.push((dir_entry, child_fh));
         }
-        
+
         Ok(entries)
     }
     

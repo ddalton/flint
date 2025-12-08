@@ -174,9 +174,9 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer
         let request = buf.split().freeze();
         
         // Process the RPC call (async, may take time)
-        debug!("Processing request from {}, length={} bytes", peer, length);
+        debug!(">>> Processing request from {}, length={} bytes", peer, length);
         let reply = dispatch(request, fs.clone()).await;
-        debug!("Reply ready for {}, length={} bytes", peer, reply.len());
+        debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
         
         // Write reply with record marker
         let reply_len = reply.len() as u32;
@@ -236,9 +236,9 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
             return ReplyBuilder::garbage_args(0).into();
         }
     };
-    
-    debug!(
-        "RPC: xid={}, program={}, version={}, procedure={}",
+
+    info!(
+        ">>> RPC CALL: xid={}, program={}, version={}, procedure={}",
         call.xid, call.program, call.version, call.procedure
     );
     
@@ -256,13 +256,19 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
     
     // Check program and version
     if call.program == NFS_PROGRAM && call.version == NFS_VERSION {
-        return dispatch_nfs(call, request, fs).await;
+        info!(">>> Dispatching to NFS handler");
+        let result = dispatch_nfs(call, request, fs).await;
+        info!("<<< NFS handler returned");
+        return result;
     }
-    
+
     if call.program == MOUNT_PROGRAM && call.version == MOUNT_VERSION {
-        return dispatch_mount(call, request, fs).await;
+        info!(">>> Dispatching to MOUNT handler");
+        let result = dispatch_mount(call, request, fs).await;
+        info!("<<< MOUNT handler returned");
+        return result;
     }
-    
+
     // Program not available
     warn!("Unknown program: {}", call.program);
     ReplyBuilder::prog_unavail(call.xid)
@@ -301,7 +307,12 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
     
     // Now dec is positioned at procedure arguments
     
-    match Procedure::from_u32(call.procedure) {
+    let proc_name = Procedure::from_u32(call.procedure)
+        .map(|p| format!("{:?}", p))
+        .unwrap_or_else(|| format!("Unknown({})", call.procedure));
+    info!(">>> Calling NFS procedure: {}", proc_name);
+
+    let result = match Procedure::from_u32(call.procedure) {
         Some(Procedure::Null) => handlers::handle_null(&call),
         Some(Procedure::GetAttr) => handlers::handle_getattr(fs.clone(), &call, &mut dec).await,
         Some(Procedure::SetAttr) => setattr::handle_setattr(fs.clone(), &call, &mut dec).await,
@@ -329,7 +340,10 @@ async fn dispatch_nfs(call: CallMessage, request: Bytes, fs: Arc<LocalFilesystem
             warn!("Unsupported NFS procedure: {}", call.procedure);
             ReplyBuilder::proc_unavail(call.xid)
         }
-    }
+    };
+
+    info!("<<< NFS procedure {} completed", proc_name);
+    result
 }
 
 /// Dispatch MOUNT protocol procedure

@@ -725,9 +725,11 @@ pub async fn handle_readdir(
     call: &CallMessage,
     dec: &mut XdrDecoder,
 ) -> Bytes {
-    debug!("NFS READDIR");
-    
+    use tracing::info;
+    info!(">>> NFS READDIR handler entered");
+
     // Decode directory handle
+    info!(">>> Decoding directory handle");
     let dir_handle = match FileHandle::decode(dec) {
         Ok(fh) => fh,
         Err(e) => {
@@ -735,33 +737,38 @@ pub async fn handle_readdir(
             return error_reply(call.xid, NFS3Status::BadHandle);
         }
     };
-    
+    info!(">>> Directory handle decoded: {:?}", dir_handle);
+
     // Decode cookie (resume point)
     let cookie = match dec.decode_u64() {
         Ok(c) => c,
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
-    
+
     // Decode cookie verifier (we ignore for simplicity)
     let _cookieverf = match dec.decode_u64() {
         Ok(c) => c,
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
-    
+
     // Decode count (max bytes to return)
     let count = match dec.decode_u32() {
         Ok(c) => c,
         Err(_) => return ReplyBuilder::garbage_args(call.xid),
     };
-    
-    debug!("READDIR: cookie={}, count={}", cookie, count);
-    
+
+    info!(">>> READDIR: cookie={}, count={}", cookie, count);
+
     // Read directory
+    info!(">>> Calling fs.readdir()");
     match fs.readdir(&dir_handle, cookie, count).await {
         Ok(entries) => {
+            info!("<<< fs.readdir() returned {} entries", entries.len());
             // Get directory attributes for cache coherency
             // This saves clients from issuing a separate GETATTR RPC
+            info!(">>> Getting directory attributes");
             let dir_attrs = fs.getattr(&dir_handle).await.ok();
+            info!("<<< Got directory attributes");
 
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
@@ -793,10 +800,11 @@ pub async fn handle_readdir(
             // EOF (true if all entries returned)
             enc.encode_bool(true);
 
+            info!("<<< READDIR reply built, returning");
             reply.finish()
         }
         Err(e) => {
-            warn!("READDIR failed: {}", e);
+            warn!("<<< READDIR failed: {}", e);
 
             // Even on error, try to return directory attributes
             let dir_attrs = fs.getattr(&dir_handle).await.ok();

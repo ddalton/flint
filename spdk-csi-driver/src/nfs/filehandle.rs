@@ -9,20 +9,23 @@
 //! - We maintain a cache mapping file handles ↔ paths for performance
 
 use super::protocol::FileHandle;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// File handle cache - maintains mapping between file handles and paths
+///
+/// Uses DashMap for lock-free concurrent access with fine-grained internal sharding.
+/// This eliminates the deadlock issues from the previous RwLock-based implementation.
 #[derive(Clone)]
 pub struct HandleCache {
-    /// Map from inode → path
-    inode_to_path: Arc<RwLock<HashMap<u64, PathBuf>>>,
-    
-    /// Map from path → inode (reverse lookup)
-    path_to_inode: Arc<RwLock<HashMap<PathBuf, u64>>>,
-    
+    /// Map from inode → path (lock-free concurrent HashMap)
+    inode_to_path: Arc<DashMap<u64, PathBuf>>,
+
+    /// Map from path → inode (reverse lookup, lock-free concurrent HashMap)
+    path_to_inode: Arc<DashMap<PathBuf, u64>>,
+
     /// Root export path
     root: PathBuf,
 }
@@ -30,18 +33,19 @@ pub struct HandleCache {
 impl HandleCache {
     /// Create a new handle cache for the given export root
     pub fn new(root: PathBuf) -> Self {
-        let mut cache = Self {
-            inode_to_path: Arc::new(RwLock::new(HashMap::new())),
-            path_to_inode: Arc::new(RwLock::new(HashMap::new())),
-            root,
+        let cache = Self {
+            inode_to_path: Arc::new(DashMap::new()),
+            path_to_inode: Arc::new(DashMap::new()),
+            root: root.clone(),
         };
-        
+
         // Register the root directory (use empty path for root)
-        if let Ok(metadata) = std::fs::metadata(&cache.root) {
+        if let Ok(metadata) = std::fs::metadata(&root) {
             let root_inode = metadata.ino();
-            cache.insert(root_inode, PathBuf::from(""));
+            cache.inode_to_path.insert(root_inode, PathBuf::from(""));
+            cache.path_to_inode.insert(PathBuf::from(""), root_inode);
         }
-        
+
         cache
     }
     
@@ -50,50 +54,47 @@ impl HandleCache {
         let metadata = std::fs::metadata(&self.root)?;
         Ok(FileHandle::from_inode(metadata.ino()))
     }
-    
-    /// Insert a mapping from inode to relative path
-    fn insert(&mut self, inode: u64, path: PathBuf) {
-        self.inode_to_path.write().unwrap().insert(inode, path.clone());
-        self.path_to_inode.write().unwrap().insert(path, inode);
-    }
-    
+
     /// Resolve a file handle to an absolute filesystem path
     pub fn resolve(&self, handle: &FileHandle) -> Result<PathBuf, std::io::Error> {
         // Extract inode from file handle
         let inode = self.handle_to_inode(handle)?;
         
         tracing::trace!("Resolving file handle for inode {}", inode);
-        
-        // Look up in cache
-        if let Some(rel_path) = self.inode_to_path.read().unwrap().get(&inode) {
-            let resolved = self.root.join(rel_path);
-            
+
+        // Look up in cache (DashMap provides lock-free reads)
+        if let Some(rel_path_ref) = self.inode_to_path.get(&inode) {
+            let rel_path = rel_path_ref.value().clone();
+            drop(rel_path_ref); // Release the reference guard
+
+            let resolved = self.root.join(&rel_path);
+
             // Verify the path still exists and has the same inode
             if let Ok(metadata) = std::fs::metadata(&resolved) {
                 if metadata.ino() == inode {
                     tracing::debug!("✓ Resolved inode {} to path: {:?} (cached, verified)", inode, resolved);
                     return Ok(resolved);
                 } else {
-                    tracing::warn!("Cache STALE: inode {} cached to {:?}, but path has inode {}", 
+                    tracing::warn!("Cache STALE: inode {} cached to {:?}, but path has inode {}",
                                    inode, resolved, metadata.ino());
-                    // Remove stale entry
-                    self.inode_to_path.write().unwrap().remove(&inode);
-                    self.path_to_inode.write().unwrap().remove(rel_path);
+                    // Remove stale entries (DashMap handles concurrent removal safely)
+                    self.inode_to_path.remove(&inode);
+                    self.path_to_inode.remove(&rel_path);
                 }
             } else {
-                tracing::warn!("Cache STALE: inode {} cached to {:?}, but path no longer exists", 
+                tracing::warn!("Cache STALE: inode {} cached to {:?}, but path no longer exists",
                                inode, resolved);
-                // Remove stale entry
-                self.inode_to_path.write().unwrap().remove(&inode);
-                self.path_to_inode.write().unwrap().remove(rel_path);
+                // Remove stale entries
+                self.inode_to_path.remove(&inode);
+                self.path_to_inode.remove(&rel_path);
             }
         }
         
         // Not in cache or cache was stale - search the filesystem to find it
         tracing::info!("Inode {} not in valid cache, searching filesystem...", inode);
         tracing::info!("  Export root: {:?}", self.root);
-        tracing::info!("  Current cache size: {} entries", self.inode_to_path.read().unwrap().len());
-        tracing::info!("  Cached inodes: {:?}", self.inode_to_path.read().unwrap().keys().collect::<Vec<_>>());
+        tracing::info!("  Current cache size: {} entries", self.inode_to_path.len());
+        tracing::info!("  Cached inodes: {:?}", self.inode_to_path.iter().map(|e| *e.key()).collect::<Vec<_>>());
         
         match self.find_by_inode(inode) {
             Ok(path) => {
@@ -103,9 +104,9 @@ impl HandleCache {
             Err(e) => {
                 tracing::error!("✗ STALE FILE HANDLE: inode {} not found anywhere!", inode);
                 tracing::error!("  Searched in: {:?}", self.root);
-                tracing::error!("  Cache contents: {:?}", 
-                               self.inode_to_path.read().unwrap().iter()
-                                   .map(|(k, v)| format!("{}→{:?}", k, v))
+                tracing::error!("  Cache contents: {:?}",
+                               self.inode_to_path.iter()
+                                   .map(|entry| format!("{}→{:?}", entry.key(), entry.value()))
                                    .collect::<Vec<_>>());
                 
                 // Check if root directory exists
@@ -143,15 +144,15 @@ impl HandleCache {
             let metadata = entry.metadata()?;
             
             if metadata.ino() == target_inode {
-                // Found it! Cache the mapping
+                // Found it! Cache the mapping (DashMap handles concurrent inserts)
                 let rel_path = path
                     .strip_prefix(&self.root)
                     .unwrap_or(Path::new(""))
                     .to_path_buf();
-                
-                self.inode_to_path.write().unwrap().insert(target_inode, rel_path.clone());
-                self.path_to_inode.write().unwrap().insert(rel_path, target_inode);
-                
+
+                self.inode_to_path.insert(target_inode, rel_path.clone());
+                self.path_to_inode.insert(rel_path, target_inode);
+
                 tracing::debug!("Cached found inode {} -> {:?}", target_inode, path);
                 return Ok(path);
             }
@@ -189,11 +190,11 @@ impl HandleCache {
             .strip_prefix(&self.root)
             .unwrap_or(Path::new(""))
             .to_path_buf();
-        
-        // Cache the mapping
-        self.inode_to_path.write().unwrap().insert(inode, rel_path.clone());
-        self.path_to_inode.write().unwrap().insert(rel_path, inode);
-        
+
+        // Cache the mapping (DashMap handles concurrent inserts)
+        self.inode_to_path.insert(inode, rel_path.clone());
+        self.path_to_inode.insert(rel_path, inode);
+
         Ok(FileHandle::from_inode(inode))
     }
     
@@ -239,10 +240,11 @@ impl HandleCache {
             "Caching file handle: inode={}, name={}, rel_path={:?}",
             inode, name, rel_path
         );
-        
-        self.inode_to_path.write().unwrap().insert(inode, rel_path.clone());
-        self.path_to_inode.write().unwrap().insert(rel_path, inode);
-        
+
+        // Cache the mapping (DashMap handles concurrent inserts)
+        self.inode_to_path.insert(inode, rel_path.clone());
+        self.path_to_inode.insert(rel_path, inode);
+
         Ok(FileHandle::from_inode(inode))
     }
     
@@ -265,14 +267,14 @@ impl HandleCache {
     /// Clear the cache (useful when export directory is recreated)
     pub fn clear_cache(&self) {
         tracing::info!("Clearing file handle cache");
-        self.inode_to_path.write().unwrap().clear();
-        self.path_to_inode.write().unwrap().clear();
-        
+        self.inode_to_path.clear();
+        self.path_to_inode.clear();
+
         // Re-register root
         if let Ok(metadata) = std::fs::metadata(&self.root) {
             let root_inode = metadata.ino();
-            self.inode_to_path.write().unwrap().insert(root_inode, PathBuf::from(""));
-            self.path_to_inode.write().unwrap().insert(PathBuf::from(""), root_inode);
+            self.inode_to_path.insert(root_inode, PathBuf::from(""));
+            self.path_to_inode.insert(PathBuf::from(""), root_inode);
             tracing::info!("Re-cached root with inode {}", root_inode);
         }
     }
