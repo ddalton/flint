@@ -22,11 +22,13 @@ const PMAP_PROC_UNSET: u32 = 2;
 const IPPROTO_TCP: u32 = 6;
 const IPPROTO_UDP: u32 = 17;
 
-// NFS and MOUNT program numbers
+// NFS, MOUNT, and NLM program numbers
 const NFS_PROGRAM: u32 = 100003;
 const NFS_VERSION: u32 = 3;
 const MOUNT_PROGRAM: u32 = 100005;
 const MOUNT_VERSION: u32 = 3;
+const NLM_PROGRAM: u32 = 100021;
+const NLM_VERSION: u32 = 4;
 
 /// Register NFS and MOUNT services with the portmapper
 pub async fn register_with_portmapper(port: u16) -> io::Result<()> {
@@ -57,7 +59,15 @@ pub async fn register_with_portmapper(port: u16) -> io::Result<()> {
     // Register MOUNT v3 UDP
     register_service(&mut stream, MOUNT_PROGRAM, MOUNT_VERSION, IPPROTO_UDP, port).await?;
     info!("✅ Registered MOUNT v3 UDP on port {}", port);
-    
+
+    // Register NLM v4 TCP
+    register_service(&mut stream, NLM_PROGRAM, NLM_VERSION, IPPROTO_TCP, port).await?;
+    info!("✅ Registered NLM v4 TCP on port {}", port);
+
+    // Register NLM v4 UDP
+    register_service(&mut stream, NLM_PROGRAM, NLM_VERSION, IPPROTO_UDP, port).await?;
+    info!("✅ Registered NLM v4 UDP on port {}", port);
+
     info!("✅ Portmapper registration complete");
     
     Ok(())

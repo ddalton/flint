@@ -5,6 +5,7 @@
 //! and sends replies.
 
 use super::handlers;
+use super::nlm::{NlmService, NLM_PROGRAM, NLM_VERSION};
 use super::portmap;
 use super::protocol::Procedure;
 use super::rpc::{CallMessage, ReplyBuilder, NFS_PROGRAM, NFS_VERSION, MOUNT_PROGRAM, MOUNT_VERSION};
@@ -49,12 +50,14 @@ impl Default for NfsConfig {
 pub struct NfsServer {
     config: NfsConfig,
     fs: Arc<LocalFilesystem>,
+    nlm: Arc<NlmService>,
 }
 
 impl NfsServer {
     /// Create a new NFS server
     pub fn new(config: NfsConfig, fs: Arc<LocalFilesystem>) -> std::io::Result<Self> {
-        Ok(Self { config, fs })
+        let nlm = Arc::new(NlmService::new());
+        Ok(Self { config, fs, nlm })
     }
     
     /// Start the NFS server
@@ -72,19 +75,21 @@ impl NfsServer {
         // Start TCP and UDP servers concurrently
         let tcp_handle = {
             let fs = self.fs.clone();
+            let nlm = self.nlm.clone();
             let addr = addr.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_tcp(&addr, fs).await {
+                if let Err(e) = serve_tcp(&addr, fs, nlm).await {
                     error!("TCP server error: {}", e);
                 }
             })
         };
-        
+
         let udp_handle = {
             let fs = self.fs.clone();
+            let nlm = self.nlm.clone();
             let addr = addr.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_udp(&addr, fs).await {
+                if let Err(e) = serve_udp(&addr, fs, nlm).await {
                     error!("UDP server error: {}", e);
                 }
             })
@@ -98,7 +103,7 @@ impl NfsServer {
 }
 
 /// Serve NFS over TCP
-async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
+async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>, nlm: Arc<NlmService>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("NFS TCP server listening on {}", addr);
     
@@ -107,8 +112,9 @@ async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
         info!("📡 New TCP connection from {}", peer);
         
         let fs = fs.clone();
+        let nlm = nlm.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_connection(stream, fs, peer).await {
+            if let Err(e) = handle_tcp_connection(stream, fs, nlm, peer).await {
                 warn!("TCP connection from {} error: {}", peer, e);
             } else {
                 info!("✓ TCP connection from {} closed cleanly", peer);
@@ -118,12 +124,12 @@ async fn serve_tcp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
 }
 
 /// Handle a TCP connection
-/// 
+///
 /// Performance optimizations:
 /// - Uses BufWriter to batch writes and reduce syscalls
 /// - Uses BytesMut for zero-copy buffer reuse
 /// - Avoids unnecessary flushes (let BufWriter and OS handle batching)
-async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer: std::net::SocketAddr) -> std::io::Result<()> {
+async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, nlm: Arc<NlmService>, peer: std::net::SocketAddr) -> std::io::Result<()> {
     use bytes::BytesMut;
     use tokio::io::BufWriter;
     
@@ -175,7 +181,7 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer
         
         // Process the RPC call (async, may take time)
         debug!(">>> Processing request from {}, length={} bytes", peer, length);
-        let reply = dispatch(request, fs.clone()).await;
+        let reply = dispatch(request, fs.clone(), nlm.clone()).await;
         debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
         
         // Write reply with record marker
@@ -193,7 +199,7 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer
 }
 
 /// Serve NFS over UDP
-async fn serve_udp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
+async fn serve_udp(addr: &str, fs: Arc<LocalFilesystem>, nlm: Arc<NlmService>) -> std::io::Result<()> {
     let socket = Arc::new(UdpSocket::bind(addr).await?);
     info!("NFS UDP server listening on {}", addr);
 
@@ -213,11 +219,12 @@ async fn serve_udp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
         buf.truncate(len);
         let request = buf.split_to(len).freeze();
         let fs = fs.clone();
+        let nlm = nlm.clone();
         let socket = socket.clone();
-        
+
         // Handle request in separate task
         tokio::spawn(async move {
-            let reply = dispatch(request, fs).await;
+            let reply = dispatch(request, fs, nlm).await;
             
             if let Err(e) = socket.send_to(&reply, peer).await {
                 warn!("Failed to send UDP reply: {}", e);
@@ -227,7 +234,7 @@ async fn serve_udp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> 
 }
 
 /// Dispatch an RPC call to the appropriate handler
-async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
+async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>, nlm: Arc<NlmService>) -> Bytes {
     // Parse RPC call message
     let call = match CallMessage::decode(request.clone()) {
         Ok(c) => c,
@@ -246,7 +253,7 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
     let prog_name = match call.program {
         100003 => "NFS",
         100005 => "MOUNT",
-        100227 => "NLM", // Network Lock Manager
+        100021 => "NLM", // Network Lock Manager
         _ => "UNKNOWN",
     };
     
@@ -266,6 +273,13 @@ async fn dispatch(request: Bytes, fs: Arc<LocalFilesystem>) -> Bytes {
         info!(">>> Dispatching to MOUNT handler");
         let result = dispatch_mount(call, request, fs).await;
         info!("<<< MOUNT handler returned");
+        return result;
+    }
+
+    if call.program == NLM_PROGRAM && call.version == NLM_VERSION {
+        info!(">>> Dispatching to NLM handler");
+        let result = dispatch_nlm(call, request, nlm).await;
+        info!("<<< NLM handler returned");
         return result;
     }
 
@@ -431,5 +445,39 @@ async fn dispatch_mount(call: CallMessage, request: Bytes, fs: Arc<LocalFilesyst
         }
         _ => ReplyBuilder::proc_unavail(call.xid),
     }
+}
+
+/// Dispatch NLM protocol procedure
+async fn dispatch_nlm(call: CallMessage, request: Bytes, nlm: Arc<NlmService>) -> Bytes {
+    debug!("NLM procedure: {}", call.procedure);
+
+    // Create decoder positioned at procedure arguments
+    // Same pattern as dispatch_nfs and dispatch_mount
+    let mut dec = XdrDecoder::new(request);
+
+    // Skip RPC call header
+    let _ = dec.decode_u32(); // xid
+    let _ = dec.decode_u32(); // msg_type
+    let _ = dec.decode_u32(); // rpc_version
+    let _ = dec.decode_u32(); // program
+    let _ = dec.decode_u32(); // version
+    let _ = dec.decode_u32(); // procedure
+
+    // Skip credentials
+    let _ = dec.decode_u32(); // cred_flavor
+    let cred_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((cred_len + 3) / 4) {
+        let _ = dec.decode_u32();
+    }
+
+    // Skip verifier
+    let _ = dec.decode_u32(); // verf_flavor
+    let verf_len = dec.decode_u32().unwrap_or(0);
+    for _ in 0..((verf_len + 3) / 4) {
+        let _ = dec.decode_u32();
+    }
+
+    // Now dec is positioned at procedure arguments
+    nlm.handle_call(&call, &mut dec).await
 }
 

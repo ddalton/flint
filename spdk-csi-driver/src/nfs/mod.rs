@@ -31,6 +31,8 @@ pub mod filehandle;   // File handle management
 pub mod vfs;          // Filesystem backend
 pub mod handlers;     // NFSv3 operation handlers
 pub mod setattr;      // SETATTR handler
+pub mod lock_manager; // Lock-free lock manager
+pub mod nlm;          // NLM (Network Lock Manager) protocol
 pub mod server;       // TCP/UDP server
 pub mod portmap;      // Portmapper registration
 
