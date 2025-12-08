@@ -11,7 +11,7 @@ use super::rpc::{CallMessage, ReplyBuilder, NFS_PROGRAM, NFS_VERSION, MOUNT_PROG
 use super::setattr;
 use super::vfs::LocalFilesystem;
 use super::xdr::XdrDecoder;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -196,14 +196,22 @@ async fn handle_tcp_connection(stream: TcpStream, fs: Arc<LocalFilesystem>, peer
 async fn serve_udp(addr: &str, fs: Arc<LocalFilesystem>) -> std::io::Result<()> {
     let socket = Arc::new(UdpSocket::bind(addr).await?);
     info!("NFS UDP server listening on {}", addr);
-    
-    let mut buf = vec![0u8; 65536];
-    
+
+    // Use BytesMut for zero-copy split (same pattern as TCP path)
+    let mut buf = BytesMut::with_capacity(65536);
+
     loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
+        // Prepare buffer for receive
+        buf.clear();
+        buf.reserve(65536);
+        unsafe { buf.set_len(65536); }
+
+        let (len, peer) = socket.recv_from(&mut buf[..]).await?;
         debug!("UDP request from {}, {} bytes", peer, len);
-        
-        let request = Bytes::copy_from_slice(&buf[..len]);
+
+        // Zero-copy split (same as TCP)
+        buf.truncate(len);
+        let request = buf.split_to(len).freeze();
         let fs = fs.clone();
         let socket = socket.clone();
         

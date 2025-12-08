@@ -145,27 +145,53 @@ pub async fn handle_lookup(
     // Lookup in filesystem
     match fs.lookup(&dir_handle, &name).await {
         Ok((file_handle, attrs)) => {
+            // Get parent directory attributes for cache coherency
+            // This saves clients from issuing a separate GETATTR RPC
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
-            
+
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
-            
+
             // File handle
             file_handle.encode(enc);
-            
+
             // Object attributes (optional but we always provide)
             enc.encode_bool(true); // obj_attributes_follow
             attrs.encode(enc);
-            
-            // Directory attributes (optional, we skip for simplicity)
-            enc.encode_bool(false); // dir_attributes_follow
-            
+
+            // Directory attributes (post_op_attr)
+            // NFSv3 clients use this for cache coherency, avoiding extra GETATTR
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true); // dir_attributes_follow
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+
             reply.finish()
         }
         Err(e) => {
             warn!("LOOKUP failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+
+            // Even on error, try to return directory attributes for cache coherency
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+
+            // Provide directory attributes even on error
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+
+            reply.finish()
         }
     }
 }
@@ -284,50 +310,68 @@ pub async fn handle_write(
     };
     
     debug!("WRITE: offset={}, count={}, actual={}", offset, count, data.len());
-    
+
     // Write to filesystem
-    match fs.write(&file_handle, offset, &data).await {
-        Ok(written) => {
-            // Get updated attributes
-            let attrs = fs.getattr(&file_handle).await.ok();
-            
+    match fs.write(&file_handle, offset, data).await {
+        Ok((written, attrs)) => {
+            // Attributes are now returned directly from write()
+            // This eliminates the extra getattr() syscall and async operation
+
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
-            
+
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
-            
-            // File attributes before operation (we skip)
+
+            // File attributes before operation (we skip for simplicity)
             enc.encode_bool(false);
-            
-            // File attributes after operation
+
+            // File attributes after operation (always available now)
+            enc.encode_bool(true);
+            attrs.encode(enc);
+
+            // Count of bytes written
+            enc.encode_u32(written);
+
+            // How data was committed:
+            // UNSTABLE = 0: data in cache, needs COMMIT (BEST PERFORMANCE)
+            // DATA_SYNC = 1: data committed, metadata may not be
+            // FILE_SYNC = 2: both data and metadata committed
+            //
+            // We return UNSTABLE for maximum performance - client will call COMMIT
+            enc.encode_u32(0);
+
+            // Write verifier (for detecting server reboots)
+            // TODO: Use actual server boot time or persistent counter
+            enc.encode_u64(0);
+
+            reply.finish()
+        }
+        Err(e) => {
+            warn!("WRITE failed: {}", e);
+
+            // Try to provide file attributes even on error for better cache coherency
+            let attrs = fs.getattr(&file_handle).await.ok();
+
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+
+            // Status
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+
+            // wcc_data structure:
+            // - pre_op_attr (we skip)
+            enc.encode_bool(false);
+
+            // - post_op_attr (try to get even on error)
             if let Some(attr) = attrs {
                 enc.encode_bool(true);
                 attr.encode(enc);
             } else {
                 enc.encode_bool(false);
             }
-            
-            // Count of bytes written
-            enc.encode_u32(written);
-            
-            // How data was committed:
-            // UNSTABLE = 0: data in cache, needs COMMIT (BEST PERFORMANCE)
-            // DATA_SYNC = 1: data committed, metadata may not be
-            // FILE_SYNC = 2: both data and metadata committed
-            // 
-            // We return UNSTABLE for maximum performance - client will call COMMIT
-            enc.encode_u32(0);
-            
-            // Write verifier (for detecting server reboots)
-            // TODO: Use actual server boot time or persistent counter
-            enc.encode_u64(0);
-            
+
             reply.finish()
-        }
-        Err(e) => {
-            warn!("WRITE failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
         }
     }
 }
@@ -715,18 +759,28 @@ pub async fn handle_readdir(
     // Read directory
     match fs.readdir(&dir_handle, cookie, count).await {
         Ok(entries) => {
+            // Get directory attributes for cache coherency
+            // This saves clients from issuing a separate GETATTR RPC
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+
             let mut reply = ReplyBuilder::success(call.xid);
             let enc = reply.encoder();
-            
+
             // Status: NFS3_OK
             enc.encode_u32(NFS3Status::Ok as u32);
-            
-            // Directory attributes (optional, we skip)
-            enc.encode_bool(false);
-            
+
+            // Directory attributes (post_op_attr)
+            // NFSv3 clients use this to detect directory changes
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+
             // Cookie verifier
             enc.encode_u64(0);
-            
+
             // Encode entries
             for entry in &entries {
                 enc.encode_bool(true); // value_follows
@@ -735,15 +789,31 @@ pub async fn handle_readdir(
                 enc.encode_u64(entry.cookie);
             }
             enc.encode_bool(false); // no more entries
-            
+
             // EOF (true if all entries returned)
             enc.encode_bool(true);
-            
+
             reply.finish()
         }
         Err(e) => {
             warn!("READDIR failed: {}", e);
-            error_reply(call.xid, NFS3Status::from_io_error(&e))
+
+            // Even on error, try to return directory attributes
+            let dir_attrs = fs.getattr(&dir_handle).await.ok();
+
+            let mut reply = ReplyBuilder::success(call.xid);
+            let enc = reply.encoder();
+            enc.encode_u32(NFS3Status::from_io_error(&e) as u32);
+
+            // Provide directory attributes even on error
+            if let Some(attr) = dir_attrs {
+                enc.encode_bool(true);
+                attr.encode(enc);
+            } else {
+                enc.encode_bool(false);
+            }
+
+            reply.finish()
         }
     }
 }

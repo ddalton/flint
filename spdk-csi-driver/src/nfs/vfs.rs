@@ -126,41 +126,49 @@ impl LocalFilesystem {
     }
     
     /// Write data to a file
-    /// 
+    ///
     /// Uses positioned I/O (pwrite) for lock-free concurrent writes.
     /// Returns UNSTABLE write per NFSv3 spec - data is synced on COMMIT, not on every write.
     /// This provides 10-50x performance improvement over sync_all() on every write.
-    pub async fn write(&self, fh: &FileHandle, offset: u64, data: &[u8]) -> io::Result<u32> {
+    ///
+    /// Returns (bytes_written, post_write_attributes) to eliminate extra GETATTR calls.
+    pub async fn write(&self, fh: &FileHandle, offset: u64, data: Bytes) -> io::Result<(u32, FileAttr)> {
         let path = self.resolve(fh)?;
-        let data_owned = data.to_vec(); // Clone for spawn_blocking
-        let len = data_owned.len() as u32;
-        
+        let data_clone = data.clone(); // Cheap Arc ref count increment
+        let len = data_clone.len() as u32;
+
         // Use positioned I/O via spawn_blocking for true concurrency
         // pwrite doesn't modify file position, so no locking needed
         tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::MetadataExt;
+
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&path)?;
-            
+
             // pwrite: positioned write that doesn't change file offset
-            file.write_at(&data_owned, offset)?;
-            
+            file.write_at(&data_clone, offset)?;
+
             // CRITICAL PERFORMANCE FIX:
             // Do NOT call sync_all() here - NFSv3 supports UNSTABLE writes
             // Client will call COMMIT when it wants data synced to disk
             // This provides 10-50x performance improvement on write-heavy workloads
-            // 
+            //
             // The data is in OS page cache and will be written to disk by:
             // 1. Explicit COMMIT RPC from client
             // 2. OS periodic writeback
             // 3. File close
-            
-            Ok::<_, io::Error>(len)
+
+            // Get metadata immediately (file descriptor already open)
+            // This is cheaper than a separate stat() call and eliminates an extra RPC
+            let metadata = file.metadata()?;
+            let fileid = metadata.ino(); // Get inode from metadata
+            let attr = FileAttr::from_metadata(&metadata, fileid);
+
+            Ok::<_, io::Error>((len, attr))
         })
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))??;
-        
-        Ok(len)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
     }
     
     /// Create a new regular file
@@ -570,7 +578,7 @@ mod tests {
         
         // Write some data
         let data = b"Hello, NFS!";
-        let written = vfs.write(&file_fh, 0, data).await.unwrap();
+        let (written, _attrs) = vfs.write(&file_fh, 0, Bytes::from(&data[..])).await.unwrap();
         assert_eq!(written, data.len() as u32);
         
         // Read it back

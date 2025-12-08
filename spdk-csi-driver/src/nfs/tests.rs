@@ -3,6 +3,7 @@
 //! These tests verify RFC 1813 compliance and proper operation of the NFS server.
 
 use super::*;
+use bytes::Bytes;
 use crate::nfs::protocol::FileType;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -131,7 +132,7 @@ use tempfile::TempDir;
         
         // Test WRITE
         let data = b"Hello, NFS!";
-        let written = fs.write(&file_fh, 0, data).await.unwrap();
+        let (written, _attrs) = fs.write(&file_fh, 0, Bytes::from(&data[..])).await.unwrap();
         assert_eq!(written, data.len() as u32);
         
         // Test READ
@@ -208,9 +209,9 @@ use tempfile::TempDir;
             let fh_clone = file_fh.clone();
             
             handles.push(tokio::spawn(async move {
-                let data = format!("Line {}\n", i).into_bytes();
+                let data = Bytes::from(format!("Line {}\n", i).into_bytes());
                 let offset = (i * 10) as u64;
-                fs_clone.write(&fh_clone, offset, &data).await.unwrap();
+                let _ = fs_clone.write(&fh_clone, offset, data).await.unwrap();
             }));
         }
         
@@ -245,7 +246,7 @@ use tempfile::TempDir;
         
         for i in 0..16 {
             let offset = (i * chunk_size) as u64;
-            fs.write(&file_fh, offset, &data).await.unwrap();
+            let _ = fs.write(&file_fh, offset, Bytes::from(data.clone())).await.unwrap();
         }
         
         // Verify file size
@@ -276,7 +277,7 @@ use tempfile::TempDir;
         
         // Create a file in the deepest directory
         let (file_fh, _) = fs.create(&dir3_fh, "deep.txt", 0o644).await.unwrap();
-        fs.write(&file_fh, 0, b"nested file").await.unwrap();
+        let _ = fs.write(&file_fh, 0, Bytes::from(&b"nested file"[..])).await.unwrap();
         
         // Navigate and read
         let (d1_fh, _) = fs.lookup(&root_fh, "dir1").await.unwrap();
