@@ -53,7 +53,9 @@ async-trait = "0.1"
 nix = { version = "0.27", features = ["fs"] }
 thiserror = "1.0"
 rand = "0.8"
-dashmap = "6.0"
+dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state management
+sha2 = "0.10"
+crossbeam = "0.8"  # Lock-free channels and queues
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

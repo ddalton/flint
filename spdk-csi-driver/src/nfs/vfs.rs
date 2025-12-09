@@ -35,10 +35,13 @@ pub struct DirEntry {
 pub struct LocalFilesystem {
     /// Root export path (e.g., /var/lib/flint/mounts/vol-123)
     root: PathBuf,
-    
+
     /// File handle cache
     handle_cache: HandleCache,
 }
+
+/// Type alias for virtual filesystem (NFSv4 uses this)
+pub type Vfs = LocalFilesystem;
 
 impl LocalFilesystem {
     /// Create a new local filesystem backend

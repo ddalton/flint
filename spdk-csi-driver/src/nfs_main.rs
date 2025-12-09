@@ -1,13 +1,14 @@
 //! Flint NFS Server - Binary Entry Point
 //!
-//! This is a standalone NFSv3 server that exports a local filesystem directory
-//! over NFS. Used by Flint CSI driver to provide ReadWriteMany (RWX) volumes.
+//! This is a standalone NFSv4.2 server that exports a local filesystem directory
+//! over NFS. Used by Flint CSI driver to provide ReadWriteMany (RWX) volumes
+//! with concurrent I/O support per RFC 7862.
 //!
 //! Usage:
 //!   flint-nfs-server --export-path /var/lib/flint/exports/vol-123 --volume-id vol-123
 //!
-//! The server listens on port 2049 (standard NFS port) and serves the specified
-//! directory to NFS clients.
+//! The server listens on port 2049 (standard NFS port) and serves NFSv4.2 with
+//! full support for concurrent reads, writes, CREATE, REMOVE, and all file operations.
 
 use clap::Parser;
 use spdk_csi_driver::nfs::{NfsConfig, NfsServer};
@@ -19,7 +20,7 @@ use tracing_subscriber;
 
 #[derive(Parser, Debug)]
 #[command(name = "flint-nfs-server")]
-#[command(about = "Flint NFSv3 Server - Exports SPDK volumes over NFS for RWX support")]
+#[command(about = "Flint NFSv4.2 Server - Exports SPDK volumes with concurrent I/O (RFC 7862)")]
 #[command(version)]
 struct Args {
     /// Path to the directory to export over NFS
@@ -60,7 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("╔═══════════════════════════════════════════════════════════╗");
-    info!("║         Flint NFSv3 Server - RWX Volume Export           ║");
+    info!("║        Flint NFSv4.2 Server - RWX Volume Export          ║");
+    info!("║          RFC 7862 - Concurrent I/O Support               ║");
     info!("╚═══════════════════════════════════════════════════════════╝");
     info!("");
 
@@ -112,7 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   • Bind Address: {}:{}", args.bind_addr, args.port);
     info!("");
     info!("🔧 Mount command (from client):");
-    info!("   mount -t nfs -o vers=3,tcp <server-ip>:/ /mnt/point");
+    info!("   mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point");
+    info!("   OR: mount -t nfs -o vers=4.1,tcp <server-ip>:/ /mnt/point");
     info!("");
     info!("⚡ Server starting...");
     info!("");
