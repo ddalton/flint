@@ -531,7 +531,9 @@ impl CompoundRequest {
     /// Decode a single operation
     fn decode_operation(decoder: &mut XdrDecoder, opcode: u32) -> Result<Operation, String> {
         match opcode {
+            // File handle operations
             opcode::PUTROOTFH => Ok(Operation::PutRootFh),
+            opcode::PUTPUBFH => Ok(Operation::PutPubFh),
             opcode::PUTFH => {
                 let fh = decoder.decode_filehandle()?;
                 Ok(Operation::PutFh(fh))
@@ -540,11 +542,212 @@ impl CompoundRequest {
             opcode::SAVEFH => Ok(Operation::SaveFh),
             opcode::RESTOREFH => Ok(Operation::RestoreFh),
 
+            // Lookup and directory operations
+            opcode::LOOKUP => {
+                let component = decoder.decode_string()?;
+                Ok(Operation::Lookup(component))
+            }
+            opcode::LOOKUPP => Ok(Operation::LookupP),
+            opcode::READDIR => {
+                let cookie = decoder.decode_u64()?;
+                let verf_bytes = decoder.decode_fixed_opaque(8)?;
+                let mut cookieverf = [0u8; 8];
+                cookieverf.copy_from_slice(&verf_bytes[..8]);
+                let dircount = decoder.decode_u32()?;
+                let maxcount = decoder.decode_u32()?;
+                let attr_request = decoder.decode_bitmap()?;
+                Ok(Operation::ReadDir {
+                    cookie,
+                    cookieverf,
+                    dircount,
+                    maxcount,
+                    attr_request,
+                })
+            }
+
+            // Attribute operations
             opcode::GETATTR => {
                 let bitmap = decoder.decode_bitmap()?;
                 Ok(Operation::GetAttr(bitmap))
             }
+            opcode::SETATTR => {
+                let stateid = decoder.decode_stateid()?;
+                let attrs = decoder.decode_opaque()?;
+                Ok(Operation::SetAttr { stateid, attrs })
+            }
+            opcode::ACCESS => {
+                let access = decoder.decode_u32()?;
+                Ok(Operation::Access(access))
+            }
 
+            // File I/O operations
+            opcode::OPEN => {
+                let seqid = decoder.decode_u32()?;
+                let share_access = decoder.decode_u32()?;
+                let share_deny = decoder.decode_u32()?;
+                
+                // Owner (state_owner)
+                let owner = decoder.decode_opaque()?.to_vec();
+                
+                // Openhow (discriminated union)
+                let createmode = decoder.decode_u32()?;
+                let openhow = match createmode {
+                    0 => OpenHow { createmode, attrs: None },  // UNCHECKED4
+                    1 => {
+                        // GUARDED4 - decode createattrs
+                        let attrs = decoder.decode_opaque()?;
+                        OpenHow { createmode, attrs: Some(attrs) }
+                    }
+                    2 => {
+                        // EXCLUSIVE4 - decode verifier (stored in attrs)
+                        let verf = decoder.decode_fixed_opaque(8)?;
+                        OpenHow { createmode, attrs: Some(verf) }
+                    }
+                    _ => OpenHow { createmode: 0, attrs: None },
+                };
+                
+                // Claim (discriminated union)
+                let claim_type = decoder.decode_u32()?;
+                let file = match claim_type {
+                    0 => decoder.decode_string()?,  // CLAIM_NULL - filename
+                    _ => String::new(),  // Other claim types
+                };
+                let claim = OpenClaim { claim_type, file };
+                
+                Ok(Operation::Open {
+                    seqid,
+                    share_access,
+                    share_deny,
+                    owner,
+                    openhow,
+                    claim,
+                })
+            }
+            opcode::CLOSE => {
+                let seqid = decoder.decode_u32()?;
+                let stateid = decoder.decode_stateid()?;
+                Ok(Operation::Close { seqid, stateid })
+            }
+            opcode::READ => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let count = decoder.decode_u32()?;
+                Ok(Operation::Read { stateid, offset, count })
+            }
+            opcode::WRITE => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let stable = decoder.decode_u32()?;
+                let data = decoder.decode_opaque()?;
+                Ok(Operation::Write { stateid, offset, stable, data })
+            }
+            opcode::COMMIT => {
+                let offset = decoder.decode_u64()?;
+                let count = decoder.decode_u32()?;
+                Ok(Operation::Commit { offset, count })
+            }
+
+            // Modify operations
+            opcode::CREATE => {
+                let objtype_raw = decoder.decode_u32()?;
+                let objtype = match objtype_raw {
+                    1 => Nfs4FileType::Regular,
+                    2 => Nfs4FileType::Directory,
+                    3 => Nfs4FileType::BlockDevice,
+                    4 => Nfs4FileType::CharDevice,
+                    5 => Nfs4FileType::Symlink,
+                    6 => Nfs4FileType::Socket,
+                    7 => Nfs4FileType::Fifo,
+                    8 => Nfs4FileType::AttrDir,
+                    9 => Nfs4FileType::NamedAttr,
+                    _ => Nfs4FileType::Regular,
+                };
+                let objname = decoder.decode_string()?;
+                Ok(Operation::Create { objtype, objname })
+            }
+            opcode::REMOVE => {
+                let component = decoder.decode_string()?;
+                Ok(Operation::Remove(component))
+            }
+            opcode::RENAME => {
+                let oldname = decoder.decode_string()?;
+                let newname = decoder.decode_string()?;
+                Ok(Operation::Rename { oldname, newname })
+            }
+            opcode::LINK => {
+                let newname = decoder.decode_string()?;
+                Ok(Operation::Link(newname))
+            }
+            opcode::READLINK => Ok(Operation::ReadLink),
+
+            // Session operations (NFSv4.1)
+            opcode::EXCHANGE_ID => {
+                // Client owner (opaque string)
+                let client_id_bytes = decoder.decode_opaque()?;
+                
+                // Verifier (8 bytes encoded as u64)
+                let verifier = decoder.decode_u64()?;
+                
+                let clientowner = ClientId {
+                    verifier,
+                    id: client_id_bytes.to_vec(),
+                };
+                
+                let flags = decoder.decode_u32()?;
+                let state_protect = decoder.decode_u32()?;
+                
+                // Implementation ID (optional) - for now skip
+                let has_impl_id = decoder.decode_bool()?;
+                let impl_id = if has_impl_id {
+                    decoder.decode_opaque()?.to_vec()
+                } else {
+                    Vec::new()
+                };
+                
+                Ok(Operation::ExchangeId {
+                    clientowner,
+                    flags,
+                    state_protect,
+                    impl_id,
+                })
+            }
+            opcode::CREATE_SESSION => {
+                let clientid = decoder.decode_u64()?;
+                let sequence = decoder.decode_u32()?;
+                let flags = decoder.decode_u32()?;
+                
+                // Fore channel attributes
+                let fore_chan_attrs = ChannelAttrs {
+                    headerpadsize: decoder.decode_u32()?,
+                    maxrequestsize: decoder.decode_u32()?,
+                    maxresponsesize: decoder.decode_u32()?,
+                    maxresponsesize_cached: decoder.decode_u32()?,
+                    maxoperations: decoder.decode_u32()?,
+                    maxrequests: decoder.decode_u32()?,
+                };
+                
+                // Back channel attributes
+                let back_chan_attrs = ChannelAttrs {
+                    headerpadsize: decoder.decode_u32()?,
+                    maxrequestsize: decoder.decode_u32()?,
+                    maxresponsesize: decoder.decode_u32()?,
+                    maxresponsesize_cached: decoder.decode_u32()?,
+                    maxoperations: decoder.decode_u32()?,
+                    maxrequests: decoder.decode_u32()?,
+                };
+                
+                Ok(Operation::CreateSession {
+                    clientid,
+                    sequence,
+                    flags,
+                    fore_chan_attrs,
+                    back_chan_attrs,
+                })
+            }
+            opcode::DESTROY_SESSION => {
+                let sessionid = decoder.decode_sessionid()?;
+                Ok(Operation::DestroySession(sessionid))
+            }
             opcode::SEQUENCE => {
                 let sessionid = decoder.decode_sessionid()?;
                 let sequenceid = decoder.decode_u32()?;
@@ -558,6 +761,119 @@ impl CompoundRequest {
                     highest_slotid,
                     cachethis,
                 })
+            }
+            opcode::RECLAIM_COMPLETE => {
+                let one_fs = decoder.decode_bool()?;
+                Ok(Operation::ReclaimComplete(one_fs))
+            }
+
+            // Lock operations
+            opcode::LOCK => {
+                let locktype = decoder.decode_u32()?;
+                let reclaim = decoder.decode_bool()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                let stateid = decoder.decode_stateid()?;
+                let owner = decoder.decode_opaque()?.to_vec();
+                Ok(Operation::Lock {
+                    locktype,
+                    reclaim,
+                    offset,
+                    length,
+                    stateid,
+                    owner,
+                })
+            }
+            opcode::LOCKT => {
+                let locktype = decoder.decode_u32()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                let owner = decoder.decode_opaque()?.to_vec();
+                Ok(Operation::LockT {
+                    locktype,
+                    offset,
+                    length,
+                    owner,
+                })
+            }
+            opcode::LOCKU => {
+                let locktype = decoder.decode_u32()?;
+                let seqid = decoder.decode_u32()?;
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                Ok(Operation::LockU {
+                    locktype,
+                    seqid,
+                    stateid,
+                    offset,
+                    length,
+                })
+            }
+
+            // NFSv4.2 Performance operations
+            opcode::ALLOCATE => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                Ok(Operation::Allocate { stateid, offset, length })
+            }
+            opcode::DEALLOCATE => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                Ok(Operation::Deallocate { stateid, offset, length })
+            }
+            opcode::SEEK => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let what = decoder.decode_u32()?;
+                Ok(Operation::Seek { stateid, offset, what })
+            }
+            opcode::COPY => {
+                let src_stateid = decoder.decode_stateid()?;
+                let dst_stateid = decoder.decode_stateid()?;
+                let src_offset = decoder.decode_u64()?;
+                let dst_offset = decoder.decode_u64()?;
+                let count = decoder.decode_u64()?;
+                let consecutive = decoder.decode_bool()?;
+                let synchronous = decoder.decode_bool()?;
+                Ok(Operation::Copy {
+                    src_stateid,
+                    dst_stateid,
+                    src_offset,
+                    dst_offset,
+                    count,
+                    consecutive,
+                    synchronous,
+                })
+            }
+            opcode::CLONE => {
+                let src_stateid = decoder.decode_stateid()?;
+                let dst_stateid = decoder.decode_stateid()?;
+                let src_offset = decoder.decode_u64()?;
+                let dst_offset = decoder.decode_u64()?;
+                let count = decoder.decode_u64()?;
+                Ok(Operation::Clone {
+                    src_stateid,
+                    dst_stateid,
+                    src_offset,
+                    dst_offset,
+                    count,
+                })
+            }
+            opcode::READ_PLUS => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let count = decoder.decode_u32()?;
+                Ok(Operation::ReadPlus { stateid, offset, count })
+            }
+            opcode::IO_ADVISE => {
+                let stateid = decoder.decode_stateid()?;
+                let offset = decoder.decode_u64()?;
+                let count = decoder.decode_u64()?;
+                let hints = decoder.decode_u32()?;
+                Ok(Operation::IoAdvise { stateid, offset, count, hints })
             }
 
             // For now, return unsupported for operations we haven't implemented yet
@@ -594,6 +910,7 @@ impl CompoundResponse {
     /// Encode a single operation result
     fn encode_result(encoder: &mut XdrEncoder, result: OperationResult) {
         match result {
+            // File handle operations
             OperationResult::PutRootFh(status) => {
                 encoder.encode_u32(opcode::PUTROOTFH);
                 encoder.encode_status(status);
@@ -619,15 +936,181 @@ impl CompoundResponse {
                 encoder.encode_u32(opcode::RESTOREFH);
                 encoder.encode_status(status);
             }
+
+            // Lookup and directory operations
+            OperationResult::Lookup(status) => {
+                encoder.encode_u32(opcode::LOOKUP);
+                encoder.encode_status(status);
+            }
+            OperationResult::ReadDir(status, result) => {
+                encoder.encode_u32(opcode::READDIR);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        // Encode cookieverf (u64)
+                        encoder.encode_u64(res.cookieverf);
+                        
+                        // Encode directory entries
+                        encoder.encode_u32(res.entries.len() as u32);
+                        for entry in res.entries {
+                            encoder.encode_u64(entry.cookie);
+                            encoder.encode_string(&entry.name);
+                            encoder.encode_opaque(&entry.attrs);
+                        }
+                        
+                        // Encode eof flag
+                        encoder.encode_bool(res.eof);
+                    }
+                }
+            }
+
+            // Attribute operations
             OperationResult::GetAttr(status, attrs) => {
                 encoder.encode_u32(opcode::GETATTR);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(attrs) = attrs {
-                        // Encode attributes opaque data
                         encoder.encode_opaque(&attrs);
                     }
                 }
+            }
+            OperationResult::SetAttr(status) => {
+                encoder.encode_u32(opcode::SETATTR);
+                encoder.encode_status(status);
+            }
+            OperationResult::Access(status, supported) => {
+                encoder.encode_u32(opcode::ACCESS);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(access) = supported {
+                        encoder.encode_u32(access);
+                    }
+                }
+            }
+
+            // File I/O operations
+            OperationResult::Open(status, result) => {
+                encoder.encode_u32(opcode::OPEN);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_stateid(&res.stateid);
+                        // Change info
+                        encoder.encode_bool(res.change_info.atomic);
+                        encoder.encode_u64(res.change_info.before);
+                        encoder.encode_u64(res.change_info.after);
+                        // Result flags
+                        encoder.encode_u32(res.result_flags);
+                        // Attrset bitmap
+                        encoder.encode_bitmap(&res.attrset);
+                        // Delegation (simplified - None for now)
+                        encoder.encode_u32(0); // OPEN_DELEGATE_NONE
+                    }
+                }
+            }
+            OperationResult::Close(status, stateid) => {
+                encoder.encode_u32(opcode::CLOSE);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(sid) = stateid {
+                        encoder.encode_stateid(&sid);
+                    }
+                }
+            }
+            OperationResult::Read(status, result) => {
+                encoder.encode_u32(opcode::READ);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_bool(res.eof);
+                        encoder.encode_opaque(&res.data);
+                    }
+                }
+            }
+            OperationResult::Write(status, result) => {
+                encoder.encode_u32(opcode::WRITE);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_u32(res.count);
+                        encoder.encode_u32(res.committed);
+                        encoder.encode_fixed_opaque(&res.verifier);
+                    }
+                }
+            }
+            OperationResult::Commit(status, verifier) => {
+                encoder.encode_u32(opcode::COMMIT);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(verf) = verifier {
+                        encoder.encode_fixed_opaque(&verf);
+                    }
+                }
+            }
+
+            // Modify operations
+            OperationResult::Create(status) => {
+                encoder.encode_u32(opcode::CREATE);
+                encoder.encode_status(status);
+            }
+            OperationResult::Remove(status) => {
+                encoder.encode_u32(opcode::REMOVE);
+                encoder.encode_status(status);
+            }
+            OperationResult::Rename(status) => {
+                encoder.encode_u32(opcode::RENAME);
+                encoder.encode_status(status);
+            }
+
+            // Session operations (NFSv4.1)
+            OperationResult::ExchangeId(status, result) => {
+                encoder.encode_u32(opcode::EXCHANGE_ID);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_u64(res.clientid);
+                        encoder.encode_u32(res.sequenceid);
+                        encoder.encode_u32(res.flags);
+                        encoder.encode_u32(0); // state_protect: SP4_NONE
+                        encoder.encode_string(&res.server_owner);
+                        encoder.encode_opaque(&Bytes::from(res.server_scope));
+                        // Implementation ID (empty)
+                        encoder.encode_u32(0);
+                    }
+                }
+            }
+            OperationResult::CreateSession(status, result) => {
+                encoder.encode_u32(opcode::CREATE_SESSION);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_sessionid(&res.sessionid);
+                        encoder.encode_u32(res.sequenceid);
+                        encoder.encode_u32(res.flags);
+                        
+                        // Fore channel attributes
+                        let fore = &res.fore_chan_attrs;
+                        encoder.encode_u32(fore.headerpadsize);
+                        encoder.encode_u32(fore.maxrequestsize);
+                        encoder.encode_u32(fore.maxresponsesize);
+                        encoder.encode_u32(fore.maxresponsesize_cached);
+                        encoder.encode_u32(fore.maxoperations);
+                        encoder.encode_u32(fore.maxrequests);
+                        
+                        // Back channel attributes
+                        let back = &res.back_chan_attrs;
+                        encoder.encode_u32(back.headerpadsize);
+                        encoder.encode_u32(back.maxrequestsize);
+                        encoder.encode_u32(back.maxresponsesize);
+                        encoder.encode_u32(back.maxresponsesize_cached);
+                        encoder.encode_u32(back.maxoperations);
+                        encoder.encode_u32(back.maxrequests);
+                    }
+                }
+            }
+            OperationResult::DestroySession(status) => {
+                encoder.encode_u32(opcode::DESTROY_SESSION);
+                encoder.encode_status(status);
             }
             OperationResult::Sequence(status, seq_res) => {
                 encoder.encode_u32(opcode::SEQUENCE);
@@ -643,13 +1126,99 @@ impl CompoundResponse {
                     }
                 }
             }
-            OperationResult::Unsupported(status) => {
-                // For unsupported operations, just encode status
+            OperationResult::ReclaimComplete(status) => {
+                encoder.encode_u32(opcode::RECLAIM_COMPLETE);
                 encoder.encode_status(status);
             }
-            _ => {
-                // TODO: Implement encoding for other operation results
-                warn!("Result encoding not yet implemented for this operation type");
+
+            // Lock operations
+            OperationResult::Lock(status, stateid) => {
+                encoder.encode_u32(opcode::LOCK);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(sid) = stateid {
+                        encoder.encode_stateid(&sid);
+                    }
+                }
+            }
+            OperationResult::LockT(status) => {
+                encoder.encode_u32(opcode::LOCKT);
+                encoder.encode_status(status);
+            }
+            OperationResult::LockU(status, stateid) => {
+                encoder.encode_u32(opcode::LOCKU);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(sid) = stateid {
+                        encoder.encode_stateid(&sid);
+                    }
+                }
+            }
+
+            // NFSv4.2 Performance operations
+            OperationResult::Allocate(status) => {
+                encoder.encode_u32(opcode::ALLOCATE);
+                encoder.encode_status(status);
+            }
+            OperationResult::Deallocate(status) => {
+                encoder.encode_u32(opcode::DEALLOCATE);
+                encoder.encode_status(status);
+            }
+            OperationResult::Seek(status, result) => {
+                encoder.encode_u32(opcode::SEEK);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_bool(res.eof);
+                        encoder.encode_u64(res.offset);
+                    }
+                }
+            }
+            OperationResult::Copy(status, result) => {
+                encoder.encode_u32(opcode::COPY);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_u64(res.count);
+                        encoder.encode_bool(res.consecutive);
+                        encoder.encode_bool(res.synchronous);
+                    }
+                }
+            }
+            OperationResult::Clone(status) => {
+                encoder.encode_u32(opcode::CLONE);
+                encoder.encode_status(status);
+            }
+            OperationResult::ReadPlus(status, result) => {
+                encoder.encode_u32(opcode::READ_PLUS);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(res) = result {
+                        encoder.encode_bool(res.eof);
+                        
+                        // Encode segments
+                        encoder.encode_u32(res.segments.len() as u32);
+                        for segment in res.segments {
+                            match segment {
+                                ReadPlusSegment::Data { offset, data } => {
+                                    encoder.encode_u32(0); // DATA
+                                    encoder.encode_u64(offset);
+                                    encoder.encode_opaque(&data);
+                                }
+                                ReadPlusSegment::Hole { offset, length } => {
+                                    encoder.encode_u32(1); // HOLE
+                                    encoder.encode_u64(offset);
+                                    encoder.encode_u64(length);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Unsupported operations
+            OperationResult::Unsupported(status) => {
+                encoder.encode_status(status);
             }
         }
     }
