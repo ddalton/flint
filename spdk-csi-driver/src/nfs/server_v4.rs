@@ -10,7 +10,7 @@ use super::v4::filehandle::FileHandleManager;
 use super::v4::operations::lockops::LockManager;
 use super::v4::protocol::{NFS4_PROGRAM, procedure};
 use super::v4::state::StateManager;
-use super::vfs::LocalFilesystem;
+// LocalFilesystem removed - NFSv4 uses direct filesystem access via filehandle manager
 use super::xdr::{XdrDecoder, XdrEncoder};
 use bytes::{Bytes, BytesMut};
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ pub struct NfsServer {
 
 impl NfsServer {
     /// Create a new NFSv4.2 server
-    pub fn new(config: NfsConfig, _fs: Arc<LocalFilesystem>) -> std::io::Result<Self> {
+    pub fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
         let fh_mgr = Arc::new(FileHandleManager::new(config.export_path.clone()));
         let state_mgr = Arc::new(StateManager::new());

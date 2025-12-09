@@ -26,31 +26,21 @@
 //! - **Lock-free**: State management uses DashMap for concurrent access
 //! - **Complete**: Implements CREATE, REMOVE, and all operations for concurrent I/O
 
-pub mod xdr;          // XDR encoding/decoding
-pub mod rpc;          // RPC message handling
-pub mod protocol;     // NFSv3 protocol types (kept for RPC layer)
-pub mod filehandle;   // File handle management (NFSv3 - kept for legacy)
-pub mod vfs;          // Filesystem backend
-pub mod handlers;     // NFSv3 operation handlers (kept for legacy)
-pub mod setattr;      // SETATTR handler (kept for legacy)
-pub mod lock_manager; // Lock-free lock manager (kept for legacy)
-pub mod nlm;          // NLM protocol (kept for legacy)
-pub mod server;       // NFSv3 TCP/UDP server (legacy)
-pub mod server_v4;    // NFSv4.2 TCP server (ACTIVE)
-pub mod portmap;      // Portmapper registration (kept for legacy)
+pub mod xdr;          // XDR encoding/decoding (shared with RPC)
+pub mod rpc;          // RPC message handling (shared with NFSv4)
+pub mod server_v4;    // NFSv4.2 TCP server
 pub mod v4;           // NFSv4.2 implementation (COMPLETE)
 
 #[cfg(test)]
 mod tests;            // Integration tests
 
-// Re-exports for convenience - NOW USING NFSv4.2
+// Re-exports for convenience
 pub use server_v4::{NfsServer, NfsConfig};
-pub use vfs::LocalFilesystem;
 
-/// NFSv3 server result type
+/// NFS server result type
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// NFSv3 server errors
+/// NFS server errors
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("I/O error: {0}")]

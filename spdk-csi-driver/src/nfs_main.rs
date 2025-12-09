@@ -12,9 +12,7 @@
 
 use clap::Parser;
 use spdk_csi_driver::nfs::{NfsConfig, NfsServer};
-use spdk_csi_driver::nfs::vfs::LocalFilesystem;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber;
 
@@ -78,17 +76,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Export path must be a directory".into());
     }
 
-    // Create filesystem backend
-    let fs = match LocalFilesystem::new(args.export_path.clone()) {
-        Ok(fs) => {
-            info!("✅ Filesystem backend initialized");
-            Arc::new(fs)
-        }
-        Err(e) => {
-            error!("Failed to initialize filesystem: {}", e);
-            return Err(e.into());
-        }
-    };
+    // NFSv4.2 uses direct filesystem access via file handle manager
+    // No separate filesystem backend needed
 
     // Create NFS server configuration
     let config = NfsConfig {
@@ -99,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create and start NFS server
-    let server = match NfsServer::new(config, fs) {
+    let server = match NfsServer::new(config) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to create NFS server: {}", e);
