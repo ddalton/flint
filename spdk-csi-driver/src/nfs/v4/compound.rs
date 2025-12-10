@@ -1214,12 +1214,21 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(res) = seq_res {
+                        debug!("🔍 Encoding SEQUENCE response:");
+                        debug!("   sessionid={:?}", res.sessionid);
+                        debug!("   sequenceid={}, slotid={}", res.sequenceid, res.slotid);
+                        debug!("   highest_slotid={}, target_highest_slotid={}", 
+                               res.highest_slotid, res.target_highest_slotid);
+                        debug!("   status_flags=0x{:08x}", res.status_flags);
+                        
                         encoder.encode_sessionid(&res.sessionid);
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.slotid);
                         encoder.encode_u32(res.highest_slotid);
                         encoder.encode_u32(res.target_highest_slotid);
                         encoder.encode_u32(res.status_flags);
+                        
+                        debug!("✅ SEQUENCE encoded");
                     }
                 }
             }
