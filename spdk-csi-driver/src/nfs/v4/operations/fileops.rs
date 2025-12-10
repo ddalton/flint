@@ -295,9 +295,11 @@ fn encode_attributes(
     // Parse bitmap to get list of requested attribute IDs in order
     let mut requested_attrs = BTreeSet::new();
     for (word_idx, &bitmap_word) in requested_bitmap.iter().enumerate() {
+        debug!("  Bitmap word {}: 0x{:08x}", word_idx, bitmap_word);
         for bit in 0..32 {
             if (bitmap_word & (1 << bit)) != 0 {
                 let attr_id = (word_idx * 32 + bit) as u32;
+                debug!("    Bit {} set → Attribute {}", bit, attr_id);
                 requested_attrs.insert(attr_id);
             }
         }
