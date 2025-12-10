@@ -15,6 +15,7 @@ use crate::nfs::v4::filehandle::FileHandleManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+use bytes::{BufMut, BytesMut};
 
 /// PUTROOTFH operation (opcode 24)
 ///
@@ -235,6 +236,404 @@ pub struct PutPubFhOp;
 
 pub struct PutPubFhRes {
     pub status: Nfs4Status,
+}
+
+// NFSv4 Attribute IDs (FATTR4_*)
+const FATTR4_SUPPORTED_ATTRS: u32 = 0;
+const FATTR4_TYPE: u32 = 1;
+const FATTR4_FH_EXPIRE_TYPE: u32 = 2;
+const FATTR4_CHANGE: u32 = 3;
+const FATTR4_SIZE: u32 = 4;
+const FATTR4_LINK_SUPPORT: u32 = 5;
+const FATTR4_SYMLINK_SUPPORT: u32 = 6;
+const FATTR4_NAMED_ATTR: u32 = 7;
+const FATTR4_FSID: u32 = 8;
+const FATTR4_UNIQUE_HANDLES: u32 = 9;
+const FATTR4_LEASE_TIME: u32 = 10;
+const FATTR4_RDATTR_ERROR: u32 = 11;
+const FATTR4_FILEHANDLE: u32 = 19;
+const FATTR4_FILEID: u32 = 20;
+const FATTR4_FILES_AVAIL: u32 = 21;
+const FATTR4_FILES_FREE: u32 = 22;
+const FATTR4_FILES_TOTAL: u32 = 23;
+const FATTR4_MAXFILESIZE: u32 = 42;
+const FATTR4_MAXREAD: u32 = 43;
+const FATTR4_MAXWRITE: u32 = 44;
+const FATTR4_MODE: u32 = 33;
+const FATTR4_NUMLINKS: u32 = 27;
+const FATTR4_OWNER: u32 = 36;
+const FATTR4_OWNER_GROUP: u32 = 37;
+const FATTR4_SPACE_AVAIL: u32 = 47;
+const FATTR4_SPACE_FREE: u32 = 48;
+const FATTR4_SPACE_TOTAL: u32 = 49;
+const FATTR4_SPACE_USED: u32 = 50;
+const FATTR4_TIME_ACCESS: u32 = 51;
+const FATTR4_TIME_MODIFY: u32 = 53;
+const FATTR4_TIME_METADATA: u32 = 52;
+const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
+
+/// Encode NFSv4 attributes based on requested bitmap
+///
+/// Returns (attribute_values, supported_bitmap) where:
+/// - attribute_values: XDR-encoded attribute values in bitmap order
+/// - supported_bitmap: Bitmap of attributes we actually encoded
+fn encode_attributes(
+    requested_bitmap: &[u32],
+    metadata: &std::fs::Metadata,
+    path: &Path,
+) -> (Vec<u8>, Vec<u32>) {
+    use std::collections::BTreeSet;
+    
+    // Parse bitmap to get list of requested attribute IDs in order
+    let mut requested_attrs = BTreeSet::new();
+    for (word_idx, &bitmap_word) in requested_bitmap.iter().enumerate() {
+        for bit in 0..32 {
+            if (bitmap_word & (1 << bit)) != 0 {
+                let attr_id = (word_idx * 32 + bit) as u32;
+                requested_attrs.insert(attr_id);
+            }
+        }
+    }
+    
+    debug!("GETATTR: Requested attributes: {:?}", requested_attrs);
+    
+    // Encode attributes in order
+    let mut attr_vals = BytesMut::new();
+    let mut supported_attrs = BTreeSet::new();
+    
+    for attr_id in requested_attrs {
+        if encode_single_attribute(attr_id, metadata, path, &mut attr_vals) {
+            supported_attrs.insert(attr_id);
+        }
+    }
+    
+    // Convert supported attributes back to bitmap
+    let mut supported_bitmap = vec![0u32; 3]; // Support up to 96 attributes
+    for attr_id in supported_attrs {
+        let word_idx = (attr_id / 32) as usize;
+        let bit = attr_id % 32;
+        if word_idx < supported_bitmap.len() {
+            supported_bitmap[word_idx] |= 1 << bit;
+        }
+    }
+    
+    // Trim trailing zeros from bitmap
+    while supported_bitmap.len() > 1 && supported_bitmap.last() == Some(&0) {
+        supported_bitmap.pop();
+    }
+    
+    (attr_vals.to_vec(), supported_bitmap)
+}
+
+/// Encode a single attribute value
+///
+/// Returns true if attribute was encoded, false if unsupported
+fn encode_single_attribute(
+    attr_id: u32,
+    metadata: &std::fs::Metadata,
+    path: &Path,
+    buf: &mut BytesMut,
+) -> bool {
+    match attr_id {
+        FATTR4_SUPPORTED_ATTRS => {
+            // Return bitmap of attributes we support
+            // For now, support basic attributes
+            let supported: u64 = (1u64 << FATTR4_TYPE)
+                | (1u64 << FATTR4_SIZE)
+                | (1u64 << FATTR4_FSID)
+                | (1u64 << FATTR4_FILEID)
+                | (1u64 << FATTR4_MODE)
+                | (1u64 << FATTR4_NUMLINKS)
+                | (1u64 << FATTR4_OWNER)
+                | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_SPACE_USED)
+                | (1u64 << FATTR4_TIME_ACCESS)
+                | (1u64 << FATTR4_TIME_MODIFY)
+                | (1u64 << FATTR4_TIME_METADATA);
+            
+            // Encode as two u32 words
+            buf.put_u32((supported >> 32) as u32);
+            buf.put_u32(supported as u32);
+            true
+        }
+        
+        FATTR4_TYPE => {
+            // File type: 1=regular, 2=directory, 3=block, 4=char, 5=symlink, 6=socket, 7=fifo
+            let ftype = if metadata.is_dir() { 
+                2u32 
+            } else if metadata.is_symlink() {
+                5u32
+            } else { 
+                1u32 // Regular file
+            };
+            buf.put_u32(ftype);
+            true
+        }
+        
+        FATTR4_FH_EXPIRE_TYPE => {
+            // FH_PERSISTENT (0) = filehandles never expire
+            buf.put_u32(0);
+            true
+        }
+        
+        FATTR4_CHANGE => {
+            // Change attribute - use modification time as change ID
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let change_id = metadata.mtime() as u64;
+                buf.put_u64(change_id);
+            }
+            #[cfg(not(unix))]
+            {
+                buf.put_u64(0);
+            }
+            true
+        }
+        
+        FATTR4_SIZE => {
+            buf.put_u64(metadata.len());
+            true
+        }
+        
+        FATTR4_LINK_SUPPORT => {
+            // TRUE = hard links supported
+            buf.put_u32(1);
+            true
+        }
+        
+        FATTR4_SYMLINK_SUPPORT => {
+            // TRUE = symbolic links supported
+            buf.put_u32(1);
+            true
+        }
+        
+        FATTR4_NAMED_ATTR => {
+            // FALSE = no named attributes
+            buf.put_u32(0);
+            true
+        }
+        
+        FATTR4_FSID => {
+            // Filesystem ID - major and minor (8 bytes each)
+            buf.put_u64(0); // major
+            buf.put_u64(1); // minor
+            true
+        }
+        
+        FATTR4_UNIQUE_HANDLES => {
+            // TRUE = filehandles are unique within filesystem
+            buf.put_u32(1);
+            true
+        }
+        
+        FATTR4_LEASE_TIME => {
+            // Lease time in seconds (90 seconds is standard)
+            buf.put_u32(90);
+            true
+        }
+        
+        FATTR4_RDATTR_ERROR => {
+            // No error reading attributes
+            buf.put_u32(0); // NFS4_OK
+            true
+        }
+        
+        FATTR4_FILEID => {
+            // File ID (inode number)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                buf.put_u64(metadata.ino());
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, use a hash of the path
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                path.hash(&mut hasher);
+                buf.put_u64(hasher.finish());
+            }
+            true
+        }
+        
+        FATTR4_FILES_AVAIL | FATTR4_FILES_FREE | FATTR4_FILES_TOTAL => {
+            // Total file/inode counts
+            buf.put_u64(1_000_000); // Reasonable default
+            true
+        }
+        
+        FATTR4_MAXFILESIZE => {
+            // Maximum file size (1TB)
+            buf.put_u64(1024 * 1024 * 1024 * 1024);
+            true
+        }
+        
+        FATTR4_MAXREAD | FATTR4_MAXWRITE => {
+            // Maximum read/write size (1MB)
+            buf.put_u64(1024 * 1024);
+            true
+        }
+        
+        FATTR4_MODE => {
+            // File mode/permissions (mask out file type bits, keep only permission bits)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = metadata.permissions().mode() & 0o7777;
+                buf.put_u32(mode);
+            }
+            #[cfg(not(unix))]
+            {
+                // Default: rwxr-xr-x for dirs, rw-r--r-- for files
+                let mode = if metadata.is_dir() { 0o755 } else { 0o644 };
+                buf.put_u32(mode);
+            }
+            true
+        }
+        
+        FATTR4_NUMLINKS => {
+            // Number of hard links
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                buf.put_u32(metadata.nlink() as u32);
+            }
+            #[cfg(not(unix))]
+            {
+                buf.put_u32(1);
+            }
+            true
+        }
+        
+        FATTR4_OWNER => {
+            // Owner (user ID as string)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let owner = format!("{}", metadata.uid());
+                let owner_bytes = owner.as_bytes();
+                buf.put_u32(owner_bytes.len() as u32);
+                buf.put_slice(owner_bytes);
+                // XDR padding to 4-byte boundary
+                let padding = (4 - (owner_bytes.len() % 4)) % 4;
+                for _ in 0..padding {
+                    buf.put_u8(0);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let owner = b"nobody";
+                buf.put_u32(owner.len() as u32);
+                buf.put_slice(owner);
+                // XDR padding
+                buf.put_u16(0);
+            }
+            true
+        }
+        
+        FATTR4_OWNER_GROUP => {
+            // Owner group (group ID as string)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let group = format!("{}", metadata.gid());
+                let group_bytes = group.as_bytes();
+                buf.put_u32(group_bytes.len() as u32);
+                buf.put_slice(group_bytes);
+                // XDR padding to 4-byte boundary
+                let padding = (4 - (group_bytes.len() % 4)) % 4;
+                for _ in 0..padding {
+                    buf.put_u8(0);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let group = b"nogroup";
+                buf.put_u32(group.len() as u32);
+                buf.put_slice(group);
+                // XDR padding
+                buf.put_u8(0);
+            }
+            true
+        }
+        
+        FATTR4_SPACE_AVAIL | FATTR4_SPACE_FREE => {
+            // Available/free space (100GB)
+            buf.put_u64(100 * 1024 * 1024 * 1024);
+            true
+        }
+        
+        FATTR4_SPACE_TOTAL => {
+            // Total space (1TB)
+            buf.put_u64(1024 * 1024 * 1024 * 1024);
+            true
+        }
+        
+        FATTR4_SPACE_USED => {
+            // Space used by file (actual size)
+            buf.put_u64(metadata.len());
+            true
+        }
+        
+        FATTR4_TIME_ACCESS | FATTR4_TIME_MODIFY | FATTR4_TIME_METADATA => {
+            // Time values (NFSv4 nfstime4 format: seconds + nanoseconds)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let (secs, nsecs) = match attr_id {
+                    FATTR4_TIME_ACCESS => (metadata.atime(), metadata.atime_nsec()),
+                    FATTR4_TIME_MODIFY => (metadata.mtime(), metadata.mtime_nsec()),
+                    FATTR4_TIME_METADATA => (metadata.ctime(), metadata.ctime_nsec()),
+                    _ => (0, 0),
+                };
+                buf.put_i64(secs);
+                buf.put_u32(nsecs as u32);
+            }
+            #[cfg(not(unix))]
+            {
+                // Use modified time for all
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        buf.put_i64(duration.as_secs() as i64);
+                        buf.put_u32(duration.subsec_nanos());
+                    } else {
+                        buf.put_i64(0);
+                        buf.put_u32(0);
+                    }
+                } else {
+                    buf.put_i64(0);
+                    buf.put_u32(0);
+                }
+            }
+            true
+        }
+        
+        FATTR4_MOUNTED_ON_FILEID => {
+            // For non-mount-points, same as FILEID
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                buf.put_u64(metadata.ino());
+            }
+            #[cfg(not(unix))]
+            {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                path.hash(&mut hasher);
+                buf.put_u64(hasher.finish());
+            }
+            true
+        }
+        
+        _ => {
+            // Unsupported attribute
+            debug!("GETATTR: Unsupported attribute {}", attr_id);
+            false
+        }
+    }
 }
 
 /// File operation handler
@@ -547,14 +946,16 @@ impl FileOperationHandler {
             }
         };
 
-        // Return MINIMAL attributes to get mount working
-        // TODO: Implement proper bitmap-driven attribute encoding per RFC 7530/7862
-        // For now, return empty attributes which is valid - client will use defaults
+        // Encode requested attributes per RFC 7530/7862
+        // Attributes must be encoded in bitmap order
+        let (attr_vals, supported_bitmap) = encode_attributes(&op.attr_request, &metadata, &path);
         
         let fattr = Fattr4 {
-            attrmask: vec![],  // Empty bitmap = no attributes returned
-            attr_vals: vec![], // Empty values
+            attrmask: supported_bitmap,
+            attr_vals,
         };
+
+        debug!("GETATTR: Returning {} bytes of attributes", fattr.attr_vals.len());
 
         GetAttrRes {
             status: Nfs4Status::Ok,
