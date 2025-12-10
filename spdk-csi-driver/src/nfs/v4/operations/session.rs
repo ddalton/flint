@@ -262,11 +262,16 @@ impl SessionOperationHandler {
         info!("CREATE_SESSION: Session {:?} created for client {}",
               session.session_id, op.clientid);
 
+        // Set server flags based on actual capabilities (RFC 7862)
+        // Don't echo client flags - that would claim features we don't support!
+        // flags = 0: Basic session, no persistence, no backchannel (we don't implement these yet)
+        let server_flags = 0u32;  // TODO: Add flags when we implement persistence/backchannel
+        
         CreateSessionRes {
             status: Nfs4Status::Ok,
             sessionid: session.session_id,
             sequence: session.sequence,
-            flags: session.flags,
+            flags: server_flags,  // Use server flags, NOT client flags!
             fore_chan_attrs: ChannelAttrs {
                 header_pad_size: 0,
                 max_request_size: session.fore_chan_maxrequestsize,
