@@ -55,8 +55,8 @@ impl CompoundDispatcher {
         // Create operation handlers
         let session_handler = SessionOperationHandler::new(state_mgr.clone());
         let file_handler = FileOperationHandler::new(fh_mgr.clone());
-        let io_handler = IoOperationHandler::new(state_mgr.clone());
-        let perf_handler = PerfOperationHandler::new(state_mgr.clone());
+        let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
+        let perf_handler = PerfOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone());
 
         Self {

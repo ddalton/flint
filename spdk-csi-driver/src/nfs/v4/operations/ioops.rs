@@ -14,8 +14,10 @@ use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::compound::CompoundContext;
 use crate::nfs::v4::state::{StateManager, StateType};
 use crate::nfs::v4::operations::fileops::Fattr4;
+use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
 use std::sync::Arc;
+use std::os::unix::fs::FileExt;
 use tracing::{debug, info, warn};
 
 /// Open claim types
@@ -180,12 +182,21 @@ pub struct CommitRes {
 /// I/O operation handler
 pub struct IoOperationHandler {
     state_mgr: Arc<StateManager>,
+    fh_mgr: Arc<FileHandleManager>,
+    write_verifier: u64,
 }
 
 impl IoOperationHandler {
     /// Create a new I/O operation handler
-    pub fn new(state_mgr: Arc<StateManager>) -> Self {
-        Self { state_mgr }
+    pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
+        // Generate write verifier (used to detect server reboots)
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let write_verifier = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        Self { state_mgr, fh_mgr, write_verifier }
     }
 
     /// Handle OPEN operation
@@ -309,13 +320,91 @@ impl IoOperationHandler {
             };
         }
 
-        // TODO: Perform actual read via filesystem
-        // For now, return empty data
+        // Resolve file path from filehandle
+        let path = match self.fh_mgr.resolve_handle(current_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("READ: Failed to resolve file handle: {}", e);
+                return ReadRes {
+                    status: Nfs4Status::Stale,
+                    eof: false,
+                    data: Bytes::new(),
+                };
+            }
+        };
 
-        ReadRes {
-            status: Nfs4Status::Ok,
-            eof: true,
-            data: Bytes::new(),
+        // Get filename for logging before moving path
+        let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
+
+        // Perform positioned read using blocking I/O
+        // Uses positioned I/O (pread) for concurrent access without seek
+        let offset = op.offset;
+        let count = op.count as usize;
+        
+        let read_result = tokio::task::spawn_blocking(move || {
+            // Open file for reading
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => return Err(e),
+            };
+
+            // Get file size to determine EOF
+            let metadata = file.metadata()?;
+            let file_size = metadata.len();
+            
+            // Determine actual read count (don't read past EOF)
+            let actual_count = if offset >= file_size {
+                0
+            } else {
+                std::cmp::min(count, (file_size - offset) as usize)
+            };
+            
+            if actual_count == 0 {
+                return Ok((Bytes::new(), true));
+            }
+
+            // Read data using positioned I/O (no seek needed - concurrent safe!)
+            let mut buffer = vec![0u8; actual_count];
+            let bytes_read = file.read_at(&mut buffer, offset)?;
+            
+            buffer.truncate(bytes_read);
+            let eof = offset + bytes_read as u64 >= file_size;
+            
+            Ok((Bytes::from(buffer), eof))
+        }).await;
+
+        match read_result {
+            Ok(Ok((data, eof))) => {
+                info!("READ: Read {} bytes at offset {} from {:?}, eof={}", 
+                      data.len(), op.offset, filename.as_deref().unwrap_or("unknown"), eof);
+                ReadRes {
+                    status: Nfs4Status::Ok,
+                    eof,
+                    data,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("READ: I/O error reading file: {}", e);
+                let status = match e.kind() {
+                    std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                    std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    std::io::ErrorKind::IsADirectory => Nfs4Status::IsDir,
+                    _ => Nfs4Status::Io,
+                };
+                ReadRes {
+                    status,
+                    eof: false,
+                    data: Bytes::new(),
+                }
+            }
+            Err(e) => {
+                warn!("READ: Task spawn error: {}", e);
+                ReadRes {
+                    status: Nfs4Status::Io,
+                    eof: false,
+                    data: Bytes::new(),
+                }
+            }
         }
     }
 
@@ -352,18 +441,95 @@ impl IoOperationHandler {
             };
         }
 
-        // TODO: Perform actual write via filesystem
-        // For now, claim we wrote all bytes
+        // Resolve file path from filehandle
+        let path = match self.fh_mgr.resolve_handle(current_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("WRITE: Failed to resolve file handle: {}", e);
+                return WriteRes {
+                    status: Nfs4Status::Stale,
+                    count: 0,
+                    committed: UNSTABLE4,
+                    writeverf: 0,
+                };
+            }
+        };
 
-        let count = op.data.len() as u32;
+        // Get filename for logging before moving path
+        let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
-        info!("WRITE: Wrote {} bytes at offset {}", count, op.offset);
+        // Perform positioned write using blocking I/O
+        // Uses positioned I/O (pwrite) for concurrent access without seek
+        // ZERO-COPY: data is Bytes (Arc-backed), clone is cheap
+        let offset = op.offset;
+        let data_clone = op.data.clone(); // Cheap: just Arc increment
+        let stable = op.stable;
+        let write_verifier = self.write_verifier;
+        
+        let write_result = tokio::task::spawn_blocking(move || {
+            // Open file for writing (create if doesn't exist)
+            let file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&path)
+            {
+                Ok(f) => f,
+                Err(e) => return Err(e),
+            };
 
-        WriteRes {
-            status: Nfs4Status::Ok,
-            count,
-            committed: op.stable,
-            writeverf: 1, // TODO: Generate proper write verifier
+            // Write data using positioned I/O (no seek needed - concurrent safe!)
+            let bytes_written = file.write_at(&data_clone, offset)?;
+            
+            // Handle stability requirement
+            // UNSTABLE4 (0): Can cache, flush later (fast)
+            // DATA_SYNC4 (1): Sync data, metadata can be cached
+            // FILE_SYNC4 (2): Sync both data and metadata (slow)
+            if stable == FILE_SYNC4 {
+                file.sync_all()?; // Full fsync
+            } else if stable == DATA_SYNC4 {
+                file.sync_data()?; // Sync data only
+            }
+            // UNSTABLE4: no sync, will be done on COMMIT
+            
+            Ok(bytes_written)
+        }).await;
+
+        match write_result {
+            Ok(Ok(bytes_written)) => {
+                let count = bytes_written as u32;
+                info!("WRITE: Wrote {} bytes at offset {} to {:?}, stable={}", 
+                      count, offset, filename.as_deref().unwrap_or("unknown"), stable);
+                WriteRes {
+                    status: Nfs4Status::Ok,
+                    count,
+                    committed: stable,
+                    writeverf: write_verifier,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("WRITE: I/O error writing file: {}", e);
+                let status = match e.kind() {
+                    std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                    std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    std::io::ErrorKind::IsADirectory => Nfs4Status::IsDir,
+                    _ => Nfs4Status::Io,
+                };
+                WriteRes {
+                    status,
+                    count: 0,
+                    committed: UNSTABLE4,
+                    writeverf: 0,
+                }
+            }
+            Err(e) => {
+                warn!("WRITE: Task spawn error: {}", e);
+                WriteRes {
+                    status: Nfs4Status::Io,
+                    count: 0,
+                    committed: UNSTABLE4,
+                    writeverf: 0,
+                }
+            }
         }
     }
 
@@ -386,12 +552,69 @@ impl IoOperationHandler {
             }
         };
 
-        // TODO: Perform actual fsync/commit via filesystem
-        // For now, claim success
+        // Resolve file path from filehandle
+        let path = match self.fh_mgr.resolve_handle(current_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("COMMIT: Failed to resolve file handle: {}", e);
+                return CommitRes {
+                    status: Nfs4Status::Stale,
+                    writeverf: 0,
+                };
+            }
+        };
 
-        CommitRes {
-            status: Nfs4Status::Ok,
-            writeverf: 1, // Should match WRITE writeverf
+        // Get filename for logging before moving path
+        let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
+
+        // Perform fsync to commit UNSTABLE writes to stable storage
+        // This is critical for data integrity!
+        let write_verifier = self.write_verifier;
+        
+        let commit_result = tokio::task::spawn_blocking(move || {
+            // Open file for syncing
+            let file = match std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+            {
+                Ok(f) => f,
+                Err(e) => return Err(e),
+            };
+
+            // Full fsync: sync both data and metadata
+            // This ensures UNSTABLE writes are committed to persistent storage
+            file.sync_all()?;
+            
+            Ok(())
+        }).await;
+
+        match commit_result {
+            Ok(Ok(())) => {
+                info!("COMMIT: Synced data to disk for {:?}", filename.as_deref().unwrap_or("unknown"));
+                CommitRes {
+                    status: Nfs4Status::Ok,
+                    writeverf: write_verifier,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("COMMIT: I/O error syncing file: {}", e);
+                let status = match e.kind() {
+                    std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                    std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    _ => Nfs4Status::Io,
+                };
+                CommitRes {
+                    status,
+                    writeverf: 0,
+                }
+            }
+            Err(e) => {
+                warn!("COMMIT: Task spawn error: {}", e);
+                CommitRes {
+                    status: Nfs4Status::Io,
+                    writeverf: 0,
+                }
+            }
         }
     }
 }
@@ -407,7 +630,7 @@ mod tests {
         let export_path = temp_dir.path().to_path_buf();
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
         let state_mgr = Arc::new(StateManager::new());
-        let handler = IoOperationHandler::new(state_mgr);
+        let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
         (handler, fh_mgr, temp_dir)
     }
 

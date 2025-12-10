@@ -21,8 +21,10 @@
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::compound::CompoundContext;
 use crate::nfs::v4::state::StateManager;
+use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
 use std::sync::Arc;
+use std::os::unix::fs::FileExt;
 use tracing::{debug, info, warn};
 
 /// COPY operation (opcode 60) - NFSv4.2
@@ -249,12 +251,13 @@ pub struct IoAdviseRes {
 /// Performance operation handler
 pub struct PerfOperationHandler {
     state_mgr: Arc<StateManager>,
+    fh_mgr: Arc<FileHandleManager>,
 }
 
 impl PerfOperationHandler {
     /// Create a new performance operation handler
-    pub fn new(state_mgr: Arc<StateManager>) -> Self {
-        Self { state_mgr }
+    pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
+        Self { state_mgr, fh_mgr }
     }
 
     /// Handle COPY operation
@@ -291,21 +294,160 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend for server-side copy
-        // SPDK options:
-        // 1. Use copy offload if available (hardware acceleration)
-        // 2. Efficient read from source blob + write to dest blob
-        // 3. For same-LVS copies, consider CoW optimizations
-        //
-        // For now, acknowledge the operation would succeed
+        // Get source and destination file handles from stateids
+        let src_fh_data = match self.state_mgr.stateids.get_state(&op.src_stateid) {
+            Some(state) => state.filehandle,
+            None => {
+                warn!("COPY: Source stateid has no associated file handle");
+                return CopyRes {
+                    status: Nfs4Status::BadStateId,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        };
 
-        info!("COPY: Would copy {} bytes (server-side, zero network overhead)", op.count);
+        let dst_fh_data = match self.state_mgr.stateids.get_state(&op.dst_stateid) {
+            Some(state) => state.filehandle,
+            None => {
+                warn!("COPY: Destination stateid has no associated file handle");
+                return CopyRes {
+                    status: Nfs4Status::BadStateId,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        };
 
-        CopyRes {
-            status: Nfs4Status::Ok,
-            sync: true,
-            count: op.count,
-            completion: CopyCompletion::Synchronous,
+        // Resolve file paths
+        let src_fh = Nfs4FileHandle { data: src_fh_data.unwrap_or_default() };
+        let dst_fh = Nfs4FileHandle { data: dst_fh_data.unwrap_or_default() };
+
+        let src_path = match self.fh_mgr.resolve_handle(&src_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("COPY: Failed to resolve source handle: {}", e);
+                return CopyRes {
+                    status: Nfs4Status::Stale,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        };
+
+        let dst_path = match self.fh_mgr.resolve_handle(&dst_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("COPY: Failed to resolve destination handle: {}", e);
+                return CopyRes {
+                    status: Nfs4Status::Stale,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        };
+
+        // Clone paths for logging before moving into closure
+        let src_path_name = src_path.file_name().map(|n| n.to_string_lossy().to_string());
+        let dst_path_name = dst_path.file_name().map(|n| n.to_string_lossy().to_string());
+
+        // Perform server-side copy
+        // NO DATA crosses the network - all happens on the server!
+        let src_offset = op.src_offset;
+        let dst_offset = op.dst_offset;
+        let count = op.count;
+        let sync = op.sync;
+
+        let copy_result = tokio::task::spawn_blocking(move || {
+            // Open source file for reading
+            let src_file = std::fs::File::open(&src_path)?;
+            
+            // Open destination file for writing
+            let dst_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&dst_path)?;
+
+            // Copy data in chunks using positioned I/O
+            // This allows concurrent operations on the same files
+            const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+            let mut total_copied = 0u64;
+            let mut buffer = vec![0u8; CHUNK_SIZE];
+
+            while total_copied < count {
+                let remaining = count - total_copied;
+                let to_read = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
+                
+                // Read from source at current position
+                let bytes_read = src_file.read_at(
+                    &mut buffer[..to_read], 
+                    src_offset + total_copied
+                )?;
+                
+                if bytes_read == 0 {
+                    break; // EOF reached
+                }
+                
+                // Write to destination at current position
+                let bytes_written = dst_file.write_at(
+                    &buffer[..bytes_read],
+                    dst_offset + total_copied
+                )?;
+                
+                total_copied += bytes_written as u64;
+                
+                if bytes_read < to_read {
+                    break; // Partial read = EOF
+                }
+            }
+
+            // Sync if requested
+            if sync {
+                dst_file.sync_all()?;
+            }
+
+            Ok::<u64, std::io::Error>(total_copied)
+        }).await;
+
+        match copy_result {
+            Ok(Ok(bytes_copied)) => {
+                info!("COPY: Server-side copy completed: {} bytes from {:?} to {:?} (ZERO network transfer!)",
+                      bytes_copied, src_path_name.as_deref().unwrap_or("unknown"), 
+                      dst_path_name.as_deref().unwrap_or("unknown"));
+                CopyRes {
+                    status: Nfs4Status::Ok,
+                    sync,
+                    count: bytes_copied,
+                    completion: CopyCompletion::Synchronous,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("COPY: I/O error during server-side copy: {}", e);
+                let status = match e.kind() {
+                    std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                    std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    _ => Nfs4Status::Io,
+                };
+                CopyRes {
+                    status,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                }
+            }
+            Err(e) => {
+                warn!("COPY: Task spawn error: {}", e);
+                CopyRes {
+                    status: Nfs4Status::Io,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                }
+            }
         }
     }
 
@@ -540,10 +682,15 @@ impl PerfOperationHandler {
 mod tests {
     use super::*;
     use crate::nfs::v4::state::StateType;
+    use tempfile::TempDir;
 
-    fn create_test_handler() -> PerfOperationHandler {
+    fn create_test_handler() -> (PerfOperationHandler, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let export_path = temp_dir.path().to_path_buf();
+        let fh_mgr = Arc::new(FileHandleManager::new(export_path));
         let state_mgr = Arc::new(StateManager::new());
-        PerfOperationHandler::new(state_mgr)
+        let handler = PerfOperationHandler::new(state_mgr, fh_mgr);
+        (handler, temp_dir)
     }
 
     fn create_test_stateid(handler: &PerfOperationHandler, client_id: u64) -> StateId {
@@ -552,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_copy() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let src_stateid = create_test_stateid(&handler, 1);
@@ -575,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let src_stateid = create_test_stateid(&handler, 1);
@@ -595,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocate() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
@@ -612,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deallocate() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
@@ -663,7 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_plus() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
@@ -680,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_io_advise() {
-        let handler = create_test_handler();
+        let (handler, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
