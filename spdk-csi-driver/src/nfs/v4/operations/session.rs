@@ -14,6 +14,7 @@
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::state::{StateManager, StateType};
 use crate::nfs::v4::xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder};
+use crate::nfs::v4::compound::ChannelAttrs;
 use bytes::{BytesMut, BufMut};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -79,35 +80,7 @@ pub struct CreateSessionOp {
     pub cb_program: u32,
 }
 
-#[derive(Debug, Clone)]
-pub struct ChannelAttrs {
-    /// Maximum request size
-    pub max_request_size: u32,
-
-    /// Maximum response size
-    pub max_response_size: u32,
-
-    /// Maximum response size cached (for replay detection)
-    pub max_response_size_cached: u32,
-
-    /// Maximum operations per request
-    pub max_ops: u32,
-
-    /// Maximum requests in flight
-    pub max_reqs: u32,
-}
-
-impl Default for ChannelAttrs {
-    fn default() -> Self {
-        Self {
-            max_request_size: 1024 * 1024,      // 1MB
-            max_response_size: 1024 * 1024,     // 1MB
-            max_response_size_cached: 64 * 1024, // 64KB
-            max_ops: 16,
-            max_reqs: 128,
-        }
-    }
-}
+// ChannelAttrs is now imported from compound.rs to ensure field name consistency
 
 /// CREATE_SESSION response
 pub struct CreateSessionRes {
@@ -230,8 +203,22 @@ impl SessionOperationHandler {
                 sessionid: SessionId([0; 16]),
                 sequence: 0,
                 flags: 0,
-                fore_chan_attrs: ChannelAttrs::default(),
-                back_chan_attrs: ChannelAttrs::default(),
+                fore_chan_attrs: ChannelAttrs {
+                    header_pad_size: 0,
+                    max_request_size: 0,
+                    max_response_size: 0,
+                    max_response_size_cached: 0,
+                    max_operations: 0,
+                    max_requests: 0,
+                },
+                back_chan_attrs: ChannelAttrs {
+                    header_pad_size: 0,
+                    max_request_size: 0,
+                    max_response_size: 0,
+                    max_response_size_cached: 0,
+                    max_operations: 0,
+                    max_requests: 0,
+                },
             };
         }
 
@@ -243,8 +230,22 @@ impl SessionOperationHandler {
                 sessionid: SessionId([0; 16]),
                 sequence: 0,
                 flags: 0,
-                fore_chan_attrs: ChannelAttrs::default(),
-                back_chan_attrs: ChannelAttrs::default(),
+                fore_chan_attrs: ChannelAttrs {
+                    header_pad_size: 0,
+                    max_request_size: 0,
+                    max_response_size: 0,
+                    max_response_size_cached: 0,
+                    max_operations: 0,
+                    max_requests: 0,
+                },
+                back_chan_attrs: ChannelAttrs {
+                    header_pad_size: 0,
+                    max_request_size: 0,
+                    max_response_size: 0,
+                    max_response_size_cached: 0,
+                    max_operations: 0,
+                    max_requests: 0,
+                },
             };
         }
 
@@ -255,7 +256,7 @@ impl SessionOperationHandler {
             op.flags,
             op.fore_chan_attrs.max_request_size,
             op.fore_chan_attrs.max_response_size,
-            op.fore_chan_attrs.max_ops,
+            op.fore_chan_attrs.max_operations,
         );
 
         info!("CREATE_SESSION: Session {:?} created for client {}",
@@ -267,13 +268,21 @@ impl SessionOperationHandler {
             sequence: session.sequence,
             flags: session.flags,
             fore_chan_attrs: ChannelAttrs {
+                header_pad_size: 0,
                 max_request_size: session.fore_chan_maxrequestsize,
                 max_response_size: session.fore_chan_maxresponsesize,
                 max_response_size_cached: 64 * 1024,
-                max_ops: session.fore_chan_maxops,
-                max_reqs: 128,
+                max_operations: session.fore_chan_maxops,
+                max_requests: 128,
             },
-            back_chan_attrs: ChannelAttrs::default(),
+            back_chan_attrs: ChannelAttrs {
+                header_pad_size: 0,
+                max_request_size: 1024 * 1024,
+                max_response_size: 1024 * 1024,
+                max_response_size_cached: 0,
+                max_operations: 2,
+                max_requests: 16,
+            },
         }
     }
 

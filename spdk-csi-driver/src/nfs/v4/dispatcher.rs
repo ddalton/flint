@@ -151,28 +151,12 @@ impl CompoundDispatcher {
             }
 
             Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs } => {
-                // Convert compound::ChannelAttrs to operations::session::ChannelAttrs
-                let fore_attrs = crate::nfs::v4::operations::session::ChannelAttrs {
-                    max_request_size: fore_chan_attrs.maxrequestsize,
-                    max_response_size: fore_chan_attrs.maxresponsesize,
-                    max_response_size_cached: fore_chan_attrs.maxresponsesize_cached,
-                    max_ops: fore_chan_attrs.maxoperations,
-                    max_reqs: fore_chan_attrs.maxrequests,
-                };
-                let back_attrs = crate::nfs::v4::operations::session::ChannelAttrs {
-                    max_request_size: back_chan_attrs.maxrequestsize,
-                    max_response_size: back_chan_attrs.maxresponsesize,
-                    max_response_size_cached: back_chan_attrs.maxresponsesize_cached,
-                    max_ops: back_chan_attrs.maxoperations,
-                    max_reqs: back_chan_attrs.maxrequests,
-                };
-
                 let op = CreateSessionOp {
                     clientid,
                     sequence,
                     flags,
-                    fore_chan_attrs: fore_attrs,
-                    back_chan_attrs: back_attrs,
+                    fore_chan_attrs: fore_chan_attrs.clone(),
+                    back_chan_attrs: back_chan_attrs.clone(),
                     cb_program: 0,
                 };
                 let res = self.session_handler.handle_create_session(op);
@@ -181,22 +165,8 @@ impl CompoundDispatcher {
                         sessionid: res.sessionid,
                         sequenceid: res.sequence,
                         flags: res.flags,
-                        fore_chan_attrs: ChannelAttrs {
-                            headerpadsize: 0,
-                            maxrequestsize: res.fore_chan_attrs.max_request_size,
-                            maxresponsesize: res.fore_chan_attrs.max_response_size,
-                            maxresponsesize_cached: res.fore_chan_attrs.max_response_size_cached,
-                            maxoperations: res.fore_chan_attrs.max_ops,
-                            maxrequests: res.fore_chan_attrs.max_reqs,
-                        },
-                        back_chan_attrs: ChannelAttrs {
-                            headerpadsize: 0,
-                            maxrequestsize: res.back_chan_attrs.max_request_size,
-                            maxresponsesize: res.back_chan_attrs.max_response_size,
-                            maxresponsesize_cached: res.back_chan_attrs.max_response_size_cached,
-                            maxoperations: res.back_chan_attrs.max_ops,
-                            maxrequests: res.back_chan_attrs.max_reqs,
-                        },
+                        fore_chan_attrs: res.fore_chan_attrs,
+                        back_chan_attrs: res.back_chan_attrs,
                     }))
                 } else {
                     OperationResult::CreateSession(res.status, None)

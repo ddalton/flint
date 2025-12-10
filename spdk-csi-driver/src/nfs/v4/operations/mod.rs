@@ -29,7 +29,7 @@ pub use session::{
     CreateSessionOp, CreateSessionRes,
     SequenceOp, SequenceRes,
     DestroySessionOp, DestroySessionRes,
-    ChannelAttrs, ClientImplId,
+    ClientImplId,
 };
 
 pub use fileops::{

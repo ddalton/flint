@@ -26,7 +26,7 @@ pub use protocol::*;
 pub use xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder, AttrEncoder, AttrDecoder};
 pub use compound::{
     CompoundRequest, CompoundResponse, CompoundContext,
-    Operation, OperationResult,
+    Operation, OperationResult, ChannelAttrs,
 };
 
 pub use dispatcher::{CompoundDispatcher, ServerStats};

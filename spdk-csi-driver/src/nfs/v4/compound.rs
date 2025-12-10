@@ -264,14 +264,14 @@ pub struct ReadPlusResult {
 }
 
 /// Channel attributes for sessions
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ChannelAttrs {
-    pub headerpadsize: u32,
-    pub maxrequestsize: u32,
-    pub maxresponsesize: u32,
-    pub maxresponsesize_cached: u32,
-    pub maxoperations: u32,
-    pub maxrequests: u32,
+    pub header_pad_size: u32,
+    pub max_request_size: u32,
+    pub max_response_size: u32,
+    pub max_response_size_cached: u32,
+    pub max_operations: u32,
+    pub max_requests: u32,
 }
 
 /// Change info for operations that modify namespace
@@ -734,22 +734,22 @@ impl CompoundRequest {
                 
                 // Fore channel attributes
                 let fore_chan_attrs = ChannelAttrs {
-                    headerpadsize: decoder.decode_u32()?,
-                    maxrequestsize: decoder.decode_u32()?,
-                    maxresponsesize: decoder.decode_u32()?,
-                    maxresponsesize_cached: decoder.decode_u32()?,
-                    maxoperations: decoder.decode_u32()?,
-                    maxrequests: decoder.decode_u32()?,
+                    header_pad_size: decoder.decode_u32()?,
+                    max_request_size: decoder.decode_u32()?,
+                    max_response_size: decoder.decode_u32()?,
+                    max_response_size_cached: decoder.decode_u32()?,
+                    max_operations: decoder.decode_u32()?,
+                    max_requests: decoder.decode_u32()?,
                 };
-                
+
                 // Back channel attributes
                 let back_chan_attrs = ChannelAttrs {
-                    headerpadsize: decoder.decode_u32()?,
-                    maxrequestsize: decoder.decode_u32()?,
-                    maxresponsesize: decoder.decode_u32()?,
-                    maxresponsesize_cached: decoder.decode_u32()?,
-                    maxoperations: decoder.decode_u32()?,
-                    maxrequests: decoder.decode_u32()?,
+                    header_pad_size: decoder.decode_u32()?,
+                    max_request_size: decoder.decode_u32()?,
+                    max_response_size: decoder.decode_u32()?,
+                    max_response_size_cached: decoder.decode_u32()?,
+                    max_operations: decoder.decode_u32()?,
+                    max_requests: decoder.decode_u32()?,
                 };
                 
                 Ok(Operation::CreateSession {
@@ -1154,22 +1154,22 @@ impl CompoundResponse {
                         
                         // Fore channel attributes
                         let fore = &res.fore_chan_attrs;
-                        encoder.encode_u32(fore.headerpadsize);
-                        encoder.encode_u32(fore.maxrequestsize);
-                        encoder.encode_u32(fore.maxresponsesize);
-                        encoder.encode_u32(fore.maxresponsesize_cached);
-                        encoder.encode_u32(fore.maxoperations);
-                        encoder.encode_u32(fore.maxrequests);
+                        encoder.encode_u32(fore.header_pad_size);
+                        encoder.encode_u32(fore.max_request_size);
+                        encoder.encode_u32(fore.max_response_size);
+                        encoder.encode_u32(fore.max_response_size_cached);
+                        encoder.encode_u32(fore.max_operations);
+                        encoder.encode_u32(fore.max_requests);
                         encoder.encode_u32(0); // ca_rdma_ird<> array length (empty for non-RDMA)
 
                         // Back channel attributes
                         let back = &res.back_chan_attrs;
-                        encoder.encode_u32(back.headerpadsize);
-                        encoder.encode_u32(back.maxrequestsize);
-                        encoder.encode_u32(back.maxresponsesize);
-                        encoder.encode_u32(back.maxresponsesize_cached);
-                        encoder.encode_u32(back.maxoperations);
-                        encoder.encode_u32(back.maxrequests);
+                        encoder.encode_u32(back.header_pad_size);
+                        encoder.encode_u32(back.max_request_size);
+                        encoder.encode_u32(back.max_response_size);
+                        encoder.encode_u32(back.max_response_size_cached);
+                        encoder.encode_u32(back.max_operations);
+                        encoder.encode_u32(back.max_requests);
                         encoder.encode_u32(0); // ca_rdma_ird<> array length (empty for non-RDMA)
                     }
                 }
