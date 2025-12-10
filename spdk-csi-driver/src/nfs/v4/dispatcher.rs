@@ -228,6 +228,11 @@ impl CompoundDispatcher {
 
             Operation::GetFh => {
                 let res = self.file_handler.handle_getfh(GetFhOp, context);
+                if let Some(ref fh) = res.filehandle {
+                    debug!("GETFH returning filehandle: {} bytes", fh.data.len());
+                } else {
+                    warn!("GETFH returning None (no current filehandle!)");
+                }
                 OperationResult::GetFh(res.status, res.filehandle)
             }
 
