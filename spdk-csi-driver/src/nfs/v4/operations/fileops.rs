@@ -310,8 +310,14 @@ fn encode_attributes(
     let mut supported_attrs = BTreeSet::new();
     
     for attr_id in requested_attrs {
+        let before_len = attr_vals.len();
         if encode_single_attribute(attr_id, metadata, path, &mut attr_vals) {
+            let after_len = attr_vals.len();
+            let bytes_added = after_len - before_len;
+            debug!("  Encoded attr {}: {} bytes (total now: {})", attr_id, bytes_added, after_len);
             supported_attrs.insert(attr_id);
+        } else {
+            debug!("  Skipped attr {} (unsupported)", attr_id);
         }
     }
     
@@ -1015,21 +1021,31 @@ impl FileOperationHandler {
             }
         };
 
-        // Encode requested attributes per RFC 7530/7862
-        // Attributes must be encoded in bitmap order
-        let (attr_vals, supported_bitmap) = encode_attributes(&op.attr_request, &metadata, &path);
-        
-        let fattr = Fattr4 {
-            attrmask: supported_bitmap,
-            attr_vals,
-        };
+    // Encode requested attributes per RFC 7530/7862
+    // Attributes must be encoded in bitmap order
+    let (attr_vals, supported_bitmap) = encode_attributes(&op.attr_request, &metadata, &path);
+    
+    let fattr = Fattr4 {
+        attrmask: supported_bitmap.clone(),
+        attr_vals: attr_vals.clone(),
+    };
 
-        debug!("GETATTR: Returning {} bytes of attributes", fattr.attr_vals.len());
-
-        GetAttrRes {
-            status: Nfs4Status::Ok,
-            obj_attributes: Some(fattr),
+    debug!("GETATTR: Returning {} bytes of attributes", fattr.attr_vals.len());
+    
+    // Detailed hex dump for debugging
+    debug!("GETATTR: Supported bitmap: {:?}", supported_bitmap);
+    if attr_vals.len() <= 256 {
+        // Hex dump in 16-byte rows
+        for (i, chunk) in attr_vals.chunks(16).enumerate() {
+            let hex_str: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            debug!("  Attr vals [{:04x}]: {}", i * 16, hex_str);
         }
+    }
+
+    GetAttrRes {
+        status: Nfs4Status::Ok,
+        obj_attributes: Some(fattr),
+    }
     }
 
     /// Handle SETATTR operation
