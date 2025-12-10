@@ -1153,12 +1153,19 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(res) = result {
+                        debug!("🔍 Encoding CREATE_SESSION response:");
+                        debug!("   sessionid={:?}", res.sessionid);
+                        debug!("   sequenceid={}, flags={}", res.sequenceid, res.flags);
+                        
                         encoder.encode_sessionid(&res.sessionid);
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.flags);
                         
                         // Fore channel attributes
                         let fore = &res.fore_chan_attrs;
+                        debug!("   Fore channel: pad={}, max_req={}, max_resp={}, max_resp_cached={}, max_ops={}, max_reqs={}",
+                               fore.header_pad_size, fore.max_request_size, fore.max_response_size,
+                               fore.max_response_size_cached, fore.max_operations, fore.max_requests);
                         encoder.encode_u32(fore.header_pad_size);
                         encoder.encode_u32(fore.max_request_size);
                         encoder.encode_u32(fore.max_response_size);
@@ -1169,6 +1176,9 @@ impl CompoundResponse {
 
                         // Back channel attributes
                         let back = &res.back_chan_attrs;
+                        debug!("   Back channel: pad={}, max_req={}, max_resp={}, max_resp_cached={}, max_ops={}, max_reqs={}",
+                               back.header_pad_size, back.max_request_size, back.max_response_size,
+                               back.max_response_size_cached, back.max_operations, back.max_requests);
                         encoder.encode_u32(back.header_pad_size);
                         encoder.encode_u32(back.max_request_size);
                         encoder.encode_u32(back.max_response_size);
@@ -1176,6 +1186,8 @@ impl CompoundResponse {
                         encoder.encode_u32(back.max_operations);
                         encoder.encode_u32(back.max_requests);
                         encoder.encode_u32(0); // ca_rdma_ird<> array length (empty for non-RDMA)
+                        
+                        debug!("✅ CREATE_SESSION encoded successfully");
                     }
                 }
             }
