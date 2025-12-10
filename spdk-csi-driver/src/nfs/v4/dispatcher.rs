@@ -260,13 +260,20 @@ impl CompoundDispatcher {
             }
 
             Operation::GetAttr(attr_request) => {
-                let op = GetAttrOp { attr_request };
+                let op = GetAttrOp { attr_request: attr_request.clone() };
                 let res = self.file_handler.handle_getattr(op, context).await;
                 if res.status == Nfs4Status::Ok {
                     // Encode Fattr4 properly: bitmap + values
                     let attrs_bytes = if let Some(fattr) = res.obj_attributes {
                         use bytes::{BytesMut, BufMut};
                         let mut buf = BytesMut::new();
+                        
+                        debug!("🔍 Encoding GETATTR response:");
+                        debug!("   Requested attrs: {:?}", attr_request);
+                        debug!("   Returned bitmap: {:?}", fattr.attrmask);
+                        debug!("   Attr values: {} bytes", fattr.attr_vals.len());
+                        debug!("   First 32 bytes of attr_vals: {:02x?}", 
+                               &fattr.attr_vals[..std::cmp::min(32, fattr.attr_vals.len())]);
                         
                         // Encode attribute bitmap first (required by NFSv4!)
                         // Bitmap is array of u32 values
@@ -278,6 +285,9 @@ impl CompoundDispatcher {
                         // Then encode attribute values
                         buf.put_u32(fattr.attr_vals.len() as u32); // Length of attr_vals
                         buf.put_slice(&fattr.attr_vals);
+                        
+                        debug!("   Total encoded GETATTR: {} bytes", buf.len());
+                        debug!("   Encoded first 64 bytes: {:02x?}", &buf[..std::cmp::min(64, buf.len())]);
                         
                         bytes::Bytes::from(buf)
                     } else {
