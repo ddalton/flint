@@ -1129,6 +1129,10 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(res) = result {
+                        debug!("🔍 Encoding EXCHANGE_ID response: clientid={}, sequenceid={}, flags={}", 
+                               res.clientid, res.sequenceid, res.flags);
+                        debug!("   server_owner={}, server_scope={:?}", 
+                               res.server_owner, res.server_scope);
                         encoder.encode_u64(res.clientid);
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.flags);
@@ -1140,6 +1144,7 @@ impl CompoundResponse {
                         encoder.encode_opaque(&Bytes::from(res.server_scope));
                         // Implementation ID (empty array - length 0)
                         encoder.encode_u32(0);
+                        debug!("✅ EXCHANGE_ID encoded: total response will include clientid={}", res.clientid);
                     }
                 }
             }
