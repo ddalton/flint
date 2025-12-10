@@ -961,7 +961,11 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(fh) = fh {
+                        debug!("🔍 Encoding GETFH response: filehandle {} bytes", fh.data.len());
                         encoder.encode_filehandle(&fh);
+                        debug!("✅ GETFH filehandle encoded");
+                    } else {
+                        warn!("⚠️  GETFH encoding: no filehandle to encode!");
                     }
                 }
             }
