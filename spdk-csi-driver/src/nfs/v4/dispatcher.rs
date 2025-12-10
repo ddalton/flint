@@ -691,27 +691,31 @@ impl CompoundDispatcher {
             }
 
             Operation::Rename { oldname, newname } => {
-                // TODO: Implement file/directory rename
-                debug!("RENAME operation not yet implemented: {} -> {}", oldname, newname);
-                OperationResult::Rename(Nfs4Status::NotSupp)
+                use crate::nfs::v4::operations::fileops::RenameOp;
+                let op = RenameOp { oldname, newname };
+                let res = self.file_handler.handle_rename(op, context).await;
+                OperationResult::Rename(res.status, res.source_cinfo, res.target_cinfo)
             }
 
-            Operation::Link(_newname) => {
-                // TODO: Implement hard link creation
-                // Note: Link operation and result not fully defined in compound.rs
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+            Operation::Link(newname) => {
+                use crate::nfs::v4::operations::fileops::LinkOp;
+                let op = LinkOp { newname };
+                let res = self.file_handler.handle_link(op, context).await;
+                OperationResult::Link(res.status, res.change_info)
             }
 
             Operation::ReadLink => {
-                // TODO: Implement symbolic link reading
-                // Note: ReadLink operation and result not fully defined in compound.rs
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+                use crate::nfs::v4::operations::fileops::ReadLinkOp;
+                let op = ReadLinkOp;
+                let res = self.file_handler.handle_readlink(op, context).await;
+                OperationResult::ReadLink(res.status, res.link)
             }
 
             Operation::PutPubFh => {
-                // TODO: Implement public filehandle (rarely used)
-                // Note: PutPubFh result not defined in OperationResult enum
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+                use crate::nfs::v4::operations::fileops::PutPubFhOp;
+                let op = PutPubFhOp;
+                let res = self.file_handler.handle_putpubfh(op, context);
+                OperationResult::PutPubFh(res.status)
             }
 
             // Recovery operations

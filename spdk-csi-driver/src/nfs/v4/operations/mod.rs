@@ -45,6 +45,10 @@ pub use fileops::{
     SetAttrOp, SetAttrRes,
     AccessOp, AccessRes,
     ReadDirOp, ReadDirRes, DirEntry,
+    RenameOp, RenameRes,
+    LinkOp, LinkRes,
+    ReadLinkOp, ReadLinkRes,
+    PutPubFhOp, PutPubFhRes,
 };
 
 pub use ioops::{

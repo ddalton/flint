@@ -318,7 +318,10 @@ pub enum OperationResult {
     // Modify
     Create(Nfs4Status),
     Remove(Nfs4Status),
-    Rename(Nfs4Status),
+    Rename(Nfs4Status, Option<ChangeInfo>, Option<ChangeInfo>), // source_cinfo, target_cinfo
+    Link(Nfs4Status, Option<ChangeInfo>),
+    ReadLink(Nfs4Status, Option<String>), // link target
+    PutPubFh(Nfs4Status),
 
     // Sessions
     ExchangeId(Nfs4Status, Option<ExchangeIdResult>),
@@ -366,7 +369,10 @@ impl OperationResult {
             OperationResult::Access(s, _) => *s,
             OperationResult::Create(s) => *s,
             OperationResult::Remove(s) => *s,
-            OperationResult::Rename(s) => *s,
+            OperationResult::Rename(s, _, _) => *s,
+            OperationResult::Link(s, _) => *s,
+            OperationResult::ReadLink(s, _) => *s,
+            OperationResult::PutPubFh(s) => *s,
             OperationResult::ExchangeId(s, _) => *s,
             OperationResult::CreateSession(s, _) => *s,
             OperationResult::DestroySession(s) => *s,
@@ -1074,8 +1080,46 @@ impl CompoundResponse {
                 encoder.encode_u32(opcode::REMOVE);
                 encoder.encode_status(status);
             }
-            OperationResult::Rename(status) => {
+            OperationResult::Rename(status, source_cinfo, target_cinfo) => {
                 encoder.encode_u32(opcode::RENAME);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    // Source directory change info
+                    if let Some(cinfo) = source_cinfo {
+                        encoder.encode_bool(cinfo.atomic);
+                        encoder.encode_u64(cinfo.before);
+                        encoder.encode_u64(cinfo.after);
+                    }
+                    // Target directory change info
+                    if let Some(cinfo) = target_cinfo {
+                        encoder.encode_bool(cinfo.atomic);
+                        encoder.encode_u64(cinfo.before);
+                        encoder.encode_u64(cinfo.after);
+                    }
+                }
+            }
+            OperationResult::Link(status, change_info) => {
+                encoder.encode_u32(opcode::LINK);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(cinfo) = change_info {
+                        encoder.encode_bool(cinfo.atomic);
+                        encoder.encode_u64(cinfo.before);
+                        encoder.encode_u64(cinfo.after);
+                    }
+                }
+            }
+            OperationResult::ReadLink(status, link) => {
+                encoder.encode_u32(opcode::READLINK);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(target) = link {
+                        encoder.encode_string(&target);
+                    }
+                }
+            }
+            OperationResult::PutPubFh(status) => {
+                encoder.encode_u32(opcode::PUTPUBFH);
                 encoder.encode_status(status);
             }
 

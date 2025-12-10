@@ -26,7 +26,7 @@ struct Args {
     export_path: PathBuf,
 
     /// Volume ID (for logging and identification)
-    #[arg(short, long)]
+    #[arg(long)]
     volume_id: String,
 
     /// Bind address (default: 0.0.0.0 - all interfaces)
