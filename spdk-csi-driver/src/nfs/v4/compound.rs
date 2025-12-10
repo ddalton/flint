@@ -927,16 +927,20 @@ impl CompoundResponse {
         encoder.encode_string(&self.tag);
 
         // Encode result count
-        encoder.encode_u32(self.results.len() as u32);
+        let result_count = self.results.len();
+        encoder.encode_u32(result_count as u32);
+        debug!("🔍 Encoding COMPOUND response with {} results", result_count);
 
         // Encode each result
-        for result in self.results {
+        for (i, result) in self.results.into_iter().enumerate() {
+            debug!("   Encoding result #{}: {:?}", i, std::mem::discriminant(&result));
             Self::encode_result(&mut encoder, result);
         }
 
         let bytes = encoder.finish();
         eprintln!("DEBUG CompoundResponse: Sending {} bytes", bytes.len());
         eprintln!("DEBUG CompoundResponse: First 80 bytes: {:02x?}", &bytes[..bytes.len().min(80)]);
+        debug!("✅ COMPOUND response encoded: {} results, {} bytes total", result_count, bytes.len());
         bytes
     }
 
