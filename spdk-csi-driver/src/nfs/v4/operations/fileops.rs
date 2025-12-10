@@ -564,12 +564,15 @@ impl FileOperationHandler {
         let file_type = if metadata.is_dir() { 2u32 } else { 1u32 };
         attr_buf.put_u32(file_type);
         
-        // Mode/permissions (simplified - use file permissions if available)
+        // Mode/permissions (ONLY permission bits, not file type)
+        // NFSv4 expects just the permission bits since type is encoded separately
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = metadata.permissions().mode();
-            attr_buf.put_u32(mode);
+            // Mask off file type bits (S_IFMT), keep only permission bits
+            let permissions = mode & 0o7777;  // Keep only permission bits
+            attr_buf.put_u32(permissions);
         }
         #[cfg(not(unix))]
         {
