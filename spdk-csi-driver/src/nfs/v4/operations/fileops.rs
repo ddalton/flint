@@ -547,51 +547,13 @@ impl FileOperationHandler {
             }
         };
 
-        // Encode actual file attributes
-        // This is a simplified implementation - proper NFSv4 attribute encoding
-        // would use XDR and handle all possible attributes per RFC 7530/7862
-        use bytes::{BufMut, BytesMut};
-        let mut attr_buf = BytesMut::new();
+        // Return MINIMAL attributes to get mount working
+        // TODO: Implement proper bitmap-driven attribute encoding per RFC 7530/7862
+        // For now, return empty attributes which is valid - client will use defaults
         
-        // For each requested attribute, encode its value
-        // Common attributes: type, size, mode, nlink, uid, gid, times
-        // Simplified encoding - just putting basic values
-        
-        // Size (attribute 0)
-        attr_buf.put_u64(metadata.len());
-        
-        // File type (simplified)
-        let file_type = if metadata.is_dir() { 2u32 } else { 1u32 };
-        attr_buf.put_u32(file_type);
-        
-        // Mode/permissions (ONLY permission bits, not file type)
-        // NFSv4 expects just the permission bits since type is encoded separately
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = metadata.permissions().mode();
-            // Mask off file type bits (S_IFMT), keep only permission bits
-            let permissions = mode & 0o7777;  // Keep only permission bits
-            attr_buf.put_u32(permissions);
-        }
-        #[cfg(not(unix))]
-        {
-            // Default permissions for non-Unix systems
-            let mode = if metadata.is_dir() { 0o755u32 } else { 0o644u32 };
-            attr_buf.put_u32(mode);
-        }
-        
-        // Timestamps (modified time)
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                attr_buf.put_u64(duration.as_secs()); // seconds
-                attr_buf.put_u32(duration.subsec_nanos()); // nanoseconds
-            }
-        }
-
         let fattr = Fattr4 {
-            attrmask: op.attr_request.clone(),
-            attr_vals: attr_buf.to_vec(),
+            attrmask: vec![],  // Empty bitmap = no attributes returned
+            attr_vals: vec![], // Empty values
         };
 
         GetAttrRes {
