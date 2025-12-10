@@ -95,17 +95,28 @@ async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>) -> std::io::
     let listener = TcpListener::bind(addr).await?;
     info!("✅ NFSv4.2 TCP server listening on {}", addr);
     info!("");
+    
+    let mut connection_count = 0u64;
 
     loop {
         let (stream, peer) = listener.accept().await?;
-        info!("📡 New TCP connection from {}", peer);
-
+        
+        connection_count += 1;
+        info!("📡 New TCP connection #{} from {}", connection_count, peer);
+        
+        // Log TCP socket info
+        if let Ok(addr) = stream.local_addr() {
+            debug!("   Local addr: {}", addr);
+        }
+        
         let dispatcher = dispatcher.clone();
+        let conn_id = connection_count;
         tokio::spawn(async move {
+            debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
             if let Err(e) = handle_tcp_connection(stream, dispatcher, peer).await {
-                warn!("TCP connection from {} error: {}", peer, e);
+                warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
             } else {
-                info!("✓ TCP connection from {} closed cleanly", peer);
+                info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
             }
         });
     }
@@ -118,6 +129,10 @@ async fn handle_tcp_connection(
     peer: std::net::SocketAddr
 ) -> std::io::Result<()> {
     use tokio::io::BufWriter;
+    use tokio::time::Instant;
+
+    let connect_time = Instant::now();
+    debug!("🔌 TCP connection handler started for {}", peer);
 
     // Set TCP_NODELAY for low latency
     stream.set_nodelay(true)?;
@@ -130,36 +145,63 @@ async fn handle_tcp_connection(
     // Reusable buffer
     let mut buf = BytesMut::with_capacity(128 * 1024);
 
+    let mut rpc_count = 0;
+
     loop {
+        debug!("📥 Waiting for RPC message #{} from {}", rpc_count + 1, peer);
+        
         // Read RPC record marker (4 bytes)
         let mut marker_buf = [0u8; 4];
         match reader.read_exact(&mut marker_buf).await {
-            Ok(_) => {}
+            Ok(_) => {
+                debug!("✅ Received RPC marker from {}: {:02x?}", peer, marker_buf);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // Connection closed gracefully
+                let duration = connect_time.elapsed();
+                info!("🔌 Connection from {} closed after {:?} ({} RPCs processed)", 
+                      peer, duration, rpc_count);
+                if rpc_count == 0 {
+                    warn!("⚠️  Client {} connected but sent NO RPC messages!", peer);
+                }
                 return Ok(());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                warn!("❌ Error reading RPC marker from {}: {}", peer, e);
+                return Err(e);
+            }
         }
 
         let marker = u32::from_be_bytes(marker_buf);
-        let _is_last = (marker & 0x80000000) != 0;
+        let is_last = (marker & 0x80000000) != 0;
         let length = (marker & 0x7FFFFFFF) as usize;
+
+        debug!("📊 RPC marker decoded: is_last={}, length={} bytes", is_last, length);
 
         // Prevent oversized allocations
         if length > 4 * 1024 * 1024 {
-            warn!("Rejecting oversized RPC message: {} bytes", length);
+            warn!("❌ Rejecting oversized RPC message from {}: {} bytes (max 4MB)", peer, length);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "RPC message too large",
             ));
         }
 
+        if length == 0 {
+            warn!("⚠️  Zero-length RPC message from {}, ignoring", peer);
+            continue;
+        }
+
         // Read message
         buf.clear();
         buf.reserve(length);
         unsafe { buf.set_len(length); }
+        
+        debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
         reader.read_exact(&mut buf[..length]).await?;
+        
+        debug!("✅ Received complete RPC message ({} bytes), first 32 bytes: {:02x?}", 
+               length, &buf[..std::cmp::min(32, length)]);
 
         let request = buf.split().freeze();
 
@@ -167,23 +209,39 @@ async fn handle_tcp_connection(
         debug!(">>> Processing NFSv4 request from {}, length={} bytes", peer, length);
         let reply = dispatch_nfsv4(request, dispatcher.clone()).await;
         debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
+        
+        rpc_count += 1;
 
         // Write reply with record marker
         let reply_len = reply.len() as u32;
         let reply_marker = 0x80000000 | reply_len;
+        
+        debug!("📤 Sending reply to {}: {} bytes (marker: {:08x})", peer, reply_len, reply_marker);
+        debug!("   Reply first 32 bytes: {:02x?}", &reply[..std::cmp::min(32, reply.len())]);
+        
         writer.write_all(&reply_marker.to_be_bytes()).await?;
         writer.write_all(&reply).await?;
         writer.flush().await?;
+        
+        debug!("✅ Reply sent and flushed to {}", peer);
     }
 }
 
 /// Dispatch an NFSv4 RPC call
 async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> Bytes {
+    debug!("🔍 Dispatching RPC: {} total bytes", request.len());
+    debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
+    
     // Parse RPC call message and extract procedure arguments
-    let (call, args) = match CallMessage::decode_with_args(request) {
-        Ok(result) => result,
+    let (call, args) = match CallMessage::decode_with_args(request.clone()) {
+        Ok(result) => {
+            debug!("✅ RPC message parsed successfully");
+            result
+        }
         Err(e) => {
-            warn!("Failed to parse RPC call: {}", e);
+            warn!("❌ Failed to parse RPC call: {}", e);
+            warn!("   Request was {} bytes: {:02x?}", request.len(), 
+                  &request[..std::cmp::min(128, request.len())]);
             return ReplyBuilder::garbage_args(0).into();
         }
     };
@@ -192,19 +250,26 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> 
         ">>> RPC CALL: xid={}, program={}, version={}, procedure={}",
         call.xid, call.program, call.version, call.procedure
     );
+    debug!("   Cred: {:?}, Verf: {:?}", call.cred.flavor, call.verf.flavor);
 
     // Check program number
     if call.program != NFS4_PROGRAM {
-        warn!("Invalid program number: {} (expected {})", call.program, NFS4_PROGRAM);
+        warn!("❌ Invalid program number: {} (expected {} for NFS4)", call.program, NFS4_PROGRAM);
+        warn!("   This might be a different RPC service trying to connect");
+        debug!("   Returning PROG_UNAVAIL to client");
         return ReplyBuilder::prog_unavail(call.xid);
     }
 
     // Check version (4.0, 4.1, or 4.2)
     if call.version != 4 {
-        warn!("Invalid NFSv4 version: {} (expected 4)", call.version);
+        warn!("❌ Invalid NFSv4 version: {} (expected 4)", call.version);
+        warn!("   Client might be trying NFSv3 or other version");
+        debug!("   Returning PROC_UNAVAIL to client");
         // NFSv4 doesn't have prog_mismatch, return proc_unavail
         return ReplyBuilder::proc_unavail(call.xid);
     }
+    
+    debug!("✅ RPC validation passed: program={}, version={}", call.program, call.version);
 
     // Handle procedure
     match call.procedure {
