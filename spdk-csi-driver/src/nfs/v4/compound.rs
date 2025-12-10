@@ -1116,7 +1116,8 @@ impl CompoundResponse {
                         encoder.encode_u32(fore.maxresponsesize_cached);
                         encoder.encode_u32(fore.maxoperations);
                         encoder.encode_u32(fore.maxrequests);
-                        
+                        encoder.encode_u32(0); // ca_rdma_ird<> array length (empty for non-RDMA)
+
                         // Back channel attributes
                         let back = &res.back_chan_attrs;
                         encoder.encode_u32(back.headerpadsize);
@@ -1125,6 +1126,7 @@ impl CompoundResponse {
                         encoder.encode_u32(back.maxresponsesize_cached);
                         encoder.encode_u32(back.maxoperations);
                         encoder.encode_u32(back.maxrequests);
+                        encoder.encode_u32(0); // ca_rdma_ird<> array length (empty for non-RDMA)
                     }
                 }
             }
