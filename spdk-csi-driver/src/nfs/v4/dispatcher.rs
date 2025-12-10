@@ -696,8 +696,16 @@ impl CompoundDispatcher {
                 OperationResult::ReclaimComplete(Nfs4Status::Ok)
             }
 
+            // Security operations
+            Operation::Unsupported(52) => {
+                // SECINFO_NO_NAME (opcode 52) - return supported security flavors
+                info!("SECINFO_NO_NAME");
+                OperationResult::SecInfoNoName(Nfs4Status::Ok)
+            }
+
             // Unsupported operations
             Operation::Unsupported(opcode) => {
+                warn!("Unsupported operation: opcode={}", opcode);
                 OperationResult::Unsupported(Nfs4Status::NotSupp)
             }
 

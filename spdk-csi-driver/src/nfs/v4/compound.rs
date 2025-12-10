@@ -330,6 +330,7 @@ pub enum OperationResult {
     DestroyClientId(Nfs4Status),
     Sequence(Nfs4Status, Option<SequenceResult>),
     ReclaimComplete(Nfs4Status),
+    SecInfoNoName(Nfs4Status),
 
     // NFSv4.2 Performance
     Allocate(Nfs4Status),
@@ -379,6 +380,7 @@ impl OperationResult {
             OperationResult::DestroyClientId(s) => *s,
             OperationResult::Sequence(s, _) => *s,
             OperationResult::ReclaimComplete(s) => *s,
+            OperationResult::SecInfoNoName(s) => *s,
             OperationResult::Allocate(s) => *s,
             OperationResult::Deallocate(s) => *s,
             OperationResult::Seek(s, _) => *s,
@@ -1216,6 +1218,16 @@ impl CompoundResponse {
             OperationResult::ReclaimComplete(status) => {
                 encoder.encode_u32(opcode::RECLAIM_COMPLETE);
                 encoder.encode_status(status);
+            }
+            OperationResult::SecInfoNoName(status) => {
+                encoder.encode_u32(opcode::SECINFO_NO_NAME);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    // Return array of supported security flavors
+                    // For now, just AUTH_SYS (Unix auth)
+                    encoder.encode_u32(1); // Array length: 1 flavor
+                    encoder.encode_u32(1); // AUTH_SYS
+                }
             }
 
             // Lock operations
