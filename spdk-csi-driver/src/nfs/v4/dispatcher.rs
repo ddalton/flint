@@ -263,11 +263,23 @@ impl CompoundDispatcher {
                 let op = GetAttrOp { attr_request };
                 let res = self.file_handler.handle_getattr(op, context).await;
                 if res.status == Nfs4Status::Ok {
-                    // Convert Fattr4 to Bytes
-                    // For now, we'll encode the attribute values as-is
-                    // TODO: Properly encode attribute bitmap + values using XDR
+                    // Encode Fattr4 properly: bitmap + values
                     let attrs_bytes = if let Some(fattr) = res.obj_attributes {
-                        bytes::Bytes::from(fattr.attr_vals)
+                        use bytes::{BytesMut, BufMut};
+                        let mut buf = BytesMut::new();
+                        
+                        // Encode attribute bitmap first (required by NFSv4!)
+                        // Bitmap is array of u32 values
+                        buf.put_u32(fattr.attrmask.len() as u32);
+                        for &bitmap_word in &fattr.attrmask {
+                            buf.put_u32(bitmap_word);
+                        }
+                        
+                        // Then encode attribute values
+                        buf.put_u32(fattr.attr_vals.len() as u32); // Length of attr_vals
+                        buf.put_slice(&fattr.attr_vals);
+                        
+                        bytes::Bytes::from(buf)
                     } else {
                         bytes::Bytes::new()
                     };
