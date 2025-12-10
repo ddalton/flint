@@ -128,6 +128,55 @@ impl CallMessage {
             verf,
         })
     }
+
+    /// Decode RPC call and return both the CallMessage and remaining procedure arguments
+    pub fn decode_with_args(buf: Bytes) -> Result<(Self, Bytes), String> {
+        let mut dec = XdrDecoder::new(buf);
+
+        let xid = dec.decode_u32()?;
+
+        let msg_type = dec.decode_u32()?;
+        if msg_type != MessageType::Call as u32 {
+            return Err(format!("Expected CALL message, got {}", msg_type));
+        }
+
+        let rpc_version = dec.decode_u32()?;
+        if rpc_version != 2 {
+            return Err(format!("Unsupported RPC version: {}", rpc_version));
+        }
+
+        let program = dec.decode_u32()?;
+        let version = dec.decode_u32()?;
+        let procedure = dec.decode_u32()?;
+
+        let cred = Auth::decode(&mut dec)?;
+        let verf = Auth::decode(&mut dec)?;
+
+        let call_msg = Self {
+            xid,
+            program,
+            version,
+            procedure,
+            cred,
+            verf,
+        };
+
+        // Get remaining bytes (procedure arguments)
+        let remaining_count = dec.remaining();
+        eprintln!("DEBUG: After RPC header, {} bytes remaining for procedure args", remaining_count);
+
+        // DEBUG: Print first 40 bytes before extraction
+        if remaining_count > 0 {
+            let peek_len = remaining_count.min(40);
+            eprintln!("DEBUG: RPC args peek (first {} bytes): {:02x?}", peek_len, dec.peek_bytes(peek_len));
+        }
+
+        let args = dec.into_remaining_bytes();
+        eprintln!("DEBUG: Extracted args bytes length: {}", args.len());
+        eprintln!("DEBUG: Args first 40 bytes: {:02x?}", &args[..args.len().min(40)]);
+
+        Ok((call_msg, args))
+    }
 }
 
 /// RPC reply builder

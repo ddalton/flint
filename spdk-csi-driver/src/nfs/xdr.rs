@@ -106,6 +106,12 @@ impl XdrEncoder {
     pub fn len(&self) -> usize {
         self.buf.len()
     }
+
+    /// Append raw bytes without any encoding (no length prefix, no padding)
+    /// Use this for RPC procedure results that are already XDR-encoded
+    pub fn append_bytes(&mut self, data: &[u8]) {
+        self.buf.put_slice(data);
+    }
 }
 
 impl Default for XdrEncoder {
@@ -219,14 +225,38 @@ impl XdrDecoder {
         Ok(result)
     }
 
-    /// Get remaining bytes
+    /// Get remaining bytes count
     pub fn remaining(&self) -> usize {
         self.buf.remaining()
+    }
+
+    /// Consume and return remaining bytes as a Bytes object
+    pub fn into_remaining_bytes(mut self) -> Bytes {
+        // Extract all remaining bytes into a fresh Vec, then convert to Bytes
+        // This ensures we get a clean buffer with cursor at position 0
+        let len = self.buf.remaining();
+        if len == 0 {
+            return Bytes::new();
+        }
+
+        let mut vec = Vec::with_capacity(len);
+        while self.buf.has_remaining() {
+            vec.push(self.buf.get_u8());
+        }
+
+        eprintln!("DEBUG into_remaining_bytes: extracted {} bytes into vec", vec.len());
+        Bytes::from(vec)
     }
 
     /// Check if there's more data to decode
     pub fn has_remaining(&self) -> bool {
         self.buf.has_remaining()
+    }
+
+    /// Peek at the remaining buffer (for debugging)
+    pub fn peek_bytes(&self, len: usize) -> &[u8] {
+        let available = self.buf.chunk();
+        &available[..len.min(available.len())]
     }
 }
 

@@ -93,6 +93,27 @@ pub mod opcode {
     pub const CLONE: u32 = 71;           // Atomic copy-on-write clone
 }
 
+/// EXCHANGE_ID Flags (RFC 8881 Section 18.35)
+pub mod exchgid_flags {
+    // Client can support moved/referred filesystems
+    pub const SUPP_MOVED_REFER: u32 = 0x00000001;
+    // Client can support migrated filesystems
+    pub const SUPP_MOVED_MIGR: u32 = 0x00000002;
+    // Client wants to bind principal to stateid
+    pub const BIND_PRINC_STATEID: u32 = 0x00000100;
+
+    // Server role flags (one of these must be set in response)
+    pub const USE_NON_PNFS: u32 = 0x00010000;      // Not using pNFS
+    pub const USE_PNFS_MDS: u32 = 0x00020000;      // pNFS metadata server
+    pub const USE_PNFS_DS: u32 = 0x00040000;       // pNFS data server
+    pub const MASK_PNFS: u32 = 0x00070000;         // Mask for pNFS role bits
+
+    // Update confirmed record
+    pub const UPD_CONFIRMED_REC_A: u32 = 0x40000000;
+    // Server returning confirmed clientid
+    pub const CONFIRMED_R: u32 = 0x80000000;
+}
+
 /// NFSv4 Status Codes (nfsstat4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

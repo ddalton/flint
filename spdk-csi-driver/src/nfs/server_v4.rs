@@ -179,9 +179,9 @@ async fn handle_tcp_connection(
 
 /// Dispatch an NFSv4 RPC call
 async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> Bytes {
-    // Parse RPC call message
-    let call = match CallMessage::decode(request.clone()) {
-        Ok(c) => c,
+    // Parse RPC call message and extract procedure arguments
+    let (call, args) = match CallMessage::decode_with_args(request) {
+        Ok(result) => result,
         Err(e) => {
             warn!("Failed to parse RPC call: {}", e);
             return ReplyBuilder::garbage_args(0).into();
@@ -217,7 +217,7 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> 
         procedure::COMPOUND => {
             // COMPOUND procedure - dispatch to NFSv4.2 handler
             info!(">>> COMPOUND procedure");
-            handle_compound(call, request, dispatcher).await
+            handle_compound(call, args, dispatcher).await
         }
 
         _ => {
@@ -230,20 +230,18 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> 
 /// Handle NFSv4 COMPOUND request
 async fn handle_compound(
     call: CallMessage,
-    request: Bytes,
+    args: Bytes,
     dispatcher: Arc<CompoundDispatcher>,
 ) -> Bytes {
-    // The request Bytes contains the full RPC call including header.
-    // We need to skip the RPC header to get to COMPOUND procedure arguments.
-    // CallMessage::decode already parsed the header, but we need to know where it ends.
+    // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
-    // For now, let's use a simple approach: parse the call again to find where args start
-    // This is not optimal but works. TODO: Make CallMessage return the args offset.
+    eprintln!("DEBUG handle_compound: args.len()={}", args.len());
+    eprintln!("DEBUG handle_compound: First 32 bytes (hex): {:02x?}", &args[..args.len().min(32)]);
 
-    // Create a decoder from the request
-    let decoder = XdrDecoder::new(request);
+    // Create a decoder from the procedure arguments
+    let decoder = XdrDecoder::new(args);
 
-    // Decode COMPOUND request (this handles skipping the RPC header internally)
+    // Decode COMPOUND request
     let compound_req = match CompoundRequest::decode(decoder) {
         Ok(req) => req,
         Err(e) => {
@@ -283,8 +281,9 @@ async fn handle_compound(
     // Accept status: SUCCESS
     encoder.encode_u32(0);  // AcceptStatus::Success
 
-    // Procedure-specific result (COMPOUND response)
-    encoder.encode_opaque(&compound_data);
+    // Procedure-specific result (COMPOUND response data appended directly, no length prefix)
+    // Per RFC 5531, procedure results are appended directly to RPC reply
+    encoder.append_bytes(&compound_data);
 
     encoder.finish()
 }

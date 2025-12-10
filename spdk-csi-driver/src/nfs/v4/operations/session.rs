@@ -188,11 +188,31 @@ impl SessionOperationHandler {
             info!("EXCHANGE_ID: Existing client {} returned", clientid);
         }
 
+        // Build server response flags per RFC 8881 Section 18.35
+        use crate::nfs::v4::protocol::exchgid_flags;
+        let mut response_flags = 0u32;
+
+        // Set server role - we're a non-pNFS server
+        response_flags |= exchgid_flags::USE_NON_PNFS;
+
+        // Support client capabilities we understand
+        if op.flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
+            response_flags |= exchgid_flags::SUPP_MOVED_REFER;
+        }
+        if op.flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
+            response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
+        }
+
+        // If this is an existing client (confirmed), set CONFIRMED_R flag
+        if !is_new {
+            response_flags |= exchgid_flags::CONFIRMED_R;
+        }
+
         ExchangeIdRes {
             status: Nfs4Status::Ok,
             clientid,
             sequenceid,
-            flags: op.flags,
+            flags: response_flags,
             server_owner: self.state_mgr.clients.server_owner().to_string(),
             server_scope: self.state_mgr.clients.server_scope().to_vec(),
         }

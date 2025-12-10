@@ -236,6 +236,14 @@ impl CompoundDispatcher {
                 OperationResult::DestroySession(res.status)
             }
 
+            Operation::DestroyClientId(clientid) => {
+                // DESTROY_CLIENTID is used to destroy unused client IDs
+                // For now, we'll just return OK status
+                // TODO: Implement actual client cleanup in ClientManager
+                info!("DESTROY_CLIENTID: clientid={}", clientid);
+                OperationResult::DestroyClientId(Nfs4Status::Ok)
+            }
+
             // File handle operations
             Operation::PutRootFh => {
                 let res = self.file_handler.handle_putrootfh(PutRootFhOp, context);

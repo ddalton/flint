@@ -127,6 +127,7 @@ pub enum Operation {
         back_chan_attrs: ChannelAttrs,
     },
     DestroySession(SessionId),
+    DestroyClientId(u64),        // clientid
     Sequence {
         sessionid: SessionId,
         sequenceid: u32,
@@ -323,6 +324,7 @@ pub enum OperationResult {
     ExchangeId(Nfs4Status, Option<ExchangeIdResult>),
     CreateSession(Nfs4Status, Option<CreateSessionResult>),
     DestroySession(Nfs4Status),
+    DestroyClientId(Nfs4Status),
     Sequence(Nfs4Status, Option<SequenceResult>),
     ReclaimComplete(Nfs4Status),
 
@@ -368,6 +370,7 @@ impl OperationResult {
             OperationResult::ExchangeId(s, _) => *s,
             OperationResult::CreateSession(s, _) => *s,
             OperationResult::DestroySession(s) => *s,
+            OperationResult::DestroyClientId(s) => *s,
             OperationResult::Sequence(s, _) => *s,
             OperationResult::ReclaimComplete(s) => *s,
             OperationResult::Allocate(s) => *s,
@@ -501,14 +504,19 @@ impl CompoundContext {
 impl CompoundRequest {
     /// Decode a COMPOUND request from XDR
     pub fn decode(mut decoder: XdrDecoder) -> Result<Self, String> {
+        eprintln!("DEBUG CompoundRequest::decode: Starting with {} bytes", decoder.remaining());
+
         // Decode tag
         let tag = decoder.decode_string()?;
+        eprintln!("DEBUG CompoundRequest::decode: After tag decode (tag='{}'): {} bytes remaining", tag, decoder.remaining());
 
         // Decode minor version
         let minor_version = decoder.decode_u32()?;
+        eprintln!("DEBUG CompoundRequest::decode: After minor_version decode (={}): {} bytes remaining", minor_version, decoder.remaining());
 
         // Decode operation count
         let op_count = decoder.decode_u32()? as usize;
+        eprintln!("DEBUG CompoundRequest::decode: After op_count decode (={}): {} bytes remaining", op_count, decoder.remaining());
         debug!("COMPOUND: tag='{}', minor_version={}, op_count={}", tag, minor_version, op_count);
 
         // Decode operations
@@ -682,12 +690,14 @@ impl CompoundRequest {
 
             // Session operations (NFSv4.1)
             opcode::EXCHANGE_ID => {
-                // Client owner (opaque string)
+                // ClientOwner structure: verifier FIRST, then id
+                // Verifier (8 bytes)
+                let verifier_bytes = decoder.decode_verifier()?;
+                let verifier = u64::from_be_bytes(verifier_bytes);
+
+                // Client ID (opaque string)
                 let client_id_bytes = decoder.decode_opaque()?;
-                
-                // Verifier (8 bytes encoded as u64)
-                let verifier = decoder.decode_u64()?;
-                
+
                 let clientowner = ClientId {
                     verifier,
                     id: client_id_bytes.to_vec(),
@@ -747,6 +757,10 @@ impl CompoundRequest {
             opcode::DESTROY_SESSION => {
                 let sessionid = decoder.decode_sessionid()?;
                 Ok(Operation::DestroySession(sessionid))
+            }
+            opcode::DESTROY_CLIENTID => {
+                let clientid = decoder.decode_u64()?;
+                Ok(Operation::DestroyClientId(clientid))
             }
             opcode::SEQUENCE => {
                 let sessionid = decoder.decode_sessionid()?;
@@ -904,7 +918,10 @@ impl CompoundResponse {
             Self::encode_result(&mut encoder, result);
         }
 
-        encoder.finish()
+        let bytes = encoder.finish();
+        eprintln!("DEBUG CompoundResponse: Sending {} bytes", bytes.len());
+        eprintln!("DEBUG CompoundResponse: First 80 bytes: {:02x?}", &bytes[..bytes.len().min(80)]);
+        bytes
     }
 
     /// Encode a single operation result
@@ -1072,9 +1089,12 @@ impl CompoundResponse {
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.flags);
                         encoder.encode_u32(0); // state_protect: SP4_NONE
-                        encoder.encode_string(&res.server_owner);
+                        // server_owner4: struct with so_minor_id (u64) and so_major_id (opaque)
+                        // Per RFC 8881 Section 18.35
+                        encoder.encode_u64(0); // so_minor_id (using 0 for simplicity)
+                        encoder.encode_string(&res.server_owner); // so_major_id
                         encoder.encode_opaque(&Bytes::from(res.server_scope));
-                        // Implementation ID (empty)
+                        // Implementation ID (empty array - length 0)
                         encoder.encode_u32(0);
                     }
                 }
@@ -1110,6 +1130,10 @@ impl CompoundResponse {
             }
             OperationResult::DestroySession(status) => {
                 encoder.encode_u32(opcode::DESTROY_SESSION);
+                encoder.encode_status(status);
+            }
+            OperationResult::DestroyClientId(status) => {
+                encoder.encode_u32(opcode::DESTROY_CLIENTID);
                 encoder.encode_status(status);
             }
             OperationResult::Sequence(status, seq_res) => {
