@@ -263,6 +263,14 @@ const FATTR4_MODE: u32 = 33;
 const FATTR4_NUMLINKS: u32 = 27;
 const FATTR4_OWNER: u32 = 36;
 const FATTR4_OWNER_GROUP: u32 = 37;
+const FATTR4_ACLSUPPORT: u32 = 12;
+const FATTR4_ACL: u32 = 13;
+const FATTR4_ARCHIVE: u32 = 34;
+const FATTR4_CANSETTIME: u32 = 35;
+const FATTR4_CASE_INSENSITIVE: u32 = 39;
+const FATTR4_CASE_PRESERVING: u32 = 40;
+const FATTR4_MAXLINK: u32 = 41;
+const FATTR4_MAXNAME: u32 = 45;
 const FATTR4_SPACE_AVAIL: u32 = 47;
 const FATTR4_SPACE_FREE: u32 = 48;
 const FATTR4_SPACE_TOTAL: u32 = 49;
@@ -337,19 +345,30 @@ fn encode_single_attribute(
     match attr_id {
         FATTR4_SUPPORTED_ATTRS => {
             // Return bitmap of attributes we support
-            // For now, support basic attributes
+            // Build supported attributes bitmap
             let supported: u64 = (1u64 << FATTR4_TYPE)
                 | (1u64 << FATTR4_SIZE)
+                | (1u64 << FATTR4_CHANGE)
                 | (1u64 << FATTR4_FSID)
                 | (1u64 << FATTR4_FILEID)
                 | (1u64 << FATTR4_MODE)
                 | (1u64 << FATTR4_NUMLINKS)
                 | (1u64 << FATTR4_OWNER)
                 | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_ACLSUPPORT)
+                | (1u64 << FATTR4_CANSETTIME)
+                | (1u64 << FATTR4_CASE_INSENSITIVE)
+                | (1u64 << FATTR4_CASE_PRESERVING)
+                | (1u64 << FATTR4_MAXLINK)
+                | (1u64 << FATTR4_MAXNAME)
+                | (1u64 << FATTR4_SPACE_AVAIL)
+                | (1u64 << FATTR4_SPACE_FREE)
+                | (1u64 << FATTR4_SPACE_TOTAL)
                 | (1u64 << FATTR4_SPACE_USED)
                 | (1u64 << FATTR4_TIME_ACCESS)
                 | (1u64 << FATTR4_TIME_MODIFY)
-                | (1u64 << FATTR4_TIME_METADATA);
+                | (1u64 << FATTR4_TIME_METADATA)
+                | (1u64 << FATTR4_MOUNTED_ON_FILEID);
             
             // Encode as two u32 words
             buf.put_u32((supported >> 32) as u32);
@@ -439,6 +458,20 @@ fn encode_single_attribute(
             true
         }
         
+        FATTR4_ACLSUPPORT => {
+            // ACL support flags
+            // ACL4_SUPPORT_ALLOW_ACL = 0x00000001
+            // ACL4_SUPPORT_DENY_ACL = 0x00000002
+            buf.put_u32(0x00000003); // Support both ALLOW and DENY ACLs
+            true
+        }
+        
+        FATTR4_ACL => {
+            // Return empty ACL (no ACL set)
+            buf.put_u32(0); // 0 ACE entries
+            true
+        }
+        
         FATTR4_FILEID => {
             // File ID (inode number)
             #[cfg(unix)]
@@ -473,6 +506,42 @@ fn encode_single_attribute(
         FATTR4_MAXREAD | FATTR4_MAXWRITE => {
             // Maximum read/write size (1MB)
             buf.put_u64(1024 * 1024);
+            true
+        }
+        
+        FATTR4_MAXLINK => {
+            // Maximum number of hard links
+            buf.put_u32(65535);
+            true
+        }
+        
+        FATTR4_MAXNAME => {
+            // Maximum filename length
+            buf.put_u32(255);
+            true
+        }
+        
+        FATTR4_CANSETTIME => {
+            // TRUE = server can set time fields
+            buf.put_u32(1);
+            true
+        }
+        
+        FATTR4_CASE_INSENSITIVE => {
+            // FALSE = filesystem is case-sensitive
+            buf.put_u32(0);
+            true
+        }
+        
+        FATTR4_CASE_PRESERVING => {
+            // TRUE = filesystem preserves case
+            buf.put_u32(1);
+            true
+        }
+        
+        FATTR4_ARCHIVE => {
+            // Archive bit (not used on Unix)
+            buf.put_u32(0);
             true
         }
         
