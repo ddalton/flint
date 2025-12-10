@@ -697,9 +697,9 @@ impl CompoundDispatcher {
             }
 
             // Security operations
-            Operation::Unsupported(52) => {
+            Operation::SecInfoNoName(style) => {
                 // SECINFO_NO_NAME (opcode 52) - return supported security flavors
-                info!("SECINFO_NO_NAME");
+                info!("SECINFO_NO_NAME: style={}", style);
                 OperationResult::SecInfoNoName(Nfs4Status::Ok)
             }
 

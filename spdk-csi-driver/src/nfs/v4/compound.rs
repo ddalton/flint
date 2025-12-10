@@ -136,6 +136,7 @@ pub enum Operation {
         cachethis: bool,
     },
     ReclaimComplete(bool),       // one_fs
+    SecInfoNoName(u32),          // style
 
     // Lock operations (Phase 3)
     Lock {
@@ -896,6 +897,13 @@ impl CompoundRequest {
                 let count = decoder.decode_u64()?;
                 let hints = decoder.decode_u32()?;
                 Ok(Operation::IoAdvise { stateid, offset, count, hints })
+            }
+            
+            // Security operations
+            opcode::SECINFO_NO_NAME => {
+                // SECINFO_NO_NAME takes a style argument (RFC 5661 Section 18.45)
+                let style = decoder.decode_u32()?;
+                Ok(Operation::SecInfoNoName(style))
             }
 
             // For now, return unsupported for operations we haven't implemented yet
