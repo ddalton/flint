@@ -715,9 +715,11 @@ impl CompoundDispatcher {
             }
 
             // Recovery operations
-            Operation::ReclaimComplete(_one_fs) => {
-                // TODO: Implement reclaim completion tracking
-                OperationResult::ReclaimComplete(Nfs4Status::NotSupp)
+            Operation::ReclaimComplete(one_fs) => {
+                // RECLAIM_COMPLETE indicates client has finished reclaiming state
+                // For a fresh mount with no previous state, just return OK
+                info!("RECLAIM_COMPLETE: one_fs={}", one_fs);
+                OperationResult::ReclaimComplete(Nfs4Status::Ok)
             }
 
             // Unsupported operations
