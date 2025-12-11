@@ -16,12 +16,13 @@
 // - Path (variable): Full path string (for verification)
 
 use super::protocol::Nfs4FileHandle;
+use super::pseudo::{PseudoFilesystem, Export};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, warn};
+use tracing::{debug, warn, info};
 
 /// File handle manager - maps between paths and file handles
 pub struct FileHandleManager {
@@ -36,11 +37,22 @@ pub struct FileHandleManager {
 
     /// Root export path
     export_path: PathBuf,
+    
+    /// Pseudo-filesystem (RFC 7530 Section 7)
+    pseudo_fs: Arc<PseudoFilesystem>,
+    
+    /// Export name in pseudo-filesystem
+    export_name: String,
 }
 
 impl FileHandleManager {
     /// Create a new file handle manager
     pub fn new(export_path: PathBuf) -> Self {
+        Self::new_with_export_name(export_path, "volume".to_string())
+    }
+    
+    /// Create a new file handle manager with custom export name
+    pub fn new_with_export_name(export_path: PathBuf, export_name: String) -> Self {
         // Canonicalize the export path so relative inputs work with PUTROOTFH
         // and normalization checks. If canonicalize fails, keep the original
         // to avoid crashing; later operations will surface a clear error.
@@ -54,13 +66,27 @@ impl FileHandleManager {
             .unwrap()
             .as_secs();
 
-        debug!("FileHandleManager created with instance_id={}", instance_id);
+        info!("🔧 FileHandleManager created:");
+        info!("   Instance ID: {}", instance_id);
+        info!("   Export path: {:?}", export_path);
+        info!("   Export name: {}", export_name);
+        
+        // Create pseudo-filesystem (RFC 7530 Section 7)
+        let pseudo_fs = Arc::new(PseudoFilesystem::new());
+        
+        // Register the export in pseudo-filesystem
+        let export = Export::new(1, export_name.clone(), export_path.clone());
+        if let Err(e) = pseudo_fs.add_export(export) {
+            warn!("Failed to add export to pseudo-filesystem: {}", e);
+        }
 
         Self {
             instance_id,
             path_to_handle: Arc::new(RwLock::new(HashMap::new())),
             handle_to_path: Arc::new(RwLock::new(HashMap::new())),
             export_path,
+            pseudo_fs,
+            export_name,
         }
     }
 
@@ -120,9 +146,13 @@ impl FileHandleManager {
         Ok(path)
     }
 
-    /// Get the root file handle
+    /// Get the root file handle (PUTROOTFH)
+    ///
+    /// Per RFC 7530 Section 7, this MUST return the pseudo-filesystem root,
+    /// NOT the actual export directory.
     pub fn root_filehandle(&self) -> Result<Nfs4FileHandle, String> {
-        self.path_to_filehandle(&self.export_path)
+        // Return pseudo-root handle (RFC 7530 Section 7)
+        Ok(self.pseudo_fs.get_pseudo_root_handle())
     }
 
     /// Alias for root_filehandle (NFSv4 terminology)
@@ -133,6 +163,26 @@ impl FileHandleManager {
     /// Get the export root path
     pub fn get_export_path(&self) -> &Path {
         &self.export_path
+    }
+    
+    /// Check if a filehandle represents the pseudo-root
+    pub fn is_pseudo_root(&self, handle: &Nfs4FileHandle) -> bool {
+        self.pseudo_fs.is_pseudo_root(handle)
+    }
+    
+    /// Get pseudo-filesystem reference
+    pub fn get_pseudo_fs(&self) -> &Arc<PseudoFilesystem> {
+        &self.pseudo_fs
+    }
+    
+    /// Lookup an export by name (for LOOKUP from pseudo-root)
+    pub fn lookup_export(&self, name: &str) -> Option<Export> {
+        self.pseudo_fs.lookup_export(name)
+    }
+    
+    /// Get export name
+    pub fn get_export_name(&self) -> &str {
+        &self.export_name
     }
 
     /// Alias for path_to_filehandle (get or create)

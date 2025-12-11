@@ -358,6 +358,154 @@ fn encode_attributes(
     (attr_vals.to_vec(), supported_bitmap)
 }
 
+/// Encode NFSv4 attributes for pseudo-root (RFC 7530 Section 7)
+///
+/// Returns (attribute_values, supported_bitmap) with synthetic values
+fn encode_pseudo_root_attributes(
+    requested_bitmap: &[u32],
+    attrs: &crate::nfs::v4::pseudo::PseudoRootAttrs,
+) -> (Vec<u8>, Vec<u32>) {
+    use std::collections::BTreeSet;
+    use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
+    
+    // Parse bitmap to get list of requested attribute IDs in order
+    let mut requested_attrs = BTreeSet::new();
+    for (word_idx, &bitmap_word) in requested_bitmap.iter().enumerate() {
+        for bit in 0..32 {
+            if (bitmap_word & (1 << bit)) != 0 {
+                let attr_id = (word_idx * 32 + bit) as u32;
+                requested_attrs.insert(attr_id);
+            }
+        }
+    }
+    
+    debug!("PSEUDO-ROOT GETATTR: Requested attributes: {:?}", requested_attrs);
+    
+    // Encode attributes in order with SYNTHETIC values
+    let mut attr_vals = BytesMut::new();
+    let mut supported_attrs = BTreeSet::new();
+    
+    for attr_id in requested_attrs {
+        let before_len = attr_vals.len();
+        if encode_pseudo_root_attribute(attr_id, attrs, &mut attr_vals) {
+            let after_len = attr_vals.len();
+            let bytes_added = after_len - before_len;
+            debug!("  Encoded pseudo-root attr {}: {} bytes", attr_id, bytes_added);
+            supported_attrs.insert(attr_id);
+        }
+    }
+    
+    // Convert supported attributes back to bitmap
+    let mut supported_bitmap = vec![0u32; 3];
+    for attr_id in supported_attrs {
+        let word_idx = (attr_id / 32) as usize;
+        let bit = attr_id % 32;
+        if word_idx < supported_bitmap.len() {
+            supported_bitmap[word_idx] |= 1 << bit;
+        }
+    }
+    
+    // Trim trailing zeros from bitmap
+    while supported_bitmap.len() > 1 && supported_bitmap.last() == Some(&0) {
+        supported_bitmap.pop();
+    }
+    
+    (attr_vals.to_vec(), supported_bitmap)
+}
+
+/// Encode a single pseudo-root attribute
+fn encode_pseudo_root_attribute(
+    attr_id: u32,
+    attrs: &crate::nfs::v4::pseudo::PseudoRootAttrs,
+    buf: &mut BytesMut,
+) -> bool {
+    use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
+    
+    match attr_id {
+        FATTR4_TYPE => {
+            buf.put_u32(2); // NF4DIR - directory
+            true
+        }
+        FATTR4_FSID => {
+            // Pseudo-filesystem FSID: {0, 0}
+            buf.put_u64(PSEUDO_ROOT_FSID.0);
+            buf.put_u64(PSEUDO_ROOT_FSID.1);
+            true
+        }
+        FATTR4_FILEID => {
+            // Pseudo-root file ID: 1
+            buf.put_u64(PSEUDO_ROOT_FILEID);
+            true
+        }
+        FATTR4_MOUNTED_ON_FILEID => {
+            // Same as FILEID for pseudo-root
+            buf.put_u64(PSEUDO_ROOT_FILEID);
+            true
+        }
+        FATTR4_SIZE => {
+            buf.put_u64(attrs.size); // Synthetic size (4096)
+            true
+        }
+        FATTR4_NUMLINKS => {
+            buf.put_u32(attrs.nlink); // 2 + number of exports
+            true
+        }
+        FATTR4_MODE => {
+            buf.put_u32(0o755); // rwxr-xr-x
+            true
+        }
+        FATTR4_CHANGE => {
+            buf.put_u64(attrs.create_time);
+            true
+        }
+        FATTR4_TIME_ACCESS | FATTR4_TIME_METADATA | FATTR4_TIME_MODIFY => {
+            // All times = pseudo-root creation time
+            buf.put_i64(attrs.create_time as i64); // seconds
+            buf.put_u32(0); // nanoseconds
+            true
+        }
+        FATTR4_OWNER => {
+            // "root"
+            buf.put_u32(4);
+            buf.put_slice(b"root");
+            true
+        }
+        FATTR4_OWNER_GROUP => {
+            // "root"
+            buf.put_u32(4);
+            buf.put_slice(b"root");
+            true
+        }
+        FATTR4_SUPPORTED_ATTRS => {
+            // Return bitmap of attributes we support
+            let supported: u64 = (1u64 << FATTR4_TYPE)
+                | (1u64 << FATTR4_SIZE)
+                | (1u64 << FATTR4_CHANGE)
+                | (1u64 << FATTR4_FSID)
+                | (1u64 << FATTR4_FILEID)
+                | (1u64 << FATTR4_MODE)
+                | (1u64 << FATTR4_NUMLINKS)
+                | (1u64 << FATTR4_OWNER)
+                | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_TIME_ACCESS)
+                | (1u64 << FATTR4_TIME_MODIFY)
+                | (1u64 << FATTR4_TIME_METADATA)
+                | (1u64 << FATTR4_MOUNTED_ON_FILEID);
+            
+            // Encode as bitmap4
+            buf.put_u32(2); // array length
+            buf.put_u32((supported >> 32) as u32);
+            buf.put_u32(supported as u32);
+            true
+        }
+        _ => {
+            // Attribute not supported for pseudo-root
+            debug!("  Pseudo-root attr {} not supported", attr_id);
+            false
+        }
+    }
+}
+
 /// Encode a single attribute value
 ///
 /// Returns true if attribute was encoded, false if unsupported
@@ -914,7 +1062,38 @@ impl FileOperationHandler {
             }
         };
 
-        // Resolve current path
+        // Handle LOOKUP from pseudo-root (RFC 7530 Section 7)
+        if self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("LOOKUP from PSEUDO-ROOT: looking for export '{}'", op.component);
+            
+            // Lookup export by name
+            if let Some(export) = self.fh_mgr.lookup_export(&op.component) {
+                info!("✅ Found export '{}' at path {:?}", export.name, export.path);
+                
+                // Create filehandle for the export's actual path
+                match self.fh_mgr.get_or_create_handle(&export.path) {
+                    Ok(fh) => {
+                        ctx.current_fh = Some(fh);
+                        return LookupRes {
+                            status: Nfs4Status::Ok,
+                        };
+                    }
+                    Err(e) => {
+                        warn!("LOOKUP: Failed to create handle for export: {}", e);
+                        return LookupRes {
+                            status: Nfs4Status::Resource,
+                        };
+                    }
+                }
+            } else {
+                debug!("❌ Export '{}' not found in pseudo-filesystem", op.component);
+                return LookupRes {
+                    status: Nfs4Status::NoEnt,
+                };
+            }
+        }
+
+        // Regular filesystem LOOKUP
         let current_path = match self.fh_mgr.resolve_handle(current_fh) {
             Ok(path) => path,
             Err(e) => {
@@ -982,6 +1161,14 @@ impl FileOperationHandler {
                 };
             }
         };
+
+        // Cannot go up from pseudo-root (RFC 7530 Section 7)
+        if self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("LOOKUPP: Cannot go above pseudo-root");
+            return LookupPRes {
+                status: Nfs4Status::NoEnt,
+            };
+        }
 
         // Resolve current path
         let current_path = match self.fh_mgr.resolve_handle(current_fh) {
@@ -1110,6 +1297,12 @@ impl FileOperationHandler {
                 };
             }
         };
+
+        // Check if this is the pseudo-root (RFC 7530 Section 7)
+        if self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("📂 GETATTR for PSEUDO-ROOT (synthetic attributes)");
+            return self.handle_pseudo_root_getattr(op).await;
+        }
 
         // Resolve path
         let path = match self.fh_mgr.resolve_handle(current_fh) {
@@ -1763,6 +1956,36 @@ impl FileOperationHandler {
                     status: Nfs4Status::Resource,
                 }
             }
+        }
+    }
+    
+    /// Handle GETATTR for pseudo-root (RFC 7530 Section 7)
+    ///
+    /// Returns synthetic attributes for the virtual root filesystem.
+    async fn handle_pseudo_root_getattr(&self, op: GetAttrOp) -> GetAttrRes {
+        use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
+        
+        let pseudo_fs = self.fh_mgr.get_pseudo_fs();
+        let attrs = pseudo_fs.get_pseudo_root_attrs();
+        
+        // Encode attributes with synthetic values
+        let (attr_vals, supported_bitmap) = encode_pseudo_root_attributes(
+            &op.attr_request,
+            &attrs,
+        );
+        
+        let fattr = Fattr4 {
+            attrmask: supported_bitmap.clone(),
+            attr_vals: attr_vals.clone(),
+        };
+        
+        debug!("PSEUDO-ROOT GETATTR: Returning {} bytes of synthetic attributes", fattr.attr_vals.len());
+        debug!("   FSID: {:?}", PSEUDO_ROOT_FSID);
+        debug!("   FILEID: {}", PSEUDO_ROOT_FILEID);
+        
+        GetAttrRes {
+            status: Nfs4Status::Ok,
+            obj_attributes: Some(fattr),
         }
     }
 }

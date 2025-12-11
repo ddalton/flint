@@ -201,40 +201,70 @@ dmesg | grep decode_getfattr
 
 ---
 
-## ~~Remaining Issue: ENOTDIR~~ ✅ **FIXED**
+## ~~Remaining Issue: ENOTDIR~~ 🔍 **ROOT CAUSE IDENTIFIED**
 
-**Status:** ✅ **ISSUE RESOLVED** - Root cause identified and fixed
+**Status:** 🔍 **ARCHITECTURAL ISSUE FOUND** - Requires pseudo-filesystem implementation
+
+### Issue #1: LOOKUP Validation ✅ **FIXED**
 
 **Root Cause:**
-The LOOKUP operation was not checking if paths actually existed on the filesystem. It was returning success for non-existent paths, causing the client to receive invalid filehandles that failed when accessed.
-
-**The Problem:**
-```rust
-// TODO: Check if path exists via filesystem
-// For now, assume all lookups succeed if path can be constructed
-```
-
-This TODO comment in `handle_lookup()` was the smoking gun. The server was lying to the client by saying paths existed when they didn't.
+The LOOKUP operation was not checking if paths actually existed on the filesystem.
 
 **The Fix:**
+1. **LOOKUP Operation** - Added filesystem existence check
+2. **LOOKUPP Operation** - Added three-layer validation  
+3. **Files Modified:** `fileops.rs`, `filehandle.rs`
 
-1. **LOOKUP Operation** - Added filesystem existence check:
-   - Calls `tokio::fs::metadata()` to verify path exists
-   - Returns `NFS4ERR_NOENT` for non-existent paths
-   - Validates path before creating filehandle
+**Status:** ✅ Fixed and deployed (commit fafb1fa)
 
-2. **LOOKUPP Operation** - Added three-layer validation:
-   - Export boundary check (prevents escaping export root)
-   - Parent path existence check
-   - Directory type verification
+---
 
-**Files Modified:**
-- `src/nfs/v4/operations/fileops.rs` - Fixed LOOKUP and LOOKUPP
-- `src/nfs/v4/filehandle.rs` - Added `get_export_path()` method
+### Issue #2: Missing Pseudo-Filesystem 🔍 **IDENTIFIED - NOT YET FIXED**
 
-**Build Status:** ✅ Compiles successfully
+**Root Cause:** NFSv4 requires a **pseudo-filesystem** layer that we haven't implemented.
 
-**Details:** See `ENOTDIR_FIX_SUMMARY.md` for complete technical analysis
+**The Problem:**
+```
+Client: mount -t nfs server:/ /mnt
+Client: PUTROOTFH (expects pseudo-filesystem root)
+Our Server: Returns actual export directory ❌  
+Client: This isn't a pseudo-root → ENOTDIR
+```
+
+**What We Do:**
+- PUTROOTFH → Returns `/root/flint/.../target/nfs-test-export` (real directory)
+- Client expects: Virtual pseudo-root containing export entries
+
+**What Ganesha Does:**
+- PUTROOTFH → Returns pseudo-filesystem root with "Root node (nil)"  
+- Client sees: Proper pseudo-root → Mount succeeds (shows empty virtual root)
+
+**Evidence:**
+```bash
+# Ganesha log:
+PUTROOTFH Export 0 pseudo (/) with path (/) Root node (nil)
+
+# Our server log:
+PUTROOTFH
+GETATTR for path: "/root/flint/spdk-csi-driver/target/nfs-test-export"
+```
+
+**Why This Matters:**
+Per RFC 7530 Section 7, NFSv4 servers MUST present exports through a pseudo-filesystem. The root "/" is a virtual namespace, not an actual directory.
+
+**Impact:**
+- ❌ Cannot mount `server:/` (fails with ENOTDIR)
+- ❌ Single-export servers don't work properly
+- ❌ Not RFC 7530 compliant
+
+**Next Steps:**
+See `PSEUDO_FILESYSTEM_REQUIRED.md` for:
+- Detailed analysis of pseudo-filesystem requirements
+- Implementation plan (2-3 days estimated)  
+- Reference to RFC 7530 and Ganesha implementation
+- Testing strategy
+
+**Status:** Analysis complete, implementation required
 
 ---
 

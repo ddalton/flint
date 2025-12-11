@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod xdr;              // NFSv4 XDR encoding/decoding - DONE
 pub mod compound;         // COMPOUND operation framework - DONE
 pub mod filehandle;       // NFSv4 file handle management - DONE
+pub mod pseudo;           // Pseudo-filesystem (RFC 7530 Section 7) - NEW
 pub mod state;            // State management (stateids, sessions, leases) - DONE
 pub mod operations;       // NFSv4 operations - DONE
 pub mod dispatcher;       // COMPOUND dispatcher - DONE
