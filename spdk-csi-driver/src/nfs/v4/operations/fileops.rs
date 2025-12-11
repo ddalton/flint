@@ -928,8 +928,25 @@ impl FileOperationHandler {
         // Build target path
         let target_path = current_path.join(&op.component);
 
-        // TODO: Check if path exists via filesystem
-        // For now, assume all lookups succeed if path can be constructed
+        // Check if the target path exists
+        let metadata = match tokio::fs::metadata(&target_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                debug!("LOOKUP: Path {:?} does not exist: {}", target_path, e);
+                return LookupRes {
+                    status: if e.kind() == std::io::ErrorKind::NotFound {
+                        Nfs4Status::NoEnt
+                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        Nfs4Status::Access
+                    } else {
+                        Nfs4Status::Io
+                    },
+                };
+            }
+        };
+
+        debug!("LOOKUP: Found {:?} (is_dir={}, is_file={})", 
+               target_path, metadata.is_dir(), metadata.is_file());
 
         // Generate filehandle for target
         match self.fh_mgr.get_or_create_handle(&target_path) {
@@ -979,7 +996,7 @@ impl FileOperationHandler {
 
         // Get parent
         let parent_path = match current_path.parent() {
-            Some(p) => p,
+            Some(p) => p.to_path_buf(),
             None => {
                 // Already at root
                 return LookupPRes {
@@ -988,8 +1005,46 @@ impl FileOperationHandler {
             }
         };
 
+        // Check if we're trying to go above the export root
+        // Compare with the export root from the file handle manager
+        let export_root = self.fh_mgr.get_export_path();
+        if !parent_path.starts_with(export_root) {
+            debug!("LOOKUPP: Attempt to go above export root (current={:?}, parent={:?}, export={:?})",
+                   current_path, parent_path, export_root);
+            return LookupPRes {
+                status: Nfs4Status::NoEnt,
+            };
+        }
+
+        // Check if the parent path exists
+        let metadata = match tokio::fs::metadata(&parent_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                debug!("LOOKUPP: Parent path {:?} does not exist: {}", parent_path, e);
+                return LookupPRes {
+                    status: if e.kind() == std::io::ErrorKind::NotFound {
+                        Nfs4Status::NoEnt
+                    } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        Nfs4Status::Access
+                    } else {
+                        Nfs4Status::Io
+                    },
+                };
+            }
+        };
+
+        // Verify it's a directory
+        if !metadata.is_dir() {
+            warn!("LOOKUPP: Parent path {:?} is not a directory", parent_path);
+            return LookupPRes {
+                status: Nfs4Status::NotDir,
+            };
+        }
+
+        debug!("LOOKUPP: Moving from {:?} to parent {:?}", current_path, parent_path);
+
         // Generate filehandle for parent
-        match self.fh_mgr.get_or_create_handle(parent_path) {
+        match self.fh_mgr.get_or_create_handle(&parent_path) {
             Ok(fh) => {
                 ctx.current_fh = Some(fh);
                 LookupPRes {

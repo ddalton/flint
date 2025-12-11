@@ -130,6 +130,11 @@ impl FileHandleManager {
         self.root_filehandle()
     }
 
+    /// Get the export root path
+    pub fn get_export_path(&self) -> &Path {
+        &self.export_path
+    }
+
     /// Alias for path_to_filehandle (get or create)
     pub fn get_or_create_handle(&self, path: &Path) -> Result<Nfs4FileHandle, String> {
         self.path_to_filehandle(path)
