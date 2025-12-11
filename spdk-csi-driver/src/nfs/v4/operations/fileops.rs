@@ -395,9 +395,11 @@ fn encode_single_attribute(
                 | (1u64 << FATTR4_TIME_METADATA)
                 | (1u64 << FATTR4_MOUNTED_ON_FILEID);
             
-            // Encode as two u32 words
-            buf.put_u32((supported >> 32) as u32);
-            buf.put_u32(supported as u32);
+            // Encode as bitmap4 (variable-length array per RFC 5661)
+            // bitmap4 = array_length + words
+            buf.put_u32(2); // array length (2 words for attrs 0-63)
+            buf.put_u32((supported >> 32) as u32); // word 0 (attrs 32-63)
+            buf.put_u32(supported as u32); // word 1 (attrs 0-31)
             true
         }
         
