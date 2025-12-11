@@ -14,8 +14,147 @@ use crate::nfs::v4::compound::{CompoundContext, ChangeInfo, DirEntry as Compound
 use crate::nfs::v4::filehandle::FileHandleManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tracing::{debug, info, warn};
 use bytes::{Bytes, BufMut, BytesMut};
+
+/// Point-in-time snapshot of file attributes
+///
+/// Per RFC 8434 §13, all attributes returned in a single response MUST represent
+/// a consistent point-in-time snapshot. This struct captures all file attributes
+/// from a SINGLE VFS call, ensuring consistency.
+///
+/// Key principle: Fetch ONCE, encode MANY times
+#[derive(Debug, Clone)]
+pub struct AttributeSnapshot {
+    // Basic type
+    pub ftype: u32,        // NF4REG, NF4DIR, NF4LNK, etc.
+    
+    // Size and space
+    pub size: u64,
+    pub space_used: u64,
+    
+    // Identity
+    pub fileid: u64,
+    pub fsid_major: u64,
+    pub fsid_minor: u64,
+    
+    // Times (all from same stat() call)
+    pub atime: SystemTime,
+    pub mtime: SystemTime,
+    pub ctime: SystemTime,
+    pub change: u64,       // Change attribute (ctime-based)
+    
+    // Permissions and ownership
+    pub mode: u32,
+    pub numlinks: u32,
+    pub owner: u32,
+    pub group: u32,
+    
+    // Source (for debugging)
+    pub path: PathBuf,
+}
+
+impl AttributeSnapshot {
+    /// Create a snapshot from filesystem metadata
+    ///
+    /// This performs a SINGLE stat() call and captures all attributes atomically.
+    /// This is the ONLY place where VFS I/O should happen for attribute queries.
+    pub async fn from_path(path: &Path) -> std::io::Result<Self> {
+        let metadata = tokio::fs::metadata(path).await?;
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            
+            // Determine file type
+            let ftype = if metadata.is_dir() {
+                2  // NF4DIR
+            } else if metadata.is_symlink() {
+                5  // NF4LNK
+            } else {
+                1  // NF4REG
+            };
+            
+            // Get times (all from same metadata)
+            let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+            let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let ctime_secs = metadata.ctime() as u64;
+            let ctime = SystemTime::UNIX_EPOCH + Duration::from_secs(ctime_secs);
+            
+            Ok(Self {
+                ftype,
+                size: metadata.len(),
+                space_used: metadata.blocks() * 512, // blocks are typically 512 bytes
+                fileid: metadata.ino(),
+                fsid_major: metadata.dev(),
+                fsid_minor: 0,
+                atime,
+                mtime,
+                ctime,
+                change: ctime_secs, // NFSv4 change attr is typically ctime
+                mode: metadata.mode(),
+                numlinks: metadata.nlink() as u32,
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                path: path.to_path_buf(),
+            })
+        }
+        
+        #[cfg(not(unix))]
+        {
+            // Non-Unix fallback (Windows, etc.)
+            let ftype = if metadata.is_dir() { 2 } else { 1 };
+            let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let atime = mtime; // Windows doesn't always have atime
+            
+            Ok(Self {
+                ftype,
+                size: metadata.len(),
+                space_used: metadata.len(), // Approximate
+                fileid: 0, // Not available on Windows
+                fsid_major: 0,
+                fsid_minor: 0,
+                atime,
+                mtime,
+                ctime: mtime,
+                change: mtime.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                mode: if metadata.is_dir() { 0o755 } else { 0o644 },
+                numlinks: 1,
+                owner: 0,
+                group: 0,
+                path: path.to_path_buf(),
+            })
+        }
+    }
+    
+    /// Create a synthetic snapshot for pseudo-root
+    ///
+    /// Pseudo-root doesn't have a real filesystem path, so we create
+    /// synthetic attributes per RFC 7530 Section 7.
+    pub fn pseudo_root(num_exports: usize) -> Self {
+        let now = SystemTime::now();
+        let change = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        
+        Self {
+            ftype: 2, // NF4DIR
+            size: 4096,
+            space_used: 4096,
+            fileid: 1, // Pseudo-root always has fileid 1
+            fsid_major: 0, // FSID (0, 0) indicates pseudo-fs
+            fsid_minor: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            change,
+            mode: 0o755,
+            numlinks: 2 + num_exports as u32, // . .. and exports
+            owner: 0, // root
+            group: 0, // root
+            path: PathBuf::from("/"),
+        }
+    }
+}
 
 /// PUTROOTFH operation (opcode 24)
 ///
@@ -410,100 +549,187 @@ fn encode_pseudo_root_attributes(
 ///
 /// Returns ONLY the attributes that the client explicitly requested.
 /// This is critical - returning unrequested attributes causes XDR decode errors!
+///
+/// Uses the snapshot-based approach for consistency with GETATTR.
 fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u8>, Vec<u32>) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    
-    let mut buf = BytesMut::new();
-    let mut returned_bitmap = vec![0u32; requested_attrs.len()];
+    use std::hash::{Hash, Hasher};
     
     // Generate a unique FILEID for this export based on name hash
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    use std::hash::{Hash, Hasher};
     name.hash(&mut hasher);
     let file_id = hasher.finish() | 0x8000_0000_0000_0000; // Ensure it's high to avoid conflicts
     
-    // Current time for timestamps
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    // Create a synthetic snapshot for this export entry
+    let now = SystemTime::now();
+    let change = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
     
-    // Iterate through all possible attributes in order and encode those that are requested
-    for attr_id in 0..=64 {
-        let word_index = (attr_id / 32) as usize;
-        let bit_index = attr_id % 32;
-        
-        // Check if this attribute was requested
-        if word_index >= requested_attrs.len() {
-            break;
+    let snapshot = AttributeSnapshot {
+        ftype: 2, // NF4DIR
+        size: 4096,
+        space_used: 4096,
+        fileid: file_id,
+        fsid_major: 1, // Different from pseudo-root's 0
+        fsid_minor: file_id,
+        atime: now,
+        mtime: now,
+        ctime: now,
+        change,
+        mode: 0o755,
+        numlinks: 2,
+        owner: 0, // root
+        group: 0, // root
+        path: PathBuf::from(format!("/{}", name)),
+    };
+    
+    // Use the standard snapshot encoder for consistency
+    encode_attributes_from_snapshot(requested_attrs, &snapshot)
+}
+
+/// Encode attributes from a snapshot (NO VFS I/O)
+///
+/// This is the RFC-compliant way to encode attributes: all values come from
+/// a pre-fetched snapshot, ensuring consistency per RFC 8434 §13.
+///
+/// Key principle: This function does ZERO I/O, only serialization.
+fn encode_attributes_from_snapshot(
+    requested_bitmap: &[u32],
+    snapshot: &AttributeSnapshot,
+) -> (Vec<u8>, Vec<u32>) {
+    use std::collections::BTreeSet;
+    
+    // Parse bitmap to get list of requested attribute IDs in order
+    let mut requested_attrs = BTreeSet::new();
+    for (word_idx, &bitmap_word) in requested_bitmap.iter().enumerate() {
+        for bit in 0..32 {
+            if (bitmap_word & (1 << bit)) != 0 {
+                let attr_id = (word_idx * 32 + bit) as u32;
+                requested_attrs.insert(attr_id);
+            }
         }
-        
-        if (requested_attrs[word_index] & (1 << bit_index)) == 0 {
-            continue; // Not requested
-        }
-        
-        // Encode the requested attribute
+    }
+    
+    debug!("Encoding {} attributes from snapshot", requested_attrs.len());
+    
+    // Encode attributes in order from snapshot (NO I/O!)
+    let mut attr_vals = BytesMut::new();
+    let mut supported_attrs = BTreeSet::new();
+    
+    for attr_id in requested_attrs {
         let encoded = match attr_id {
             FATTR4_TYPE => {
-                buf.put_u32(2); // NF4DIR - directory
+                attr_vals.put_u32(snapshot.ftype);
                 true
             }
             FATTR4_CHANGE => {
-                buf.put_u64(now);
+                attr_vals.put_u64(snapshot.change);
                 true
             }
             FATTR4_SIZE => {
-                buf.put_u64(4096); // Directory size
+                attr_vals.put_u64(snapshot.size);
                 true
             }
             FATTR4_FSID => {
-                // Use export-specific FSID to indicate different filesystem
-                buf.put_u64(1); // major = 1 (different from pseudo-root's 0)
-                buf.put_u64(file_id); // minor = based on export name
+                attr_vals.put_u64(snapshot.fsid_major);
+                attr_vals.put_u64(snapshot.fsid_minor);
                 true
             }
             FATTR4_RDATTR_ERROR => {
-                // No error reading attributes
-                buf.put_u32(0); // NFS4_OK
+                // No error - snapshot was successful
+                attr_vals.put_u32(0); // NFS4_OK
                 true
             }
             FATTR4_FILEID => {
-                buf.put_u64(file_id);
+                attr_vals.put_u64(snapshot.fileid);
+                true
+            }
+            FATTR4_MOUNTED_ON_FILEID => {
+                // Same as FILEID for non-mount points
+                attr_vals.put_u64(snapshot.fileid);
                 true
             }
             FATTR4_MODE => {
-                buf.put_u32(0o755); // rwxr-xr-x
+                attr_vals.put_u32(snapshot.mode);
                 true
             }
             FATTR4_NUMLINKS => {
-                buf.put_u32(2); // . and ..
+                attr_vals.put_u32(snapshot.numlinks);
                 true
             }
             FATTR4_OWNER => {
-                // Return "root"
-                buf.put_u32(4);
-                buf.put_slice(b"root");
+                // Encode as string (could be numeric or name)
+                let owner_str = snapshot.owner.to_string();
+                attr_vals.put_u32(owner_str.len() as u32);
+                attr_vals.put_slice(owner_str.as_bytes());
+                // Pad to 4-byte boundary
+                let padding = (4 - (owner_str.len() % 4)) % 4;
+                for _ in 0..padding {
+                    attr_vals.put_u8(0);
+                }
+                true
+            }
+            FATTR4_OWNER_GROUP => {
+                // Encode as string
+                let group_str = snapshot.group.to_string();
+                attr_vals.put_u32(group_str.len() as u32);
+                attr_vals.put_slice(group_str.as_bytes());
+                // Pad to 4-byte boundary
+                let padding = (4 - (group_str.len() % 4)) % 4;
+                for _ in 0..padding {
+                    attr_vals.put_u8(0);
+                }
+                true
+            }
+            FATTR4_SPACE_USED => {
+                attr_vals.put_u64(snapshot.space_used);
+                true
+            }
+            FATTR4_TIME_ACCESS => {
+                let duration = snapshot.atime.duration_since(UNIX_EPOCH).unwrap();
+                attr_vals.put_i64(duration.as_secs() as i64);
+                attr_vals.put_u32(duration.subsec_nanos());
                 true
             }
             FATTR4_TIME_METADATA => {
-                // nfstime4: seconds + nanoseconds
-                buf.put_i64(now as i64); // seconds
-                buf.put_u32(0); // nanoseconds
+                let duration = snapshot.ctime.duration_since(UNIX_EPOCH).unwrap();
+                attr_vals.put_i64(duration.as_secs() as i64);
+                attr_vals.put_u32(duration.subsec_nanos());
+                true
+            }
+            FATTR4_TIME_MODIFY => {
+                let duration = snapshot.mtime.duration_since(UNIX_EPOCH).unwrap();
+                attr_vals.put_i64(duration.as_secs() as i64);
+                attr_vals.put_u32(duration.subsec_nanos());
                 true
             }
             _ => {
-                // Unsupported attribute - don't encode it
+                debug!("  Attribute {} not supported in snapshot encoder", attr_id);
                 false
             }
         };
         
         if encoded {
-            // Mark this attribute as returned in bitmap
-            returned_bitmap[word_index] |= 1 << bit_index;
+            supported_attrs.insert(attr_id);
         }
     }
     
-    (buf.to_vec(), returned_bitmap)
+    // Convert supported attributes back to bitmap
+    let mut supported_bitmap = vec![0u32; 3];
+    for attr_id in supported_attrs {
+        let word_idx = (attr_id / 32) as usize;
+        let bit = attr_id % 32;
+        if word_idx < supported_bitmap.len() {
+            supported_bitmap[word_idx] |= 1 << bit;
+        }
+    }
+    
+    // Trim trailing zeros from bitmap
+    while supported_bitmap.len() > 1 && supported_bitmap.last() == Some(&0) {
+        supported_bitmap.pop();
+    }
+    
+    debug!("Encoded {} bytes from snapshot", attr_vals.len());
+    
+    (attr_vals.to_vec(), supported_bitmap)
 }
 
 /// Encode a single pseudo-root attribute
@@ -1468,11 +1694,12 @@ impl FileOperationHandler {
         
         debug!("📂 GETATTR for path: {:?}", path);
 
-        // Get file metadata from filesystem
-        let metadata = match tokio::fs::metadata(&path).await {
-            Ok(m) => m,
+        // PHASE 1: Fetch attribute snapshot (SINGLE VFS CALL)
+        // This is the ONLY place where we do filesystem I/O for attributes
+        let snapshot = match AttributeSnapshot::from_path(&path).await {
+            Ok(s) => s,
             Err(e) => {
-                warn!("GETATTR: Failed to get metadata for {:?}: {}", path, e);
+                warn!("GETATTR: Failed to create attribute snapshot for {:?}: {}", path, e);
                 return GetAttrRes {
                     status: if e.kind() == std::io::ErrorKind::NotFound {
                         Nfs4Status::NoEnt
@@ -1484,44 +1711,40 @@ impl FileOperationHandler {
             }
         };
         
-        // Debug log metadata values
-        debug!("📊 Metadata for {:?}:", path);
-        debug!("   is_dir: {}, is_file: {}, is_symlink: {}", 
-               metadata.is_dir(), metadata.is_file(), metadata.is_symlink());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            debug!("   size: {}, ino: {}, mode: {:o}", 
-                   metadata.len(), metadata.ino(), metadata.mode());
-            debug!("   mtime: {}, atime: {}, ctime: {}", 
-                   metadata.mtime(), metadata.atime(), metadata.ctime());
+        // Debug log snapshot values (all from same point in time!)
+        debug!("📊 Attribute snapshot for {:?}:", path);
+        debug!("   type: {}, size: {}, fileid: {}", snapshot.ftype, snapshot.size, snapshot.fileid);
+        debug!("   mode: {:o}, nlink: {}, owner: {}, group: {}", 
+               snapshot.mode, snapshot.numlinks, snapshot.owner, snapshot.group);
+
+        // PHASE 2: Encode from snapshot (NO VFS I/O, pure serialization)
+        // Per RFC 8434 §13, all attributes MUST be from same point in time
+        let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
+            &op.attr_request,
+            &snapshot,
+        );
+        
+        let fattr = Fattr4 {
+            attrmask: supported_bitmap.clone(),
+            attr_vals: attr_vals.clone(),
+        };
+
+        debug!("GETATTR: Returning {} bytes of attributes (from snapshot)", fattr.attr_vals.len());
+        
+        // Detailed hex dump for debugging
+        debug!("GETATTR: Supported bitmap: {:?}", supported_bitmap);
+        if attr_vals.len() <= 256 {
+            // Hex dump in 16-byte rows
+            for (i, chunk) in attr_vals.chunks(16).enumerate() {
+                let hex_str: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                debug!("  Attr vals [{:04x}]: {}", i * 16, hex_str);
+            }
         }
 
-    // Encode requested attributes per RFC 7530/7862
-    // Attributes must be encoded in bitmap order
-    let (attr_vals, supported_bitmap) = encode_attributes(&op.attr_request, &metadata, &path);
-    
-    let fattr = Fattr4 {
-        attrmask: supported_bitmap.clone(),
-        attr_vals: attr_vals.clone(),
-    };
-
-    debug!("GETATTR: Returning {} bytes of attributes", fattr.attr_vals.len());
-    
-    // Detailed hex dump for debugging
-    debug!("GETATTR: Supported bitmap: {:?}", supported_bitmap);
-    if attr_vals.len() <= 256 {
-        // Hex dump in 16-byte rows
-        for (i, chunk) in attr_vals.chunks(16).enumerate() {
-            let hex_str: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-            debug!("  Attr vals [{:04x}]: {}", i * 16, hex_str);
+        GetAttrRes {
+            status: Nfs4Status::Ok,
+            obj_attributes: Some(fattr),
         }
-    }
-
-    GetAttrRes {
-        status: Nfs4Status::Ok,
-        obj_attributes: Some(fattr),
-    }
     }
 
     /// Handle SETATTR operation
@@ -2169,12 +2392,19 @@ impl FileOperationHandler {
         use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
         
         let pseudo_fs = self.fh_mgr.get_pseudo_fs();
-        let attrs = pseudo_fs.get_pseudo_root_attrs();
+        let export_names = pseudo_fs.list_exports();
         
-        // Encode attributes with synthetic values
-        let (attr_vals, supported_bitmap) = encode_pseudo_root_attributes(
+        // Create synthetic snapshot for pseudo-root
+        let snapshot = AttributeSnapshot::pseudo_root(export_names.len());
+        
+        debug!("PSEUDO-ROOT GETATTR: Creating snapshot with {} exports", export_names.len());
+        debug!("   FSID: {:?}", PSEUDO_ROOT_FSID);
+        debug!("   FILEID: {}", PSEUDO_ROOT_FILEID);
+        
+        // Encode from snapshot (consistent with regular GETATTR)
+        let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
             &op.attr_request,
-            &attrs,
+            &snapshot,
         );
         
         let fattr = Fattr4 {
@@ -2182,9 +2412,7 @@ impl FileOperationHandler {
             attr_vals: attr_vals.clone(),
         };
         
-        debug!("PSEUDO-ROOT GETATTR: Returning {} bytes of synthetic attributes", fattr.attr_vals.len());
-        debug!("   FSID: {:?}", PSEUDO_ROOT_FSID);
-        debug!("   FILEID: {}", PSEUDO_ROOT_FILEID);
+        debug!("PSEUDO-ROOT GETATTR: Returning {} bytes of synthetic attributes (from snapshot)", fattr.attr_vals.len());
         
         GetAttrRes {
             status: Nfs4Status::Ok,
