@@ -408,13 +408,13 @@ fn encode_pseudo_root_attributes(
 
 /// Encode attributes for an export entry in pseudo-root READDIR
 ///
-/// Returns minimal directory attributes so client can understand the entry.
-/// These are the mandatory attributes Linux NFS client expects in READDIR.
-fn encode_export_entry_attributes(name: &str) -> (Vec<u8>, Vec<u32>) {
-    use crate::nfs::v4::pseudo::PSEUDO_ROOT_FSID;
+/// Returns ONLY the attributes that the client explicitly requested.
+/// This is critical - returning unrequested attributes causes XDR decode errors!
+fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u8>, Vec<u32>) {
     use std::time::{SystemTime, UNIX_EPOCH};
     
     let mut buf = BytesMut::new();
+    let mut returned_bitmap = vec![0u32; requested_attrs.len()];
     
     // Generate a unique FILEID for this export based on name hash
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -428,37 +428,82 @@ fn encode_export_entry_attributes(name: &str) -> (Vec<u8>, Vec<u32>) {
         .unwrap()
         .as_secs();
     
-    // FATTR4_TYPE (1) - Directory
-    buf.put_u32(2); // NF4DIR
+    // Iterate through all possible attributes in order and encode those that are requested
+    for attr_id in 0..=64 {
+        let word_index = (attr_id / 32) as usize;
+        let bit_index = attr_id % 32;
+        
+        // Check if this attribute was requested
+        if word_index >= requested_attrs.len() {
+            break;
+        }
+        
+        if (requested_attrs[word_index] & (1 << bit_index)) == 0 {
+            continue; // Not requested
+        }
+        
+        // Encode the requested attribute
+        let encoded = match attr_id {
+            FATTR4_TYPE => {
+                buf.put_u32(2); // NF4DIR - directory
+                true
+            }
+            FATTR4_CHANGE => {
+                buf.put_u64(now);
+                true
+            }
+            FATTR4_SIZE => {
+                buf.put_u64(4096); // Directory size
+                true
+            }
+            FATTR4_FSID => {
+                // Use export-specific FSID to indicate different filesystem
+                buf.put_u64(1); // major = 1 (different from pseudo-root's 0)
+                buf.put_u64(file_id); // minor = based on export name
+                true
+            }
+            FATTR4_RDATTR_ERROR => {
+                // No error reading attributes
+                buf.put_u32(0); // NFS4_OK
+                true
+            }
+            FATTR4_FILEID => {
+                buf.put_u64(file_id);
+                true
+            }
+            FATTR4_MODE => {
+                buf.put_u32(0o755); // rwxr-xr-x
+                true
+            }
+            FATTR4_NUMLINKS => {
+                buf.put_u32(2); // . and ..
+                true
+            }
+            FATTR4_OWNER => {
+                // Return "root"
+                buf.put_u32(4);
+                buf.put_slice(b"root");
+                true
+            }
+            FATTR4_TIME_METADATA => {
+                // nfstime4: seconds + nanoseconds
+                buf.put_i64(now as i64); // seconds
+                buf.put_u32(0); // nanoseconds
+                true
+            }
+            _ => {
+                // Unsupported attribute - don't encode it
+                false
+            }
+        };
+        
+        if encoded {
+            // Mark this attribute as returned in bitmap
+            returned_bitmap[word_index] |= 1 << bit_index;
+        }
+    }
     
-    // FATTR4_CHANGE (3) - Change time attribute
-    buf.put_u64(now);
-    
-    // FATTR4_SIZE (4) - Size (directories typically 4096)
-    buf.put_u64(4096);
-    
-    // FATTR4_FSID (8) - Different from pseudo-root to indicate mount point
-    // Use export-specific FSID to show this is a different filesystem
-    buf.put_u64(1); // major = 1 (different from pseudo-root's 0)
-    buf.put_u64(file_id); // minor = based on export name
-    
-    // FATTR4_FILEID (20) - Unique file ID for this export
-    buf.put_u64(file_id);
-    
-    // FATTR4_MODE (33) - Permissions (0755)
-    buf.put_u32(0o755);
-    
-    // Build bitmap for attributes we're returning
-    // Attributes: 1 (TYPE), 3 (CHANGE), 4 (SIZE), 8 (FSID), 20 (FILEID), 33 (MODE)
-    let mut bitmap = vec![0u32; 2];
-    bitmap[0] |= 1 << 1;  // TYPE
-    bitmap[0] |= 1 << 3;  // CHANGE
-    bitmap[0] |= 1 << 4;  // SIZE
-    bitmap[0] |= 1 << 8;  // FSID
-    bitmap[0] |= 1 << 20; // FILEID
-    bitmap[1] |= 1 << (33 - 32); // MODE (bit 1 in word 1)
-    
-    (buf.to_vec(), bitmap)
+    (buf.to_vec(), returned_bitmap)
 }
 
 /// Encode a single pseudo-root attribute
@@ -1610,8 +1655,8 @@ impl FileOperationHandler {
                     continue; // Skip entries before cookie
                 }
                 
-                // Create minimal attributes for export entry
-                let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name);
+                // Create attributes for export entry based on what client requested
+                let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request);
                 
                 // Pre-encode Fattr4 into Bytes for compound module
                 let mut fattr_buf = BytesMut::new();
