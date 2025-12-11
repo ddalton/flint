@@ -413,6 +413,17 @@ fn encode_pseudo_root_attributes(
     (attr_vals.to_vec(), supported_bitmap)
 }
 
+/// Encode attributes for an export entry in pseudo-root READDIR
+fn encode_export_entry_attributes(name: &str) -> (Vec<u8>, Vec<u32>) {
+    let mut buf = BytesMut::new();
+    
+    // Minimal attributes for directory entry: TYPE
+    buf.put_u32(2); // NF4DIR - directory
+    
+    let bitmap = vec![2]; // Only TYPE (attribute 1)
+    (buf.to_vec(), bitmap)
+}
+
 /// Encode a single pseudo-root attribute
 fn encode_pseudo_root_attribute(
     attr_id: u32,
@@ -1288,6 +1299,17 @@ impl FileOperationHandler {
             }
         };
 
+        // Pseudo-root is always accessible for READ and LOOKUP
+        if self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("ACCESS on PSEUDO-ROOT - granting READ and LOOKUP");
+            let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_EXECUTE;
+            return AccessRes {
+                status: Nfs4Status::Ok,
+                supported,
+                access: op.access & supported,
+            };
+        }
+
         // For now, grant all requested access
         // TODO: Implement proper permission checking
         let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
@@ -1512,8 +1534,45 @@ impl FileOperationHandler {
             }
         };
 
+        // Handle READDIR on pseudo-root - list exports
+        if self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("READDIR on PSEUDO-ROOT - listing exports");
+            
+            let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
+            debug!("Found {} exports: {:?}", export_names.len(), export_names);
+            
+            // Create directory entries for exports
+            let mut entries = vec![];
+            for (i, name) in export_names.iter().enumerate() {
+                if op.cookie > 0 && (i as u64) < op.cookie {
+                    continue; // Skip entries before cookie
+                }
+                
+                // Create minimal attributes for export entry
+                let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name);
+                
+                entries.push(DirEntry {
+                    cookie: (i + 1) as u64,
+                    name: name.clone(),
+                    attrs: Fattr4 {
+                        attrmask: supported_bitmap,
+                        attr_vals,
+                    },
+                });
+            }
+            
+            debug!("READDIR returning {} export entries", entries.len());
+            
+            return ReadDirRes {
+                status: Nfs4Status::Ok,
+                cookieverf: 1, // Simple verifier
+                entries,
+                eof: true,
+            };
+        }
+
         // TODO: Read actual directory entries via filesystem
-        // For now, return empty directory
+        // For now, return empty directory for regular directories
 
         ReadDirRes {
             status: Nfs4Status::Ok,
