@@ -476,6 +476,22 @@ fn encode_pseudo_root_attribute(
             buf.put_slice(b"root");
             true
         }
+        FATTR4_RAWDEV => {
+            // Raw device specdata4 (major, minor) - pseudo-root is not a device
+            buf.put_u32(0); // major
+            buf.put_u32(0); // minor
+            true
+        }
+        FATTR4_SPACE_USED => {
+            // Space used by pseudo-root (minimal)
+            buf.put_u64(4096); // One block
+            true
+        }
+        FATTR4_SPACE_AVAIL | FATTR4_SPACE_FREE | FATTR4_SPACE_TOTAL => {
+            // Pseudo-filesystem has "infinite" space (return large value)
+            buf.put_u64(u64::MAX / 2); // Very large but not overflow
+            true
+        }
         FATTR4_SUPPORTED_ATTRS => {
             // Return bitmap of attributes we support
             let supported: u64 = (1u64 << FATTR4_TYPE)
@@ -487,6 +503,11 @@ fn encode_pseudo_root_attribute(
                 | (1u64 << FATTR4_NUMLINKS)
                 | (1u64 << FATTR4_OWNER)
                 | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_RAWDEV)
+                | (1u64 << FATTR4_SPACE_AVAIL)
+                | (1u64 << FATTR4_SPACE_FREE)
+                | (1u64 << FATTR4_SPACE_TOTAL)
+                | (1u64 << FATTR4_SPACE_USED)
                 | (1u64 << FATTR4_TIME_ACCESS)
                 | (1u64 << FATTR4_TIME_MODIFY)
                 | (1u64 << FATTR4_TIME_METADATA)
