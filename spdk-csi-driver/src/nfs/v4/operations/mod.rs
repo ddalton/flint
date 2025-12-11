@@ -44,7 +44,7 @@ pub use fileops::{
     GetAttrOp, GetAttrRes, Fattr4,
     SetAttrOp, SetAttrRes,
     AccessOp, AccessRes,
-    ReadDirOp, ReadDirRes, DirEntry,
+    ReadDirOp, ReadDirRes,
     RenameOp, RenameRes,
     LinkOp, LinkRes,
     ReadLinkOp, ReadLinkRes,

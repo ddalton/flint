@@ -10,12 +10,12 @@
 // These operations work with the COMPOUND context's current/saved filehandles.
 
 use crate::nfs::v4::protocol::*;
-use crate::nfs::v4::compound::{CompoundContext, ChangeInfo};
+use crate::nfs::v4::compound::{CompoundContext, ChangeInfo, DirEntry as CompoundDirEntry};
 use crate::nfs::v4::filehandle::FileHandleManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use bytes::{BufMut, BytesMut};
+use bytes::{Bytes, BufMut, BytesMut};
 
 /// PUTROOTFH operation (opcode 24)
 ///
@@ -152,15 +152,8 @@ pub struct ReadDirOp {
 pub struct ReadDirRes {
     pub status: Nfs4Status,
     pub cookieverf: u64,
-    pub entries: Vec<DirEntry>,
+    pub entries: Vec<CompoundDirEntry>,  // Use compound module's DirEntry (attrs: Bytes)
     pub eof: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    pub cookie: u64,
-    pub name: String,
-    pub attrs: Fattr4,
 }
 
 /// CREATE operation (opcode 6)
@@ -1551,13 +1544,27 @@ impl FileOperationHandler {
                 // Create minimal attributes for export entry
                 let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name);
                 
-                entries.push(DirEntry {
+                // Pre-encode Fattr4 into Bytes for compound module
+                let mut fattr_buf = BytesMut::new();
+                
+                // Encode bitmap
+                fattr_buf.put_u32(supported_bitmap.len() as u32);
+                for word in &supported_bitmap {
+                    fattr_buf.put_u32(*word);
+                }
+                
+                // Encode attr_vals as opaque
+                fattr_buf.put_u32(attr_vals.len() as u32);
+                fattr_buf.put_slice(&attr_vals);
+                let padding = (4 - (attr_vals.len() % 4)) % 4;
+                for _ in 0..padding {
+                    fattr_buf.put_u8(0);
+                }
+                
+                entries.push(CompoundDirEntry {
                     cookie: (i + 1) as u64,
                     name: name.clone(),
-                    attrs: Fattr4 {
-                        attrmask: supported_bitmap,
-                        attr_vals,
-                    },
+                    attrs: fattr_buf.freeze(),
                 });
             }
             

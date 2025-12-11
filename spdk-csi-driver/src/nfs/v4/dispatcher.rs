@@ -345,13 +345,9 @@ impl CompoundDispatcher {
                 let res = self.file_handler.handle_readdir(op, context).await;
                 if res.status == Nfs4Status::Ok {
                     use crate::nfs::v4::compound::{ReadDirResult, DirEntry};
+                    // Entries are already pre-encoded with attrs as Bytes
                     OperationResult::ReadDir(res.status, Some(ReadDirResult {
-                        entries: res.entries.into_iter().map(|e| DirEntry {
-                            cookie: e.cookie,
-                            name: e.name,
-                            // TODO: Properly encode Fattr4 to Bytes
-                            attrs: bytes::Bytes::from(e.attrs.attr_vals),
-                        }).collect(),
+                        entries: res.entries,
                         eof: res.eof,
                         cookieverf: res.cookieverf,
                     }))

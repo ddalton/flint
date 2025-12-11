@@ -991,16 +991,33 @@ impl CompoundResponse {
                         // Encode cookieverf (u64)
                         encoder.encode_u64(res.cookieverf);
                         
-                        // Encode directory entries
-                        encoder.encode_u32(res.entries.len() as u32);
-                        for entry in res.entries {
-                            encoder.encode_u64(entry.cookie);
-                            encoder.encode_string(&entry.name);
-                            encoder.encode_opaque(&entry.attrs);
-                        }
+                        // RFC 5661: dirlist4 is a linked list of entry4
+                        // Each entry has: cookie, name, attrs, nextentry pointer
                         
-                        // Encode eof flag
-                        encoder.encode_bool(res.eof);
+                        if res.entries.is_empty() {
+                            // Empty directory: value_follows = FALSE, then EOF
+                            encoder.encode_bool(false);
+                            encoder.encode_bool(res.eof);
+                        } else {
+                            // Encode directory entries as linked list
+                            for (i, entry) in res.entries.iter().enumerate() {
+                                // value_follows (or next_entry for subsequent entries)
+                                encoder.encode_bool(true);
+                                
+                                // entry4 fields
+                                encoder.encode_u64(entry.cookie);
+                                encoder.encode_string(&entry.name);
+                                
+                                // Attrs are already pre-encoded as Bytes (fattr4 structure)
+                                encoder.append_raw(&entry.attrs);
+                            }
+                            
+                            // End of list: nextentry = FALSE
+                            encoder.encode_bool(false);
+                            
+                            // EOF flag
+                            encoder.encode_bool(res.eof);
+                        }
                     }
                 }
             }
