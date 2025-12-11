@@ -107,6 +107,12 @@ impl XdrEncoder {
         self.buf.len()
     }
 
+    /// Append raw bytes directly (no length prefix, no padding)
+    /// Used when the data is already properly XDR-encoded
+    pub fn append_raw(&mut self, data: &[u8]) {
+        self.buf.put_slice(data);
+    }
+
     /// Append raw bytes without any encoding (no length prefix, no padding)
     /// Use this for RPC procedure results that are already XDR-encoded
     pub fn append_bytes(&mut self, data: &[u8]) {

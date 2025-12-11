@@ -1011,7 +1011,9 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(attrs) = attrs {
-                        encoder.encode_opaque(&attrs);
+                        // attrs already contains the properly encoded fattr4 structure
+                        // (bitmap + attr_vals), so write it directly without opaque wrapper
+                        encoder.append_raw(&attrs);
                     }
                 }
             }
@@ -1347,5 +1349,148 @@ impl CompoundResponse {
                 encoder.encode_status(status);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nfs::xdr::XdrDecoder;
+
+    #[test]
+    fn test_getattr_response_encoding() {
+        // This test verifies that GETATTR response is encoded correctly per RFC 5661
+        // The bug was that we were wrapping the fattr4 structure in encode_opaque(),
+        // which added an extra length prefix that the Linux NFS client couldn't parse.
+        
+        // Create a mock fattr4 structure with bitmap and attribute values
+        // Simulating a response for attributes: TYPE (1), SIZE (3)
+        let mut attr_vals = BytesMut::new();
+        attr_vals.put_u32(2); // NF4DIR (directory type)
+        attr_vals.put_u64(4096); // size = 4096 bytes
+        
+        let fattr = Fattr4 {
+            attrmask: vec![0x0000000A], // bits 1 and 3 set (TYPE=1, SIZE=3)
+            attr_vals: attr_vals.to_vec(),
+        };
+        
+        // Encode using dispatcher logic (what goes into attrs bytes)
+        let mut dispatcher_buf = BytesMut::new();
+        dispatcher_buf.put_u32(fattr.attrmask.len() as u32); // bitmap array length
+        for &word in &fattr.attrmask {
+            dispatcher_buf.put_u32(word);
+        }
+        dispatcher_buf.put_u32(fattr.attr_vals.len() as u32); // attr_vals length
+        dispatcher_buf.put_slice(&fattr.attr_vals);
+        
+        let attrs_bytes = dispatcher_buf.to_vec();
+        
+        // Now encode the full GETATTR response
+        let result = OperationResult::GetAttr(Nfs4Status::Ok, Some(attrs_bytes.clone()));
+        
+        let mut encoder = XdrEncoder::new();
+        let mut response = CompoundResponse::new();
+        response.encode_single_result(&result, &mut encoder);
+        
+        let encoded = encoder.finish();
+        
+        // Decode and verify the structure
+        let mut decoder = XdrDecoder::new(encoded);
+        
+        // Should be: opcode (u32) + status (u32) + fattr4
+        let opcode = decoder.decode_u32().expect("decode opcode");
+        assert_eq!(opcode, opcode::GETATTR);
+        
+        let status = decoder.decode_u32().expect("decode status");
+        assert_eq!(status, Nfs4Status::Ok.to_u32());
+        
+        // Now should come the fattr4 structure DIRECTLY (not wrapped in opaque)
+        // fattr4 = bitmap array + attr_vals
+        let bitmap_len = decoder.decode_u32().expect("decode bitmap len");
+        assert_eq!(bitmap_len, 1, "Should have 1 bitmap word");
+        
+        let bitmap_word0 = decoder.decode_u32().expect("decode bitmap word 0");
+        assert_eq!(bitmap_word0, 0x0000000A, "Bitmap should have bits 1,3 set");
+        
+        let attr_vals_len = decoder.decode_u32().expect("decode attr_vals len");
+        assert_eq!(attr_vals_len, 12, "attr_vals should be 12 bytes (u32 + u64)");
+        
+        let type_val = decoder.decode_u32().expect("decode type");
+        assert_eq!(type_val, 2, "Type should be NF4DIR");
+        
+        let size_val = decoder.decode_u64().expect("decode size");
+        assert_eq!(size_val, 4096, "Size should be 4096");
+        
+        // Should have consumed all data
+        assert_eq!(decoder.remaining(), 0, "Should have no remaining bytes");
+    }
+    
+    #[test]
+    fn test_getattr_no_double_wrapping() {
+        // Verify that we DON'T wrap fattr4 in encode_opaque (which would add extra length)
+        // The old buggy code did: encode_opaque(&attrs) which added a u32 length prefix
+        
+        let attrs_bytes = vec![
+            0x00, 0x00, 0x00, 0x01, // bitmap array length = 1
+            0x00, 0x00, 0x00, 0x02, // bitmap word 0 = 0x02 (bit 1 = TYPE)
+            0x00, 0x00, 0x00, 0x04, // attr_vals length = 4 bytes
+            0x00, 0x00, 0x00, 0x01, // TYPE = NF4REG (regular file)
+        ];
+        
+        let result = OperationResult::GetAttr(Nfs4Status::Ok, Some(attrs_bytes.clone()));
+        
+        let mut encoder = XdrEncoder::new();
+        let mut response = CompoundResponse::new();
+        response.encode_single_result(&result, &mut encoder);
+        
+        let encoded = encoder.finish();
+        
+        // Encoded should be: opcode (4) + status (4) + attrs_bytes (16) = 24 bytes total
+        assert_eq!(encoded.len(), 24, 
+            "Expected 24 bytes: 4 (opcode) + 4 (status) + 16 (fattr4). Got {} bytes", 
+            encoded.len());
+        
+        // If we had wrongly used encode_opaque, it would be:
+        // 4 (opcode) + 4 (status) + 4 (opaque length) + 16 (data) = 28 bytes
+        // So the test would fail if the bug was present
+        
+        // Verify the bytes directly
+        let bytes: Vec<u8> = encoded.to_vec();
+        assert_eq!(&bytes[0..4], &[0x00, 0x00, 0x00, opcode::GETATTR as u8], "opcode");
+        assert_eq!(&bytes[4..8], &[0x00, 0x00, 0x00, 0x00], "status OK");
+        assert_eq!(&bytes[8..], &attrs_bytes[..], "fattr4 data should follow directly");
+    }
+    
+    #[test]
+    fn test_secinfo_no_name_dual_flavors() {
+        // Verify SECINFO_NO_NAME returns both AUTH_NONE and AUTH_SYS
+        // This matches Ganesha behavior and gives clients flexibility
+        
+        let result = OperationResult::SecInfoNoName(Nfs4Status::Ok);
+        
+        let mut encoder = XdrEncoder::new();
+        let mut response = CompoundResponse::new();
+        response.encode_single_result(&result, &mut encoder);
+        
+        let encoded = encoder.finish();
+        let mut decoder = XdrDecoder::new(encoded);
+        
+        let opcode = decoder.decode_u32().expect("decode opcode");
+        assert_eq!(opcode, opcode::SECINFO_NO_NAME);
+        
+        let status = decoder.decode_u32().expect("decode status");
+        assert_eq!(status, Nfs4Status::Ok.to_u32());
+        
+        // Should have array of 2 security flavors
+        let flavor_count = decoder.decode_u32().expect("decode flavor count");
+        assert_eq!(flavor_count, 2, "Should return 2 security flavors");
+        
+        let flavor1 = decoder.decode_u32().expect("decode flavor 1");
+        assert_eq!(flavor1, 0, "First flavor should be AUTH_NONE (0)");
+        
+        let flavor2 = decoder.decode_u32().expect("decode flavor 2");
+        assert_eq!(flavor2, 1, "Second flavor should be AUTH_SYS (1)");
+        
+        assert_eq!(decoder.remaining(), 0, "Should have consumed all data");
     }
 }
