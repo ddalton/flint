@@ -701,6 +701,91 @@ fn encode_attributes_from_snapshot(
                 attr_vals.put_u32(duration.subsec_nanos());
                 true
             }
+            FATTR4_SUPPORTED_ATTRS => {
+                // Return bitmap of attributes we support
+                let supported: u64 = (1u64 << FATTR4_TYPE)
+                    | (1u64 << FATTR4_SIZE)
+                    | (1u64 << FATTR4_CHANGE)
+                    | (1u64 << FATTR4_FSID)
+                    | (1u64 << FATTR4_FILEID)
+                    | (1u64 << FATTR4_MODE)
+                    | (1u64 << FATTR4_NUMLINKS)
+                    | (1u64 << FATTR4_OWNER)
+                    | (1u64 << FATTR4_OWNER_GROUP)
+                    | (1u64 << FATTR4_SPACE_USED)
+                    | (1u64 << FATTR4_TIME_ACCESS)
+                    | (1u64 << FATTR4_TIME_METADATA)
+                    | (1u64 << FATTR4_TIME_MODIFY);
+                // Encode as bitmap (up to 64 attributes in 2 words)
+                attr_vals.put_u32(2); // 2 words
+                attr_vals.put_u32((supported & 0xFFFFFFFF) as u32); // word 0
+                attr_vals.put_u32((supported >> 32) as u32); // word 1
+                true
+            }
+            FATTR4_MAXREAD => {
+                // Maximum read size (1MB)
+                attr_vals.put_u64(1024 * 1024);
+                true
+            }
+            FATTR4_MAXWRITE => {
+                // Maximum write size (1MB)
+                attr_vals.put_u64(1024 * 1024);
+                true
+            }
+            FATTR4_MAXNAME => {
+                // Maximum filename length
+                attr_vals.put_u32(255);
+                true
+            }
+            FATTR4_MAXLINK => {
+                // Maximum hard links
+                attr_vals.put_u32(65535);
+                true
+            }
+            FATTR4_CANSETTIME => {
+                // Server can set time
+                attr_vals.put_u32(1); // TRUE
+                true
+            }
+            FATTR4_CASE_INSENSITIVE => {
+                // Filesystem is case sensitive
+                attr_vals.put_u32(0); // FALSE
+                true
+            }
+            FATTR4_CASE_PRESERVING => {
+                // Filesystem preserves case
+                attr_vals.put_u32(1); // TRUE
+                true
+            }
+            FATTR4_LINK_SUPPORT => {
+                // Supports hard links
+                attr_vals.put_u32(1); // TRUE
+                true
+            }
+            FATTR4_SYMLINK_SUPPORT => {
+                // Supports symbolic links
+                attr_vals.put_u32(1); // TRUE
+                true
+            }
+            FATTR4_UNIQUE_HANDLES => {
+                // File handles are unique
+                attr_vals.put_u32(1); // TRUE
+                true
+            }
+            FATTR4_LEASE_TIME => {
+                // Lease time in seconds
+                attr_vals.put_u32(90);
+                true
+            }
+            FATTR4_SUPPATTR_EXCLCREAT => {
+                // Attributes supported for exclusive create
+                // Return minimal set: TYPE, MODE
+                let supported: u64 = (1u64 << FATTR4_TYPE) | (1u64 << FATTR4_MODE);
+                attr_vals.put_u32(2); // 2 words
+                attr_vals.put_u32((supported & 0xFFFFFFFF) as u32);
+                attr_vals.put_u32((supported >> 32) as u32);
+                true
+            }
             _ => {
                 debug!("  Attribute {} not supported in snapshot encoder", attr_id);
                 false
