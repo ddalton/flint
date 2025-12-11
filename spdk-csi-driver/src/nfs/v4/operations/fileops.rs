@@ -1103,15 +1103,38 @@ impl FileOperationHandler {
 
         // Handle LOOKUP from pseudo-root (RFC 7530 Section 7)
         if self.fh_mgr.is_pseudo_root(current_fh) {
-            debug!("LOOKUP from PSEUDO-ROOT: looking for export '{}'", op.component);
+            info!("🔍 LOOKUP from PSEUDO-ROOT: component='{}'", op.component);
             
             // Lookup export by name
             if let Some(export) = self.fh_mgr.lookup_export(&op.component) {
-                info!("✅ Found export '{}' at path {:?}", export.name, export.path);
+                info!("✅ Found export '{}' → path {:?}", export.name, export.path);
+                
+                // Verify the export path exists
+                match tokio::fs::metadata(&export.path).await {
+                    Ok(metadata) => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            info!("   Export metadata: is_dir={}, mode={:o}", 
+                                  metadata.is_dir(), metadata.mode());
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            info!("   Export metadata: is_dir={}", metadata.is_dir());
+                        }
+                    }
+                    Err(e) => {
+                        warn!("   Export path does not exist: {}", e);
+                        return LookupRes {
+                            status: Nfs4Status::NoEnt,
+                        };
+                    }
+                }
                 
                 // Create filehandle for the export's actual path
                 match self.fh_mgr.get_or_create_handle(&export.path) {
                     Ok(fh) => {
+                        info!("   Created filehandle: {} bytes", fh.data.len());
                         ctx.current_fh = Some(fh);
                         return LookupRes {
                             status: Nfs4Status::Ok,
@@ -1125,7 +1148,9 @@ impl FileOperationHandler {
                     }
                 }
             } else {
-                debug!("❌ Export '{}' not found in pseudo-filesystem", op.component);
+                warn!("❌ Export '{}' not found in pseudo-filesystem", op.component);
+                let available = self.fh_mgr.get_pseudo_fs().list_exports();
+                warn!("   Available exports: {:?}", available);
                 return LookupRes {
                     status: Nfs4Status::NoEnt,
                 };
