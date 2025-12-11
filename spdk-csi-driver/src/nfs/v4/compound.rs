@@ -1011,9 +1011,12 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(attrs) = attrs {
-                        // attrs already contains the properly encoded fattr4 structure
+                        // attrs already contains the properly encoded fattr4 structure  
                         // (bitmap + attr_vals), so write it directly without opaque wrapper
+                        debug!("📝 GETATTR encoding: appending {} bytes directly (no opaque wrapper)", attrs.len());
+                        debug!("   First 32 bytes: {:02x?}", &attrs[..attrs.len().min(32)]);
                         encoder.append_raw(&attrs);
+                        debug!("✅ GETATTR fattr4 appended");
                     }
                 }
             }
