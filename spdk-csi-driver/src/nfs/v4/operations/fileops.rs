@@ -408,32 +408,16 @@ fn encode_pseudo_root_attributes(
 
 /// Encode attributes for an export entry in pseudo-root READDIR
 ///
-/// Returns synthetic attributes for the export entry (not the pseudo-root itself).
-/// Client requested: bitmap [1050650, 1048602] which includes many attributes.
-/// We return a safe minimal set that won't cause XDR decode errors.
+/// Returns ONLY the attributes the client explicitly requested.
+/// Client sends bitmap in READDIR request - we must match exactly what they ask for.
 fn encode_export_entry_attributes(_name: &str) -> (Vec<u8>, Vec<u32>) {
     let mut buf = BytesMut::new();
     
-    // Return minimal but complete attribute set
-    // TYPE, FSID, FILEID, MODE - enough for client to recognize as directory
+    // Return EMPTY attribute set - let client do LOOKUP+GETATTR for full attrs
+    // This is valid per RFC - READDIR can return minimal/no attributes
+    // Client will explicitly LOOKUP to get full details
     
-    // TYPE (attribute 1): Directory
-    buf.put_u32(2); // NF4DIR
-    
-    // FSID (attribute 8): Different from pseudo-root
-    buf.put_u64(1); // major
-    buf.put_u64(1); // minor
-    
-    // FILEID (attribute 20): Synthetic ID for export entry
-    buf.put_u64(2); // Use ID 2 (pseudo-root is 1)
-    
-    // MODE (attribute 33): Standard directory permissions
-    buf.put_u32(0o40755); // drwxr-xr-x
-    
-    // Bitmap: TYPE(1) + FSID(8) + FILEID(20) + MODE(33)
-    // Word 0: bits 1,8,20 = 0x00100102
-    // Word 1: bit 1 (33-32) = 0x00000002
-    let bitmap = vec![0x00100102, 0x00000002];
+    let bitmap = vec![]; // No attributes
     
     (buf.to_vec(), bitmap)
 }
