@@ -408,16 +408,55 @@ fn encode_pseudo_root_attributes(
 
 /// Encode attributes for an export entry in pseudo-root READDIR
 ///
-/// Returns ONLY the attributes the client explicitly requested.
-/// Client sends bitmap in READDIR request - we must match exactly what they ask for.
-fn encode_export_entry_attributes(_name: &str) -> (Vec<u8>, Vec<u32>) {
+/// Returns minimal directory attributes so client can understand the entry.
+/// These are the mandatory attributes Linux NFS client expects in READDIR.
+fn encode_export_entry_attributes(name: &str) -> (Vec<u8>, Vec<u32>) {
+    use crate::nfs::v4::pseudo::PSEUDO_ROOT_FSID;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
     let mut buf = BytesMut::new();
     
-    // Return EMPTY attribute set - let client do LOOKUP+GETATTR for full attrs
-    // This is valid per RFC - READDIR can return minimal/no attributes
-    // Client will explicitly LOOKUP to get full details
+    // Generate a unique FILEID for this export based on name hash
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    name.hash(&mut hasher);
+    let file_id = hasher.finish() | 0x8000_0000_0000_0000; // Ensure it's high to avoid conflicts
     
-    let bitmap = vec![]; // No attributes
+    // Current time for timestamps
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    // FATTR4_TYPE (1) - Directory
+    buf.put_u32(2); // NF4DIR
+    
+    // FATTR4_CHANGE (3) - Change time attribute
+    buf.put_u64(now);
+    
+    // FATTR4_SIZE (4) - Size (directories typically 4096)
+    buf.put_u64(4096);
+    
+    // FATTR4_FSID (8) - Different from pseudo-root to indicate mount point
+    // Use export-specific FSID to show this is a different filesystem
+    buf.put_u64(1); // major = 1 (different from pseudo-root's 0)
+    buf.put_u64(file_id); // minor = based on export name
+    
+    // FATTR4_FILEID (20) - Unique file ID for this export
+    buf.put_u64(file_id);
+    
+    // FATTR4_MODE (33) - Permissions (0755)
+    buf.put_u32(0o755);
+    
+    // Build bitmap for attributes we're returning
+    // Attributes: 1 (TYPE), 3 (CHANGE), 4 (SIZE), 8 (FSID), 20 (FILEID), 33 (MODE)
+    let mut bitmap = vec![0u32; 2];
+    bitmap[0] |= 1 << 1;  // TYPE
+    bitmap[0] |= 1 << 3;  // CHANGE
+    bitmap[0] |= 1 << 4;  // SIZE
+    bitmap[0] |= 1 << 8;  // FSID
+    bitmap[0] |= 1 << 20; // FILEID
+    bitmap[1] |= 1 << (33 - 32); // MODE (bit 1 in word 1)
     
     (buf.to_vec(), bitmap)
 }
