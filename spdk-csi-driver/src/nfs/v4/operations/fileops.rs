@@ -407,13 +407,27 @@ fn encode_pseudo_root_attributes(
 }
 
 /// Encode attributes for an export entry in pseudo-root READDIR
-fn encode_export_entry_attributes(name: &str) -> (Vec<u8>, Vec<u32>) {
+///
+/// Returns synthetic attributes for the export entry (not the pseudo-root itself).
+/// These are placeholder values since the actual export attributes will be
+/// retrieved via LOOKUP + GETATTR.
+fn encode_export_entry_attributes(_name: &str) -> (Vec<u8>, Vec<u32>) {
     let mut buf = BytesMut::new();
     
-    // Minimal attributes for directory entry: TYPE
-    buf.put_u32(2); // NF4DIR - directory
+    // For READDIR entries, return minimal attributes
+    // Client will do LOOKUP + GETATTR to get full attributes
     
-    let bitmap = vec![2]; // Only TYPE (attribute 1)
+    // TYPE (attribute 1): Directory
+    buf.put_u32(2); // NF4DIR
+    
+    // FILEID (attribute 20): Synthetic ID for export entry
+    buf.put_u64(2); // Use ID 2 (pseudo-root is 1)
+    
+    // Only claim to support these two attributes
+    // Bitmap with TYPE (1) and FILEID (20) set
+    // Word 0: bit 1 and bit 20 = 0x00100002
+    let bitmap = vec![0x00100002];
+    
     (buf.to_vec(), bitmap)
 }
 
