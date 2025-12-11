@@ -295,6 +295,7 @@ const FATTR4_TIME_METADATA: u32 = 52;
 const FATTR4_TIME_MODIFY: u32 = 53;
 const FATTR4_TIME_MODIFY_SET: u32 = 54;
 const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
+const FATTR4_SUPPATTR_EXCLCREAT: u32 = 75;
 
 /// Encode NFSv4 attributes based on requested bitmap
 ///
@@ -740,6 +741,24 @@ fn encode_single_attribute(
                 path.hash(&mut hasher);
                 buf.put_u64(hasher.finish());
             }
+            true
+        }
+        
+        FATTR4_SUPPATTR_EXCLCREAT => {
+            // Bitmap of attributes supported for exclusive create (RFC 5661 §5.8.1.14)
+            // Return bitmap of settable attributes during exclusive create
+            let supported: u64 = (1u64 << FATTR4_MODE)
+                | (1u64 << FATTR4_OWNER)
+                | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_SIZE)
+                | (1u64 << FATTR4_TIME_ACCESS_SET)
+                | (1u64 << FATTR4_TIME_MODIFY_SET);
+            
+            // Encode as bitmap4 (array of u32)
+            // For attributes 0-63, we need 2 words
+            buf.put_u32(2); // bitmap array length
+            buf.put_u32((supported >> 32) as u32); // word 0
+            buf.put_u32(supported as u32); // word 1
             true
         }
         
