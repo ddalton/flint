@@ -197,13 +197,24 @@ impl FileHandleManager {
 
     /// Validate a file handle (check instance ID)
     pub fn validate_handle(&self, handle: &Nfs4FileHandle) -> Result<(), String> {
+        if handle.data.is_empty() {
+            return Err("File handle is empty".to_string());
+        }
+        
+        // Check if this is a pseudo-root handle (special case)
+        if self.is_pseudo_root(handle) {
+            debug!("Validating pseudo-root handle: {} bytes", handle.data.len());
+            return Ok(()); // Pseudo-root handles are always valid
+        }
+        
+        // Regular filehandle validation
         if handle.data.len() < 41 {
             return Err("File handle too short".to_string());
         }
 
         // Check version
         if handle.data[0] != 1 {
-            return Err("Unsupported file handle version".to_string());
+            return Err(format!("Unsupported file handle version: {}", handle.data[0]));
         }
 
         // Extract instance ID
