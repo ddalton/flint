@@ -1249,9 +1249,11 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     // Return array of supported security flavors
-                    // For now, just AUTH_SYS (Unix auth)
-                    encoder.encode_u32(1); // Array length: 1 flavor
-                    encoder.encode_u32(1); // AUTH_SYS
+                    // Per RFC 5661, return both AUTH_NONE and AUTH_SYS like Ganesha does
+                    // We accept both (parse but don't enforce credentials)
+                    encoder.encode_u32(2); // Array length: 2 flavors
+                    encoder.encode_u32(0); // AUTH_NONE
+                    encoder.encode_u32(1); // AUTH_SYS (Unix auth)
                 }
             }
 

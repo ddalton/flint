@@ -41,6 +41,13 @@ pub struct FileHandleManager {
 impl FileHandleManager {
     /// Create a new file handle manager
     pub fn new(export_path: PathBuf) -> Self {
+        // Canonicalize the export path so relative inputs work with PUTROOTFH
+        // and normalization checks. If canonicalize fails, keep the original
+        // to avoid crashing; later operations will surface a clear error.
+        let export_path = export_path
+            .canonicalize()
+            .unwrap_or(export_path);
+
         // Generate instance ID from current timestamp
         let instance_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)

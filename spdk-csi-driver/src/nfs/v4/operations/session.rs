@@ -19,6 +19,11 @@ use bytes::{BytesMut, BufMut};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+// CREATE_SESSION flags (RFC 5661 §18.36)
+const CREATE_SESSION4_FLAG_PERSIST: u32 = 0x0000_0001;
+const CREATE_SESSION4_FLAG_CONN_BACK_CHAN: u32 = 0x0000_0002;
+const CREATE_SESSION4_FLAG_CONN_RDMA: u32 = 0x0000_0004;
+
 /// EXCHANGE_ID operation (opcode 42)
 ///
 /// Establishes client identity and receives clientid from server.
@@ -262,16 +267,28 @@ impl SessionOperationHandler {
         info!("CREATE_SESSION: Session {:?} created for client {}",
               session.session_id, op.clientid);
 
-        // Set server flags based on actual capabilities (RFC 7862)
-        // Don't echo client flags - that would claim features we don't support!
-        // flags = 0: Basic session, no persistence, no backchannel (we don't implement these yet)
-        let server_flags = 0u32;  // TODO: Add flags when we implement persistence/backchannel
+        // Set server flags based on actual capabilities (RFC 5661 §18.36)
+        // We do not support persistent reply cache or backchannel callbacks yet,
+        // so advertise none to avoid client-side EINVAL during mount negotiation.
+        let server_flags = 0u32;
+
+        // If we are not offering a backchannel, RFC 5661 says csr_flags MUST NOT
+        // set CREATE_SESSION4_FLAG_CONN_BACK_CHAN and the backchannel attrs should
+        // be zeroed so the client knows callbacks are unavailable.
+        let back_chan_attrs = ChannelAttrs {
+            header_pad_size: 0,
+            max_request_size: 0,
+            max_response_size: 0,
+            max_response_size_cached: 0,
+            max_operations: 0,
+            max_requests: 0,
+        };
         
         CreateSessionRes {
             status: Nfs4Status::Ok,
             sessionid: session.session_id,
             sequence: session.sequence,
-            flags: server_flags,  // Use server flags, NOT client flags!
+            flags: server_flags,
             fore_chan_attrs: ChannelAttrs {
                 header_pad_size: 0,
                 max_request_size: session.fore_chan_maxrequestsize,
@@ -280,14 +297,7 @@ impl SessionOperationHandler {
                 max_operations: session.fore_chan_maxops,
                 max_requests: 128,
             },
-            back_chan_attrs: ChannelAttrs {
-                header_pad_size: 0,
-                max_request_size: 1024 * 1024,
-                max_response_size: 1024 * 1024,
-                max_response_size_cached: 0,
-                max_operations: 2,
-                max_requests: 16,
-            },
+            back_chan_attrs,
         }
     }
 
