@@ -615,21 +615,25 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u
     let now = SystemTime::now();
     let change = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
     
+    // CRITICAL: Use SAME FSID as pseudo-root!
+    // If we use a different FSID, client thinks it's a different filesystem
+    // and expects a mount point, which causes permission issues.
+    // Using (0, 0) tells client this is part of the same pseudo-filesystem.
     let snapshot = AttributeSnapshot {
         ftype: 2, // NF4DIR
         size: 4096,
         space_used: 4096,
         fileid: file_id,
-        fsid_major: 1, // Different from pseudo-root's 0
-        fsid_minor: file_id,
+        fsid_major: 0, // SAME as pseudo-root!
+        fsid_minor: 0, // SAME as pseudo-root!
         atime: now,
         mtime: now,
         ctime: now,
         change,
         mode: 0o755,
         numlinks: 2,
-        owner: 0, // root
-        group: 0, // root
+        owner: 0, // root (will be translated to "root" by uid_to_username)
+        group: 0, // root (will be translated to "root" by gid_to_groupname)
         path: PathBuf::from(format!("/{}", name)),
     };
     
