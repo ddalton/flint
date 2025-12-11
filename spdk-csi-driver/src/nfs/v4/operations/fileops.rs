@@ -1656,7 +1656,9 @@ impl FileOperationHandler {
                 }
                 
                 // Create attributes for export entry based on what client requested
+                debug!("Client requested attributes: bitmap={:?}", op.attr_request);
                 let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request);
+                debug!("Returning attributes: bitmap={:?}, {} bytes", supported_bitmap, attr_vals.len());
                 
                 // Pre-encode Fattr4 into Bytes for compound module
                 let mut fattr_buf = BytesMut::new();
