@@ -665,6 +665,7 @@ fn encode_single_attribute(
                     FATTR4_TIME_METADATA => (metadata.ctime(), metadata.ctime_nsec()),
                     _ => (0, 0),
                 };
+                debug!("  Encoding time attr {}: secs={}, nsecs={}", attr_id, secs, nsecs);
                 buf.put_i64(secs);
                 buf.put_u32(nsecs as u32);
             }
