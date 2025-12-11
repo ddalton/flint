@@ -238,7 +238,7 @@ pub struct PutPubFhRes {
     pub status: Nfs4Status,
 }
 
-// NFSv4 Attribute IDs (FATTR4_*)
+// NFSv4 Attribute IDs (FATTR4_*) - Per RFC 5661 Table 3
 const FATTR4_SUPPORTED_ATTRS: u32 = 0;
 const FATTR4_TYPE: u32 = 1;
 const FATTR4_FH_EXPIRE_TYPE: u32 = 2;
@@ -251,33 +251,49 @@ const FATTR4_FSID: u32 = 8;
 const FATTR4_UNIQUE_HANDLES: u32 = 9;
 const FATTR4_LEASE_TIME: u32 = 10;
 const FATTR4_RDATTR_ERROR: u32 = 11;
+const FATTR4_ACLSUPPORT: u32 = 12;
+const FATTR4_ACL: u32 = 13;
+const FATTR4_ARCHIVE: u32 = 14;
+const FATTR4_CANSETTIME: u32 = 15;  // FIXED: was 35
+const FATTR4_CASE_INSENSITIVE: u32 = 16;  // FIXED: was 39
+const FATTR4_CASE_PRESERVING: u32 = 17;  // FIXED: was 40
+const FATTR4_CHOWN_RESTRICTED: u32 = 18;
 const FATTR4_FILEHANDLE: u32 = 19;
 const FATTR4_FILEID: u32 = 20;
 const FATTR4_FILES_AVAIL: u32 = 21;
 const FATTR4_FILES_FREE: u32 = 22;
 const FATTR4_FILES_TOTAL: u32 = 23;
-const FATTR4_MAXFILESIZE: u32 = 42;
-const FATTR4_MAXREAD: u32 = 43;
-const FATTR4_MAXWRITE: u32 = 44;
+const FATTR4_FS_LOCATIONS: u32 = 24;
+const FATTR4_HIDDEN: u32 = 25;
+const FATTR4_HOMOGENEOUS: u32 = 26;
+const FATTR4_MAXFILESIZE: u32 = 27;  // FIXED: was 42
+const FATTR4_MAXLINK: u32 = 28;  // FIXED: was 41
+const FATTR4_MAXNAME: u32 = 29;  // FIXED: was 45
+const FATTR4_MAXREAD: u32 = 30;  // FIXED: was 43
+const FATTR4_MAXWRITE: u32 = 31;  // FIXED: was 44
+const FATTR4_MIMETYPE: u32 = 32;
 const FATTR4_MODE: u32 = 33;
-const FATTR4_NUMLINKS: u32 = 27;
+const FATTR4_NO_TRUNC: u32 = 34;
+const FATTR4_NUMLINKS: u32 = 35;  // FIXED: was 27
 const FATTR4_OWNER: u32 = 36;
 const FATTR4_OWNER_GROUP: u32 = 37;
-const FATTR4_ACLSUPPORT: u32 = 12;
-const FATTR4_ACL: u32 = 13;
-const FATTR4_ARCHIVE: u32 = 34;
-const FATTR4_CANSETTIME: u32 = 35;
-const FATTR4_CASE_INSENSITIVE: u32 = 39;
-const FATTR4_CASE_PRESERVING: u32 = 40;
-const FATTR4_MAXLINK: u32 = 41;
-const FATTR4_MAXNAME: u32 = 45;
-const FATTR4_SPACE_AVAIL: u32 = 47;
-const FATTR4_SPACE_FREE: u32 = 48;
-const FATTR4_SPACE_TOTAL: u32 = 49;
-const FATTR4_SPACE_USED: u32 = 50;
-const FATTR4_TIME_ACCESS: u32 = 51;
-const FATTR4_TIME_MODIFY: u32 = 53;
+const FATTR4_QUOTA_AVAIL_HARD: u32 = 38;
+const FATTR4_QUOTA_AVAIL_SOFT: u32 = 39;
+const FATTR4_QUOTA_USED: u32 = 40;
+const FATTR4_RAWDEV: u32 = 41;  // ADDED: was missing
+const FATTR4_SPACE_AVAIL: u32 = 42;  // FIXED: was 47
+const FATTR4_SPACE_FREE: u32 = 43;  // FIXED: was 48
+const FATTR4_SPACE_TOTAL: u32 = 44;  // FIXED: was 49
+const FATTR4_SPACE_USED: u32 = 45;  // FIXED: was 50
+const FATTR4_SYSTEM: u32 = 46;
+const FATTR4_TIME_ACCESS: u32 = 47;  // FIXED: was 51
+const FATTR4_TIME_ACCESS_SET: u32 = 48;
+const FATTR4_TIME_BACKUP: u32 = 49;
+const FATTR4_TIME_CREATE: u32 = 50;
+const FATTR4_TIME_DELTA: u32 = 51;
 const FATTR4_TIME_METADATA: u32 = 52;
+const FATTR4_TIME_MODIFY: u32 = 53;
+const FATTR4_TIME_MODIFY_SET: u32 = 54;
 const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
 
 /// Encode NFSv4 attributes based on requested bitmap
@@ -352,23 +368,23 @@ fn encode_single_attribute(
 ) -> bool {
     match attr_id {
         FATTR4_SUPPORTED_ATTRS => {
-            // Return bitmap of attributes we support
-            // Build supported attributes bitmap
+            // Return bitmap of attributes we support (RFC 5661 compliant)
             let supported: u64 = (1u64 << FATTR4_TYPE)
                 | (1u64 << FATTR4_SIZE)
                 | (1u64 << FATTR4_CHANGE)
                 | (1u64 << FATTR4_FSID)
-                | (1u64 << FATTR4_FILEID)
-                | (1u64 << FATTR4_MODE)
-                | (1u64 << FATTR4_NUMLINKS)
-                | (1u64 << FATTR4_OWNER)
-                | (1u64 << FATTR4_OWNER_GROUP)
                 | (1u64 << FATTR4_ACLSUPPORT)
                 | (1u64 << FATTR4_CANSETTIME)
                 | (1u64 << FATTR4_CASE_INSENSITIVE)
                 | (1u64 << FATTR4_CASE_PRESERVING)
+                | (1u64 << FATTR4_FILEID)
                 | (1u64 << FATTR4_MAXLINK)
                 | (1u64 << FATTR4_MAXNAME)
+                | (1u64 << FATTR4_MODE)
+                | (1u64 << FATTR4_NUMLINKS)
+                | (1u64 << FATTR4_OWNER)
+                | (1u64 << FATTR4_OWNER_GROUP)
+                | (1u64 << FATTR4_RAWDEV)
                 | (1u64 << FATTR4_SPACE_AVAIL)
                 | (1u64 << FATTR4_SPACE_FREE)
                 | (1u64 << FATTR4_SPACE_TOTAL)
@@ -632,6 +648,27 @@ fn encode_single_attribute(
                 buf.put_slice(group);
                 // XDR padding
                 buf.put_u8(0);
+            }
+            true
+        }
+        
+        FATTR4_RAWDEV => {
+            // Raw device (specdata4: major + minor device numbers)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let rdev = metadata.rdev();
+                // Extract major/minor from rdev
+                let major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & !0xfff);
+                let minor = (rdev & 0xff) | ((rdev >> 12) & !0xff);
+                buf.put_u32(major as u32);
+                buf.put_u32(minor as u32);
+            }
+            #[cfg(not(unix))]
+            {
+                // Not a device
+                buf.put_u32(0);
+                buf.put_u32(0);
             }
             true
         }
