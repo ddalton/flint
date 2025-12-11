@@ -18,6 +18,58 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tracing::{debug, info, warn};
 use bytes::{Bytes, BufMut, BytesMut};
 
+/// Translate UID to username using system APIs
+///
+/// Uses getpwuid() to lookup username from UID, falling back to numeric string
+/// if lookup fails. This matches Ganesha's behavior.
+#[cfg(unix)]
+fn uid_to_username(uid: u32) -> String {
+    use nix::unistd::Uid;
+    
+    match nix::unistd::User::from_uid(Uid::from_raw(uid)) {
+        Ok(Some(user)) => user.name,
+        Ok(None) => {
+            debug!("UID {} not found in passwd, using numeric", uid);
+            uid.to_string()
+        }
+        Err(e) => {
+            warn!("Failed to lookup UID {}: {}, using numeric", uid, e);
+            uid.to_string()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn uid_to_username(uid: u32) -> String {
+    uid.to_string()
+}
+
+/// Translate GID to groupname using system APIs
+///
+/// Uses getgrgid() to lookup groupname from GID, falling back to numeric string
+/// if lookup fails. This matches Ganesha's behavior.
+#[cfg(unix)]
+fn gid_to_groupname(gid: u32) -> String {
+    use nix::unistd::Gid;
+    
+    match nix::unistd::Group::from_gid(Gid::from_raw(gid)) {
+        Ok(Some(group)) => group.name,
+        Ok(None) => {
+            debug!("GID {} not found in group database, using numeric", gid);
+            gid.to_string()
+        }
+        Err(e) => {
+            warn!("Failed to lookup GID {}: {}, using numeric", gid, e);
+            gid.to_string()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn gid_to_groupname(gid: u32) -> String {
+    gid.to_string()
+}
+
 /// Point-in-time snapshot of file attributes
 ///
 /// Per RFC 8434 §13, all attributes returned in a single response MUST represent
@@ -656,8 +708,8 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_OWNER => {
-                // Encode as string (could be numeric or name)
-                let owner_str = snapshot.owner.to_string();
+                // Translate UID to username (per RFC 7530 §5.9)
+                let owner_str = uid_to_username(snapshot.owner);
                 attr_vals.put_u32(owner_str.len() as u32);
                 attr_vals.put_slice(owner_str.as_bytes());
                 // Pad to 4-byte boundary
@@ -668,8 +720,8 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_OWNER_GROUP => {
-                // Encode as string
-                let group_str = snapshot.group.to_string();
+                // Translate GID to groupname (per RFC 7530 §5.9)
+                let group_str = gid_to_groupname(snapshot.group);
                 attr_vals.put_u32(group_str.len() as u32);
                 attr_vals.put_slice(group_str.as_bytes());
                 // Pad to 4-byte boundary

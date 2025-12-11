@@ -50,7 +50,7 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 bytes = "1.0"
 async-trait = "0.1"
-nix = { version = "0.27", features = ["fs"] }
+nix = { version = "0.27", features = ["fs", "user"] }
 thiserror = "1.0"
 rand = "0.8"
 dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state management
