@@ -406,12 +406,14 @@ fn encode_single_attribute(
         FATTR4_TYPE => {
             // File type: 1=regular, 2=directory, 3=block, 4=char, 5=symlink, 6=socket, 7=fifo
             let ftype = if metadata.is_dir() { 
-                2u32 
+                2u32  // NF4DIR
             } else if metadata.is_symlink() {
-                5u32
+                5u32  // NF4LNK
             } else { 
-                1u32 // Regular file
+                1u32  // NF4REG
             };
+            debug!("  Encoding TYPE: value={} (is_dir={}, is_symlink={})", 
+                   ftype, metadata.is_dir(), metadata.is_symlink());
             buf.put_u32(ftype);
             true
         }
