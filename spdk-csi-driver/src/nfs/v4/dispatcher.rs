@@ -277,8 +277,20 @@ impl CompoundDispatcher {
                         debug!("   Requested attrs: {:?}", attr_request);
                         debug!("   Returned bitmap: {:?}", fattr.attrmask);
                         debug!("   Attr values: {} bytes", fattr.attr_vals.len());
-                        debug!("   First 32 bytes of attr_vals: {:02x?}", 
-                               &fattr.attr_vals[..std::cmp::min(32, fattr.attr_vals.len())]);
+                        
+                        // Log first few attribute values to verify TYPE, FSID, etc.
+                        if fattr.attr_vals.len() >= 4 {
+                            let type_val = u32::from_be_bytes([
+                                fattr.attr_vals[0], fattr.attr_vals[1],
+                                fattr.attr_vals[2], fattr.attr_vals[3]
+                            ]);
+                            debug!("   🏷️  First attr (likely TYPE): value={} (2=dir, 1=file)", type_val);
+                        }
+                        
+                        debug!("   📦 Full attr_vals hex dump:");
+                        for (i, chunk) in fattr.attr_vals.chunks(16).enumerate() {
+                            debug!("      [{:3}] {:02x?}", i * 16, chunk);
+                        }
                         
                         // Encode attribute bitmap first (required by NFSv4!)
                         // Bitmap is array of u32 values
@@ -291,8 +303,8 @@ impl CompoundDispatcher {
                         buf.put_u32(fattr.attr_vals.len() as u32); // Length of attr_vals
                         buf.put_slice(&fattr.attr_vals);
                         
-                        debug!("   Total encoded GETATTR: {} bytes", buf.len());
-                        debug!("   Encoded first 64 bytes: {:02x?}", &buf[..std::cmp::min(64, buf.len())]);
+                        debug!("   📤 Total encoded fattr4: {} bytes", buf.len());
+                        debug!("   📤 Complete fattr4 hex (first 96 bytes): {:02x?}", &buf[..std::cmp::min(96, buf.len())]);
                         
                         bytes::Bytes::from(buf)
                     } else {

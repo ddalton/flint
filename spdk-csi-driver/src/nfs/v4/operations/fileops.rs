@@ -1067,6 +1067,8 @@ impl FileOperationHandler {
                 };
             }
         };
+        
+        debug!("📂 GETATTR for path: {:?}", path);
 
         // Get file metadata from filesystem
         let metadata = match tokio::fs::metadata(&path).await {
@@ -1083,6 +1085,19 @@ impl FileOperationHandler {
                 };
             }
         };
+        
+        // Debug log metadata values
+        debug!("📊 Metadata for {:?}:", path);
+        debug!("   is_dir: {}, is_file: {}, is_symlink: {}", 
+               metadata.is_dir(), metadata.is_file(), metadata.is_symlink());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            debug!("   size: {}, ino: {}, mode: {:o}", 
+                   metadata.len(), metadata.ino(), metadata.mode());
+            debug!("   mtime: {}, atime: {}, ctime: {}", 
+                   metadata.mtime(), metadata.atime(), metadata.ctime());
+        }
 
     // Encode requested attributes per RFC 7530/7862
     // Attributes must be encoded in bitmap order
