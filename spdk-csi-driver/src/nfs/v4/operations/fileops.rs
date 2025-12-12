@@ -2116,14 +2116,216 @@ impl FileOperationHandler {
             */  // End of commented-out code
         }
 
-        // TODO: Read actual directory entries via filesystem
-        // For now, return empty directory for regular directories
+        // Handle READDIR on regular directories
+        // Resolve the directory path from the filehandle
+        let dir_path = match self.fh_mgr.resolve_handle(current_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("READDIR: Failed to resolve handle: {}", e);
+                return ReadDirRes {
+                    status: Nfs4Status::Stale,
+                    cookieverf: 0,
+                    entries: vec![],
+                    eof: true,
+                };
+            }
+        };
+
+        debug!("READDIR: Reading directory: {:?}", dir_path);
+
+        // Get directory metadata for cookieverf generation
+        // Per RFC 5661 Section 18.23.3, cookieverf is used to detect directory changes
+        let dir_metadata = match tokio::fs::metadata(&dir_path).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("READDIR: Failed to stat directory: {}", e);
+                let status = if e.kind() == std::io::ErrorKind::NotFound {
+                    Nfs4Status::NoEnt
+                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    Nfs4Status::Access
+                } else {
+                    Nfs4Status::Io
+                };
+                return ReadDirRes {
+                    status,
+                    cookieverf: 0,
+                    entries: vec![],
+                    eof: true,
+                };
+            }
+        };
+
+        // Generate cookieverf from directory mtime
+        // This allows clients to detect if directory changed between READDIR calls
+        let current_cookieverf = match dir_metadata.modified() {
+            Ok(mtime) => {
+                // Convert SystemTime to u64 (seconds since UNIX_EPOCH)
+                mtime.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs()
+            }
+            Err(_) => {
+                // Fallback if mtime not available (shouldn't happen on Unix)
+                1u64
+            }
+        };
+
+        // Validate cookieverf on subsequent requests (when cookie != 0)
+        // Per RFC 5661: "If the server determines that the cookieverf is no longer valid
+        // for the directory, the error NFS4ERR_NOT_SAME must be returned."
+        if op.cookie != 0 && op.cookieverf != 0 {
+            if op.cookieverf != current_cookieverf {
+                debug!("READDIR: cookieverf mismatch - directory changed (expected {}, got {})",
+                       current_cookieverf, op.cookieverf);
+                return ReadDirRes {
+                    status: Nfs4Status::NotSame,
+                    cookieverf: current_cookieverf,
+                    entries: vec![],
+                    eof: true,
+                };
+            }
+            debug!("READDIR: cookieverf validated successfully");
+        }
+
+        // Open the directory
+        let mut dir_stream = match tokio::fs::read_dir(&dir_path).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("READDIR: Failed to open directory: {}", e);
+                let status = if e.kind() == std::io::ErrorKind::NotFound {
+                    Nfs4Status::NoEnt
+                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    Nfs4Status::Access
+                } else {
+                    Nfs4Status::Io
+                };
+                return ReadDirRes {
+                    status,
+                    cookieverf: 0,
+                    entries: vec![],
+                    eof: true,
+                };
+            }
+        };
+
+        // Collect all directory entries first (needed for cookie handling)
+        let mut all_entries = Vec::new();
+        while let Ok(Some(entry)) = dir_stream.next_entry().await {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let entry_path = entry.path();
+
+            // Get metadata for this entry
+            let snapshot = match AttributeSnapshot::from_path(&entry_path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("READDIR: Failed to stat '{}': {}, skipping", file_name, e);
+                    continue; // Skip entries we can't stat
+                }
+            };
+
+            all_entries.push((file_name, snapshot));
+        }
+
+        debug!("READDIR: Found {} entries in directory", all_entries.len());
+
+        // Handle cookie-based pagination
+        // cookie=0 means start from beginning
+        // cookie>0 means resume from that position (1-indexed)
+        let start_idx = if op.cookie == 0 {
+            0
+        } else {
+            // Cookie is 1-indexed position of NEXT entry to return
+            // So cookie=3 means we already returned entries 1,2 and should start at 3
+            op.cookie as usize
+        };
+
+        // Build response entries with attribute encoding
+        let mut response_entries = Vec::new();
+        let mut total_bytes = 0usize;
+        let mut dir_bytes_used = 0usize;
+
+        // Base sizes per RFC 5661
+        // READDIR response includes: status(4) + cookieverf(8) + entry_follows(4) + eof(4)
+        const BASE_RESPONSE_SIZE: usize = 20;
+        let maxcount_limit = op.maxcount.saturating_sub(BASE_RESPONSE_SIZE as u32) as usize;
+
+        for (idx, (file_name, snapshot)) in all_entries.iter().enumerate() {
+            // Skip entries before our start position
+            if idx < start_idx {
+                continue;
+            }
+
+            // Calculate cookie for this entry (1-indexed position of NEXT entry)
+            let cookie = (idx + 1) as u64;
+
+            // Encode attributes based on client's request
+            let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(&op.attr_request, snapshot);
+
+            debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
+                   file_name, attr_vals.len(), supported_bitmap);
+
+            // Build fattr4 structure per RFC 5661
+            // fattr4 = attrmask (array of u32) + attr_vals (opaque bytes with length prefix)
+            let mut fattr_buf = BytesMut::new();
+
+            // Encode attrmask (bitmap)
+            fattr_buf.put_u32(supported_bitmap.len() as u32);
+            for word in &supported_bitmap {
+                fattr_buf.put_u32(*word);
+            }
+
+            // Encode attr_vals as opaque (length + data + padding)
+            fattr_buf.put_u32(attr_vals.len() as u32);
+            fattr_buf.put_slice(&attr_vals);
+            let padding = (4 - (attr_vals.len() % 4)) % 4;
+            for _ in 0..padding {
+                fattr_buf.put_u8(0);
+            }
+
+            let fattr_bytes = fattr_buf.freeze();
+
+            // Calculate size of this entry4 on the wire
+            // entry4 = cookie(8) + name_len(4) + name(variable) + name_padding + attrs + next_entry_flag(4)
+            let name_len_padded = ((file_name.len() + 3) / 4) * 4; // Round up to 4-byte boundary
+            let entry_wire_size = 8 + 4 + name_len_padded + fattr_bytes.len() + 4;
+
+            // Check maxcount limit (total response size)
+            if total_bytes + entry_wire_size > maxcount_limit {
+                debug!("READDIR: Hit maxcount limit at {} entries", response_entries.len());
+                break;
+            }
+
+            // Calculate dircount contribution (cookie + name only per RFC)
+            let dir_bytes_contribution = 8 + 4 + name_len_padded;
+
+            // Check dircount limit (directory info only, no attributes)
+            if op.dircount > 0 && dir_bytes_used + dir_bytes_contribution > op.dircount as usize {
+                debug!("READDIR: Hit dircount limit at {} entries", response_entries.len());
+                break;
+            }
+
+            // Add this entry to response
+            response_entries.push(CompoundDirEntry {
+                cookie,
+                name: file_name.clone(),
+                attrs: fattr_bytes,
+            });
+
+            total_bytes += entry_wire_size;
+            dir_bytes_used += dir_bytes_contribution;
+        }
+
+        // Determine if we've reached EOF
+        let eof = start_idx + response_entries.len() >= all_entries.len();
+
+        debug!("READDIR: Returning {} entries, eof={}, total_bytes={}",
+               response_entries.len(), eof, total_bytes);
 
         ReadDirRes {
             status: Nfs4Status::Ok,
-            cookieverf: 0,
-            entries: vec![],
-            eof: true,
+            cookieverf: current_cookieverf, // Directory mtime as verifier per RFC 5661
+            entries: response_entries,
+            eof,
         }
     }
 
