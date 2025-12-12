@@ -1395,19 +1395,68 @@ impl FileOperationHandler {
     }
 
     /// Handle PUTROOTFH operation
+    /// 
+    /// RFC 5661 allows optimization: if server has a single export, it can
+    /// return that export's root directly instead of the pseudo-root.
+    /// This enables "direct mount" (Option B) for CSI/single-export scenarios.
     pub fn handle_putrootfh(
         &self,
         _op: PutRootFhOp,
         ctx: &mut CompoundContext,
     ) -> PutRootFhRes {
-        info!("📁 PUTROOTFH - Setting current FH to pseudo-root");
+        info!("📁 PUTROOTFH - Determining root filehandle to return");
         debug!("   Previous current_fh: {:?}", ctx.current_fh.as_ref().map(|fh| fh.data.len()));
 
-        // Get root filehandle (pseudo-root per RFC 7530 Section 7)
+        // Check if we have a single export (CSI/direct mount scenario)
+        let exports = self.fh_mgr.get_pseudo_fs().list_exports();
+        debug!("   Server has {} export(s): {:?}", exports.len(), exports);
+
+        if exports.len() == 1 {
+            // OPTION B: Single export - return export root directly (RFC 5661 optimization)
+            let export_name = &exports[0];
+            info!("   🎯 Single export detected: '{}'", export_name);
+            info!("   → Using OPTION B: Direct export mount (bypass pseudo-root)");
+            
+            match self.fh_mgr.lookup_export(export_name) {
+                Some(export) => {
+                    debug!("   Export found: path={:?}", export.path);
+                    
+                    // Get filehandle for the actual export directory
+                    match self.fh_mgr.get_or_create_handle(&export.path) {
+                        Ok(fh) => {
+                            info!("   ✅ Returning EXPORT ROOT directly: {} bytes", fh.data.len());
+                            debug!("   Export FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
+                            debug!("   → Client can now access files directly without LOOKUP");
+                            ctx.current_fh = Some(fh);
+                            return PutRootFhRes {
+                                status: Nfs4Status::Ok,
+                            };
+                        }
+                        Err(e) => {
+                            warn!("   ❌ Failed to create handle for export root: {}", e);
+                            warn!("   → Falling back to pseudo-root");
+                        }
+                    }
+                }
+                None => {
+                    warn!("   ⚠️ Export '{}' not found in registry", export_name);
+                    warn!("   → Falling back to pseudo-root");
+                }
+            }
+        } else if exports.is_empty() {
+            warn!("   ⚠️ No exports configured!");
+        } else {
+            // OPTION A: Multiple exports - use pseudo-root for browsing
+            info!("   🌳 Multiple exports detected: {:?}", exports);
+            info!("   → Using OPTION A: Pseudo-root with browsing/discovery");
+        }
+
+        // Get pseudo-root filehandle (RFC 7530 Section 7)
         match self.fh_mgr.get_root_fh() {
             Ok(fh) => {
-                info!("   ✅ Pseudo-root FH: {} bytes", fh.data.len());
-                debug!("   FH data (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
+                info!("   ✅ Returning PSEUDO-ROOT: {} bytes", fh.data.len());
+                debug!("   Pseudo-root FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
+                debug!("   → Client will need LOOKUP to traverse to exports");
                 ctx.current_fh = Some(fh);
                 PutRootFhRes {
                     status: Nfs4Status::Ok,

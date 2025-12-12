@@ -175,6 +175,10 @@ impl FileHandleManager {
         &self.pseudo_fs
     }
     
+    /// Get reference to pseudo-filesystem (for export management)
+    pub fn get_pseudo_fs(&self) -> &Arc<PseudoFilesystem> {
+        &self.pseudo_fs
+    }
     
     /// Lookup an export by name (for LOOKUP from pseudo-root)
     pub fn lookup_export(&self, name: &str) -> Option<Export> {
