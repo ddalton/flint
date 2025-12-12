@@ -1400,18 +1400,21 @@ impl FileOperationHandler {
         _op: PutRootFhOp,
         ctx: &mut CompoundContext,
     ) -> PutRootFhRes {
-        debug!("PUTROOTFH");
+        info!("📁 PUTROOTFH - Setting current FH to pseudo-root");
+        debug!("   Previous current_fh: {:?}", ctx.current_fh.as_ref().map(|fh| fh.data.len()));
 
-        // Get root filehandle
+        // Get root filehandle (pseudo-root per RFC 7530 Section 7)
         match self.fh_mgr.get_root_fh() {
             Ok(fh) => {
+                info!("   ✅ Pseudo-root FH: {} bytes", fh.data.len());
+                debug!("   FH data (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
                 ctx.current_fh = Some(fh);
                 PutRootFhRes {
                     status: Nfs4Status::Ok,
                 }
             }
             Err(e) => {
-                warn!("PUTROOTFH failed: {}", e);
+                warn!("❌ PUTROOTFH failed: {}", e);
                 PutRootFhRes {
                     status: Nfs4Status::Resource,
                 }
