@@ -2033,53 +2033,41 @@ impl FileOperationHandler {
         // Handle READDIR on pseudo-root - list exports
         if self.fh_mgr.is_pseudo_root(current_fh) {
             info!("📂 READDIR on PSEUDO-ROOT");
+            debug!("   cookie={}, cookieverf={:?}, dircount={}, maxcount={}", 
+                   op.cookie, op.cookieverf, op.dircount, op.maxcount);
             
-            // WORKAROUND: Return EMPTY like Ganesha does
-            // The Linux kernel VFS has issues with synthetic directory entries
-            // in pseudo-filesystems. It does a permission check that fails,
-            // preventing LOOKUP from ever being called.
-            //
-            // By returning empty, we force clients to mount exports directly:
-            //   mount server:/volume /mnt
-            //
-            // This matches Ganesha's behavior and works around the VFS issue.
-            
-            info!("   Returning EMPTY directory (Ganesha model)");
-            info!("   Clients must mount exports directly: mount server:/volume /mnt");
-            
-            return ReadDirRes {
-                status: Nfs4Status::Ok,
-                cookieverf: 1,
-                entries: vec![],  // EMPTY!
-                eof: true,
-            };
-            
-            /* ORIGINAL CODE - Kept for reference if we fix VFS issue later
             let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
             info!("   Found {} exports: {:?}", export_names.len(), export_names);
-            info!("   Client requested {} attribute words: {:?}", op.attr_request.len(), op.attr_request);
+            debug!("   Client requested {} attribute words: {:?}", op.attr_request.len(), op.attr_request);
+            debug!("   Requested attribute bitmap: {:?}", op.attr_request);
             
             let mut entries = vec![];
+            let mut total_size = 0usize;
+            
             for (i, name) in export_names.iter().enumerate() {
-                if op.cookie > 0 && (i as u64) < op.cookie {
+                let entry_cookie = (i + 1) as u64;
+                if op.cookie > 0 && entry_cookie <= op.cookie {
+                    debug!("   Skipping entry '{}' (cookie {} <= requested {})", name, entry_cookie, op.cookie);
                     continue; // Skip entries before cookie
                 }
                 
                 // Create attributes for export entry based on what client requested
-                info!("   Encoding entry '{}': client requested bitmap={:?}", name, op.attr_request);
+                debug!("   Encoding entry '{}': client requested bitmap={:?}", name, op.attr_request);
                 let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request);
                 info!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
                 
-                // Decode bitmap to show which attributes
-                let mut attr_names = vec![];
-                for (word_idx, &word) in supported_bitmap.iter().enumerate() {
-                    for bit in 0..32 {
-                        if (word & (1 << bit)) != 0 {
-                            attr_names.push(word_idx * 32 + bit);
+                // Decode bitmap to show which attributes (debug only)
+                if log::log_enabled!(log::Level::Debug) {
+                    let mut attr_names = vec![];
+                    for (word_idx, &word) in supported_bitmap.iter().enumerate() {
+                        for bit in 0..32 {
+                            if (word & (1 << bit)) != 0 {
+                                attr_names.push(word_idx * 32 + bit);
+                            }
                         }
                     }
+                    debug!("   → Attribute IDs: {:?}", attr_names);
                 }
-                info!("   → Attribute IDs: {:?}", attr_names);
                 
                 // Pre-encode Fattr4 into Bytes for compound module
                 let mut fattr_buf = BytesMut::new();
@@ -2098,22 +2086,35 @@ impl FileOperationHandler {
                     fattr_buf.put_u8(0);
                 }
                 
+                let entry_size = fattr_buf.len();
+                total_size += entry_size;
+                debug!("   → Entry '{}' encoded: {} bytes (total so far: {})", name, entry_size, total_size);
+                
                 entries.push(CompoundDirEntry {
-                    cookie: (i + 1) as u64,
+                    cookie: entry_cookie,
                     name: name.clone(),
                     attrs: fattr_buf.freeze(),
                 });
+                
+                // Check if we've exceeded maxcount
+                if total_size > op.maxcount as usize {
+                    debug!("   Stopping: total_size {} exceeds maxcount {}", total_size, op.maxcount);
+                    break;
+                }
             }
             
-            debug!("READDIR returning {} export entries (no . or .. per NFSv4 spec)", entries.len());
+            info!("✅ READDIR returning {} export entries (no . or .. per NFSv4 spec), total {} bytes", 
+                  entries.len(), total_size);
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("   Entry names: {:?}", entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+            }
             
             return ReadDirRes {
                 status: Nfs4Status::Ok,
-                cookieverf: 1, // Simple verifier
+                cookieverf: 1, // Simple verifier for pseudo-root (exports don't change)
                 entries,
                 eof: true,
             };
-            */  // End of commented-out code
         }
 
         // Handle READDIR on regular directories
