@@ -18,55 +18,35 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tracing::{debug, info, warn};
 use bytes::{Bytes, BufMut, BytesMut};
 
-/// Translate UID to username using system APIs
+/// Translate UID to NFSv4 owner string
 ///
-/// Uses getpwuid() to lookup username from UID, falling back to numeric string
-/// if lookup fails. This matches Ganesha's behavior.
-#[cfg(unix)]
+/// Per NFS-Ganesha implementation (fsal_pseudo.c), returns NUMERIC string.
+/// Using "root" or "root@domain" causes ID mapping issues when domain
+/// configuration doesn't match - client maps to nobody (UID 65534).
+///
+/// Numeric strings (e.g., "0", "1000") are universally recognized by
+/// Linux NFS client's idmapper and avoid domain configuration issues.
+///
+/// Reference: https://github.com/nfs-ganesha/nfs-ganesha (fsal_pseudo.c)
 fn uid_to_username(uid: u32) -> String {
-    use nix::unistd::Uid;
-    
-    match nix::unistd::User::from_uid(Uid::from_raw(uid)) {
-        Ok(Some(user)) => user.name,
-        Ok(None) => {
-            debug!("UID {} not found in passwd, using numeric", uid);
-            uid.to_string()
-        }
-        Err(e) => {
-            warn!("Failed to lookup UID {}: {}, using numeric", uid, e);
-            uid.to_string()
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn uid_to_username(uid: u32) -> String {
+    // Use numeric string like Ganesha does
+    // This avoids ID mapping failures when domain config is missing/mismatched
     uid.to_string()
 }
 
-/// Translate GID to groupname using system APIs
+/// Translate GID to NFSv4 group string
 ///
-/// Uses getgrgid() to lookup groupname from GID, falling back to numeric string
-/// if lookup fails. This matches Ganesha's behavior.
-#[cfg(unix)]
+/// Per NFS-Ganesha implementation (fsal_pseudo.c), returns NUMERIC string.
+/// Using "root" or "root@domain" causes ID mapping issues when domain
+/// configuration doesn't match - client maps to nogroup (GID 65534).
+///
+/// Numeric strings (e.g., "0", "1000") are universally recognized by
+/// Linux NFS client's idmapper and avoid domain configuration issues.
+///
+/// Reference: https://github.com/nfs-ganesha/nfs-ganesha (fsal_pseudo.c)
 fn gid_to_groupname(gid: u32) -> String {
-    use nix::unistd::Gid;
-    
-    match nix::unistd::Group::from_gid(Gid::from_raw(gid)) {
-        Ok(Some(group)) => group.name,
-        Ok(None) => {
-            debug!("GID {} not found in group database, using numeric", gid);
-            gid.to_string()
-        }
-        Err(e) => {
-            warn!("Failed to lookup GID {}: {}, using numeric", gid, e);
-            gid.to_string()
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn gid_to_groupname(gid: u32) -> String {
+    // Use numeric string like Ganesha does
+    // This avoids ID mapping failures when domain config is missing/mismatched
     gid.to_string()
 }
 
