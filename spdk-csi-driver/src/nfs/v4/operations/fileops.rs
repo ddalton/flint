@@ -2032,17 +2032,33 @@ impl FileOperationHandler {
 
         // Handle READDIR on pseudo-root - list exports
         if self.fh_mgr.is_pseudo_root(current_fh) {
-            info!("📂 READDIR on PSEUDO-ROOT - listing exports");
+            info!("📂 READDIR on PSEUDO-ROOT");
             
+            // WORKAROUND: Return EMPTY like Ganesha does
+            // The Linux kernel VFS has issues with synthetic directory entries
+            // in pseudo-filesystems. It does a permission check that fails,
+            // preventing LOOKUP from ever being called.
+            //
+            // By returning empty, we force clients to mount exports directly:
+            //   mount server:/volume /mnt
+            //
+            // This matches Ganesha's behavior and works around the VFS issue.
+            
+            info!("   Returning EMPTY directory (Ganesha model)");
+            info!("   Clients must mount exports directly: mount server:/volume /mnt");
+            
+            return ReadDirRes {
+                status: Nfs4Status::Ok,
+                cookieverf: 1,
+                entries: vec![],  // EMPTY!
+                eof: true,
+            };
+            
+            /* ORIGINAL CODE - Kept for reference if we fix VFS issue later
             let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
             info!("   Found {} exports: {:?}", export_names.len(), export_names);
             info!("   Client requested {} attribute words: {:?}", op.attr_request.len(), op.attr_request);
             
-            // Per RFC 7530, NFSv4 READDIR does NOT include "." and ".." entries!
-            // This is different from NFSv3. The client handles these implicitly.
-            // Only return export entries, not "." or "..".
-            
-            // Create directory entries for exports ONLY
             let mut entries = vec![];
             for (i, name) in export_names.iter().enumerate() {
                 if op.cookie > 0 && (i as u64) < op.cookie {
@@ -2097,6 +2113,7 @@ impl FileOperationHandler {
                 entries,
                 eof: true,
             };
+            */  // End of commented-out code
         }
 
         // TODO: Read actual directory entries via filesystem
