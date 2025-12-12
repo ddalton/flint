@@ -1523,6 +1523,22 @@ impl FileOperationHandler {
             }
         };
 
+        // Special case: LOOKUP "." returns current filehandle unchanged
+        if op.component == "." {
+            debug!("LOOKUP '.': returning current filehandle");
+            return LookupRes {
+                status: Nfs4Status::Ok,
+            };
+        }
+
+        // Special case: LOOKUP ".." from pseudo-root is not allowed
+        if op.component == ".." && self.fh_mgr.is_pseudo_root(current_fh) {
+            debug!("LOOKUP '..': Cannot go above pseudo-root");
+            return LookupRes {
+                status: Nfs4Status::NoEnt,
+            };
+        }
+
         // Handle LOOKUP from pseudo-root (RFC 7530 Section 7)
         if self.fh_mgr.is_pseudo_root(current_fh) {
             info!("🔍 LOOKUP from PSEUDO-ROOT: component='{}'", op.component);
@@ -1591,7 +1607,21 @@ impl FileOperationHandler {
         };
 
         // Build target path
-        let target_path = current_path.join(&op.component);
+        let target_path = if op.component == ".." {
+            // Special handling for parent directory
+            match current_path.parent() {
+                Some(parent) => parent.to_path_buf(),
+                None => {
+                    // Already at root
+                    debug!("LOOKUP '..': Already at filesystem root");
+                    return LookupRes {
+                        status: Nfs4Status::NoEnt,
+                    };
+                }
+            }
+        } else {
+            current_path.join(&op.component)
+        };
 
         // Check if the target path exists
         let metadata = match tokio::fs::metadata(&target_path).await {
@@ -1992,7 +2022,11 @@ impl FileOperationHandler {
             let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
             debug!("Found {} exports: {:?}", export_names.len(), export_names);
             
-            // Create directory entries for exports
+            // Per RFC 7530, NFSv4 READDIR does NOT include "." and ".." entries!
+            // This is different from NFSv3. The client handles these implicitly.
+            // Only return export entries, not "." or "..".
+            
+            // Create directory entries for exports ONLY
             let mut entries = vec![];
             for (i, name) in export_names.iter().enumerate() {
                 if op.cookie > 0 && (i as u64) < op.cookie {
@@ -2028,7 +2062,7 @@ impl FileOperationHandler {
                 });
             }
             
-            debug!("READDIR returning {} export entries", entries.len());
+            debug!("READDIR returning {} export entries (no . or .. per NFSv4 spec)", entries.len());
             
             return ReadDirRes {
                 status: Nfs4Status::Ok,
