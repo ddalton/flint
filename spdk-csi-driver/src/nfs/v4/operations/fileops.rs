@@ -2057,17 +2057,15 @@ impl FileOperationHandler {
                 info!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
                 
                 // Decode bitmap to show which attributes (debug only)
-                if log::log_enabled!(log::Level::Debug) {
-                    let mut attr_names = vec![];
-                    for (word_idx, &word) in supported_bitmap.iter().enumerate() {
-                        for bit in 0..32 {
-                            if (word & (1 << bit)) != 0 {
-                                attr_names.push(word_idx * 32 + bit);
-                            }
+                let mut attr_names = vec![];
+                for (word_idx, &word) in supported_bitmap.iter().enumerate() {
+                    for bit in 0..32 {
+                        if (word & (1 << bit)) != 0 {
+                            attr_names.push(word_idx * 32 + bit);
                         }
                     }
-                    debug!("   → Attribute IDs: {:?}", attr_names);
                 }
+                debug!("   → Attribute IDs: {:?}", attr_names);
                 
                 // Pre-encode Fattr4 into Bytes for compound module
                 let mut fattr_buf = BytesMut::new();
@@ -2105,9 +2103,7 @@ impl FileOperationHandler {
             
             info!("✅ READDIR returning {} export entries (no . or .. per NFSv4 spec), total {} bytes", 
                   entries.len(), total_size);
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("   Entry names: {:?}", entries.iter().map(|e| &e.name).collect::<Vec<_>>());
-            }
+            debug!("   Entry names: {:?}", entries.iter().map(|e| &e.name).collect::<Vec<_>>());
             
             return ReadDirRes {
                 status: Nfs4Status::Ok,
