@@ -1511,37 +1511,41 @@ impl FileOperationHandler {
         op: LookupOp,
         ctx: &mut CompoundContext,
     ) -> LookupRes {
-        debug!("LOOKUP: component={}", op.component);
+        info!("🔍 LOOKUP called: component='{}'", op.component);
 
         // Check current filehandle
         let current_fh = match &ctx.current_fh {
             Some(fh) => fh,
             None => {
+                warn!("LOOKUP: No current filehandle!");
                 return LookupRes {
                     status: Nfs4Status::NoFileHandle,
                 };
             }
         };
 
+        let is_pseudo = self.fh_mgr.is_pseudo_root(current_fh);
+        info!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
+
         // Special case: LOOKUP "." returns current filehandle unchanged
         if op.component == "." {
-            debug!("LOOKUP '.': returning current filehandle");
+            info!("✅ LOOKUP '.': returning current filehandle (no change)");
             return LookupRes {
                 status: Nfs4Status::Ok,
             };
         }
 
         // Special case: LOOKUP ".." from pseudo-root is not allowed
-        if op.component == ".." && self.fh_mgr.is_pseudo_root(current_fh) {
-            debug!("LOOKUP '..': Cannot go above pseudo-root");
+        if op.component == ".." && is_pseudo {
+            info!("❌ LOOKUP '..': Cannot go above pseudo-root");
             return LookupRes {
                 status: Nfs4Status::NoEnt,
             };
         }
 
         // Handle LOOKUP from pseudo-root (RFC 7530 Section 7)
-        if self.fh_mgr.is_pseudo_root(current_fh) {
-            info!("🔍 LOOKUP from PSEUDO-ROOT: component='{}'", op.component);
+        if is_pseudo {
+            info!("🔍 LOOKUP from PSEUDO-ROOT: component='{}' (looking for export)", op.component);
             
             // Lookup export by name
             if let Some(export) = self.fh_mgr.lookup_export(&op.component) {
@@ -1769,12 +1773,20 @@ impl FileOperationHandler {
         op: AccessOp,
         ctx: &CompoundContext,
     ) -> AccessRes {
-        debug!("ACCESS: access=0x{:08x}", op.access);
+        info!("🔐 ACCESS called: mask=0x{:02x}", op.access);
+        info!("   Requested: READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
+              op.access & ACCESS4_READ != 0,
+              op.access & ACCESS4_LOOKUP != 0,
+              op.access & ACCESS4_MODIFY != 0,
+              op.access & ACCESS4_EXTEND != 0,
+              op.access & ACCESS4_DELETE != 0,
+              op.access & ACCESS4_EXECUTE != 0);
 
         // Check current filehandle
         let current_fh = match &ctx.current_fh {
             Some(fh) => fh,
             None => {
+                warn!("ACCESS: No current filehandle!");
                 return AccessRes {
                     status: Nfs4Status::NoFileHandle,
                     supported: 0,
@@ -1783,10 +1795,13 @@ impl FileOperationHandler {
             }
         };
 
+        let is_pseudo = self.fh_mgr.is_pseudo_root(current_fh);
+        info!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
+
         // Pseudo-root is always accessible for READ and LOOKUP
-        if self.fh_mgr.is_pseudo_root(current_fh) {
-            debug!("ACCESS on PSEUDO-ROOT - granting READ and LOOKUP");
+        if is_pseudo {
             let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_EXECUTE;
+            info!("✅ ACCESS on PSEUDO-ROOT - granting: READ | LOOKUP | EXECUTE (mask=0x{:02x})", supported);
             return AccessRes {
                 status: Nfs4Status::Ok,
                 supported,
@@ -2017,10 +2032,11 @@ impl FileOperationHandler {
 
         // Handle READDIR on pseudo-root - list exports
         if self.fh_mgr.is_pseudo_root(current_fh) {
-            debug!("READDIR on PSEUDO-ROOT - listing exports");
+            info!("📂 READDIR on PSEUDO-ROOT - listing exports");
             
             let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
-            debug!("Found {} exports: {:?}", export_names.len(), export_names);
+            info!("   Found {} exports: {:?}", export_names.len(), export_names);
+            info!("   Client requested {} attribute words: {:?}", op.attr_request.len(), op.attr_request);
             
             // Per RFC 7530, NFSv4 READDIR does NOT include "." and ".." entries!
             // This is different from NFSv3. The client handles these implicitly.
@@ -2034,9 +2050,20 @@ impl FileOperationHandler {
                 }
                 
                 // Create attributes for export entry based on what client requested
-                debug!("Client requested attributes: bitmap={:?}", op.attr_request);
+                info!("   Encoding entry '{}': client requested bitmap={:?}", name, op.attr_request);
                 let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request);
-                debug!("Returning attributes: bitmap={:?}, {} bytes", supported_bitmap, attr_vals.len());
+                info!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
+                
+                // Decode bitmap to show which attributes
+                let mut attr_names = vec![];
+                for (word_idx, &word) in supported_bitmap.iter().enumerate() {
+                    for bit in 0..32 {
+                        if (word & (1 << bit)) != 0 {
+                            attr_names.push(word_idx * 32 + bit);
+                        }
+                    }
+                }
+                info!("   → Attribute IDs: {:?}", attr_names);
                 
                 // Pre-encode Fattr4 into Bytes for compound module
                 let mut fattr_buf = BytesMut::new();
