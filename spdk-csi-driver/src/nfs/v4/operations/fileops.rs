@@ -2504,7 +2504,23 @@ impl FileOperationHandler {
         };
 
         // Build full path for new object
-        let obj_path = parent_path.join(&op.objname);
+        // IMPORTANT: For symlinks, objname and linkdata are swapped in the protocol!
+        //   objname = target (what the symlink points to)
+        //   linkdata = link name (the symlink file to create)
+        let (obj_path, symlink_target) = if op.objtype == Nfs4FileType::Symlink {
+            if let Some(link_name) = &op.linkdata {
+                (parent_path.join(link_name), Some(op.objname.clone()))
+            } else {
+                warn!("CREATE: Symlink without linkdata");
+                return CreateRes {
+                    status: Nfs4Status::Inval,
+                    change_info: None,
+                    attrset: vec![],
+                };
+            }
+        } else {
+            (parent_path.join(&op.objname), None)
+        };
 
         // Create the object based on type
         let create_result = match op.objtype {
@@ -2518,11 +2534,11 @@ impl FileOperationHandler {
             }
             Nfs4FileType::Symlink => {
                 // Create symlink
-                if let Some(target) = &op.linkdata {
-                    debug!("CREATE: Creating symlink '{}' -> '{}'", op.objname, target);
+                if let Some(target) = symlink_target {
+                    info!("CREATE: Creating symlink at {:?} pointing to '{}'", obj_path, target);
                     #[cfg(unix)]
                     {
-                        tokio::fs::symlink(target, &obj_path).await
+                        tokio::fs::symlink(&target, &obj_path).await
                     }
                     #[cfg(not(unix))]
                     {
@@ -2533,7 +2549,7 @@ impl FileOperationHandler {
                         };
                     }
                 } else {
-                    warn!("CREATE: Symlink requested but no linkdata provided");
+                    // Should never happen
                     return CreateRes {
                         status: Nfs4Status::Inval,
                         change_info: None,
