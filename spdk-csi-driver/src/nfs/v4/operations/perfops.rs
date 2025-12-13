@@ -272,8 +272,8 @@ impl PerfOperationHandler {
         info!("COPY: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
 
-        // Validate source stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.src_stateid) {
+        // Validate source stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.src_stateid) {
             warn!("COPY: Invalid source stateid: {}", e);
             return CopyRes {
                 status: Nfs4Status::BadStateId,
@@ -283,8 +283,8 @@ impl PerfOperationHandler {
             };
         }
 
-        // Validate destination stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.dst_stateid) {
+        // Validate destination stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.dst_stateid) {
             warn!("COPY: Invalid destination stateid: {}", e);
             return CopyRes {
                 status: Nfs4Status::BadStateId,
@@ -464,16 +464,16 @@ impl PerfOperationHandler {
         info!("CLONE: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
 
-        // Validate source stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.src_stateid) {
+        // Validate source stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.src_stateid) {
             warn!("CLONE: Invalid source stateid: {}", e);
             return CloneRes {
                 status: Nfs4Status::BadStateId,
             };
         }
 
-        // Validate destination stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.dst_stateid) {
+        // Validate destination stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.dst_stateid) {
             warn!("CLONE: Invalid destination stateid: {}", e);
             return CloneRes {
                 status: Nfs4Status::BadStateId,
@@ -506,8 +506,8 @@ impl PerfOperationHandler {
     ) -> AllocateRes {
         debug!("ALLOCATE: offset={}, length={}", op.offset, op.length);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("ALLOCATE: Invalid stateid: {}", e);
             return AllocateRes {
                 status: Nfs4Status::BadStateId,
@@ -539,8 +539,8 @@ impl PerfOperationHandler {
     ) -> DeallocateRes {
         debug!("DEALLOCATE: offset={}, length={}", op.offset, op.length);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("DEALLOCATE: Invalid stateid: {}", e);
             return DeallocateRes {
                 status: Nfs4Status::BadStateId,
@@ -575,8 +575,8 @@ impl PerfOperationHandler {
     ) -> SeekRes {
         debug!("SEEK: offset={}, what={:?}", op.offset, op.what);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("SEEK: Invalid stateid: {}", e);
             return SeekRes {
                 status: Nfs4Status::BadStateId,
@@ -615,8 +615,8 @@ impl PerfOperationHandler {
     ) -> ReadPlusRes {
         debug!("READ_PLUS: offset={}, count={}", op.offset, op.count);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("READ_PLUS: Invalid stateid: {}", e);
             return ReadPlusRes {
                 status: Nfs4Status::BadStateId,
@@ -654,8 +654,8 @@ impl PerfOperationHandler {
     ) -> IoAdviseRes {
         debug!("IO_ADVISE: offset={}, length={}", op.offset, op.length);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("IO_ADVISE: Invalid stateid: {}", e);
             return IoAdviseRes {
                 status: Nfs4Status::BadStateId,
