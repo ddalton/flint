@@ -1896,56 +1896,13 @@ impl FileOperationHandler {
             };
         }
 
-        // Resolve path to check if it's a directory
-        // Directories MUST have EXECUTE permission for traversal (even if not requested)
-        let path = match self.fh_mgr.resolve_handle(current_fh) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("ACCESS: Failed to resolve handle: {}", e);
-                // Fallback: grant what was requested
-                let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
-                               ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
-                return AccessRes {
-                    status: Nfs4Status::Ok,
-                    supported,
-                    access: op.access & supported,
-                };
-            }
-        };
-
-        // Check if this is a directory
-        let is_dir = match std::fs::metadata(&path) {
-            Ok(m) => m.is_dir(),
-            Err(_) => false,
-        };
-
-        // Grant requested access
+        // For now, grant all requested access
+        // TODO: Implement proper permission checking based on filesystem mode
         let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
                        ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
-        let mut granted = op.access & supported;
+        let granted = op.access & supported;
 
-        // CRITICAL: For directories, ALWAYS grant EXECUTE based on actual filesystem permissions
-        // Per RFC 7530 Section 6.2.1: "For a directory, EXECUTE means search permission"
-        // Linux VFS checks MAY_EXEC (0x01) when traversing directories, even if ACCESS
-        // request didn't include it. We must grant EXECUTE if the filesystem permits it.
-        // Like Ganesha: check actual mode bits and grant EXECUTE if directory has +x
-        if is_dir {
-            // Check if directory has execute permission (any of owner/group/other +x)
-            let metadata = std::fs::metadata(&path).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                let mode = metadata.mode();
-                let has_execute = (mode & 0o111) != 0; // Check owner/group/other execute bits
-                if has_execute {
-                    granted |= ACCESS4_EXECUTE;
-                    debug!("   → Directory with mode={:o}: granting EXECUTE (needed for traversal)", mode & 0o7777);
-                }
-            }
-        }
-
-        info!("✅ ACCESS on {} - granting: mask=0x{:02x}", 
-              if is_dir { "DIRECTORY" } else { "FILE" }, granted);
+        info!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
         debug!("   READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
                granted & ACCESS4_READ != 0,
                granted & ACCESS4_LOOKUP != 0,
