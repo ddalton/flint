@@ -1862,14 +1862,24 @@ impl FileOperationHandler {
         }
 
         // For now, grant all requested access
-        // TODO: Implement proper permission checking
+        // TODO: Implement proper permission checking based on filesystem mode
         let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
                        ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
+        let granted = op.access & supported;
+
+        info!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
+        debug!("   READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
+               granted & ACCESS4_READ != 0,
+               granted & ACCESS4_LOOKUP != 0,
+               granted & ACCESS4_MODIFY != 0,
+               granted & ACCESS4_EXTEND != 0,
+               granted & ACCESS4_DELETE != 0,
+               granted & ACCESS4_EXECUTE != 0);
 
         AccessRes {
             status: Nfs4Status::Ok,
             supported,
-            access: op.access & supported,
+            access: granted,
         }
     }
 

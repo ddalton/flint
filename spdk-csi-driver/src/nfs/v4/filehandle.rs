@@ -175,7 +175,6 @@ impl FileHandleManager {
         &self.pseudo_fs
     }
     
-    
     /// Lookup an export by name (for LOOKUP from pseudo-root)
     pub fn lookup_export(&self, name: &str) -> Option<Export> {
         self.pseudo_fs.lookup_export(name)
