@@ -299,9 +299,18 @@ impl CompoundDispatcher {
                             buf.put_u32(bitmap_word);
                         }
                         
-                        // Then encode attribute values
-                        buf.put_u32(fattr.attr_vals.len() as u32); // Length of attr_vals
+                        // Then encode attribute values as XDR opaque
+                        // Per XDR spec: length + data + padding to 4-byte boundary
+                        let attr_vals_len = fattr.attr_vals.len();
+                        buf.put_u32(attr_vals_len as u32); // Length of attr_vals
                         buf.put_slice(&fattr.attr_vals);
+                        
+                        // XDR padding: pad to 4-byte boundary
+                        let padding = (4 - (attr_vals_len % 4)) % 4;
+                        for _ in 0..padding {
+                            buf.put_u8(0);
+                        }
+                        debug!("   📤 XDR: attr_vals {} bytes + {} padding bytes", attr_vals_len, padding);
                         
                         debug!("   📤 Total encoded fattr4: {} bytes", buf.len());
                         debug!("   📤 Complete fattr4 hex (first 96 bytes): {:02x?}", &buf[..std::cmp::min(96, buf.len())]);
