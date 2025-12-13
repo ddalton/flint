@@ -110,16 +110,34 @@ impl LeaseManager {
     ///
     /// LOCK-FREE: Per-client locking only, not global
     /// Critical path for SEQUENCE operations - multiple clients can renew concurrently
+    /// 
+    /// Per RFC 8881, we allow renewal even if recently expired (within grace window)
+    /// This prevents client disruption during brief network issues or heavy load
     pub fn renew_lease(&self, client_id: u64) -> Result<(), String> {
         if let Some(mut lease) = self.leases.get_mut(&client_id) {
+            // Check if lease is expired
             if lease.is_expired() {
-                warn!("Attempting to renew expired lease for client {}", client_id);
-                return Err("Lease expired".to_string());
+                // Allow renewal if expired within last lease period (lenient)
+                // This gives clients time to recover from brief network issues
+                let time_since_expiry = Instant::now().duration_since(lease.expires_at);
+                if time_since_expiry > DEFAULT_LEASE_TIME {
+                    // Expired too long ago - reject
+                    warn!("Lease for client {} expired {} seconds ago (too long)",
+                          client_id, time_since_expiry.as_secs());
+                    return Err("Lease expired beyond grace period".to_string());
+                }
+                // Expired but within grace - allow renewal
+                debug!("Renewing recently expired lease for client {} (expired {} seconds ago)",
+                       client_id, time_since_expiry.as_secs());
             }
             lease.renew();
             Ok(())
         } else {
-            Err("Lease not found".to_string())
+            // Lease doesn't exist - create it on the fly
+            // This handles cases where server restarted or client reconnected
+            debug!("Creating lease on-the-fly for client {}", client_id);
+            self.create_lease(client_id);
+            Ok(())
         }
     }
 
