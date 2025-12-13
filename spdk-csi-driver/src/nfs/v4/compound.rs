@@ -625,8 +625,41 @@ impl CompoundRequest {
             }
             opcode::SETATTR => {
                 let stateid = decoder.decode_stateid()?;
-                let attrs = decoder.decode_opaque()?;
-                Ok(Operation::SetAttr { stateid, attrs })
+                eprintln!("DEBUG SETATTR: After stateid, {} bytes remaining", decoder.remaining());
+                
+                // Decode fattr4 structure (bitmap + attr_vals), NOT simple opaque
+                // Save current position for potential re-encoding
+                let start_remaining = decoder.remaining();
+                
+                // Decode bitmap4 (array of u32)
+                let bitmap_len = decoder.decode_u32()?;
+                eprintln!("DEBUG SETATTR: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                
+                let mut bitmap_words = Vec::with_capacity(bitmap_len as usize);
+                for _ in 0..bitmap_len {
+                    bitmap_words.push(decoder.decode_u32()?);
+                }
+                
+                // Decode attrlist4 (opaque bytes)
+                let attr_vals = decoder.decode_opaque()?;
+                eprintln!("DEBUG SETATTR: decoded fattr4: {} bitmap words, {} bytes attr_vals, {} bytes remaining", 
+                         bitmap_len, attr_vals.len(), decoder.remaining());
+                
+                // Re-encode as single blob for Operation::SetAttr
+                // (We'll need to decode it again in the handler)
+                use bytes::{BytesMut, BufMut};
+                let mut attrs_buf = BytesMut::new();
+                attrs_buf.put_u32(bitmap_len);
+                for word in bitmap_words {
+                    attrs_buf.put_u32(word);
+                }
+                attrs_buf.put_u32(attr_vals.len() as u32);
+                attrs_buf.put_slice(&attr_vals);
+                
+                Ok(Operation::SetAttr { 
+                    stateid, 
+                    attrs: attrs_buf.freeze()
+                })
             }
             opcode::ACCESS => {
                 let access = decoder.decode_u32()?;
@@ -784,7 +817,9 @@ impl CompoundRequest {
 
             // Modify operations
             opcode::CREATE => {
+                eprintln!("DEBUG CREATE: Starting decode, {} bytes remaining", decoder.remaining());
                 let objtype_raw = decoder.decode_u32()?;
+                eprintln!("DEBUG CREATE: objtype_raw={}, {} bytes after", objtype_raw, decoder.remaining());
                 let objtype = match objtype_raw {
                     1 => Nfs4FileType::Regular,
                     2 => Nfs4FileType::Directory,
@@ -798,6 +833,24 @@ impl CompoundRequest {
                     _ => Nfs4FileType::Regular,
                 };
                 let objname = decoder.decode_string()?;
+                eprintln!("DEBUG CREATE: objname='{}', {} bytes after", objname, decoder.remaining());
+                
+                // Decode createattrs (fattr4) - RFC 5661 Section 18.6
+                // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
+                eprintln!("DEBUG CREATE: Decoding createattrs fattr4, {} bytes before", decoder.remaining());
+                
+                // Decode bitmap4 (array of u32)
+                let bitmap_len = decoder.decode_u32()?;
+                eprintln!("DEBUG CREATE: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                for _ in 0..bitmap_len {
+                    let _bitmap_word = decoder.decode_u32()?;
+                }
+                
+                // Decode attrlist4 (opaque bytes)
+                let _createattrs = decoder.decode_opaque()?;
+                eprintln!("DEBUG CREATE: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
+                         bitmap_len, _createattrs.len(), decoder.remaining());
+                
                 Ok(Operation::Create { objtype, objname })
             }
             opcode::REMOVE => {
