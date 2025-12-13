@@ -716,14 +716,14 @@ impl CompoundDispatcher {
                     },
                 };
                 let res = self.file_handler.handle_create(op, context).await;
-                OperationResult::Create(res.status)
+                OperationResult::Create(res.status, res.change_info)
             }
 
             Operation::Remove(name) => {
                 use crate::nfs::v4::operations::fileops::RemoveOp;
                 let op = RemoveOp { target: name };
                 let res = self.file_handler.handle_remove(op, context).await;
-                OperationResult::Remove(res.status)
+                OperationResult::Remove(res.status, res.change_info)
             }
 
             Operation::Rename { oldname, newname } => {

@@ -319,8 +319,8 @@ pub enum OperationResult {
     Access(Nfs4Status, Option<(u32, u32)>),  // (supported, access granted)
 
     // Modify
-    Create(Nfs4Status),
-    Remove(Nfs4Status),
+    Create(Nfs4Status, Option<ChangeInfo>),  // change_info for parent directory
+    Remove(Nfs4Status, Option<ChangeInfo>),  // change_info for parent directory
     Rename(Nfs4Status, Option<ChangeInfo>, Option<ChangeInfo>), // source_cinfo, target_cinfo
     Link(Nfs4Status, Option<ChangeInfo>),
     ReadLink(Nfs4Status, Option<String>), // link target
@@ -372,8 +372,8 @@ impl OperationResult {
             OperationResult::GetAttr(s, _) => *s,
             OperationResult::SetAttr(s) => *s,
             OperationResult::Access(s, _) => *s,
-            OperationResult::Create(s) => *s,
-            OperationResult::Remove(s) => *s,
+            OperationResult::Create(s, _) => *s,
+            OperationResult::Remove(s, _) => *s,
             OperationResult::Rename(s, _, _) => *s,
             OperationResult::Link(s, _) => *s,
             OperationResult::ReadLink(s, _) => *s,
@@ -1314,13 +1314,29 @@ impl CompoundResponse {
             }
 
             // Modify operations
-            OperationResult::Create(status) => {
+            OperationResult::Create(status, change_info) => {
                 encoder.encode_u32(opcode::CREATE);
                 encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(cinfo) = change_info {
+                        // Per RFC 5661, CREATE returns change_info for parent directory
+                        encoder.encode_bool(cinfo.atomic);
+                        encoder.encode_u64(cinfo.before);
+                        encoder.encode_u64(cinfo.after);
+                    }
+                }
             }
-            OperationResult::Remove(status) => {
+            OperationResult::Remove(status, change_info) => {
                 encoder.encode_u32(opcode::REMOVE);
                 encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(cinfo) = change_info {
+                        // Per RFC 5661, REMOVE returns change_info for parent directory
+                        encoder.encode_bool(cinfo.atomic);
+                        encoder.encode_u64(cinfo.before);
+                        encoder.encode_u64(cinfo.after);
+                    }
+                }
             }
             OperationResult::Rename(status, source_cinfo, target_cinfo) => {
                 encoder.encode_u32(opcode::RENAME);
