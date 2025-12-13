@@ -701,6 +701,7 @@ fn encode_attributes_from_snapshot(
                 // Unix mode includes type: 0100644 (file) or 0040755 (dir)
                 // NFSv4 MODE should be:   0644 (file) or   0755 (dir)
                 let permission_bits = snapshot.mode & 0o7777;
+                debug!("  MODE: Unix mode={:o} → NFSv4 permission bits={:o}", snapshot.mode, permission_bits);
                 attr_vals.put_u32(permission_bits);
                 true
             }
