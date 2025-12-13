@@ -322,16 +322,51 @@ impl FileHandleManager {
             self.export_path.join(path)
         };
 
-        // Canonicalize to resolve . and ..
-        let canonical = abs_path.canonicalize()
-            .map_err(|e| format!("Path canonicalization failed: {}", e))?;
+        // IMPORTANT: Do NOT use canonicalize() because it follows symlinks!
+        // We need to normalize . and .. without following symlinks
+        let normalized = self.normalize_without_following_symlinks(&abs_path)?;
 
         // Ensure path is within export
-        if !canonical.starts_with(&self.export_path) {
+        if !normalized.starts_with(&self.export_path) {
             return Err("Path outside export".to_string());
         }
 
-        Ok(canonical)
+        Ok(normalized)
+    }
+
+    /// Normalize a path without following symlinks
+    /// Resolves . and .. components but preserves symlinks
+    fn normalize_without_following_symlinks(&self, path: &Path) -> Result<PathBuf, String> {
+        use std::path::Component;
+        
+        let mut normalized = PathBuf::new();
+        
+        for component in path.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    normalized.push(component);
+                }
+                Component::CurDir => {
+                    // Skip . (current directory)
+                }
+                Component::ParentDir => {
+                    // Go up one level (..)
+                    if !normalized.pop() {
+                        return Err("Path goes above root".to_string());
+                    }
+                }
+                Component::Normal(name) => {
+                    normalized.push(name);
+                }
+            }
+        }
+        
+        // Verify the path exists (but don't follow symlinks)
+        if !normalized.symlink_metadata().is_ok() {
+            return Err(format!("Path does not exist: {:?}", normalized));
+        }
+        
+        Ok(normalized)
     }
 
     /// Clear the cache (useful for testing)
