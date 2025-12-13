@@ -542,8 +542,8 @@ impl IoOperationHandler {
             }
         };
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking (accept seqid=0 like READ)
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("WRITE: Invalid stateid: {}", e);
             return WriteRes {
                 status: Nfs4Status::BadStateId,
