@@ -716,7 +716,7 @@ impl CompoundDispatcher {
                     },
                 };
                 let res = self.file_handler.handle_create(op, context).await;
-                OperationResult::Create(res.status, res.change_info)
+                OperationResult::Create(res.status, res.change_info, res.attrset)
             }
 
             Operation::Remove(name) => {

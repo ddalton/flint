@@ -319,7 +319,7 @@ pub enum OperationResult {
     Access(Nfs4Status, Option<(u32, u32)>),  // (supported, access granted)
 
     // Modify
-    Create(Nfs4Status, Option<ChangeInfo>),  // change_info for parent directory
+    Create(Nfs4Status, Option<ChangeInfo>, Vec<u32>),  // change_info, attrset bitmap
     Remove(Nfs4Status, Option<ChangeInfo>),  // change_info for parent directory
     Rename(Nfs4Status, Option<ChangeInfo>, Option<ChangeInfo>), // source_cinfo, target_cinfo
     Link(Nfs4Status, Option<ChangeInfo>),
@@ -372,7 +372,7 @@ impl OperationResult {
             OperationResult::GetAttr(s, _) => *s,
             OperationResult::SetAttr(s) => *s,
             OperationResult::Access(s, _) => *s,
-            OperationResult::Create(s, _) => *s,
+            OperationResult::Create(s, _, _) => *s,
             OperationResult::Remove(s, _) => *s,
             OperationResult::Rename(s, _, _) => *s,
             OperationResult::Link(s, _) => *s,
@@ -1314,16 +1314,18 @@ impl CompoundResponse {
             }
 
             // Modify operations
-            OperationResult::Create(status, change_info) => {
+            OperationResult::Create(status, change_info, attrset) => {
                 encoder.encode_u32(opcode::CREATE);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
+                    // Per RFC 5661 Section 18.6, CREATE4resok has change_info + attrset
                     if let Some(cinfo) = change_info {
-                        // Per RFC 5661, CREATE returns change_info for parent directory
                         encoder.encode_bool(cinfo.atomic);
                         encoder.encode_u64(cinfo.before);
                         encoder.encode_u64(cinfo.after);
                     }
+                    // Encode attrset bitmap (which createattrs were actually set)
+                    encoder.encode_bitmap(&attrset);
                 }
             }
             OperationResult::Remove(status, change_info) => {
