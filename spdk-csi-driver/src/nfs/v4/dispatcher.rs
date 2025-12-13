@@ -704,11 +704,12 @@ impl CompoundDispatcher {
             }
 
             // File modification operations
-            Operation::Create { objtype, objname } => {
+            Operation::Create { objtype, objname, linkdata } => {
                 use crate::nfs::v4::operations::fileops::{CreateOp, Fattr4 as FileFattr4};
                 let op = CreateOp {
                     objtype,
                     objname,
+                    linkdata,  // Pass linkdata for symlinks
                     createattrs: FileFattr4 {
                         attrmask: Vec::new(),
                         attr_vals: Vec::new(),

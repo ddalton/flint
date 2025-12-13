@@ -103,6 +103,7 @@ pub enum Operation {
     Create {
         objtype: Nfs4FileType,
         objname: String,
+        linkdata: Option<String>,  // For symlinks (NF4LNK)
     },
     Remove(String),              // component name
     Rename {
@@ -837,17 +838,21 @@ impl CompoundRequest {
                 
                 // Per RFC 5661 Section 18.6, CREATE is a discriminated union based on objtype
                 // For NF4LNK (symlink), there's linkdata BEFORE createattrs
-                if objtype == Nfs4FileType::Symlink {
+                let linkdata = if objtype == Nfs4FileType::Symlink {
                     // Decode linkdata (target path for symlink)
-                    let _linkdata = decoder.decode_string()?;
-                    eprintln!("DEBUG CREATE: Symlink linkdata='{}', {} bytes after", _linkdata, decoder.remaining());
+                    let link = decoder.decode_string()?;
+                    eprintln!("DEBUG CREATE: Symlink linkdata='{}', {} bytes after", link, decoder.remaining());
+                    Some(link)
                 } else if objtype == Nfs4FileType::BlockDevice || objtype == Nfs4FileType::CharDevice {
                     // For block/char devices, decode specdata (major/minor device numbers)
                     let _specdata1 = decoder.decode_u32()?;  // major
                     let _specdata2 = decoder.decode_u32()?;  // minor
                     eprintln!("DEBUG CREATE: Device specdata decoded, {} bytes after", decoder.remaining());
-                }
-                // All other types (Regular, Directory, Socket, Fifo) have no extra data
+                    None
+                } else {
+                    // All other types (Regular, Directory, Socket, Fifo) have no extra data
+                    None
+                };
                 
                 // Decode createattrs (fattr4) - RFC 5661 Section 18.6
                 // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
@@ -865,7 +870,7 @@ impl CompoundRequest {
                 eprintln!("DEBUG CREATE: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
                          bitmap_len, _createattrs.len(), decoder.remaining());
                 
-                Ok(Operation::Create { objtype, objname })
+                Ok(Operation::Create { objtype, objname, linkdata })
             }
             opcode::REMOVE => {
                 let component = decoder.decode_string()?;

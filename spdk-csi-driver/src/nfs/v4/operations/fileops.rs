@@ -333,6 +333,7 @@ pub struct ReadDirRes {
 pub struct CreateOp {
     pub objtype: Nfs4FileType,
     pub objname: String,
+    pub linkdata: Option<String>,  // For symlinks - target path
     pub createattrs: Fattr4,
 }
 
@@ -2515,8 +2516,34 @@ impl FileOperationHandler {
                 // Create directory
                 tokio::fs::create_dir(&obj_path).await
             }
+            Nfs4FileType::Symlink => {
+                // Create symlink
+                if let Some(target) = &op.linkdata {
+                    debug!("CREATE: Creating symlink '{}' -> '{}'", op.objname, target);
+                    #[cfg(unix)]
+                    {
+                        tokio::fs::symlink(target, &obj_path).await
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        return CreateRes {
+                            status: Nfs4Status::NotSupp,
+                            change_info: None,
+                            attrset: vec![],
+                        };
+                    }
+                } else {
+                    warn!("CREATE: Symlink requested but no linkdata provided");
+                    return CreateRes {
+                        status: Nfs4Status::Inval,
+                        change_info: None,
+                        attrset: vec![],
+                    };
+                }
+            }
             _ => {
-                // Other types not supported yet
+                // Other types not supported yet (BlockDevice, CharDevice, Socket, Fifo)
+                warn!("CREATE: Object type {:?} not yet supported", op.objtype);
                 return CreateRes {
                     status: Nfs4Status::BadType,
                     change_info: None,
