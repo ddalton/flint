@@ -310,8 +310,9 @@ impl IoOperationHandler {
             }
         };
 
-        // Validate stateid (unless special stateid)
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
+        // Validate stateid with relaxed checking for READ operations
+        // This allows seqid=0 for anonymous/first reads
+        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
             warn!("READ: Invalid stateid: {}", e);
             return ReadRes {
                 status: Nfs4Status::BadStateId,

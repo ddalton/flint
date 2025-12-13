@@ -531,10 +531,28 @@ impl CompoundRequest {
         // Decode operations
         let mut operations = Vec::with_capacity(op_count);
         for i in 0..op_count {
+            // Verify we have enough data for the opcode
+            if decoder.remaining() < 4 {
+                let err = format!("Operation {}/{}: Not enough data for opcode (need 4 bytes, have {})", 
+                                 i + 1, op_count, decoder.remaining());
+                eprintln!("ERROR CompoundRequest::decode: {}", err);
+                return Err(err);
+            }
+            
             let opcode = decoder.decode_u32()?;
+            eprintln!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining", 
+                     i + 1, op_count, opcode, decoder.remaining());
             debug!("  Operation {}: opcode={}", i, opcode);
 
-            let op = Self::decode_operation(&mut decoder, opcode)?;
+            let op = match Self::decode_operation(&mut decoder, opcode) {
+                Ok(op) => op,
+                Err(e) => {
+                    let err = format!("Operation {}/{} (opcode={}): Failed to decode: {}", 
+                                     i + 1, op_count, opcode, e);
+                    eprintln!("ERROR CompoundRequest::decode: {}", err);
+                    return Err(err);
+                }
+            };
             operations.push(op);
         }
 
@@ -547,11 +565,19 @@ impl CompoundRequest {
 
     /// Decode a single operation
     fn decode_operation(decoder: &mut XdrDecoder, opcode: u32) -> Result<Operation, String> {
+        // Check we have enough data for the operation
+        if decoder.remaining() == 0 {
+            return Err(format!("No data remaining to decode operation opcode={}", opcode));
+        }
+        
         match opcode {
             // File handle operations
             opcode::PUTROOTFH => Ok(Operation::PutRootFh),
             opcode::PUTPUBFH => Ok(Operation::PutPubFh),
             opcode::PUTFH => {
+                if decoder.remaining() < 4 {
+                    return Err(format!("PUTFH: Not enough data for filehandle length: {} bytes remaining", decoder.remaining()));
+                }
                 let fh = decoder.decode_filehandle()?;
                 Ok(Operation::PutFh(fh))
             }

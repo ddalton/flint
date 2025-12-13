@@ -201,6 +201,60 @@ impl StateIdManager {
         }
     }
 
+    /// Validate a stateid with relaxed sequence checking for READ operations
+    /// Allows seqid=0 for anonymous/first reads, or accepts any seqid if the stateid exists
+    ///
+    /// Per RFC 5661: Some clients may use seqid=0 for READ operations
+    /// LOCK-FREE: Critical path for all NFSv4 operations - concurrent validations
+    pub fn validate_for_read(&self, stateid: &StateId) -> Result<(), String> {
+        // Check for special stateids
+        if stateid == &ANONYMOUS_STATEID {
+            debug!("READ: Accepting ANONYMOUS_STATEID (seqid=0, other=all zeros)");
+            return Ok(());
+        }
+        if stateid == &READ_BYPASS_STATEID {
+            debug!("READ: Accepting READ_BYPASS_STATEID (seqid=0xFFFFFFFF, other=all 0xFF)");
+            return Ok(());
+        }
+
+        // Special case: Accept any stateid with seqid=0 as anonymous read
+        if stateid.seqid == 0 {
+            // Check if this matches any known stateid (ignoring seqid)
+            if let Some(entry) = self.states.get(&stateid.other) {
+                if entry.revoked {
+                    return Err("StateId revoked".to_string());
+                }
+                // Accept seqid=0 for READ operations (relaxed validation)
+                debug!("READ: Accepting stateid with seqid=0 (relaxed validation), expected seqid={}", entry.seqid);
+                return Ok(());
+            } else {
+                // Unknown stateid - treat as anonymous read
+                debug!("READ: Accepting unknown stateid with seqid=0 as anonymous read");
+                return Ok(());
+            }
+        }
+
+        // Standard validation for non-zero seqid
+        if let Some(entry) = self.states.get(&stateid.other) {
+            // Check if revoked
+            if entry.revoked {
+                return Err("StateId revoked".to_string());
+            }
+
+            // For READ, accept either exact seqid or seqid-1 (client may use old seqid)
+            if stateid.seqid == entry.seqid || stateid.seqid == entry.seqid - 1 {
+                Ok(())
+            } else {
+                warn!("READ: StateId sequence mismatch: expected {}, got {} (will accept anyway for READ compatibility)", 
+                      entry.seqid, stateid.seqid);
+                // For READ operations, accept anyway (lenient)
+                Ok(())
+            }
+        } else {
+            Err("StateId not found".to_string())
+        }
+    }
+
     /// Update a stateid's sequence number (for state changes)
     ///
     /// LOCK-FREE: Per-stateid locking only, not global
