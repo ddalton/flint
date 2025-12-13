@@ -632,12 +632,21 @@ impl CompoundRequest {
 
             // File I/O operations
             opcode::OPEN => {
+                eprintln!("DEBUG OPEN: Starting decode, {} bytes remaining", decoder.remaining());
                 let seqid = decoder.decode_u32()?;
+                eprintln!("DEBUG OPEN: seqid={}, {} bytes after", seqid, decoder.remaining());
                 let share_access = decoder.decode_u32()?;
+                eprintln!("DEBUG OPEN: share_access=0x{:x}, {} bytes after", share_access, decoder.remaining());
                 let share_deny = decoder.decode_u32()?;
+                eprintln!("DEBUG OPEN: share_deny=0x{:x}, {} bytes after", share_deny, decoder.remaining());
                 
-                // Owner (state_owner)
-                let owner = decoder.decode_opaque()?.to_vec();
+                // Owner (state_owner) - this is open_owner4 which is a struct with clientid + opaque
+                // Per RFC 5661: struct open_owner4 { clientid4 clientid; opaque owner<>; }
+                eprintln!("DEBUG OPEN: Decoding open_owner4, {} bytes before", decoder.remaining());
+                let owner_clientid = decoder.decode_u64()?;  // clientid4
+                eprintln!("DEBUG OPEN: owner_clientid={}, {} bytes after", owner_clientid, decoder.remaining());
+                let owner = decoder.decode_opaque()?.to_vec();  // owner opaque
+                eprintln!("DEBUG OPEN: owner {} bytes, {} bytes remaining after owner", owner.len(), decoder.remaining());
                 
                 // Openflag4 - this is a union with opentype4 as discriminator (RFC 5661 §18.16)
                 let opentype = decoder.decode_u32()?;  // OPEN4_NOCREATE=0, OPEN4_CREATE=1
