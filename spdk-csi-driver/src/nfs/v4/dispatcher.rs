@@ -261,7 +261,8 @@ impl CompoundDispatcher {
             Operation::Access(access) => {
                 let op = AccessOp { access };
                 let res = self.file_handler.handle_access(op, context).await;
-                OperationResult::Access(res.status, Some(res.supported))
+                // ACCESS response has TWO fields: supported and access (what's granted)
+                OperationResult::Access(res.status, Some((res.supported, res.access)))
             }
 
             Operation::GetAttr(attr_request) => {

@@ -314,7 +314,7 @@ pub enum OperationResult {
     // Attributes
     GetAttr(Nfs4Status, Option<Bytes>),   // encoded attributes
     SetAttr(Nfs4Status),
-    Access(Nfs4Status, Option<u32>),      // supported access
+    Access(Nfs4Status, Option<(u32, u32)>),  // (supported, access granted)
 
     // Modify
     Create(Nfs4Status),
@@ -1041,12 +1041,15 @@ impl CompoundResponse {
                 encoder.encode_u32(opcode::SETATTR);
                 encoder.encode_status(status);
             }
-            OperationResult::Access(status, supported) => {
+            OperationResult::Access(status, access_result) => {
                 encoder.encode_u32(opcode::ACCESS);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
-                    if let Some(access) = supported {
-                        encoder.encode_u32(access);
+                    if let Some((supported, access)) = access_result {
+                        // Per RFC 5661 Section 18.1: ACCESS4resok has TWO fields
+                        encoder.encode_u32(supported);  // What server supports checking
+                        encoder.encode_u32(access);     // What's actually granted
+                        debug!("ACCESS response: supported=0x{:x}, granted=0x{:x}", supported, access);
                     }
                 }
             }
