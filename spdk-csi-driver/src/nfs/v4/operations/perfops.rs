@@ -25,7 +25,60 @@ use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::os::unix::fs::FileExt;
+use std::path::Path;
 use tracing::{debug, info, warn};
+
+/// Try to create a reflink (CoW clone) on filesystems that support it
+/// (XFS with reflink enabled, Btrfs, OCFS2)
+/// 
+/// This uses the Linux FICLONE ioctl which creates an instant zero-copy clone
+/// Returns Ok(bytes_cloned) on success, Err on failure (not supported or error)
+#[cfg(target_os = "linux")]
+fn try_reflink_clone(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    use std::os::unix::io::AsRawFd;
+    
+    // Open source for reading
+    let src_file = std::fs::File::open(src)?;
+    let src_size = src_file.metadata()?.len();
+    
+    // Create/open destination for writing  
+    let dst_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
+    
+    // FICLONE ioctl number: 0x40049409
+    // This is defined in linux/fs.h as _IOW(0x94, 9, int)
+    // Equivalent to: ioctl(dst_fd, FICLONE, src_fd)
+    const FICLONE: u64 = 0x40049409;
+    
+    // Perform the reflink clone ioctl
+    let result = unsafe {
+        nix::libc::ioctl(
+            dst_file.as_raw_fd(), 
+            FICLONE as nix::libc::c_ulong,
+            src_file.as_raw_fd()
+        )
+    };
+    
+    if result == 0 {
+        // Success - reflink clone created instantly!
+        Ok(src_size)
+    } else {
+        // Failed - return error (typically EOPNOTSUPP if reflink not available)
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_reflink_clone(_src: &Path, _dst: &Path) -> std::io::Result<u64> {
+    // Reflink only supported on Linux
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Reflink cloning only supported on Linux"
+    ))
+}
 
 /// COPY operation (opcode 60) - NFSv4.2
 ///
@@ -480,18 +533,147 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend for CoW cloning
-        // SPDK implementation:
-        // 1. If cloning entire file: create snapshot of source blob
-        // 2. Create new clone from snapshot
-        // 3. If partial range: may need to do range-based CoW
-        //
-        // This is INSTANT - no data copy, just metadata updates!
+        // Get source and destination file handles from stateids
+        let src_fh_data = match self.state_mgr.stateids.get_state(&op.src_stateid) {
+            Some(state) => state.filehandle,
+            None => {
+                warn!("CLONE: Source stateid has no associated file handle");
+                return CloneRes {
+                    status: Nfs4Status::BadStateId,
+                };
+            }
+        };
 
-        info!("CLONE: Would create CoW clone of {} bytes (instant, zero data copy)", op.count);
+        let dst_fh_data = match self.state_mgr.stateids.get_state(&op.dst_stateid) {
+            Some(state) => state.filehandle,
+            None => {
+                warn!("CLONE: Destination stateid has no associated file handle");
+                return CloneRes {
+                    status: Nfs4Status::BadStateId,
+                };
+            }
+        };
 
-        CloneRes {
-            status: Nfs4Status::Ok,
+        // Resolve file paths
+        let src_fh = Nfs4FileHandle { data: src_fh_data.unwrap_or_default() };
+        let dst_fh = Nfs4FileHandle { data: dst_fh_data.unwrap_or_default() };
+
+        let src_path = match self.fh_mgr.resolve_handle(&src_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("CLONE: Failed to resolve source handle: {}", e);
+                return CloneRes {
+                    status: Nfs4Status::Stale,
+                };
+            }
+        };
+
+        let dst_path = match self.fh_mgr.resolve_handle(&dst_fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("CLONE: Failed to resolve destination handle: {}", e);
+                return CloneRes {
+                    status: Nfs4Status::Stale,
+                };
+            }
+        };
+
+        let src_offset = op.src_offset;
+        let dst_offset = op.dst_offset;
+        let count = op.count;
+
+        // Perform clone operation
+        // Try reflink (CoW) first for instant cloning on XFS/Btrfs
+        // Fall back to regular copy if reflink not supported
+        let clone_result = tokio::task::spawn_blocking(move || {
+            if src_offset == 0 && dst_offset == 0 && count == 0 {
+                // Full file clone - try reflink first for zero-copy CoW
+                
+                // Attempt reflink clone using FICLONE ioctl (XFS, Btrfs, OCFS2)
+                // This creates an instant CoW clone without copying data
+                match try_reflink_clone(&src_path, &dst_path) {
+                    Ok(bytes_copied) => {
+                        info!("CLONE: Created CoW reflink clone ({} bytes, INSTANT zero-copy!)", bytes_copied);
+                        return Ok(bytes_copied);
+                    }
+                    Err(e) => {
+                        debug!("CLONE: Reflink not supported ({}), falling back to regular copy", e);
+                        // Fall through to regular copy
+                    }
+                }
+                
+                // Fallback: Regular copy for filesystems without reflink support
+                match std::fs::copy(&src_path, &dst_path) {
+                    Ok(bytes_copied) => {
+                        info!("CLONE: Copied entire file ({} bytes, full copy)", bytes_copied);
+                        Ok(bytes_copied)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                // Partial range clone - read and write the range
+                let src_file = std::fs::File::open(&src_path)?;
+                let dst_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&dst_path)?;
+
+                use std::os::unix::fs::FileExt;
+                let actual_count = if count == 0 {
+                    src_file.metadata()?.len() - src_offset
+                } else {
+                    count
+                };
+
+                let mut buffer = vec![0u8; actual_count.min(1024 * 1024) as usize];
+                let mut remaining = actual_count;
+                let mut current_src_offset = src_offset;
+                let mut current_dst_offset = dst_offset;
+
+                while remaining > 0 {
+                    let to_read = remaining.min(buffer.len() as u64) as usize;
+                    let bytes_read = src_file.read_at(&mut buffer[..to_read], current_src_offset)?;
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    
+                    dst_file.write_at(&buffer[..bytes_read], current_dst_offset)?;
+                    
+                    remaining -= bytes_read as u64;
+                    current_src_offset += bytes_read as u64;
+                    current_dst_offset += bytes_read as u64;
+                }
+
+                info!("CLONE: Copied {} bytes from offset {} to offset {}", 
+                      actual_count - remaining, src_offset, dst_offset);
+                Ok(actual_count - remaining)
+            }
+        }).await;
+
+        match clone_result {
+            Ok(Ok(_bytes)) => {
+                info!("CLONE: Successfully cloned file");
+                CloneRes {
+                    status: Nfs4Status::Ok,
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("CLONE: I/O error: {}", e);
+                let status = match e.kind() {
+                    std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                    std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    _ => Nfs4Status::Io,
+                };
+                CloneRes {
+                    status,
+                }
+            }
+            Err(e) => {
+                warn!("CLONE: Task spawn error: {}", e);
+                CloneRes {
+                    status: Nfs4Status::Io,
+                }
+            }
         }
     }
 
