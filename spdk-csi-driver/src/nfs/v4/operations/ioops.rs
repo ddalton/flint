@@ -885,4 +885,194 @@ mod tests {
         let commit_res = handler.handle_commit(commit_op, &ctx).await;
         assert_eq!(commit_res.status, Nfs4Status::Ok);
     }
+
+    #[test]
+    fn test_open_with_file_creation() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // Set current filehandle to root directory
+        ctx.current_fh = Some(fh_mgr.root_filehandle().unwrap());
+
+        let op = OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_WRITE,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"test-owner".to_vec(),
+            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+            claim: OpenClaim::Null("new-file.txt".to_string()),
+        };
+
+        let res = handler.handle_open(op, &mut ctx);
+        
+        // Should succeed and create the file
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert!(res.stateid.is_some());
+        
+        // Verify current filehandle was updated to the new file
+        assert!(ctx.current_fh.is_some());
+        
+        // Verify file exists on disk
+        let file_path = fh_mgr.resolve_handle(ctx.current_fh.as_ref().unwrap()).unwrap();
+        assert!(file_path.exists());
+        assert_eq!(file_path.file_name().unwrap().to_str().unwrap(), "new-file.txt");
+    }
+
+    #[tokio::test]
+    async fn test_write_with_relaxed_stateid_validation() {
+        let (handler, fh_mgr, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // Create a test file first
+        let test_file = temp.path().join("test-write.txt");
+        std::fs::File::create(&test_file).unwrap();
+        
+        // Set current filehandle to the test file
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&test_file).unwrap());
+
+        // Allocate a stateid with seqid=1
+        let stateid = handler.state_mgr.stateids.allocate(
+            StateType::Open,
+            1,
+            Some(ctx.current_fh.as_ref().unwrap().data.clone()),
+        );
+
+        // Test WRITE with seqid=0 (client sends wrong seqid)
+        let write_op = WriteOp {
+            stateid: StateId {
+                seqid: 0,  // Client sends 0 instead of 1
+                other: stateid.other,
+            },
+            offset: 0,
+            stable: UNSTABLE4,
+            data: Bytes::from("test data"),
+        };
+
+        let write_res = handler.handle_write(write_op, &ctx).await;
+        
+        // Should succeed with relaxed validation
+        assert_eq!(write_res.status, Nfs4Status::Ok);
+        assert_eq!(write_res.count, 9);
+    }
+
+    #[tokio::test]
+    async fn test_read_with_relaxed_stateid_validation() {
+        let (handler, fh_mgr, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // Create a test file with content
+        let test_file = temp.path().join("test-read.txt");
+        std::fs::write(&test_file, b"test content").unwrap();
+        
+        // Set current filehandle to the test file
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&test_file).unwrap());
+
+        // Allocate a stateid
+        let stateid = handler.state_mgr.stateids.allocate(
+            StateType::Open,
+            1,
+            Some(ctx.current_fh.as_ref().unwrap().data.clone()),
+        );
+
+        // Test READ with seqid=0
+        let read_op = ReadOp {
+            stateid: StateId {
+                seqid: 0,  // Relaxed validation should accept this
+                other: stateid.other,
+            },
+            offset: 0,
+            count: 100,
+        };
+
+        let read_res = handler.handle_read(read_op, &ctx).await;
+        
+        // Should succeed
+        assert_eq!(read_res.status, Nfs4Status::Ok);
+        assert_eq!(read_res.data.as_ref(), b"test content");
+    }
+
+    #[test]
+    fn test_open_without_create() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // Set current filehandle
+        ctx.current_fh = Some(fh_mgr.root_filehandle().unwrap());
+
+        let op = OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_READ,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"test-owner".to_vec(),
+            openhow: OpenHow::NoCreate,
+            claim: OpenClaim::Null("nonexistent.txt".to_string()),
+        };
+
+        let res = handler.handle_open(op, &mut ctx);
+        
+        // Should succeed (we don't validate file existence for NoCreate)
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert!(res.stateid.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_full_write_workflow() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        // Set current filehandle to root
+        ctx.current_fh = Some(fh_mgr.root_filehandle().unwrap());
+
+        // 1. OPEN with create
+        let open_op = OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_BOTH,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"test-owner".to_vec(),
+            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+            claim: OpenClaim::Null("workflow-test.txt".to_string()),
+        };
+
+        let open_res = handler.handle_open(open_op, &mut ctx);
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let stateid = open_res.stateid.unwrap();
+
+        // 2. WRITE data
+        let write_op = WriteOp {
+            stateid: StateId {
+                seqid: 0,  // Use relaxed validation
+                other: stateid.other,
+            },
+            offset: 0,
+            stable: FILE_SYNC4,
+            data: Bytes::from("Hello, NFS!"),
+        };
+
+        let write_res = handler.handle_write(write_op, &ctx).await;
+        assert_eq!(write_res.status, Nfs4Status::Ok);
+        assert_eq!(write_res.count, 11);
+
+        // 3. READ data back
+        let read_op = ReadOp {
+            stateid: StateId {
+                seqid: 0,
+                other: stateid.other,
+            },
+            offset: 0,
+            count: 100,
+        };
+
+        let read_res = handler.handle_read(read_op, &ctx).await;
+        assert_eq!(read_res.status, Nfs4Status::Ok);
+        assert_eq!(read_res.data.as_ref(), b"Hello, NFS!");
+
+        // 4. CLOSE
+        let close_op = CloseOp {
+            seqid: 0,
+            stateid,
+        };
+
+        let close_res = handler.handle_close(close_op, &ctx);
+        assert_eq!(close_res.status, Nfs4Status::Ok);
+    }
 }
