@@ -207,8 +207,9 @@ impl IoOperationHandler {
     ) -> OpenRes {
         debug!("OPEN: share_access=0x{:08x}, share_deny=0x{:08x}",
                op.share_access, op.share_deny);
+        debug!("OPEN: openhow={:?}, claim={:?}", op.openhow, op.claim);
 
-        // Check current filehandle
+        // Check current filehandle (directory we're creating in)
         let current_fh = match &ctx.current_fh {
             Some(fh) => fh,
             None => {
@@ -223,8 +224,118 @@ impl IoOperationHandler {
             }
         };
 
+        // Extract filename from claim
+        let filename = match &op.claim {
+            OpenClaim::Null(name) => name.clone(),
+            OpenClaim::Fh => {
+                // CLAIM_FH - opening by filehandle, file must exist
+                debug!("OPEN: CLAIM_FH - file must exist");
+                String::new()
+            }
+        };
+
+        // Determine if we need to create the file
+        let should_create = !matches!(op.openhow, OpenHow::NoCreate);
+        
+        if should_create && !filename.is_empty() {
+            // Create the file
+            debug!("OPEN: Creating file '{}'", filename);
+            
+            // Resolve parent directory path
+            let parent_path = match self.fh_mgr.resolve_handle(current_fh) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("OPEN: Failed to resolve parent directory: {}", e);
+                    return OpenRes {
+                        status: Nfs4Status::Stale,
+                        stateid: None,
+                        change_info: None,
+                        result_flags: 0,
+                        delegation: OpenDelegationType::None,
+                        attrset: vec![],
+                    };
+                }
+            };
+
+            // Build full file path
+            let file_path = parent_path.join(&filename);
+            debug!("OPEN: Creating file at {:?}", file_path);
+
+            // Create the file
+            match std::fs::File::create(&file_path) {
+                Ok(_) => {
+                    info!("OPEN: Successfully created file {:?}", file_path);
+                    
+                    // Generate filehandle for the new file
+                    match self.fh_mgr.path_to_filehandle(&file_path) {
+                        Ok(new_fh) => {
+                            info!("OPEN: Generated filehandle for new file");
+                            // Update current filehandle to the newly created file
+                            ctx.set_current_fh(new_fh.clone());
+                            
+                            // TODO: Determine client ID from context
+                            let client_id = 1;
+
+                            // Allocate stateid for this open
+                            let stateid = self.state_mgr.stateids.allocate(
+                                StateType::Open,
+                                client_id,
+                                Some(new_fh.data.clone()),
+                            );
+
+                            info!("OPEN: Allocated stateid {:?} for client {}", stateid, client_id);
+
+                            return OpenRes {
+                                status: Nfs4Status::Ok,
+                                stateid: Some(stateid),
+                                change_info: Some(ChangeInfo {
+                                    atomic: true,
+                                    before: 0,
+                                    after: 1,
+                                }),
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],  // TODO: Set based on createattrs
+                            };
+                        }
+                        Err(e) => {
+                            warn!("OPEN: Failed to generate filehandle for new file: {}", e);
+                            return OpenRes {
+                                status: Nfs4Status::Io,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],
+                            };
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("OPEN: Failed to create file {:?}: {}", file_path, e);
+                    let status = match e.kind() {
+                        std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                        std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
+                        std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                        _ => Nfs4Status::Io,
+                    };
+                    return OpenRes {
+                        status,
+                        stateid: None,
+                        change_info: None,
+                        result_flags: 0,
+                        delegation: OpenDelegationType::None,
+                        attrset: vec![],
+                    };
+                }
+            }
+        }
+
+        // OPEN without CREATE or CLAIM_FH - file must exist
+        debug!("OPEN: Opening existing file (no create)");
+        
         // TODO: Determine client ID from context
-        let client_id = 1; // Placeholder
+        let client_id = 1;
 
         // Allocate stateid for this open
         let stateid = self.state_mgr.stateids.allocate(
