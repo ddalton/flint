@@ -656,6 +656,12 @@ fn encode_attributes_from_snapshot(
                 attr_vals.put_u32(snapshot.ftype);
                 true
             }
+            FATTR4_FH_EXPIRE_TYPE => {
+                // FH_EXPIRE_NEVER_EXPIRE (0x00000000) per RFC 7530 Section 5.3
+                // Our file handles are persistent and never expire
+                attr_vals.put_u32(0);
+                true
+            }
             FATTR4_CHANGE => {
                 attr_vals.put_u64(snapshot.change);
                 true
@@ -672,6 +678,12 @@ fn encode_attributes_from_snapshot(
             FATTR4_RDATTR_ERROR => {
                 // No error - snapshot was successful
                 attr_vals.put_u32(0); // NFS4_OK
+                true
+            }
+            FATTR4_ACL => {
+                // Return empty ACL (use POSIX mode instead)
+                // Per RFC 7530 Section 6.4: empty ACL means use MODE attribute
+                attr_vals.put_u32(0); // Array length = 0 (no ACEs)
                 true
             }
             FATTR4_FILEID => {
@@ -740,11 +752,17 @@ fn encode_attributes_from_snapshot(
             FATTR4_SUPPORTED_ATTRS => {
                 // Return bitmap of attributes we support
                 let supported: u64 = (1u64 << FATTR4_TYPE)
+                    | (1u64 << FATTR4_FH_EXPIRE_TYPE)
                     | (1u64 << FATTR4_SIZE)
                     | (1u64 << FATTR4_CHANGE)
+                    | (1u64 << FATTR4_LINK_SUPPORT)
+                    | (1u64 << FATTR4_SYMLINK_SUPPORT)
                     | (1u64 << FATTR4_FSID)
                     | (1u64 << FATTR4_FILEID)
+                    | (1u64 << FATTR4_ACL)
                     | (1u64 << FATTR4_MODE)
+                    | (1u64 << FATTR4_CASE_INSENSITIVE)
+                    | (1u64 << FATTR4_CASE_PRESERVING)
                     | (1u64 << FATTR4_NUMLINKS)
                     | (1u64 << FATTR4_OWNER)
                     | (1u64 << FATTR4_OWNER_GROUP)
