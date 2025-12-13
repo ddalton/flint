@@ -696,7 +696,12 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_MODE => {
-                attr_vals.put_u32(snapshot.mode);
+                // NFSv4 MODE = permission bits ONLY (not file type)
+                // Per RFC 7530 Section 5.8: mask out file type bits (S_IFMT)
+                // Unix mode includes type: 0100644 (file) or 0040755 (dir)
+                // NFSv4 MODE should be:   0644 (file) or   0755 (dir)
+                let permission_bits = snapshot.mode & 0o7777;
+                attr_vals.put_u32(permission_bits);
                 true
             }
             FATTR4_NUMLINKS => {
