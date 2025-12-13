@@ -214,6 +214,26 @@ impl CompoundDispatcher {
                 OperationResult::DestroyClientId(Nfs4Status::Ok)
             }
 
+            Operation::TestStateId(stateids) => {
+                // TEST_STATEID tests if stateids are valid
+                // Per RFC 5661 Section 18.48
+                debug!("TEST_STATEID: testing {} stateids", stateids.len());
+                let mut statuses = Vec::with_capacity(stateids.len());
+                for stateid in stateids {
+                    match self.state_mgr.stateids.validate(&stateid) {
+                        Ok(()) => {
+                            debug!("TEST_STATEID: {:?} is valid", stateid);
+                            statuses.push(Nfs4Status::Ok);
+                        }
+                        Err(e) => {
+                            debug!("TEST_STATEID: {:?} is invalid: {}", stateid, e);
+                            statuses.push(Nfs4Status::BadStateId);
+                        }
+                    }
+                }
+                OperationResult::TestStateId(Nfs4Status::Ok, Some(statuses))
+            }
+
             // File handle operations
             Operation::PutRootFh => {
                 let res = self.file_handler.handle_putrootfh(PutRootFhOp, context);

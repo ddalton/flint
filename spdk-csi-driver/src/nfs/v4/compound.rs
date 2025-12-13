@@ -137,6 +137,7 @@ pub enum Operation {
     },
     ReclaimComplete(bool),       // one_fs
     SecInfoNoName(u32),          // style
+    TestStateId(Vec<StateId>),   // array of stateids to test
 
     // Lock operations (Phase 3)
     Lock {
@@ -332,6 +333,7 @@ pub enum OperationResult {
     Sequence(Nfs4Status, Option<SequenceResult>),
     ReclaimComplete(Nfs4Status),
     SecInfoNoName(Nfs4Status),
+    TestStateId(Nfs4Status, Option<Vec<Nfs4Status>>),  // status per stateid
 
     // NFSv4.2 Performance
     Allocate(Nfs4Status),
@@ -382,6 +384,7 @@ impl OperationResult {
             OperationResult::Sequence(s, _) => *s,
             OperationResult::ReclaimComplete(s) => *s,
             OperationResult::SecInfoNoName(s) => *s,
+            OperationResult::TestStateId(s, _) => *s,
             OperationResult::Allocate(s) => *s,
             OperationResult::Deallocate(s) => *s,
             OperationResult::Seek(s, _) => *s,
@@ -904,6 +907,15 @@ impl CompoundRequest {
                 let one_fs = decoder.decode_bool()?;
                 Ok(Operation::ReclaimComplete(one_fs))
             }
+            opcode::TEST_STATEID => {
+                // Decode array of stateids to test
+                let count = decoder.decode_u32()? as usize;
+                let mut stateids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    stateids.push(decoder.decode_stateid()?);
+                }
+                Ok(Operation::TestStateId(stateids))
+            }
 
             // Lock operations
             opcode::LOCK => {
@@ -1394,6 +1406,19 @@ impl CompoundResponse {
                     encoder.encode_u32(2); // Array length: 2 flavors
                     encoder.encode_u32(0); // AUTH_NONE
                     encoder.encode_u32(1); // AUTH_SYS (Unix auth)
+                }
+            }
+            OperationResult::TestStateId(status, statuses) => {
+                encoder.encode_u32(opcode::TEST_STATEID);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(statuses) = statuses {
+                        // Encode array of status codes (one per stateid tested)
+                        encoder.encode_u32(statuses.len() as u32);
+                        for s in statuses {
+                            encoder.encode_status(s);
+                        }
+                    }
                 }
             }
 
