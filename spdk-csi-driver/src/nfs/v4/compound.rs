@@ -651,9 +651,20 @@ impl CompoundRequest {
                     match createmode {
                         0 | 1 => {
                             // UNCHECKED4 or GUARDED4 - decode createattrs (fattr4)
-                            eprintln!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs, {} bytes before", decoder.remaining());
+                            // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
+                            eprintln!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs fattr4, {} bytes before", decoder.remaining());
+                            
+                            // Decode bitmap4 (array of u32)
+                            let bitmap_len = decoder.decode_u32()?;
+                            eprintln!("DEBUG OPEN: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                            for _ in 0..bitmap_len {
+                                let _bitmap_word = decoder.decode_u32()?;
+                            }
+                            
+                            // Decode attrlist4 (opaque bytes)
                             let attrs = decoder.decode_opaque()?;
-                            eprintln!("DEBUG OPEN: decoded {} bytes attrs, {} bytes after", attrs.len(), decoder.remaining());
+                            eprintln!("DEBUG OPEN: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
+                                     bitmap_len, attrs.len(), decoder.remaining());
                             OpenHow { createmode, attrs: Some(attrs) }
                         }
                         2 => {
@@ -662,8 +673,16 @@ impl CompoundRequest {
                             OpenHow { createmode, attrs: Some(verf) }
                         }
                         3 => {
-                            // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs
+                            // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs (fattr4)
                             let _verf = decoder.decode_fixed_opaque(8)?;
+                            
+                            // Decode bitmap4
+                            let bitmap_len = decoder.decode_u32()?;
+                            for _ in 0..bitmap_len {
+                                let _bitmap_word = decoder.decode_u32()?;
+                            }
+                            
+                            // Decode attrlist4
                             let attrs = decoder.decode_opaque()?;
                             OpenHow { createmode, attrs: Some(attrs) }
                         }
