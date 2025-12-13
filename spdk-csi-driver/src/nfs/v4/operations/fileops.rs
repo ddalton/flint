@@ -92,8 +92,12 @@ impl AttributeSnapshot {
     ///
     /// This performs a SINGLE stat() call and captures all attributes atomically.
     /// This is the ONLY place where VFS I/O should happen for attribute queries.
+    /// 
+    /// IMPORTANT: Uses symlink_metadata() to NOT follow symlinks (lstat vs stat)
     pub async fn from_path(path: &Path) -> std::io::Result<Self> {
-        let metadata = tokio::fs::metadata(path).await?;
+        // Use symlink_metadata() instead of metadata() to get symlink's own attributes
+        // This is equivalent to lstat() vs stat() - returns the symlink itself, not target
+        let metadata = tokio::fs::symlink_metadata(path).await?;
         
         #[cfg(unix)]
         {
