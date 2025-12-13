@@ -570,6 +570,13 @@ impl CompoundRequest {
             return Err(format!("No data remaining to decode operation opcode={}", opcode));
         }
         
+        // Check for reserved opcodes (0, 1, 2 are RESERVED in NFSv4)
+        // Per RFC 5661, these should return NFS4ERR_OP_ILLEGAL
+        if opcode <= 2 {
+            warn!("Reserved/illegal operation code: {}", opcode);
+            return Ok(Operation::Unsupported(opcode));
+        }
+        
         match opcode {
             // File handle operations
             opcode::PUTROOTFH => Ok(Operation::PutRootFh),
@@ -646,14 +653,53 @@ impl CompoundRequest {
                         let verf = decoder.decode_fixed_opaque(8)?;
                         OpenHow { createmode, attrs: Some(verf) }
                     }
+                    3 => {
+                        // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs
+                        let _verf = decoder.decode_fixed_opaque(8)?;
+                        let attrs = decoder.decode_opaque()?;
+                        OpenHow { createmode, attrs: Some(attrs) }
+                    }
                     _ => OpenHow { createmode: 0, attrs: None },
                 };
                 
-                // Claim (discriminated union)
+                // Claim (discriminated union) - RFC 5661 Section 18.16
                 let claim_type = decoder.decode_u32()?;
                 let file = match claim_type {
-                    0 => decoder.decode_string()?,  // CLAIM_NULL - filename
-                    _ => String::new(),  // Other claim types
+                    0 => {
+                        // CLAIM_NULL - filename
+                        decoder.decode_string()?
+                    }
+                    1 => {
+                        // CLAIM_PREVIOUS - delegate_type (u32)
+                        // Used for reclaim after server reboot
+                        let _delegate_type = decoder.decode_u32()?;
+                        String::new()
+                    }
+                    2 => {
+                        // CLAIM_DELEGATE_CUR - delegate_stateid + filename
+                        let _delegate_stateid = decoder.decode_stateid()?;
+                        decoder.decode_string()?
+                    }
+                    3 => {
+                        // CLAIM_DELEGATE_PREV - filename
+                        decoder.decode_string()?
+                    }
+                    4 => {
+                        // CLAIM_FH (NFSv4.1) - no data
+                        String::new()
+                    }
+                    5 => {
+                        // CLAIM_DELEG_CUR_FH (NFSv4.1) - delegate_stateid only
+                        let _delegate_stateid = decoder.decode_stateid()?;
+                        String::new()
+                    }
+                    6 => {
+                        // CLAIM_DELEG_PREV_FH (NFSv4.1) - no data
+                        String::new()
+                    }
+                    _ => {
+                        return Err(format!("Unknown OPEN claim type: {}", claim_type));
+                    }
                 };
                 let claim = OpenClaim { claim_type, file };
                 
