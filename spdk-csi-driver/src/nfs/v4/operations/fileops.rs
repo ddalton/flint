@@ -1916,12 +1916,36 @@ impl FileOperationHandler {
             };
         }
 
-        // Grant requested access (now properly encoding both supported and access)
+        // Check if this is a directory (need EXECUTE for traversal)
+        // Per nfs_execute_ok() in Linux kernel: directories need execute permission
+        let path = match self.fh_mgr.resolve_handle(current_fh) {
+            Ok(p) => p,
+            Err(_) => {
+                // Fallback: grant what was requested
+                let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
+                               ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
+                return AccessRes {
+                    status: Nfs4Status::Ok,
+                    supported,
+                    access: op.access & supported,
+                };
+            }
+        };
+
         let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_MODIFY |
                        ACCESS4_EXTEND | ACCESS4_DELETE | ACCESS4_EXECUTE;
-        let granted = op.access & supported;
+        let mut granted = op.access & supported;
 
-        info!("✅ ACCESS on FILE/DIR - granting: mask=0x{:02x}", granted);
+        // CRITICAL: Directories always need EXECUTE permission for VFS traversal
+        // Even if client doesn't request it, VFS will check MAY_EXEC later
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            if metadata.is_dir() {
+                granted |= ACCESS4_EXECUTE;
+                debug!("   → Directory: always granting EXECUTE for VFS traversal");
+            }
+        }
+
+        info!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
         debug!("   READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
                granted & ACCESS4_READ != 0,
                granted & ACCESS4_LOOKUP != 0,
