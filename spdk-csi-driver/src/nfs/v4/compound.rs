@@ -639,31 +639,44 @@ impl CompoundRequest {
                 // Owner (state_owner)
                 let owner = decoder.decode_opaque()?.to_vec();
                 
-                // Openhow (discriminated union)
-                let createmode = decoder.decode_u32()?;
-                let openhow = match createmode {
-                    0 => OpenHow { createmode, attrs: None },  // UNCHECKED4
-                    1 => {
-                        // GUARDED4 - decode createattrs
-                        let attrs = decoder.decode_opaque()?;
-                        OpenHow { createmode, attrs: Some(attrs) }
+                // Openflag4 - this is a union with opentype4 as discriminator (RFC 5661 §18.16)
+                let opentype = decoder.decode_u32()?;  // OPEN4_NOCREATE=0, OPEN4_CREATE=1
+                eprintln!("DEBUG OPEN: opentype={}, {} bytes remaining", opentype, decoder.remaining());
+                
+                // Decode createhow4 only if opentype == OPEN4_CREATE (1)
+                let openhow = if opentype == 1 {
+                    // OPEN4_CREATE - decode createhow4 (discriminated union)
+                    let createmode = decoder.decode_u32()?;
+                    eprintln!("DEBUG OPEN: createmode={}, {} bytes remaining", createmode, decoder.remaining());
+                    match createmode {
+                        0 | 1 => {
+                            // UNCHECKED4 or GUARDED4 - decode createattrs (fattr4)
+                            eprintln!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs, {} bytes before", decoder.remaining());
+                            let attrs = decoder.decode_opaque()?;
+                            eprintln!("DEBUG OPEN: decoded {} bytes attrs, {} bytes after", attrs.len(), decoder.remaining());
+                            OpenHow { createmode, attrs: Some(attrs) }
+                        }
+                        2 => {
+                            // EXCLUSIVE4 - decode verifier only
+                            let verf = decoder.decode_fixed_opaque(8)?;
+                            OpenHow { createmode, attrs: Some(verf) }
+                        }
+                        3 => {
+                            // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs
+                            let _verf = decoder.decode_fixed_opaque(8)?;
+                            let attrs = decoder.decode_opaque()?;
+                            OpenHow { createmode, attrs: Some(attrs) }
+                        }
+                        _ => OpenHow { createmode: 0, attrs: None },
                     }
-                    2 => {
-                        // EXCLUSIVE4 - decode verifier (stored in attrs)
-                        let verf = decoder.decode_fixed_opaque(8)?;
-                        OpenHow { createmode, attrs: Some(verf) }
-                    }
-                    3 => {
-                        // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs
-                        let _verf = decoder.decode_fixed_opaque(8)?;
-                        let attrs = decoder.decode_opaque()?;
-                        OpenHow { createmode, attrs: Some(attrs) }
-                    }
-                    _ => OpenHow { createmode: 0, attrs: None },
+                } else {
+                    // OPEN4_NOCREATE - no createhow4
+                    OpenHow { createmode: 0, attrs: None }
                 };
                 
                 // Claim (discriminated union) - RFC 5661 Section 18.16
                 let claim_type = decoder.decode_u32()?;
+                eprintln!("DEBUG OPEN: claim_type={}, {} bytes remaining", claim_type, decoder.remaining());
                 let file = match claim_type {
                     0 => {
                         // CLAIM_NULL - filename
@@ -672,7 +685,9 @@ impl CompoundRequest {
                     1 => {
                         // CLAIM_PREVIOUS - delegate_type (u32)
                         // Used for reclaim after server reboot
-                        let _delegate_type = decoder.decode_u32()?;
+                        eprintln!("DEBUG OPEN: CLAIM_PREVIOUS - decoding delegate_type, {} bytes before", decoder.remaining());
+                        let delegate_type = decoder.decode_u32()?;
+                        eprintln!("DEBUG OPEN: CLAIM_PREVIOUS - decoded delegate_type={}, {} bytes after", delegate_type, decoder.remaining());
                         String::new()
                     }
                     2 => {
