@@ -651,23 +651,28 @@ fn encode_attributes_from_snapshot(
     let mut supported_attrs = BTreeSet::new();
     
     for attr_id in requested_attrs {
+        let before_len = attr_vals.len();
         let encoded = match attr_id {
             FATTR4_TYPE => {
                 attr_vals.put_u32(snapshot.ftype);
+                debug!("  Attr {}: TYPE={}", attr_id, snapshot.ftype);
                 true
             }
             FATTR4_FH_EXPIRE_TYPE => {
                 // FH_EXPIRE_NEVER_EXPIRE (0x00000000) per RFC 7530 Section 5.3
                 // Our file handles are persistent and never expire
                 attr_vals.put_u32(0);
+                debug!("  Attr {}: FH_EXPIRE_TYPE=0 (never expire)", attr_id);
                 true
             }
             FATTR4_CHANGE => {
                 attr_vals.put_u64(snapshot.change);
+                debug!("  Attr {}: CHANGE={}", attr_id, snapshot.change);
                 true
             }
             FATTR4_SIZE => {
                 attr_vals.put_u64(snapshot.size);
+                debug!("  Attr {}: SIZE={}", attr_id, snapshot.size);
                 true
             }
             FATTR4_FSID => {
@@ -745,14 +750,20 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_TIME_METADATA => {
                 let duration = snapshot.ctime.duration_since(UNIX_EPOCH).unwrap();
-                attr_vals.put_i64(duration.as_secs() as i64);
-                attr_vals.put_u32(duration.subsec_nanos());
+                let secs = duration.as_secs() as i64;
+                let nsecs = duration.subsec_nanos();
+                attr_vals.put_i64(secs);
+                attr_vals.put_u32(nsecs);
+                debug!("  Attr {}: TIME_METADATA={}.{:09} (i64+u32)", attr_id, secs, nsecs);
                 true
             }
             FATTR4_TIME_MODIFY => {
                 let duration = snapshot.mtime.duration_since(UNIX_EPOCH).unwrap();
-                attr_vals.put_i64(duration.as_secs() as i64);
-                attr_vals.put_u32(duration.subsec_nanos());
+                let secs = duration.as_secs() as i64;
+                let nsecs = duration.subsec_nanos();
+                attr_vals.put_i64(secs);
+                attr_vals.put_u32(nsecs);
+                debug!("  Attr {}: TIME_MODIFY={}.{:09} (i64+u32)", attr_id, secs, nsecs);
                 true
             }
             FATTR4_SUPPORTED_ATTRS => {
@@ -853,9 +864,18 @@ fn encode_attributes_from_snapshot(
         };
         
         if encoded {
+            let bytes_added = attr_vals.len() - before_len;
+            debug!("    → Encoded {} bytes for attr {}", bytes_added, attr_id);
             supported_attrs.insert(attr_id);
+        } else {
+            debug!("    → Attr {} not encoded (unsupported)", attr_id);
         }
     }
+    
+    debug!("=== Attribute encoding complete ===");
+    debug!("  Total attributes encoded: {}", supported_attrs.len());
+    debug!("  Total bytes: {}", attr_vals.len());
+    debug!("  Encoded attr IDs: {:?}", supported_attrs.iter().collect::<Vec<_>>());
     
     // Convert supported attributes back to bitmap
     let mut supported_bitmap = vec![0u32; 3];
