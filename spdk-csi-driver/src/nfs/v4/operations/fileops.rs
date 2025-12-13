@@ -1564,12 +1564,14 @@ impl FileOperationHandler {
         ctx: &mut CompoundContext,
     ) -> LookupRes {
         info!("🔍 LOOKUP called: component='{}'", op.component);
+        debug!("   Component length: {} bytes", op.component.len());
+        debug!("   Component bytes (hex): {:02x?}", op.component.as_bytes());
 
         // Check current filehandle
         let current_fh = match &ctx.current_fh {
             Some(fh) => fh,
             None => {
-                warn!("LOOKUP: No current filehandle!");
+                warn!("❌ LOOKUP: No current filehandle!");
                 return LookupRes {
                     status: Nfs4Status::NoFileHandle,
                 };
@@ -1578,6 +1580,7 @@ impl FileOperationHandler {
 
         let is_pseudo = self.fh_mgr.is_pseudo_root(current_fh);
         info!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
+        debug!("   Current FH (hex): {:02x?}", &current_fh.data[0..std::cmp::min(20, current_fh.data.len())]);
 
         // Special case: LOOKUP "." returns current filehandle unchanged
         if op.component == "." {
@@ -1698,17 +1701,25 @@ impl FileOperationHandler {
 
         debug!("LOOKUP: Found {:?} (is_dir={}, is_file={})", 
                target_path, metadata.is_dir(), metadata.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            debug!("   → Metadata: mode={:o}, uid={}, gid={}, ino={}", 
+                   metadata.mode(), metadata.uid(), metadata.gid(), metadata.ino());
+        }
 
         // Generate filehandle for target
         match self.fh_mgr.get_or_create_handle(&target_path) {
             Ok(fh) => {
+                info!("✅ LOOKUP succeeded: '{}' → FH {} bytes", op.component, fh.data.len());
+                debug!("   New current FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
                 ctx.current_fh = Some(fh);
                 LookupRes {
                     status: Nfs4Status::Ok,
                 }
             }
             Err(e) => {
-                warn!("LOOKUP: Failed to create handle: {}", e);
+                warn!("❌ LOOKUP: Failed to create handle: {}", e);
                 LookupRes {
                     status: Nfs4Status::Resource,
                 }
@@ -2322,6 +2333,9 @@ impl FileOperationHandler {
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
                    file_name, attr_vals.len(), supported_bitmap);
+            debug!("   → File snapshot: type={}, mode={:o}, nlink={}, owner={}, group={}, size={}",
+                   snapshot.ftype, snapshot.mode, snapshot.numlinks, snapshot.owner, snapshot.group, snapshot.size);
+            debug!("   → FSID=({}, {}), fileid={}", snapshot.fsid_major, snapshot.fsid_minor, snapshot.fileid);
 
             // Build fattr4 structure per RFC 5661
             // fattr4 = attrmask (array of u32) + attr_vals (opaque bytes with length prefix)
