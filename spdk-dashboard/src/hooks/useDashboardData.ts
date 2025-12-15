@@ -970,6 +970,9 @@ export interface UnimplementedDisk {
   // Enhanced status tracking
   driver_ready?: boolean; // True if driver is SPDK-compatible (original spdk_ready)
   blobstore_initialized?: boolean; // True if LVS/blobstore is initialized
+  bdev_name?: string; // SPDK bdev name if driver bound
+  lvs_name?: string | null; // LVS name if blobstore initialized
+  free_space?: number; // Free space in bytes
 }
 
 export interface DiskSetupRequest {
@@ -1001,9 +1004,6 @@ export interface NodeDiskData {
 export const useDiskSetup = () => {
   const [nodeData, setNodeData] = useState<Record<string, NodeDiskData>>({});
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
-  
-  // Get dashboard data to cross-reference SpdkDisk CRD status
-  const { data: dashboardData } = useDashboardData(false);
   
   // No need for complex pause logic - auto-refresh checkbox is managed automatically
 
@@ -1220,34 +1220,18 @@ export const useDiskSetup = () => {
         if (response.ok) {
           const data = await response.json();
           if (data.disks) {
-            // Enhance disk data with SpdkDisk CRD information
+            // Use disk data directly from minimal state API
             const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
               const enhancedDisk = { ...disk, nodeName };
               
-              // Find corresponding SpdkDisk CRD data using precise matching
-              const spdkDisk = dashboardData.disks.find(d => 
-                d.pci_addr === disk.pci_address ||
-                d.id.includes(disk.pci_address.replace(':', '-')) ||
-                (d.node === nodeName && d.id.includes(disk.device_name))
-              );
+              // Minimal state mode: Use values directly from the API
+              // blobstore_initialized is set by backend when LVS exists
+              enhancedDisk.blobstore_initialized = disk.blobstore_initialized || false;
+              // driver_ready is true if blobstore is initialized OR if bdev exists
+              enhancedDisk.driver_ready = enhancedDisk.blobstore_initialized || !!disk.bdev_name || disk.spdk_ready;
+              enhancedDisk.spdk_ready = enhancedDisk.blobstore_initialized;
               
-              if (spdkDisk) {
-                // Enhanced status logic with validation:
-                // Check if blobstore_initialized status is consistent with actual functionality
-                // A truly initialized blobstore should have capacity or be ready for use
-                const hasValidBlobstore = spdkDisk.blobstore_initialized && 
-                  (spdkDisk.capacity > 0 || spdkDisk.free_space > 0);
-                
-                enhancedDisk.spdk_ready = hasValidBlobstore;
-                enhancedDisk.driver_ready = disk.spdk_ready; // Original driver compatibility  
-                enhancedDisk.blobstore_initialized = hasValidBlobstore;
-                
-                console.log(`Enhanced disk ${disk.device_name}: driver_ready=${disk.spdk_ready}, blobstore_initialized=${hasValidBlobstore}, final_spdk_ready=${enhancedDisk.spdk_ready}, CRD_id=${spdkDisk.id}`);
-              } else {
-                console.log(`No SpdkDisk CRD found for ${disk.device_name}, using original spdk_ready=${disk.spdk_ready}`);
-                enhancedDisk.driver_ready = disk.spdk_ready;
-                enhancedDisk.blobstore_initialized = false;
-              }
+              console.log(`Disk ${disk.device_name}: driver_ready=${enhancedDisk.driver_ready}, blobstore_initialized=${enhancedDisk.blobstore_initialized}, bdev=${disk.bdev_name}`);
               
               return enhancedDisk;
             });
@@ -1296,7 +1280,7 @@ export const useDiskSetup = () => {
         return newSet;
       });
     }
-  }, [dashboardData.disks]);
+  }, []);
 
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 
