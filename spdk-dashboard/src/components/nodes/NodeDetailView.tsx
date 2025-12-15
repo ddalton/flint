@@ -324,15 +324,15 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                             <div className="w-20 bg-gray-200 rounded-full h-2">
                               <div 
                                 className="bg-blue-500 h-2 rounded-full" 
-                                style={{ width: `${(disk.allocated_space / disk.capacity_gb) * 100}%` }}
+                                style={{ width: `${(disk.allocated_space / disk.capacity) * 100}%` }}
                               />
                             </div>
                             <span className="text-xs text-gray-600">
-                              {Math.round((disk.allocated_space / disk.capacity_gb) * 100)}%
+                              {Math.round((disk.allocated_space / disk.capacity) * 100)}%
                             </span>
                           </div>
                           <div className="text-xs text-gray-500">
-                            {disk.allocated_space}GB / {disk.capacity_gb}GB used
+                            {Math.round(disk.allocated_space / (1024**3))}GB / {disk.capacity_gb}GB used
                           </div>
                         </div>
                       </td>

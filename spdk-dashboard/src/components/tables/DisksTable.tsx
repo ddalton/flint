@@ -141,7 +141,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     // Apply utilization filter
     if (utilizationFilter !== 'all') {
       result = result.filter(disk => {
-        const utilization = (disk.allocated_space / disk.capacity_gb) * 100;
+        const utilization = (disk.allocated_space / disk.capacity) * 100;
         switch (utilizationFilter) {
           case 'low': return utilization < 25;
           case 'medium': return utilization >= 25 && utilization < 75;
@@ -180,8 +180,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           bValue = b.capacity_gb;
           break;
         case 'utilization':
-          aValue = (a.allocated_space / a.capacity_gb) * 100;
-          bValue = (b.allocated_space / b.capacity_gb) * 100;
+          aValue = (a.allocated_space / a.capacity) * 100;
+          bValue = (b.allocated_space / b.capacity) * 100;
           break;
         case 'free_space':
           aValue = a.free_space;
@@ -558,7 +558,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               <p className="text-3xl font-bold text-purple-600">
                 {filteredDisks.length > 0 ? 
                   Math.round(filteredDisks.reduce((sum, disk) => 
-                    sum + (disk.allocated_space / disk.capacity_gb) * 100, 0
+                    sum + (disk.allocated_space / disk.capacity) * 100, 0
                   ) / filteredDisks.length) : 0}%
               </p>
             </div>
@@ -686,7 +686,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                   });
                 }
 
-                const utilization = Math.round((disk.allocated_space / disk.capacity_gb) * 100);
+                const utilization = Math.round((disk.allocated_space / disk.capacity) * 100);
 
                 return (
                   <tr key={disk.id} className="hover:bg-gray-50">
@@ -712,7 +712,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb}GB</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space}GB</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{Math.round(disk.free_space / (1024**3))}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <div className="w-20 bg-gray-200 rounded-full h-2">
@@ -913,7 +913,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
             <div>
               <span className="text-blue-700 font-medium">Total Free Space:</span>
               <div className="text-blue-900">
-                {filteredDisks.reduce((sum, d) => sum + d.free_space, 0).toLocaleString()}GB
+                {Math.round(filteredDisks.reduce((sum, d) => sum + d.free_space, 0) / (1024**3)).toLocaleString()}GB
               </div>
             </div>
           </div>
