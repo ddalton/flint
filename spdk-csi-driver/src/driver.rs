@@ -1230,18 +1230,20 @@ impl SpdkCsiDriver {
         
         let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
         
-        // Check if subsystem already exists
-        let get_subsystems_params = json!({
-            "method": "nvmf_get_subsystems"
+        // Try to get specific subsystem by NQN (more efficient than listing all)
+        let get_subsystem_params = json!({
+            "method": "nvmf_get_subsystems",
+            "params": {
+                "nqn": nqn
+            }
         });
         
-        let subsystem_exists = match self.call_node_agent(node_name, "/api/spdk/rpc", &get_subsystems_params).await {
+        let subsystem_exists = match self.call_node_agent(node_name, "/api/spdk/rpc", &get_subsystem_params).await {
             Ok(response) => {
+                // If result is a non-empty array, subsystem exists
                 if let Some(result) = response.get("result") {
                     if let Some(subsystems) = result.as_array() {
-                        subsystems.iter().any(|s| {
-                            s.get("nqn").and_then(|n| n.as_str()).map(|n| n == nqn).unwrap_or(false)
-                        })
+                        !subsystems.is_empty()
                     } else {
                         false
                     }
@@ -1256,6 +1258,7 @@ impl SpdkCsiDriver {
             println!("ℹ️ [DRIVER] Subsystem already exists (idempotent): {}", nqn);
         } else {
             // Create subsystem
+            println!("🔧 [DRIVER] Creating new NVMe-oF subsystem: {}", nqn);
             let subsystem_params = json!({
                 "method": "nvmf_create_subsystem",
                 "params": {
@@ -1274,7 +1277,10 @@ impl SpdkCsiDriver {
                 Err(e) if e.to_string().contains("already exists") => {
                     println!("ℹ️ [DRIVER] Subsystem already exists (race condition): {}", nqn);
                 }
-                Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
+                Err(e) => {
+                    println!("❌ [DRIVER] Failed to create subsystem: {}", e);
+                    return Err(format!("Failed to create subsystem: {}", e).into());
+                }
             }
         }
 
