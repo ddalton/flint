@@ -826,8 +826,16 @@ impl MinimalDiskService {
     async fn get_mounted_partitions(&self, device_name: &str) -> Vec<String> {
         use std::process::Command;
         
-        // Read /proc/mounts to find mounted partitions
-        match Command::new("cat").arg("/proc/mounts").output() {
+        // Read host's /proc/mounts to find mounted partitions
+        // Try /host/proc/mounts first (when running in container with host mount)
+        // Fall back to /proc/mounts (for local testing)
+        let mounts_path = if std::path::Path::new("/host/proc/mounts").exists() {
+            "/host/proc/mounts"
+        } else {
+            "/proc/mounts"
+        };
+        
+        match Command::new("cat").arg(mounts_path).output() {
             Ok(output) => {
                 let mounts = String::from_utf8_lossy(&output.stdout);
                 let mut partitions = Vec::new();
