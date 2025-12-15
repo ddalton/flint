@@ -1035,8 +1035,18 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
                 println!("📊 [CONTROLLER] Single-replica volume on node {}", volume_info.node_name);
 
+                // Check if this is a ROX (ReadOnlyMany) volume
+                let is_rox = req.volume_capability.as_ref()
+                    .and_then(|cap| cap.access_mode.as_ref())
+                    .map(|am| {
+                        use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
+                        am.mode == Mode::MultiNodeReaderOnly as i32
+                    })
+                    .unwrap_or(false);
+
                 // Check if pod is on the same node as the logical volume
-                if volume_info.node_name == node_id {
+                // For ROX volumes, ALWAYS use NVMe-oF (even local) to avoid bdev claim conflicts
+                if !is_rox && volume_info.node_name == node_id {
                     println!("✅ [CONTROLLER] Volume is local to node - no NVMe-oF needed");
                     
                     // Store volume info in publish context for NodeStage
@@ -1044,7 +1054,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     publish_context.insert("bdevName".to_string(), volume_info.lvol_uuid.clone());
                     publish_context.insert("lvsName".to_string(), volume_info.lvs_name.clone());
                 } else {
-                    println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
+                    if is_rox {
+                        println!("🔒 [CONTROLLER] ROX volume - using NVMe-oF for consistent multi-pod access");
+                    } else {
+                        println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
+                    }
                     
                     // Construct bdev name for lvol
                     let bdev_name = volume_info.lvol_uuid.clone();
