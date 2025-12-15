@@ -819,6 +819,11 @@ async fn delete_orphaned_lvol(
         match client.post(&url).json(&payload).send().await {
             Ok(response) if response.status().is_success() => {
                 println!("✅ [DASHBOARD] Orphaned lvol {} deleted from node {}", lvol_uuid, node_name);
+                
+                // Invalidate cache to force refresh on next dashboard request
+                *state.cache.write().await = None;
+                println!("🔄 [DASHBOARD] Cache invalidated - next request will refresh");
+                
                 return Ok(warp::reply::json(&json!({
                     "success": true,
                     "lvol_uuid": lvol_uuid,

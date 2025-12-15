@@ -304,6 +304,13 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         console.log('✅ Successfully deleted orphaned volume:', volumeToDelete.volume.spdk_volume_uuid);
         setDeleteSuccess(true);
         
+        // Invalidate dashboard cache to force refresh
+        try {
+          await fetch('/api/refresh', { method: 'POST' });
+        } catch (e) {
+          console.warn('Failed to invalidate cache:', e);
+        }
+        
         // Auto-close after 2 seconds and refresh
         setTimeout(() => {
           setShowDeleteDialog(false);
