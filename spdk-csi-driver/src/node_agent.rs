@@ -523,7 +523,7 @@ impl NodeAgent {
                         "subsystem_vendor_id": "0x0000",
                         "subsystem_device_id": "0x0000",
                         "numa_node": 0,
-                        "driver": if d.blobstore_initialized { "vfio-pci" } else { "kernel" },
+                        "driver": d.driver,
                         "serial": "",
                         "firmware_version": "",
                         "namespace_id": 1,

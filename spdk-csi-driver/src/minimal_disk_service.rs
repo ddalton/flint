@@ -1092,6 +1092,23 @@ impl MinimalDiskService {
                 device_name, partitions.len() - 1, partitions);
         }
         
+        // Detect driver type from bdev information
+        // Simple categorization: kernel-managed vs SPDK userspace-managed vs bdev type
+        let driver = if bdev.get("driver_specific")
+            .and_then(|ds| ds.get("uring"))
+            .is_some() || product_upper.contains("URING") {
+            // This is a uring bdev - kernel manages the device, SPDK uses io_uring
+            "kernel".to_string()
+        } else if bdev.get("driver_specific")
+            .and_then(|ds| ds.get("nvme"))
+            .is_some() || bdev_name.starts_with("Nvme") {
+            // This is an SPDK userspace NVMe bdev - SPDK directly manages the device
+            "SPDK userspace".to_string()
+        } else {
+            // For other types, show the product name (e.g., "Logical Volume", "RAID Volume", "Malloc disk")
+            product_name.to_string()
+        };
+        
         Ok(Some(DiskInfo {
             node_name: self.node_name.clone(),
             pci_address,
@@ -1112,6 +1129,7 @@ impl MinimalDiskService {
             serial: Some("unknown".to_string()),
             is_system_disk,
             mounted_partitions,
+            driver,
         }))
     }
 

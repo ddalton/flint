@@ -190,7 +190,7 @@ export const DiskSetupTab: React.FC = () => {
     force_unmount: false,
     backup_data: true,
     huge_pages_mb: 2048,
-    driver_override: 'vfio-pci'
+    driver_override: 'kernel'
   });
   const [setupInProgress, setSetupInProgress] = useState<Set<string>>(new Set());
   const [initializeLVSInProgress, setInitializeLVSInProgress] = useState<Set<string>>(new Set());

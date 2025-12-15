@@ -44,6 +44,7 @@ pub struct DiskInfo {
     pub lvol_count: u32,
     pub is_system_disk: bool,
     pub mounted_partitions: Vec<String>,
+    pub driver: String, // "kernel" (kernel-managed), "SPDK userspace" (SPDK-managed), or bdev type (e.g., "Logical Volume", "RAID Volume")
 }
 
 /// Volume information aggregated from SPDK
