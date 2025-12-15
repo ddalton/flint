@@ -177,6 +177,9 @@ spec:
             - name: host-proc
               mountPath: /host/proc
               readOnly: true
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
             - name: spdk-socket
               mountPath: /var/tmp
           # Note: Node agent functionality is integrated into flint-csi-driver container above
@@ -336,6 +339,10 @@ spec:
         - name: host-proc
           hostPath:
             path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
             type: Directory
         - name: hugepages
           emptyDir:

@@ -822,7 +822,7 @@ impl MinimalDiskService {
         }
     }
 
-    /// Get list of mounted partitions for a device
+    /// Get list of mounted partitions for a device by checking all its partitions
     async fn get_mounted_partitions(&self, device_name: &str) -> Vec<String> {
         use std::process::Command;
         
@@ -835,10 +835,13 @@ impl MinimalDiskService {
             "/proc/mounts"
         };
         
+        // First, get all partitions for this device (e.g., nvme0n1p1, nvme0n1p2)
+        let partitions = self.get_device_partitions(device_name);
+        
         match Command::new("cat").arg(mounts_path).output() {
             Ok(output) => {
                 let mounts = String::from_utf8_lossy(&output.stdout);
-                let mut partitions = Vec::new();
+                let mut mount_points = Vec::new();
                 
                 for line in mounts.lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
@@ -846,20 +849,63 @@ impl MinimalDiskService {
                         let device = parts[0];
                         let mount_point = parts[1];
                         
-                        // Check if this mount belongs to our device (e.g., /dev/nvme0n1p1)
-                        if device.contains(device_name) {
-                            partitions.push(mount_point.to_string());
+                        // Check if this mount belongs to any partition of our device
+                        // Handle both direct paths (/dev/nvme0n1p1) and symlinks (/dev/root)
+                        for partition in &partitions {
+                            if device.contains(partition) || device == "/dev/root" {
+                                // If it's /dev/root, we need to verify it actually points to our device
+                                // For now, if we find /dev/root mounted on critical paths, assume it's a system disk
+                                if device == "/dev/root" && self.is_critical_mount_point(mount_point) {
+                                    mount_points.push(mount_point.to_string());
+                                } else if device.contains(partition) {
+                                    mount_points.push(mount_point.to_string());
+                                }
+                            }
                         }
                     }
                 }
                 
-                partitions
+                mount_points
             }
             Err(e) => {
                 println!("⚠️ [DISK_DETECT] Failed to read mounts: {}", e);
                 Vec::new()
             }
         }
+    }
+
+    /// Get list of partitions for a device (e.g., nvme0n1 -> [nvme0n1p1, nvme0n1p2])
+    fn get_device_partitions(&self, device_name: &str) -> Vec<String> {
+        use std::fs;
+        
+        // Try host's /sys first (when running in container), fall back to /sys
+        let sys_path = if std::path::Path::new("/host/sys/block").exists() {
+            format!("/host/sys/block/{}", device_name)
+        } else {
+            format!("/sys/block/{}", device_name)
+        };
+        
+        let mut partitions = vec![device_name.to_string()]; // Include the device itself
+        
+        // Read /sys/block/{device}/ to find partitions
+        if let Ok(entries) = fs::read_dir(&sys_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Partition directories start with the device name (e.g., nvme0n1p1, nvme0n1p2)
+                if name_str.starts_with(device_name) && name_str != device_name {
+                    partitions.push(name_str.to_string());
+                }
+            }
+        }
+        
+        partitions
+    }
+
+    /// Check if a mount point is critical (indicates system disk)
+    fn is_critical_mount_point(&self, mount_point: &str) -> bool {
+        let critical_mounts = ["/", "/boot", "/usr", "/var", "/etc"];
+        critical_mounts.contains(&mount_point)
     }
 
     /// Check if a device is a system disk (has critical system mounts)
