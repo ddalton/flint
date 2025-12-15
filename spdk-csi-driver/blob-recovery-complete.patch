@@ -14,7 +14,27 @@
  	spdk_free(ctx->mask);
  	ctx->mask = NULL;
  
-@@ -4936,7 +4943,13 @@ static void
+@@ -4783,10 +4790,19 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
+ 		ctx->page_index++;
+ 	} while (spdk_bit_array_get(ctx->bs->used_md_pages, ctx->page_index) == true);
+ 
++	/* Log recovery progress every 10000 pages */
++	if (ctx->page_index % 10000 == 0 && ctx->page_index > 0) {
++		uint32_t progress_pct = (ctx->page_index * 100) / ctx->super->md_len;
++		SPDK_NOTICELOG("Recovery progress: %u/%u pages scanned (%u%% complete)\n",
++			       ctx->page_index, ctx->super->md_len, progress_pct);
++	}
++
+ 	if (ctx->page_index < ctx->super->md_len) {
+ 		ctx->cur_page = ctx->page_index;
+ 		bs_load_replay_cur_md_page(ctx);
+ 	} else {
++		SPDK_NOTICELOG("Recovery: Metadata scan complete - scanned %u pages\n", ctx->super->md_len);
++		SPDK_NOTICELOG("  Now writing updated metadata to disk...\n");
+ 		/* Claim all of the clusters used by the metadata */
+ 		num_md_clusters = spdk_divide_round_up(
+ 				  ctx->super->md_start + ctx->super->md_len, ctx->bs->pages_per_cluster);
+@@ -4936,7 +4952,13 @@ static void
  bs_recover(struct spdk_bs_load_ctx *ctx)
  {
  	int		rc;
@@ -28,7 +48,7 @@
  	SPDK_NOTICELOG("Performing recovery on blobstore\n");
  	rc = spdk_bit_array_resize(&ctx->bs->used_md_pages, ctx->super->md_len);
  	if (rc < 0) {
-@@ -5026,7 +5039,26 @@ bs_load_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -5026,7 +5048,26 @@ bs_load_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  		return;
  	}
  
