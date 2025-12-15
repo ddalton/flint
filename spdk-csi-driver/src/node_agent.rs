@@ -694,18 +694,15 @@ impl NodeAgent {
         let method = request["method"].as_str().unwrap_or("ublk_start_disk");
         let params = &request["params"];
         
-        // Check if ublk device already exists for this bdev (idempotency for ROX/RWX)
-        if let Some(bdev_name) = params["bdev_name"].as_str() {
-            let list_rpc = json!({"method": "ublk_get_disks", "params": {}});
-            if let Ok(list_response) = node_agent.disk_service.call_spdk_rpc(&list_rpc).await {
-                if let Some(disks) = list_response["result"].as_array() {
-                    for disk in disks {
-                        if disk["bdev_name"].as_str() == Some(bdev_name) {
-                            println!("✅ [HTTP_API] ublk device already exists for bdev {} (idempotent)", bdev_name);
-                            return Ok(warp::reply::with_status(warp::reply::json(&list_response), StatusCode::OK));
-                        }
-                    }
-                }
+        // Check if ublk device already exists (idempotency for ROX/RWX)
+        if let Some(ublk_id) = params["ublk_id"].as_u64() {
+            let device_path = format!("/dev/ublkb{}", ublk_id);
+            if std::path::Path::new(&device_path).exists() {
+                println!("✅ [HTTP_API] ublk device already exists: {} (idempotent)", device_path);
+                let success_response = json!({
+                    "result": device_path
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK));
             }
         }
         
