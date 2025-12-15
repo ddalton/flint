@@ -94,6 +94,22 @@ driver:
   # Rancher-managed clusters: useHostnameTopology: false
   # EKS/GKE/AKS: useHostnameTopology: false
 
+# SPDK configuration
+spdk:
+  # Force shutdown timeout (seconds) - OPT-IN for safety
+  # When > 0: During shutdown, if threads have pending messages for longer than this timeout,
+  #           force drain the messages and exit cleanly (prevents indefinite hangs)
+  # When = 0: Default safe behavior - wait indefinitely for messages to be processed
+  # 
+  # Use cases:
+  # - Production: 0 (safe default, never force shutdown)
+  # - Dev/Test: 10-30 (prevent hangs during rapid restarts/testing)
+  # - Recovery scenarios: 10 (allows clean shutdown even with corrupted blobstore)
+  #
+  # Note: Only affects abnormal shutdowns (e.g., stuck blobstore recovery)
+  #       Normal shutdowns complete quickly regardless of this setting
+  forceShutdownTimeout: 0  # seconds (0 = disabled, safe default)
+
 # Deployment configuration
 deployment:
   # Node deployment architecture:

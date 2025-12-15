@@ -31,6 +31,10 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if gt (.Values.spdk.forceShutdownTimeout | int) 0 }}
+            - name: SPDK_FORCE_SHUTDOWN_TIMEOUT
+              value: "{{ .Values.spdk.forceShutdownTimeout }}"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
@@ -189,6 +193,10 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if gt (.Values.spdk.forceShutdownTimeout | int) 0 }}
+            - name: SPDK_FORCE_SHUTDOWN_TIMEOUT
+              value: "{{ .Values.spdk.forceShutdownTimeout }}"
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
