@@ -52,9 +52,9 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply ublk debug logging patch
     patch -p1 < /tmp/ublk-debug.patch && \
     echo "✅ ublk debug logging patch applied" && \
-    # Apply combined blobstore recovery optimization (progress logging + 60x speedup)
+    # Apply combined blobstore recovery optimization (progress logging + 60x batching speedup)
     patch -p1 < /tmp/blob-recovery-optimized.patch && \
-    echo "✅ Blobstore recovery optimization applied (batching + progress logging)" && \
+    echo "✅ Blobstore recovery optimization applied (logging + 60x batching)" && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
