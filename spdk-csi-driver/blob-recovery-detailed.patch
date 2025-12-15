@@ -1,6 +1,21 @@
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -4936,6 +4936,13 @@ static void
+@@ -4721,6 +4721,14 @@ bs_load_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bser
+ {
+ 	struct spdk_bs_load_ctx	*ctx = cb_arg;
+ 
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE RECOVERY COMPLETE\n");
++	SPDK_NOTICELOG("  Status: %s\n", bserrno == 0 ? "SUCCESS" : "FAILED");
++	SPDK_NOTICELOG("  Free clusters: %lu / %lu\n", ctx->bs->num_free_clusters, ctx->bs->total_data_clusters);
++	SPDK_NOTICELOG("==========================================\n");
++
++	/* Continue with normal cleanup */
++
+ 	spdk_free(ctx->mask);
+ 	ctx->mask = NULL;
+ 
+@@ -4936,6 +4944,13 @@ static void
  bs_recover(struct spdk_bs_load_ctx *ctx)
  {
  	int		rc;
@@ -14,18 +29,3 @@
  
  	SPDK_NOTICELOG("Performing recovery on blobstore\n");
  	rc = spdk_bit_array_resize(&ctx->bs->used_md_pages, ctx->super->md_len);
-@@ -5736,6 +5743,14 @@ bs_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
- static void
- bs_load_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
- {
-+	struct spdk_bs_load_ctx *ctx = cb_arg;
-+	
-+	SPDK_NOTICELOG("==========================================\n");
-+	SPDK_NOTICELOG("BLOBSTORE RECOVERY COMPLETE\n");
-+	SPDK_NOTICELOG("  Status: %s\n", bserrno == 0 ? "SUCCESS" : "FAILED");
-+	SPDK_NOTICELOG("  Free clusters: %lu / %lu\n", ctx->bs->num_free_clusters, ctx->bs->total_data_clusters);
-+	SPDK_NOTICELOG("==========================================\n");
-+
- 	spdk_free(ctx->mask);
- 	ctx->mask = NULL;
- 
