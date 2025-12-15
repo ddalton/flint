@@ -1413,6 +1413,255 @@ See `tests/system/tests-standard/ephemeral-inline/README.md` for details.
 
 ---
 
+## ReadWriteMany (RWX) Support via NFS
+
+Flint supports **ReadWriteMany (RWX)** volumes, enabling multiple pods across different nodes to read and write to the same volume simultaneously. This is implemented using an integrated NFSv4.2 server (with support for NFSv4.1 and NFSv4.0).
+
+### Architecture Overview
+
+```mermaid
+graph TB
+    PVC[RWX PVC Created] --> VOL[Volume Created<br/>Single or Multi-Replica]
+    VOL --> NFS[NFS Server Pod<br/>Auto-deployed on replica node]
+    NFS -->|NFS mount| POD1[App Pod 1 - Any Node]
+    NFS -->|NFS mount| POD2[App Pod 2 - Any Node]
+    NFS -->|NFS mount| POD3[App Pod 3 - Any Node]
+    
+    style VOL fill:#e1f5fe
+    style NFS fill:#fff3e0
+    style POD1 fill:#e8f5e8
+    style POD2 fill:#e8f5e8
+    style POD3 fill:#e8f5e8
+```
+
+### RWX Volume Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant U as User/kubectl
+    participant C as CSI Controller
+    participant K as Kubernetes
+    participant N as NFS Server Pod
+    participant P as Client Pods
+    
+    U->>C: CreateVolume (RWX access mode)
+    C->>C: Create volume replicas
+    C->>C: Store replica nodes in volume_context
+    C-->>K: Volume created with nfs.enabled=true
+    
+    P->>C: ControllerPublishVolume (first mount)
+    C->>K: Create NFS server pod with node affinity
+    K->>N: Schedule NFS pod to replica node
+    N->>N: Mount volume locally (ublk/RAID)
+    N->>N: Start NFSv4.2 server on port 2049
+    C-->>P: Return NFS server IP in publish_context
+    
+    P->>P: NodePublishVolume (mount NFS)
+    P->>N: NFS mount to /exports/<volume-id>
+    N-->>P: Multiple pods mount concurrently
+    
+    Note over P,N: Multiple pods read/write simultaneously
+    
+    U->>C: DeleteVolume
+    C->>K: Delete NFS server pod
+    C->>C: Delete volume replicas
+```
+
+### Key Components
+
+**NFS Server Pod:**
+- **Naming**: `flint-nfs-<volume-id>`
+- **Binary**: `/usr/local/bin/flint-nfs-server` (included in CSI driver image)
+- **Protocol**: NFSv4.2 (with NFSv4.1 and NFSv4.0 support)
+- **Placement**: Uses node affinity to run on a node with volume replica (local access = high performance)
+- **Port**: 2049 (standard NFS port)
+- **Lifecycle**: Automatically created during first `ControllerPublishVolume`, deleted with volume
+
+**Volume Context Metadata:**
+
+| Key | Value | Purpose |
+|-----|-------|---------|
+| `nfs.flint.io/enabled` | `"true"` | Indicates RWX volume |
+| `nfs.flint.io/replica-nodes` | `"node-1,node-2"` | Nodes for NFS pod placement |
+| `nfs.flint.io/server-ip` | `"10.244.1.5"` | NFS server Pod IP |
+| `nfs.flint.io/export-path` | `"/exports/pvc-abc"` | NFS export path |
+
+### Configuration
+
+**Helm Values:**
+```yaml
+nfs:
+  enabled: true  # Enable RWX support
+  port: 2049
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+
+# NFS server uses same image as CSI driver
+# (includes both csi-driver and flint-nfs-server binaries)
+```
+
+**Usage Example:**
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-data
+spec:
+  accessModes:
+    - ReadWriteMany  # Request RWX
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: flint
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-writer
+spec:
+  replicas: 3  # Multiple pods share same volume
+  template:
+    spec:
+      containers:
+      - name: app
+        image: your-app:latest
+        volumeMounts:
+        - name: data
+          mountPath: /shared
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: shared-data
+```
+
+### Access Modes Comparison
+
+| Mode | Abbreviation | Concurrent Pods | Nodes | Implementation | Performance |
+|------|--------------|-----------------|-------|----------------|-------------|
+| **ReadWriteOnce** | RWO | 1 | 1 | ublk device | 🚀 Fastest (~2 GB/s) |
+| **ReadOnlyMany** | ROX | Many | Many | NFS (read-only) | ⚡ Good (~1 GB/s) |
+| **ReadWriteMany** | RWX | Many | Many | NFS (read-write) | ⚡ Good (~500-800 MB/s remote) |
+
+### Design Decisions
+
+**Node Affinity Strategy:**
+- NFS pod constrained to replica nodes via Kubernetes node affinity
+- Scheduler picks optimal node based on resources and load
+- Enables automatic failover if a replica node becomes unhealthy
+
+**Volume Types Supported:**
+- **Single Replica**: NFS pod runs on the one replica node (local access = ~1-2 GB/s)
+- **Multi-Replica**: NFS pod uses RAID bdev for data durability (local RAID = ~1-2 GB/s)
+
+**NFS Implementation:**
+- NFSv4.2 protocol (primary), with NFSv4.1 and NFSv4.0 support
+- Modern NFSv4 features: compound operations, stateful protocol, improved performance
+- AUTH_NULL authentication (isolation via Kubernetes pod network)
+- TCP transport for reliability
+- Single port operation (2049) - no portmapper needed with NFSv4
+
+### Use Cases
+
+✅ **Ideal For:**
+- Shared configuration files across services
+- Collaborative workloads with multiple writers
+- Content management systems
+- Multi-pod applications needing shared state
+
+❌ **Not Recommended For:**
+- Databases (use RWO with application-level replication)
+- Single-writer workloads (use RWO for better performance)
+- Extreme high-performance computing (network overhead)
+
+### Performance Characteristics
+
+| Access Pattern | Single Replica | Multi-Replica |
+|----------------|----------------|---------------|
+| **NFS Pod (local)** | ~1-2 GB/s | ~1-2 GB/s (via RAID bdev) |
+| **Client Pods (remote)** | ~500-800 MB/s | ~500-800 MB/s |
+| **Latency (metadata)** | ~500μs | ~500μs |
+
+**Performance Tips:**
+- Use `numReplicas: "1"` for best performance
+- Place frequently-accessed pods on same node as NFS server when possible
+- Use `readOnly: true` mounts for read-heavy workloads
+
+### Security & Networking
+
+**RBAC Requirements:**
+Controller needs pod management permissions:
+```yaml
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "create", "delete", "watch"]
+```
+
+**Network Access:**
+- Client pods must reach NFS server pod on port 2049
+- Standard Kubernetes pod-to-pod networking (CNI)
+- Consider NetworkPolicies if cluster uses them
+
+**Node Requirements:**
+- NFS client utilities installed (`nfs-common` on Debian/Ubuntu)
+- Kernel NFS client support (standard in modern Linux)
+
+### Troubleshooting
+
+**Common Issues:**
+
+1. **PVC Stuck in Pending**
+   - Check: `nfs.enabled=true` in Helm values
+   - Check: Nodes have available storage capacity
+
+2. **NFS Server Pod Not Starting**
+   - Check: CSI driver image is accessible
+   - Check: Sufficient node resources
+   - Verify: RBAC permissions for pod creation
+
+3. **Pods Can't Mount NFS**
+   - Wait 60s for NFS server to become ready
+   - Check network policies allow port 2049
+   - Verify `nfs-common` installed on nodes
+
+4. **Slow Performance**
+   - Expected: NFS is network-based (~500 MB/s over network)
+   - Check: NFS pod placement (prefer same node as clients)
+   - Consider: RWO if only single writer needed
+
+### NFS Implementation Details
+
+**Binary Location:** `spdk-csi-driver/src/nfs/`
+
+**Key Files:**
+- `nfs_server.rs` - NFSv4.2 server implementation
+- `vfs.rs` - Virtual filesystem layer
+- `nfs4_procedures.rs` - NFSv4 compound operation handlers
+- `nfs_procedures.rs` - Core NFS RPC handlers
+
+**RPC Support:**
+- NFSv4.2 protocol (RFC 7862)
+- NFSv4.1 protocol (RFC 5661)
+- NFSv4.0 protocol (RFC 7530)
+- All required procedures for read/write operations
+- Compound operations for reduced network round-trips
+- Native pseudo-filesystem support (NFSv4 requirement)
+
+### Future Enhancements
+
+Potential improvements (not currently implemented):
+- HA with multiple NFS pods per volume
+- Automatic failover if NFS pod fails
+- pNFS (parallel NFS) for multi-path data access
+- Health monitoring and auto-restart
+- NFSv4 security features (Kerberos, SEC_GSS)
+
+---
+
 ## Development
 
 ### Building
