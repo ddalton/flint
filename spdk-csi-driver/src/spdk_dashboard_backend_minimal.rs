@@ -532,6 +532,186 @@ async fn proxy_node_agent_endpoint_long(
     }
 }
 
+/// Get all snapshots from all nodes
+async fn get_all_snapshots(state: AppState) -> Result<impl Reply, warp::Rejection> {
+    println!("📸 [DASHBOARD] Fetching snapshots from all nodes");
+    
+    let node_agents = state.node_agents.read().await;
+    let mut all_snapshots = Vec::new();
+    
+    for (node_name, node_url) in node_agents.iter() {
+        println!("   Querying node: {}", node_name);
+        
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| warp::reject())?;
+        
+        let url = format!("{}/api/snapshots/list", node_url);
+        
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                if let Ok(data) = response.json::<serde_json::Value>().await {
+                    if let Some(snapshots) = data["snapshots"].as_array() {
+                        for snapshot in snapshots {
+                            let mut snapshot_with_node = snapshot.clone();
+                            snapshot_with_node["node"] = json!(node_name);
+                            all_snapshots.push(snapshot_with_node);
+                        }
+                        println!("   ✓ Found {} snapshots on {}", snapshots.len(), node_name);
+                    }
+                }
+            }
+            Ok(_) => {
+                println!("   ⚠️ Non-success response from {}", node_name);
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to query {}: {}", node_name, e);
+            }
+        }
+    }
+    
+    println!("✅ [DASHBOARD] Total snapshots found: {}", all_snapshots.len());
+    Ok(warp::reply::json(&all_snapshots))
+}
+
+/// Build snapshot tree/hierarchy from all nodes
+async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejection> {
+    println!("🌳 [DASHBOARD] Building snapshot tree from all nodes");
+    
+    let node_agents = state.node_agents.read().await;
+    let mut all_snapshots = Vec::new();
+    
+    // Collect all snapshots
+    for (node_name, node_url) in node_agents.iter() {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| warp::reject())?;
+        
+        let url = format!("{}/api/snapshots/list", node_url);
+        
+        if let Ok(response) = client.get(&url).send().await {
+            if let Ok(data) = response.json::<serde_json::Value>().await {
+                if let Some(snapshots) = data["snapshots"].as_array() {
+                    for snapshot in snapshots {
+                        let mut s = snapshot.clone();
+                        s["node"] = json!(node_name);
+                        all_snapshots.push(s);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Build tree structure
+    // Group snapshots by parent-child relationships
+    let mut tree_nodes = Vec::new();
+    let mut root_snapshots = Vec::new();
+    
+    for snapshot in &all_snapshots {
+        let snapshot_id = snapshot["snapshot_uuid"].as_str().unwrap_or("");
+        let parent_id = snapshot["parent_id"].as_str();
+        
+        if parent_id.is_none() || parent_id.unwrap().is_empty() {
+            // Root level snapshot (no parent)
+            root_snapshots.push(snapshot.clone());
+        } else {
+            // Child snapshot
+            tree_nodes.push(snapshot.clone());
+        }
+    }
+    
+    // Build hierarchical tree
+    fn build_children(parent_id: &str, snapshots: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        snapshots.iter()
+            .filter(|s| s["parent_id"].as_str().unwrap_or("") == parent_id)
+            .map(|s| {
+                let mut node = s.clone();
+                let children = build_children(
+                    s["snapshot_uuid"].as_str().unwrap_or(""),
+                    snapshots
+                );
+                if !children.is_empty() {
+                    node["children"] = json!(children);
+                }
+                node
+            })
+            .collect()
+    }
+    
+    let tree: Vec<_> = root_snapshots.iter()
+        .map(|root| {
+            let mut node = root.clone();
+            let children = build_children(
+                root["snapshot_uuid"].as_str().unwrap_or(""),
+                &tree_nodes
+            );
+            if !children.is_empty() {
+                node["children"] = json!(children);
+            }
+            node
+        })
+        .collect();
+    
+    println!("✅ [DASHBOARD] Built snapshot tree with {} roots", tree.len());
+    Ok(warp::reply::json(&tree))
+}
+
+/// Delete a snapshot by ID (find node and delete)
+async fn delete_snapshot_by_id(
+    snapshot_id: String,
+    state: AppState
+) -> Result<impl Reply, warp::Rejection> {
+    println!("🗑️ [DASHBOARD] Deleting snapshot: {}", snapshot_id);
+    
+    let node_agents = state.node_agents.read().await;
+    
+    // Find which node has this snapshot
+    for (node_name, node_url) in node_agents.iter() {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| warp::reject())?;
+        
+        // Try to delete on this node
+        let url = format!("{}/api/snapshots/delete", node_url);
+        let payload = json!({
+            "snapshot_uuid": snapshot_id
+        });
+        
+        match client.post(&url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {
+                println!("✅ [DASHBOARD] Snapshot {} deleted from node {}", snapshot_id, node_name);
+                return Ok(warp::reply::json(&json!({
+                    "success": true,
+                    "snapshot_id": snapshot_id,
+                    "node": node_name
+                })));
+            }
+            Ok(response) if response.status() == warp::http::StatusCode::NOT_FOUND => {
+                // Snapshot not on this node, try next
+                continue;
+            }
+            Ok(_) => {
+                println!("   ⚠️ Error response from {}", node_name);
+                continue;
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to query {}: {}", node_name, e);
+                continue;
+            }
+        }
+    }
+    
+    // Snapshot not found on any node
+    println!("❌ [DASHBOARD] Snapshot {} not found on any node", snapshot_id);
+    Ok(warp::reply::json(&json!({
+        "success": false,
+        "error": format!("Snapshot {} not found", snapshot_id)
+    })))
+}
+
 /// Setup all HTTP routes for the minimal dashboard backend  
 pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
     let cors = warp::cors()
@@ -636,6 +816,28 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
             }
         });
     
+    // Snapshot aggregation routes
+    let snapshots_list = warp::path("api")
+        .and(warp::path("snapshots"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and_then(get_all_snapshots);
+    
+    let snapshots_tree = warp::path("api")
+        .and(warp::path("snapshots"))
+        .and(warp::path("tree"))
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and_then(get_snapshots_tree);
+    
+    let snapshot_delete = warp::path("api")
+        .and(warp::path("snapshots"))
+        .and(warp::path::param::<String>())
+        .and(warp::delete())
+        .and(state_filter.clone())
+        .and_then(delete_snapshot_by_id);
+    
     dashboard_route
         .or(proxy_uninitialized)
         .or(proxy_setup)
@@ -644,6 +846,9 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .or(proxy_reset)
         .or(proxy_delete)
         .or(refresh_route)
+        .or(snapshots_list)
+        .or(snapshots_tree)
+        .or(snapshot_delete)
         .with(cors)
 }
 
