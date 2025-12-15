@@ -1,18 +1,11 @@
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -4770,6 +4770,7 @@ bs_load_write_used_md(struct spdk_bs_load_ctx *ctx)
- static void
- bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
- {
-+	static uint64_t last_progress_log = 0;
- 	uint64_t num_md_clusters;
- 	uint64_t i;
- 
-@@ -4779,11 +4780,27 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
+@@ -4779,11 +4779,27 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
  		ctx->page_index++;
  	} while (spdk_bit_array_get(ctx->bs->used_md_pages, ctx->page_index) == true);
  
 +	/* Log recovery progress every 1000 pages or 5 seconds */
++	static uint64_t last_progress_log = 0;
 +	uint64_t now = spdk_get_ticks();
 +	if (ctx->page_index % 1000 == 0 || (now - last_progress_log) > (spdk_get_ticks_hz() * 5)) {
 +		uint32_t progress_pct = (ctx->page_index * 100) / ctx->super->md_len;
@@ -33,39 +26,35 @@
 +		SPDK_NOTICELOG("  Clusters used: %lu\n", ctx->bs->total_clusters - ctx->bs->num_free_clusters);
 +		SPDK_NOTICELOG("  Now writing updated metadata...\n");
 +		SPDK_NOTICELOG("==========================================\n");
-+
  		num_md_clusters = spdk_divide_round_up(
  				  ctx->super->md_start + ctx->super->md_len, ctx->bs->pages_per_cluster);
  		for (i = 0; i < num_md_clusters; i++) {
-@@ -4935,7 +4952,14 @@ bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
- static void
+@@ -4936,6 +4952,13 @@ static void
  bs_recover(struct spdk_bs_load_ctx *ctx)
  {
-+	uint64_t total_size_gb = (ctx->bs->total_data_clusters * ctx->bs->cluster_sz) / (1024ULL * 1024 * 1024);
-+	uint64_t md_pages = ctx->super->md_len;
  	int		rc;
++	uint64_t total_size_gb = (ctx->bs->total_data_clusters * ctx->bs->cluster_sz) / (1024ULL * 1024 * 1024);
 +	
 +	SPDK_NOTICELOG("==========================================\n");
 +	SPDK_NOTICELOG("Starting blobstore recovery:\n");
 +	SPDK_NOTICELOG("  Disk size: %lu GB\n", total_size_gb);
-+	SPDK_NOTICELOG("  Metadata pages to scan: %lu (this may take several minutes for large disks)\n", md_pages);
++	SPDK_NOTICELOG("  Metadata pages to scan: %u (this may take several minutes for large disks)\n", ctx->super->md_len);
 +	SPDK_NOTICELOG("==========================================\n");
  
  	SPDK_NOTICELOG("Performing recovery on blobstore\n");
  	rc = spdk_bit_array_resize(&ctx->bs->used_md_pages, ctx->super->md_len);
-@@ -5046,6 +5070,11 @@ bs_load_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -5047,6 +5070,10 @@ bs_load_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  	} else {
  		SPDK_NOTICELOG("  DECISION: Clean blobstore, no recovery needed\n");
  		SPDK_NOTICELOG("==========================================\n");
-+		
-+		/* Log LVS info on clean load */
 +		SPDK_NOTICELOG("Blobstore loaded cleanly:\n");
 +		SPDK_NOTICELOG("  Total clusters: %lu, Free clusters: %lu\n",
 +			       ctx->bs->total_data_clusters, ctx->bs->num_free_clusters);
++		SPDK_NOTICELOG("==========================================\n");
  		bs_load_read_used_pages(ctx);
  	}
  }
-@@ -5736,6 +5765,15 @@ bs_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -5736,6 +5763,14 @@ bs_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  static void
  bs_load_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  {
@@ -74,11 +63,9 @@
 +	SPDK_NOTICELOG("==========================================\n");
 +	SPDK_NOTICELOG("BLOBSTORE RECOVERY COMPLETE\n");
 +	SPDK_NOTICELOG("  Status: %s\n", bserrno == 0 ? "SUCCESS" : "FAILED");
-+	SPDK_NOTICELOG("  Blobs recovered: %u\n", spdk_bit_array_count_set(ctx->bs->used_blobids));
 +	SPDK_NOTICELOG("  Free clusters: %lu / %lu\n", ctx->bs->num_free_clusters, ctx->bs->total_data_clusters);
 +	SPDK_NOTICELOG("==========================================\n");
 +
  	spdk_free(ctx->mask);
  	ctx->mask = NULL;
  
-
