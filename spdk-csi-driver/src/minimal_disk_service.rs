@@ -822,57 +822,6 @@ impl MinimalDiskService {
         }
     }
 
-    /// Get list of mounted partitions for a device by checking all its partitions
-    async fn get_mounted_partitions(&self, device_name: &str) -> Vec<String> {
-        use std::process::Command;
-        
-        // Read host's /proc/mounts to find mounted partitions
-        // Try /host/proc/mounts first (when running in container with host mount)
-        // Fall back to /proc/mounts (for local testing)
-        let mounts_path = if std::path::Path::new("/host/proc/mounts").exists() {
-            "/host/proc/mounts"
-        } else {
-            "/proc/mounts"
-        };
-        
-        // First, get all partitions for this device (e.g., nvme0n1p1, nvme0n1p2)
-        let partitions = self.get_device_partitions(device_name);
-        
-        match Command::new("cat").arg(mounts_path).output() {
-            Ok(output) => {
-                let mounts = String::from_utf8_lossy(&output.stdout);
-                let mut mount_points = Vec::new();
-                
-                for line in mounts.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let device = parts[0];
-                        let mount_point = parts[1];
-                        
-                        // Check if this mount belongs to any partition of our device
-                        // Handle both direct paths (/dev/nvme0n1p1) and symlinks (/dev/root)
-                        for partition in &partitions {
-                            if device.contains(partition) || device == "/dev/root" {
-                                // If it's /dev/root, we need to verify it actually points to our device
-                                // For now, if we find /dev/root mounted on critical paths, assume it's a system disk
-                                if device == "/dev/root" && self.is_critical_mount_point(mount_point) {
-                                    mount_points.push(mount_point.to_string());
-                                } else if device.contains(partition) {
-                                    mount_points.push(mount_point.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                mount_points
-            }
-            Err(e) => {
-                println!("⚠️ [DISK_DETECT] Failed to read mounts: {}", e);
-                Vec::new()
-            }
-        }
-    }
 
     /// Get list of partitions for a device (e.g., nvme0n1 -> [nvme0n1p1, nvme0n1p2])
     fn get_device_partitions(&self, device_name: &str) -> Vec<String> {
@@ -902,25 +851,6 @@ impl MinimalDiskService {
         partitions
     }
 
-    /// Check if a mount point is critical (indicates system disk)
-    fn is_critical_mount_point(&self, mount_point: &str) -> bool {
-        let critical_mounts = ["/", "/boot", "/usr", "/var", "/etc"];
-        critical_mounts.contains(&mount_point)
-    }
-
-    /// Check if a device is a system disk (has critical system mounts)
-    fn is_system_disk(&self, _device_name: &str, mounted_partitions: &[String]) -> bool {
-        // A disk is a system disk if it has any of these critical mount points
-        let system_mounts = ["/", "/boot", "/usr", "/var", "/etc", "/home"];
-        
-        for mount in mounted_partitions {
-            if system_mounts.contains(&mount.as_str()) {
-                return true;
-            }
-        }
-        
-        false
-    }
 
     /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
         pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1145,9 +1075,22 @@ impl MinimalDiskService {
         // Find LVS information for this bdev
         let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores);
         
-        // Check for mounted partitions on this device
-        let mounted_partitions = self.get_mounted_partitions(&device_name).await;
-        let is_system_disk = self.is_system_disk(&device_name, &mounted_partitions);
+        // Determine if this is a system disk:
+        // Simple heuristic: If it has partitions, it's a system disk (formatted for OS use)
+        // SPDK uses whole disks without partitions
+        let partitions = self.get_device_partitions(&device_name);
+        let is_system_disk = partitions.len() > 1; // More than just the device itself
+        let mounted_partitions: Vec<String> = if is_system_disk {
+            // If it has partitions, assume they're mounted (we can't reliably read host mounts from container)
+            vec!["(partitioned)".to_string()]
+        } else {
+            Vec::new()
+        };
+        
+        if is_system_disk {
+            println!("🔍 [DISK_DETECT] {} has {} partitions: {:?} -> marking as system disk", 
+                device_name, partitions.len() - 1, partitions);
+        }
         
         Ok(Some(DiskInfo {
             node_name: self.node_name.clone(),
