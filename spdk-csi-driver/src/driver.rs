@@ -1309,10 +1309,13 @@ impl SpdkCsiDriver {
 
     /// Connect to NVMe-oF target from current node
     pub async fn connect_to_nvmeof_target(&self, conn_info: &NvmeofConnectionInfo) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔌 [DRIVER] Connecting to NVMe-oF target: {} at {}:{}", 
-                 conn_info.nqn, conn_info.target_ip, conn_info.target_port);
+        println!("🔌 [DRIVER] Connecting to NVMe-oF target");
+        println!("   NQN: {}", conn_info.nqn);
+        println!("   Target: {}:{}", conn_info.target_ip, conn_info.target_port);
+        println!("   Transport: {}", conn_info.transport);
         
         let controller_name = format!("nvme_{}", conn_info.nqn.replace(":", "_").replace(".", "_"));
+        println!("   Controller name: {}", controller_name);
         
         let attach_params = json!({
             "method": "bdev_nvme_attach_controller",
@@ -1326,8 +1329,10 @@ impl SpdkCsiDriver {
             }
         });
 
+        println!("📡 [DRIVER] Calling bdev_nvme_attach_controller...");
         match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {
             Ok(response) => {
+                println!("✅ [DRIVER] bdev_nvme_attach_controller succeeded");
                 // The response should contain the bdev names created
                 if let Some(result) = response.get("result") {
                     if let Some(bdev_names) = result.as_array() {
@@ -1345,12 +1350,87 @@ impl SpdkCsiDriver {
                 Ok(bdev_name)
             }
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [DRIVER] Already connected to NVMe-oF target");
-                let bdev_name = format!("{}n1", controller_name);
-                Ok(bdev_name)
+                println!("⚠️ [DRIVER] Controller already exists (error -114)");
+                println!("   This could mean:");
+                println!("   1. Controller is connected and working (bdev exists) ✅");
+                println!("   2. Controller exists but is FAILED (no bdev) ❌");
+                println!("   Verifying bdev existence...");
+                
+                let expected_bdev = format!("{}n1", controller_name);
+                println!("   Expected bdev name: {}", expected_bdev);
+                
+                match self.verify_bdev_exists(&expected_bdev).await {
+                    Ok(()) => {
+                        // Bdev exists - controller is working
+                        println!("✅ [DRIVER] Bdev verified to exist: {}", expected_bdev);
+                        println!("   Controller is working, using existing connection");
+                        Ok(expected_bdev)
+                    }
+                    Err(_) => {
+                        // Bdev doesn't exist - controller is in FAILED state
+                        println!("❌ [DRIVER] Bdev NOT found - controller is in FAILED state");
+                        println!("   Cleaning up stale controller and retrying...");
+                        
+                        // Delete the failed controller
+                        if let Err(e) = self.delete_nvme_controller(&controller_name).await {
+                            println!("⚠️ [DRIVER] Failed to delete stale controller: {}", e);
+                            println!("   Continuing with retry anyway...");
+                        } else {
+                            println!("✅ [DRIVER] Stale controller deleted: {}", controller_name);
+                        }
+                        
+                        // Retry the attach
+                        println!("🔄 [DRIVER] Retrying bdev_nvme_attach_controller after cleanup...");
+                        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {
+                            Ok(response) => {
+                                if let Some(result) = response.get("result") {
+                                    if let Some(bdev_names) = result.as_array() {
+                                        if let Some(first_bdev) = bdev_names.first() {
+                                            if let Some(bdev_name) = first_bdev.as_str() {
+                                                println!("✅ [DRIVER] Retry succeeded, bdev created: {}", bdev_name);
+                                                return Ok(bdev_name.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                let bdev_name = format!("{}n1", controller_name);
+                                println!("✅ [DRIVER] Retry succeeded, expected bdev: {}", bdev_name);
+                                Ok(bdev_name)
+                            }
+                            Err(e) => {
+                                println!("❌ [DRIVER] Retry failed: {}", e);
+                                Err(format!("Retry attach failed after cleanup: {}", e).into())
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
+                println!("❌ [DRIVER] bdev_nvme_attach_controller failed: {}", e);
                 Err(format!("Failed to attach NVMe controller: {}", e).into())
+            }
+        }
+    }
+
+    /// Delete a failed NVMe controller
+    pub async fn delete_nvme_controller(&self, controller_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧹 [DRIVER] Deleting NVMe controller: {}", controller_name);
+        
+        let rpc = json!({
+            "method": "bdev_nvme_detach_controller",
+            "params": {
+                "name": controller_name
+            }
+        });
+        
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &rpc).await {
+            Ok(_) => {
+                println!("   ✓ Controller deleted successfully: {}", controller_name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to delete controller: {}", e);
+                Err(format!("Failed to delete controller {}: {}", controller_name, e).into())
             }
         }
     }
