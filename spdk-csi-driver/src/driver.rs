@@ -1230,26 +1230,52 @@ impl SpdkCsiDriver {
         
         let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
         
-        // Create subsystem
-        let subsystem_params = json!({
-            "method": "nvmf_create_subsystem",
-            "params": {
-                "nqn": nqn,
-                "allow_any_host": true,
-                "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64),
-                "model_number": "SPDK CSI Volume"
-            }
+        // Check if subsystem already exists
+        let get_subsystems_params = json!({
+            "method": "nvmf_get_subsystems"
         });
-
-        match self.call_node_agent(node_name, "/api/spdk/rpc", &subsystem_params).await {
-            Ok(_) => println!("✅ [DRIVER] Subsystem created: {}", nqn),
-            Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [DRIVER] Subsystem already exists: {}", nqn);
+        
+        let subsystem_exists = match self.call_node_agent(node_name, "/api/spdk/rpc", &get_subsystems_params).await {
+            Ok(response) => {
+                if let Some(result) = response.get("result") {
+                    if let Some(subsystems) = result.as_array() {
+                        subsystems.iter().any(|s| {
+                            s.get("nqn").and_then(|n| n.as_str()).map(|n| n == nqn).unwrap_or(false)
+                        })
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             }
-            Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
+            Err(_) => false
+        };
+        
+        if subsystem_exists {
+            println!("ℹ️ [DRIVER] Subsystem already exists (idempotent): {}", nqn);
+        } else {
+            // Create subsystem
+            let subsystem_params = json!({
+                "method": "nvmf_create_subsystem",
+                "params": {
+                    "nqn": nqn,
+                    "allow_any_host": true,
+                    "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64),
+                    "model_number": "SPDK CSI Volume"
+                }
+            });
+
+            match self.call_node_agent(node_name, "/api/spdk/rpc", &subsystem_params).await {
+                Ok(_) => println!("✅ [DRIVER] Subsystem created: {}", nqn),
+                Err(e) if e.to_string().contains("already exists") => {
+                    println!("ℹ️ [DRIVER] Subsystem already exists (race condition): {}", nqn);
+                }
+                Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
+            }
         }
 
         // Add namespace
