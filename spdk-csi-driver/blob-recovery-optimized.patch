@@ -1,0 +1,217 @@
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -3914,6 +3914,11 @@ struct spdk_bs_load_ctx {
+ 
+ 	bool					force_recover;
+ 
++	/* Batched recovery optimization */
++	struct spdk_blob_md_page	*batch_pages;
++	uint32_t			batch_start;
++	uint32_t			batch_count;
++
+ 	/* These fields are used in the spdk_bs_dump path. */
+ 	bool					dumping;
+ 	FILE					*fp;
+@@ -4721,6 +4726,13 @@ bs_load_write_used_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bser
+ {
+ 	struct spdk_bs_load_ctx	*ctx = cb_arg;
+ 
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE RECOVERY COMPLETE\n");
++	SPDK_NOTICELOG("  Status: %s\n", bserrno == 0 ? "SUCCESS" : "FAILED");
++	SPDK_NOTICELOG("  Free clusters: %lu / %lu\n", ctx->bs->num_free_clusters, ctx->bs->total_data_clusters);
++	SPDK_NOTICELOG("==========================================\n");
++
++	/* Continue with normal cleanup */
+ 	spdk_free(ctx->mask);
+ 	ctx->mask = NULL;
+ 
+@@ -4783,10 +4795,19 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
+ 		ctx->page_index++;
+ 	} while (spdk_bit_array_get(ctx->bs->used_md_pages, ctx->page_index) == true);
+ 
++	/* Log recovery progress every 10000 pages */
++	if (ctx->page_index % 10000 == 0 && ctx->page_index > 0) {
++		uint32_t progress_pct = (ctx->page_index * 100) / ctx->super->md_len;
++		SPDK_NOTICELOG("Recovery progress: %u/%u pages scanned (%u%% complete)\n",
++			       ctx->page_index, ctx->super->md_len, progress_pct);
++	}
++
+ 	if (ctx->page_index < ctx->super->md_len) {
+ 		ctx->cur_page = ctx->page_index;
+ 		bs_load_replay_cur_md_page(ctx);
+ 	} else {
++		SPDK_NOTICELOG("Recovery: Metadata scan complete - scanned %u pages\n", ctx->super->md_len);
++		SPDK_NOTICELOG("  Now writing updated metadata to disk...\n");
+ 		/* Claim all of the clusters used by the metadata */
+ 		num_md_clusters = spdk_divide_round_up(
+ 				  ctx->super->md_start + ctx->super->md_len, ctx->bs->pages_per_cluster);
+@@ -4866,6 +4887,10 @@ static void bs_load_replay_extent_pages(struct spdk_bs_load_ctx *ctx)
+ 	bs_batch_close(batch);
+ }
+ 
++/* Batch size for parallel recovery reads. 64 pages = 256KB buffer */
++#define BS_RECOVERY_READ_BATCH 64
++
++static void bs_load_replay_batch_read(struct spdk_bs_load_ctx *ctx);
+ static void
+ bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ {
+@@ -4908,6 +4933,45 @@ bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ 	bs_load_replay_md_chain_cpl(ctx);
+ }
+ 
++static void
++bs_load_replay_batch_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
++{
++	struct spdk_bs_load_ctx *ctx = cb_arg;
++	uint32_t i;
++	
++	if (bserrno != 0) {
++		spdk_free(ctx->batch_pages);
++		bs_load_ctx_fail(ctx, bserrno);
++		return;
++	}
++	
++	/* Process all pages in the batch */
++	for (i = 0; i < ctx->batch_count; i++) {
++		ctx->cur_page = ctx->batch_start + i;
++		ctx->page = &ctx->batch_pages[i];
++		
++		if (bs_load_cur_md_page_valid(ctx) == true) {
++			if (ctx->page->sequence_num == 0 || ctx->in_page_chain == true) {
++				spdk_spin_lock(&ctx->bs->used_lock);
++				bs_claim_md_page(ctx->bs, ctx->cur_page);
++				spdk_spin_unlock(&ctx->bs->used_lock);
++				if (ctx->page->sequence_num == 0) {
++					spdk_bit_array_set(ctx->bs->used_blobids, ctx->cur_page);
++				}
++				if (bs_load_replay_md_parse_page(ctx, ctx->page)) {
++					spdk_free(ctx->batch_pages);
++					bs_load_ctx_fail(ctx, -EILSEQ);
++					return;
++				}
++			}
++		}
++	}
++	
++	/* Move to next batch */
++	ctx->page_index = ctx->batch_start + ctx->batch_count - 1;
++	spdk_free(ctx->batch_pages);
++	bs_load_replay_batch_read(ctx);
++}
++
+ static void
+ bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
+ {
+@@ -4919,18 +4983,57 @@ bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
+ 			     bs_load_replay_md_cpl, ctx);
+ }
+ 
++static void
++bs_load_replay_batch_read(struct spdk_bs_load_ctx *ctx)
++{
++	spdk_bs_batch_t *batch;
++	uint32_t remaining, batch_size, i;
++	uint64_t lba;
++	
++	remaining = ctx->super->md_len - ctx->page_index - 1;
++	
++	if (remaining == 0) {
++		bs_load_replay_md_chain_cpl(ctx);
++		return;
++	}
++	
++	batch_size = remaining < BS_RECOVERY_READ_BATCH ? remaining : BS_RECOVERY_READ_BATCH;
++	ctx->batch_start = ctx->page_index + 1;
++	ctx->batch_count = batch_size;
++	
++	ctx->batch_pages = spdk_zmalloc(ctx->bs->md_page_size * batch_size, 0,
++	                                 NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++	if (!ctx->batch_pages) {
++		SPDK_WARNLOG("Batch alloc failed, falling back to single-page mode\n");
++		ctx->cur_page = ctx->page_index + 1;
++		ctx->page = spdk_zmalloc(ctx->bs->md_page_size, 0,
++		                         NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++		if (!ctx->page) {
++			bs_load_ctx_fail(ctx, -ENOMEM);
++			return;
++		}
++		bs_load_replay_cur_md_page(ctx);
++		return;
++	}
++	
++	batch = bs_sequence_to_batch(ctx->seq, bs_load_replay_batch_cpl, ctx);
++	for (i = 0; i < batch_size; i++) {
++		lba = bs_md_page_to_lba(ctx->bs, ctx->batch_start + i);
++		bs_batch_read_dev(batch, &ctx->batch_pages[i], lba,
++		                  bs_byte_to_lba(ctx->bs, ctx->bs->md_page_size));
++	}
++	bs_batch_close(batch);
++}
++
+ static void
+ bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
+ {
+ 	ctx->page_index = 0;
+-	ctx->cur_page = 0;
+-	ctx->page = spdk_zmalloc(ctx->bs->md_page_size, 0,
+-				 NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
+-	if (!ctx->page) {
+-		bs_load_ctx_fail(ctx, -ENOMEM);
+-		return;
+-	}
+-	bs_load_replay_cur_md_page(ctx);
++	
++	SPDK_NOTICELOG("Recovery: Using batched reads (%u pages/batch)\n", 
++	               BS_RECOVERY_READ_BATCH);
++	
++	ctx->page_index = -1;
++	bs_load_replay_batch_read(ctx);
+ }
+ 
+ static void
+@@ -4936,7 +5039,13 @@ static void
+ bs_recover(struct spdk_bs_load_ctx *ctx)
+ {
+ 	int		rc;
++	uint64_t total_size_gb = (ctx->bs->total_data_clusters * ctx->bs->cluster_sz) / (1024ULL * 1024 * 1024);
+ 
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE RECOVERY STARTING\n");
++	SPDK_NOTICELOG("  Disk size: %lu GB\n", total_size_gb);
++	SPDK_NOTICELOG("  MD pages to scan: %u (may take several minutes)\n", ctx->super->md_len);
++	SPDK_NOTICELOG("==========================================\n");
+ 	SPDK_NOTICELOG("Performing recovery on blobstore\n");
+ 	rc = spdk_bit_array_resize(&ctx->bs->used_md_pages, ctx->super->md_len);
+ 	if (rc < 0) {
+@@ -5026,7 +5135,26 @@ bs_load_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ 		return;
+ 	}
+ 
++	SPDK_NOTICELOG("==========================================\n");
++	SPDK_NOTICELOG("BLOBSTORE LOAD: Checking recovery status\n");
++	SPDK_NOTICELOG("  used_blobid_mask_len: %u\n", ctx->super->used_blobid_mask_len);
++	SPDK_NOTICELOG("  clean flag: %u\n", ctx->super->clean);
++	SPDK_NOTICELOG("  force_recover: %u\n", ctx->force_recover);
++	
+ 	if (ctx->super->used_blobid_mask_len == 0 || ctx->super->clean == 0 || ctx->force_recover) {
++		if (ctx->super->used_blobid_mask_len == 0) {
++			SPDK_NOTICELOG("  REASON: No blobid mask found\n");
++		}
++		if (ctx->super->clean == 0) {
++			SPDK_NOTICELOG("  REASON: Blobstore was not cleanly unmounted\n");
++		}
++		if (ctx->force_recover) {
++			SPDK_NOTICELOG("  REASON: Force recovery requested\n");
++		}
++		SPDK_NOTICELOG("  DECISION: Recovery required\n");
++		SPDK_NOTICELOG("==========================================\n");
+ 		bs_recover(ctx);
+ 	} else {
++		SPDK_NOTICELOG("  DECISION: Clean blobstore, no recovery needed\n");
++		SPDK_NOTICELOG("==========================================\n");
+ 		bs_load_read_used_pages(ctx);
+ 	}
+ }
+

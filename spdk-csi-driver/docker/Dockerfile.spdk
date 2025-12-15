@@ -36,8 +36,7 @@ WORKDIR /spdk
 # Copy patches
 COPY lvol-flush.patch /tmp/
 COPY ublk-debug.patch /tmp/
-COPY blob-recovery-complete.patch /tmp/
-COPY blob-recovery-batch-SIMPLEST.patch /tmp/
+COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
@@ -53,12 +52,9 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply ublk debug logging patch
     patch -p1 < /tmp/ublk-debug.patch && \
     echo "✅ ublk debug logging patch applied" && \
-    # Apply blobstore recovery complete logging patch
-    patch -p1 < /tmp/blob-recovery-complete.patch && \
-    echo "✅ Blobstore recovery complete logging patch applied" && \
-    # Apply blobstore recovery batching patch (60x speedup!)
-    patch -p1 < /tmp/blob-recovery-batch-SIMPLEST.patch && \
-    echo "✅ Blobstore recovery batching patch applied (60x speedup)" && \
+    # Apply combined blobstore recovery optimization (progress logging + 60x speedup)
+    patch -p1 < /tmp/blob-recovery-optimized.patch && \
+    echo "✅ Blobstore recovery optimization applied (batching + progress logging)" && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
