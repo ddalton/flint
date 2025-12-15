@@ -307,6 +307,128 @@ fn convert_disk_info_to_dashboard(disk_info: &DiskInfo) -> DashboardDisk {
     }
 }
 
+/// Get all active PV lvol UUIDs from Kubernetes
+async fn get_active_pv_lvol_uuids(kube_client: &Client) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error>> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    
+    let pvs_api: Api<PersistentVolume> = Api::all(kube_client.clone());
+    let pvs = pvs_api.list(&ListParams::default()).await?;
+    
+    let mut active_uuids = std::collections::HashSet::new();
+    
+    for pv in pvs.items {
+        if let Some(csi) = &pv.spec.and_then(|s| s.csi) {
+            if csi.driver == "flint.csi.storage.io" {
+                if let Some(attrs) = &csi.volume_attributes {
+                    if let Some(lvol_uuid) = attrs.get("flint.csi.storage.io/lvol-uuid") {
+                        active_uuids.insert(lvol_uuid.clone());
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("📋 [DASHBOARD] Found {} active PV lvol UUIDs", active_uuids.len());
+    Ok(active_uuids)
+}
+
+/// Fetch all lvols from a specific node
+async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    
+    let url = format!("{}/api/spdk/rpc", node_url);
+    let payload = json!({
+        "method": "bdev_get_bdevs"
+    });
+    
+    let response = client.post(&url)
+        .json(&payload)
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Failed to get bdevs from {}: {}", node_name, response.status()).into());
+    }
+    
+    let data: serde_json::Value = response.json().await?;
+    
+    if let Some(bdevs) = data["result"].as_array() {
+        // Filter for logical volumes only
+        let lvols: Vec<_> = bdevs.iter()
+            .filter(|b| b["product_name"].as_str() == Some("Logical Volume"))
+            .cloned()
+            .collect();
+        
+        println!("   Found {} lvols on {}", lvols.len(), node_name);
+        Ok(lvols)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Detect orphaned lvols across all nodes
+async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<OrphanedVolumeInfo>>, Box<dyn std::error::Error>> {
+    println!("🔍 [DASHBOARD] Detecting orphaned lvols...");
+    
+    // Get active PV lvol UUIDs from Kubernetes
+    let active_uuids = get_active_pv_lvol_uuids(&state.kube_client).await?;
+    
+    let node_agents = state.node_agents.read().await;
+    let mut orphaned_by_node: HashMap<String, Vec<OrphanedVolumeInfo>> = HashMap::new();
+    
+    for (node_name, node_url) in node_agents.iter() {
+        println!("   Checking node: {}", node_name);
+        
+        match fetch_lvols_from_node(node_url, node_name).await {
+            Ok(lvols) => {
+                let mut orphans = Vec::new();
+                
+                for lvol in lvols {
+                    let uuid = lvol["uuid"].as_str().unwrap_or("");
+                    let name = lvol.get("aliases")
+                        .and_then(|a| a.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|a| a.as_str())
+                        .unwrap_or(uuid);
+                    
+                    // Check if this lvol is referenced by any active PV
+                    if !active_uuids.contains(uuid) {
+                        let size_blocks = lvol["num_blocks"].as_u64().unwrap_or(0);
+                        let block_size = lvol["block_size"].as_u64().unwrap_or(512);
+                        let size_bytes = size_blocks * block_size;
+                        let size_gb = size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        
+                        orphans.push(OrphanedVolumeInfo {
+                            spdk_volume_name: name.to_string(),
+                            spdk_volume_uuid: uuid.to_string(),
+                            size_blocks,
+                            size_gb,
+                            orphaned_since: Utc::now().to_rfc3339(),
+                        });
+                    }
+                }
+                
+                if !orphans.is_empty() {
+                    println!("   ⚠️ Found {} orphaned lvols on {}", orphans.len(), node_name);
+                    orphaned_by_node.insert(node_name.clone(), orphans);
+                } else {
+                    println!("   ✓ No orphaned lvols on {}", node_name);
+                }
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to fetch lvols from {}: {}", node_name, e);
+            }
+        }
+    }
+    
+    let total_orphans: usize = orphaned_by_node.values().map(|v| v.len()).sum();
+    println!("✅ [DASHBOARD] Orphan detection complete: {} orphaned lvols total", total_orphans);
+    
+    Ok(orphaned_by_node)
+}
+
 /// Refresh dashboard data using minimal state approach
 async fn refresh_dashboard_data_minimal(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔄 [MINIMAL_DASHBOARD_REFRESH] Starting minimal state dashboard refresh...");
@@ -316,7 +438,18 @@ async fn refresh_dashboard_data_minimal(state: &AppState) -> Result<(), Box<dyn 
     *state.node_agents.write().await = node_agents;
     
     // Fetch disks from all node agents
-    let dashboard_disks = fetch_all_disks_from_node_agents(state).await?;
+    let mut dashboard_disks = fetch_all_disks_from_node_agents(state).await?;
+    
+    // Detect orphaned lvols and populate disk orphaned_spdk_volumes
+    let orphaned_by_node = detect_orphaned_lvols(state).await?;
+    
+    // Add orphaned volumes to their respective disks
+    for disk in dashboard_disks.iter_mut() {
+        if let Some(orphans) = orphaned_by_node.get(&disk.node) {
+            disk.orphaned_spdk_volumes = orphans.clone();
+            println!("   Added {} orphaned lvols to disk on {}", orphans.len(), disk.node);
+        }
+    }
     
     // TODO: Fetch volumes from node agents (when volume management is added)
     let dashboard_volumes = Vec::new();
@@ -658,6 +791,66 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
     Ok(warp::reply::json(&tree))
 }
 
+/// Delete an orphaned lvol by UUID
+async fn delete_orphaned_lvol(
+    lvol_uuid: String,
+    state: AppState
+) -> Result<impl Reply, warp::Rejection> {
+    println!("🗑️ [DASHBOARD] Deleting orphaned lvol: {}", lvol_uuid);
+    
+    let node_agents = state.node_agents.read().await;
+    
+    // Find which node has this lvol and delete it
+    for (node_name, node_url) in node_agents.iter() {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| warp::reject())?;
+        
+        // Try to delete lvol on this node using bdev_lvol_delete
+        let url = format!("{}/api/spdk/rpc", node_url);
+        let payload = json!({
+            "method": "bdev_lvol_delete",
+            "params": {
+                "name": lvol_uuid
+            }
+        });
+        
+        match client.post(&url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {
+                println!("✅ [DASHBOARD] Orphaned lvol {} deleted from node {}", lvol_uuid, node_name);
+                return Ok(warp::reply::json(&json!({
+                    "success": true,
+                    "lvol_uuid": lvol_uuid,
+                    "node": node_name
+                })));
+            }
+            Ok(response) => {
+                // Check if it's a "not found" error
+                if let Ok(body) = response.text().await {
+                    if body.contains("No such device") || body.contains("not found") {
+                        // Lvol not on this node, try next
+                        continue;
+                    }
+                    println!("   ⚠️ Error from {}: {}", node_name, body);
+                }
+                continue;
+            }
+            Err(e) => {
+                println!("   ⚠️ Failed to query {}: {}", node_name, e);
+                continue;
+            }
+        }
+    }
+    
+    // Lvol not found on any node
+    println!("❌ [DASHBOARD] Orphaned lvol {} not found on any node", lvol_uuid);
+    Ok(warp::reply::json(&json!({
+        "success": false,
+        "error": format!("Orphaned lvol {} not found", lvol_uuid)
+    })))
+}
+
 /// Delete a snapshot by ID (find node and delete)
 async fn delete_snapshot_by_id(
     snapshot_id: String,
@@ -838,6 +1031,14 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(state_filter.clone())
         .and_then(delete_snapshot_by_id);
     
+    // Orphaned volume deletion route
+    let orphan_delete = warp::path("api")
+        .and(warp::path("orphans"))
+        .and(warp::path::param::<String>())
+        .and(warp::delete())
+        .and(state_filter.clone())
+        .and_then(delete_orphaned_lvol);
+    
     dashboard_route
         .or(proxy_uninitialized)
         .or(proxy_setup)
@@ -849,6 +1050,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .or(snapshots_list)
         .or(snapshots_tree)
         .or(snapshot_delete)
+        .or(orphan_delete)
         .with(cors)
 }
 
