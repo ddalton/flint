@@ -635,6 +635,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               <th 
                 className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
                 onClick={() => handleSort('read_iops')}
+                title="I/O operations per second (5-minute average)"
               >
                 <div className="flex items-center gap-1">
                   Performance
@@ -794,7 +795,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div className="space-y-1">
+                      <div className="space-y-1" title="5-minute average activity">
                         <div className="flex items-center gap-1">
                           <span className="text-xs text-green-600">R:</span>
                           <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
@@ -804,7 +805,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                           <span className="text-xs">{disk.write_iops.toLocaleString()} IOPS</span>
                         </div>
                         <div className="text-xs text-gray-400">
-                          {disk.read_latency}μs / {disk.write_latency}μs
+                          5min avg
                         </div>
                       </div>
                     </td>
@@ -909,12 +910,14 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               <span className="text-blue-700 font-medium">Highest Read IOPS:</span>
               <div className="text-blue-900">
                 {Math.max(...filteredDisks.map(d => d.read_iops)).toLocaleString()} IOPS
+                <span className="text-xs text-gray-500 ml-1">(5min avg)</span>
               </div>
             </div>
             <div>
               <span className="text-blue-700 font-medium">Highest Write IOPS:</span>
               <div className="text-blue-900">
                 {Math.max(...filteredDisks.map(d => d.write_iops)).toLocaleString()} IOPS
+                <span className="text-xs text-gray-500 ml-1">(5min avg)</span>
               </div>
             </div>
             <div>
