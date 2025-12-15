@@ -104,7 +104,7 @@
  static void
  bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
  {
-@@ -4919,18 +4983,57 @@ bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
+@@ -4919,16 +4983,60 @@ bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
  			     bs_load_replay_md_cpl, ctx);
  }
  
@@ -171,7 +171,7 @@
  }
  
  static void
-@@ -4936,7 +5039,13 @@ static void
+@@ -4936,7 +5044,13 @@ static void
  bs_recover(struct spdk_bs_load_ctx *ctx)
  {
  	int		rc;
@@ -185,7 +185,7 @@
  	SPDK_NOTICELOG("Performing recovery on blobstore\n");
  	rc = spdk_bit_array_resize(&ctx->bs->used_md_pages, ctx->super->md_len);
  	if (rc < 0) {
-@@ -5026,7 +5135,26 @@ bs_load_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -5026,7 +5140,26 @@ bs_load_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  		return;
  	}
  
@@ -214,4 +214,3 @@
  		bs_load_read_used_pages(ctx);
  	}
  }
-
