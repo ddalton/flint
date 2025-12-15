@@ -857,6 +857,8 @@ impl SpdkCsiDriver {
                 blobstore_initialized: true,
                 lvs_name: disk_json["lvs_name"].as_str().map(|s| s.to_string()),
                 lvol_count: disk_json["lvol_count"].as_u64().unwrap_or(0) as u32,
+                is_system_disk: false, // Only initialized disks are returned, not system disks
+                mounted_partitions: Vec::new(), // Not relevant for SPDK-managed disks
             };
             disks.push(disk);
         }
@@ -895,6 +897,8 @@ impl SpdkCsiDriver {
                 blobstore_initialized: false, // These are uninitialized disks
                 lvs_name: None,
                 lvol_count: 0,
+                is_system_disk: false, // Will be determined by caller/frontend
+                mounted_partitions: Vec::new(),
             };
             disks.push(disk);
         }

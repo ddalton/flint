@@ -822,6 +822,52 @@ impl MinimalDiskService {
         }
     }
 
+    /// Get list of mounted partitions for a device
+    async fn get_mounted_partitions(&self, device_name: &str) -> Vec<String> {
+        use std::process::Command;
+        
+        // Read /proc/mounts to find mounted partitions
+        match Command::new("cat").arg("/proc/mounts").output() {
+            Ok(output) => {
+                let mounts = String::from_utf8_lossy(&output.stdout);
+                let mut partitions = Vec::new();
+                
+                for line in mounts.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let device = parts[0];
+                        let mount_point = parts[1];
+                        
+                        // Check if this mount belongs to our device (e.g., /dev/nvme0n1p1)
+                        if device.contains(device_name) {
+                            partitions.push(mount_point.to_string());
+                        }
+                    }
+                }
+                
+                partitions
+            }
+            Err(e) => {
+                println!("⚠️ [DISK_DETECT] Failed to read mounts: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Check if a device is a system disk (has critical system mounts)
+    fn is_system_disk(&self, _device_name: &str, mounted_partitions: &[String]) -> bool {
+        // A disk is a system disk if it has any of these critical mount points
+        let system_mounts = ["/", "/boot", "/usr", "/var", "/etc", "/home"];
+        
+        for mount in mounted_partitions {
+            if system_mounts.contains(&mount.as_str()) {
+                return true;
+            }
+        }
+        
+        false
+    }
+
     /// Call SPDK RPC via Unix socket (NODE AGENT pattern)
         pub async fn call_spdk_rpc(&self, rpc_request: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
             use crate::spdk_native::SpdkNative;
@@ -1045,6 +1091,10 @@ impl MinimalDiskService {
         // Find LVS information for this bdev
         let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores);
         
+        // Check for mounted partitions on this device
+        let mounted_partitions = self.get_mounted_partitions(&device_name).await;
+        let is_system_disk = self.is_system_disk(&device_name, &mounted_partitions);
+        
         Ok(Some(DiskInfo {
             node_name: self.node_name.clone(),
             pci_address,
@@ -1063,6 +1113,8 @@ impl MinimalDiskService {
             firmware: Some("unknown".to_string()),
             model: product_name.to_string(),
             serial: Some("unknown".to_string()),
+            is_system_disk,
+            mounted_partitions,
         }))
     }
 

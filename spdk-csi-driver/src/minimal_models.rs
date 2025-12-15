@@ -42,6 +42,8 @@ pub struct DiskInfo {
     pub blobstore_initialized: bool,
     pub lvs_name: Option<String>,
     pub lvol_count: u32,
+    pub is_system_disk: bool,
+    pub mounted_partitions: Vec<String>,
 }
 
 /// Volume information aggregated from SPDK
