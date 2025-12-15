@@ -283,34 +283,32 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
     setIsDeleting(true);
     try {
-      const response = await fetch('/api/volumes/orphaned', {
+      const response = await fetch(`/api/orphans/${volumeToDelete.volume.spdk_volume_uuid}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          node: volumeToDelete.diskNode,
-          volume_name: volumeToDelete.volume.spdk_volume_name,
-          volume_uuid: volumeToDelete.volume.spdk_volume_uuid,
-          reason: `User deleted orphaned volume via dashboard`
-        })
+        }
       });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
 
       const result = await response.json();
       
       if (result.success) {
-        console.log('✅ Successfully deleted orphaned volume:', result.deleted_volume);
+        console.log('✅ Successfully deleted orphaned volume:', volumeToDelete.volume.spdk_volume_uuid);
         // Reset dialog state
         setShowDeleteDialog(false);
         setVolumeToDelete(null);
         setDeleteConfirmText('');
         
-        // TODO: Refresh dashboard data to show the change
-        // For now, user can refresh the page manually
-        alert(`Successfully deleted orphaned volume '${volumeToDelete.volume.spdk_volume_name}' (${result.deleted_volume?.size_gb?.toFixed(2)}GB)`);
+        // Refresh dashboard data to show the change
+        alert(`Successfully deleted orphaned volume '${volumeToDelete.volume.spdk_volume_name}' from ${result.node}`);
+        window.location.reload(); // Refresh to update disk list
       } else {
-        console.error('❌ Failed to delete orphaned volume:', result.message);
-        alert(`Failed to delete orphaned volume: ${result.message}`);
+        console.error('❌ Failed to delete orphaned volume:', result.error);
+        alert(`Failed to delete orphaned volume: ${result.error}`);
       }
     } catch (error) {
       console.error('❌ Error deleting orphaned volume:', error);
