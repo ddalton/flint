@@ -179,6 +179,8 @@ pub struct AppState {
     cache: Arc<RwLock<Option<DashboardData>>>,
     last_update: Arc<RwLock<DateTime<Utc>>>,
     target_namespace: String,
+    // IOPS calculation: store previous iostat snapshots
+    iostat_history: Arc<RwLock<HashMap<String, (DateTime<Utc>, serde_json::Value)>>>, // bdev_name -> (timestamp, iostat)
 }
 
 
@@ -257,7 +259,7 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
                             if let Some(disks_array) = data["disks"].as_array() {
                                 for disk_json in disks_array {
                                     if let Ok(disk_info) = serde_json::from_value::<DiskInfo>(disk_json.clone()) {
-                                        let dashboard_disk = convert_disk_info_to_dashboard(&disk_info);
+                                        let dashboard_disk = convert_disk_info_to_dashboard(&disk_info, agent_url, state).await;
                                         all_disks.push(dashboard_disk);
                                     }
                                 }
@@ -282,8 +284,85 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
     Ok(all_disks)
 }
 
-/// Convert minimal DiskInfo to dashboard format
-fn convert_disk_info_to_dashboard(disk_info: &DiskInfo) -> DashboardDisk {
+/// Fetch IOPS statistics for a bdev
+async fn fetch_bdev_iops(
+    node_url: &str,
+    bdev_name: &str,
+    state: &AppState
+) -> (u64, u64) {
+    let client = match HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build() {
+        Ok(c) => c,
+        Err(_) => return (0, 0)
+    };
+    
+    let url = format!("{}/api/spdk/rpc", node_url);
+    let payload = json!({
+        "method": "bdev_get_iostat",
+        "params": {
+            "name": bdev_name
+        }
+    });
+    
+    let response = match client.post(&url).json(&payload).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return (0, 0)
+    };
+    
+    let data: serde_json::Value = match response.json().await {
+        Ok(d) => d,
+        Err(_) => return (0, 0)
+    };
+    
+    // Extract current stats
+    if let Some(bdevs) = data["result"]["bdevs"].as_array() {
+        if let Some(bdev) = bdevs.first() {
+            let num_read_ops = bdev["num_read_ops"].as_u64().unwrap_or(0);
+            let num_write_ops = bdev["num_write_ops"].as_u64().unwrap_or(0);
+            
+            // Calculate IOPS by comparing with previous snapshot
+            let mut history = state.iostat_history.write().await;
+            let key = format!("{}_{}", node_url, bdev_name);
+            
+            if let Some((prev_time, prev_data)) = history.get(&key) {
+                let time_diff = Utc::now().signed_duration_since(*prev_time).num_seconds() as f64;
+                
+                if time_diff > 0.0 {
+                    let prev_read_ops = prev_data["num_read_ops"].as_u64().unwrap_or(0);
+                    let prev_write_ops = prev_data["num_write_ops"].as_u64().unwrap_or(0);
+                    
+                    let read_iops = ((num_read_ops - prev_read_ops) as f64 / time_diff) as u64;
+                    let write_iops = ((num_write_ops - prev_write_ops) as f64 / time_diff) as u64;
+                    
+                    // Update history
+                    let current_data = json!({
+                        "num_read_ops": num_read_ops,
+                        "num_write_ops": num_write_ops
+                    });
+                    history.insert(key, (Utc::now(), current_data));
+                    
+                    return (read_iops, write_iops);
+                }
+            }
+            
+            // First measurement - store and return 0
+            let current_data = json!({
+                "num_read_ops": num_read_ops,
+                "num_write_ops": num_write_ops
+            });
+            history.insert(key, (Utc::now(), current_data));
+        }
+    }
+    
+    (0, 0)
+}
+
+/// Convert minimal DiskInfo to dashboard format (async to fetch IOPS)
+async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, state: &AppState) -> DashboardDisk {
+    // Get IOPS for the base bdev
+    let (read_iops, write_iops) = fetch_bdev_iops(node_url, &disk_info.bdev_name, state).await;
+    
     DashboardDisk {
         id: format!("{}_{}", disk_info.node_name, disk_info.pci_address.replace(":", "-")),
         node: disk_info.node_name.clone(),
@@ -297,13 +376,13 @@ fn convert_disk_info_to_dashboard(disk_info: &DiskInfo) -> DashboardDisk {
         blobstore_initialized: disk_info.blobstore_initialized,
         lvol_count: disk_info.lvol_count,
         model: disk_info.model.clone(),
-        read_iops: 0,     // TODO: Get from SPDK metrics
-        write_iops: 0,    // TODO: Get from SPDK metrics
-        read_latency: 0,  // TODO: Get from SPDK metrics
-        write_latency: 0, // TODO: Get from SPDK metrics
+        read_iops,
+        write_iops,
+        read_latency: 0,  // TODO: Calculate from latency_ticks
+        write_latency: 0, // TODO: Calculate from latency_ticks
         brought_online: Utc::now().to_rfc3339(),
         provisioned_volumes: Vec::new(), // TODO: Get from volume discovery
-        orphaned_spdk_volumes: Vec::new(), // TODO: Get from SPDK queries
+        orphaned_spdk_volumes: Vec::new(), // Populated later
     }
 }
 
@@ -1072,6 +1151,7 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
         cache: Arc::new(RwLock::new(None)),
         last_update: Arc::new(RwLock::new(DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now))),
         target_namespace,
+        iostat_history: Arc::new(RwLock::new(HashMap::new())),
     };
     
     println!("🎯 [MINIMAL_DASHBOARD] Using namespace: {}", app_state.target_namespace);
