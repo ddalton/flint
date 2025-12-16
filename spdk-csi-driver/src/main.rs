@@ -1218,8 +1218,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         
         // Supported access modes
         let supported_modes = vec![
-            Mode::SingleNodeWriter,      // RWO - single node read-write
-            Mode::MultiNodeReaderOnly,    // ROX - multi-node read-only
+            Mode::SingleNodeWriter,         // RWO - single node read-write
+            Mode::SingleNodeSingleWriter,   // RWOP - single pod read-write (stricter than RWO)
+            Mode::MultiNodeReaderOnly,      // ROX - multi-node read-only (via NFS)
+            Mode::MultiNodeMultiWriter,     // RWX - multi-node read-write (via NFS)
         ];
         
         // Validate requested capabilities
