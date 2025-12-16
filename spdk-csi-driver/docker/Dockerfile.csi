@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     e2fsprogs \
     xfsprogs \
     mount \
+    nfs-common \
     pciutils \
     curl \
     ca-certificates \
