@@ -20,32 +20,26 @@ use bytes::{Bytes, BufMut, BytesMut};
 
 /// Translate UID to NFSv4 owner string
 ///
-/// Per NFS-Ganesha implementation (fsal_pseudo.c), returns NUMERIC string.
 /// Using "root" or "root@domain" causes ID mapping issues when domain
 /// configuration doesn't match - client maps to nobody (UID 65534).
 ///
 /// Numeric strings (e.g., "0", "1000") are universally recognized by
 /// Linux NFS client's idmapper and avoid domain configuration issues.
-///
-/// Reference: https://github.com/nfs-ganesha/nfs-ganesha (fsal_pseudo.c)
 fn uid_to_username(uid: u32) -> String {
-    // Use numeric string like Ganesha does
+    // Use numeric string 
     // This avoids ID mapping failures when domain config is missing/mismatched
     uid.to_string()
 }
 
 /// Translate GID to NFSv4 group string
 ///
-/// Per NFS-Ganesha implementation (fsal_pseudo.c), returns NUMERIC string.
 /// Using "root" or "root@domain" causes ID mapping issues when domain
 /// configuration doesn't match - client maps to nogroup (GID 65534).
 ///
 /// Numeric strings (e.g., "0", "1000") are universally recognized by
 /// Linux NFS client's idmapper and avoid domain configuration issues.
-///
-/// Reference: https://github.com/nfs-ganesha/nfs-ganesha (fsal_pseudo.c)
 fn gid_to_groupname(gid: u32) -> String {
-    // Use numeric string like Ganesha does
+    // Use numeric string 
     // This avoids ID mapping failures when domain config is missing/mismatched
     gid.to_string()
 }

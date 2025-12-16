@@ -1491,7 +1491,7 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     // Return array of supported security flavors
-                    // Per RFC 5661, return both AUTH_NONE and AUTH_SYS like Ganesha does
+                    // Per RFC 5661, return both AUTH_NONE and AUTH_SYS 
                     // We accept both (parse but don't enforce credentials)
                     encoder.encode_u32(2); // Array length: 2 flavors
                     encoder.encode_u32(0); // AUTH_NONE
@@ -1717,7 +1717,6 @@ mod tests {
     #[test]
     fn test_secinfo_no_name_dual_flavors() {
         // Verify SECINFO_NO_NAME returns both AUTH_NONE and AUTH_SYS
-        // This matches Ganesha behavior and gives clients flexibility
         
         let result = OperationResult::SecInfoNoName(Nfs4Status::Ok);
         
