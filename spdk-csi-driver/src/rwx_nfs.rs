@@ -337,7 +337,9 @@ pub async fn create_nfs_server_pod(
                 protocol: Some("TCP".to_string()),
                 ..Default::default()
             }]),
-            cluster_ip: Some("None".to_string()), // Headless service
+            // ClusterIP service (default) - gets stable virtual IP
+            // This IP survives pod restarts and rescheduling
+            // Note: type field defaults to ClusterIP if not specified
             ..Default::default()
         }),
         ..Default::default()
@@ -382,7 +384,9 @@ pub async fn nfs_pod_exists(
     }
 }
 
-/// Wait for NFS server pod to become ready and return (node_name, pod_ip)
+/// Wait for NFS server pod to become ready and return (node_name, service_endpoint)
+/// 
+/// Returns the Service ClusterIP (stable endpoint) instead of pod IP
 /// 
 /// # Timeout
 /// Waits up to 60 seconds for pod to be ready
@@ -399,9 +403,11 @@ pub async fn wait_for_nfs_pod_ready(
     };
     
     let pod_name = format!("flint-nfs-{}", volume_id);
-    let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
+    let service_name = format!("flint-nfs-{}", volume_id);
+    let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), &config.namespace);
+    let services_api: Api<Service> = Api::namespaced(kube_client, &config.namespace);
     
-    eprintln!("⏳ [NFS] Waiting for NFS pod to be ready: {}", pod_name);
+    eprintln!("⏳ [NFS] Waiting for NFS pod and service to be ready: {}", pod_name);
     
     // Wait up to 60 seconds
     for attempt in 1..=60 {
@@ -416,15 +422,26 @@ pub async fn wait_for_nfs_pod_ready(
                                 .as_ref()
                                 .and_then(|s| s.node_name.as_ref()) 
                             {
-                                // Return Service DNS name instead of pod IP (stable endpoint)
-                                let service_dns = format!("flint-nfs-{}.{}.svc.cluster.local", 
-                                                         volume_id, config.namespace);
-                                eprintln!("✅ [NFS] Pod ready!");
-                                eprintln!("   Node: {}", node_name);
-                                eprintln!("   Pod IP: {}", pod_ip);
-                                eprintln!("   Service DNS: {}", service_dns);
-                                eprintln!("   Attempts: {}/60", attempt);
-                                return Ok((node_name.clone(), service_dns));
+                                // Get Service ClusterIP (stable virtual IP)
+                                match services_api.get(&service_name).await {
+                                    Ok(svc) => {
+                                        if let Some(spec) = &svc.spec {
+                                            if let Some(cluster_ip) = &spec.cluster_ip {
+                                                eprintln!("✅ [NFS] Pod ready!");
+                                                eprintln!("   Node: {}", node_name);
+                                                eprintln!("   Pod IP: {}", pod_ip);
+                                                eprintln!("   Service ClusterIP: {}", cluster_ip);
+                                                eprintln!("   Service DNS: {}.{}.svc.cluster.local", service_name, config.namespace);
+                                                eprintln!("   Attempts: {}/60", attempt);
+                                                return Ok((node_name.clone(), cluster_ip.clone()));
+                                            }
+                                        }
+                                        eprintln!("   Attempt {}/60: Service exists but no ClusterIP yet", attempt);
+                                    }
+                                    Err(_) => {
+                                        eprintln!("   Attempt {}/60: Service not ready yet", attempt);
+                                    }
+                                }
                             }
                         } else {
                             eprintln!("   Attempt {}/60: Pod phase: {}", attempt, phase);
