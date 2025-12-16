@@ -958,7 +958,21 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.volume_id.clone();
         let node_id = req.node_id.clone();
         
-        println!("📤 [CONTROLLER] Publishing volume {} to node {}", volume_id, node_id);
+        // Handle synthetic volumeHandle for NFS PVs
+        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts
+        let (actual_volume_id, is_nfs_pv) = if volume_id.starts_with("nfs-server-") {
+            let original_id = req.volume_context.get("originalVolumeId")
+                .ok_or_else(|| tonic::Status::invalid_argument(
+                    "NFS PV missing originalVolumeId in volumeAttributes"
+                ))?
+                .clone();
+            println!("📤 [CONTROLLER] NFS PV detected: {} → original volume: {}", volume_id, original_id);
+            (original_id, true)
+        } else {
+            (volume_id.clone(), false)
+        };
+        
+        println!("📤 [CONTROLLER] Publishing volume {} to node {}", actual_volume_id, node_id);
 
         let mut publish_context = std::collections::HashMap::new();
 
@@ -1005,13 +1019,25 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             if !pod_exists {
                 println!("🚀 [NFS] Creating NFS server pod for volume: {}", volume_id);
                 
-                // Create NFS server pod with appropriate access mode
-                // Pass full volume_context so inline CSI volume has all metadata
+                // Create NFS server infrastructure (RWO PVC/PV + Pod)
+                // Get capacity from volume_context
+                let capacity_bytes = req.volume_context
+                    .get("size")
+                    .and_then(|s| {
+                        if s.ends_with("Gi") {
+                            s.trim_end_matches("Gi").parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
+                        } else {
+                            s.parse::<i64>().ok()
+                        }
+                    })
+                    .unwrap_or(1073741824); // Default 1GB if missing
+                
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
                     self.driver.kube_client.clone(),
                     &volume_id,
                     &replica_nodes,
                     &req.volume_context,
+                    capacity_bytes,
                     is_rox // ROX=true (read-only), RWX=false (read-write)
                 ).await?;
             } else {
@@ -1049,7 +1075,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
 
         // Check if this is a multi-replica volume
-        match self.driver.get_replicas_from_pv(&volume_id).await {
+        // Use actual_volume_id to query the real volume's metadata
+        match self.driver.get_replicas_from_pv(&actual_volume_id).await {
             Ok(Some(replicas)) => {
                 // MULTI-REPLICA: Store replicas as JSON for NodeStage
                 println!("📊 [CONTROLLER] Multi-replica volume with {} replicas", replicas.len());
@@ -1063,7 +1090,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }
             Ok(None) => {
                 // SINGLE REPLICA: Use existing logic
-                let volume_info = match self.driver.get_volume_info(&volume_id).await {
+                // Use actual_volume_id to query the real volume's metadata
+                let volume_info = match self.driver.get_volume_info(&actual_volume_id).await {
                     Ok(info) => info,
                     Err(e) => {
                         println!("❌ [CONTROLLER] Failed to get volume info: {}", e);

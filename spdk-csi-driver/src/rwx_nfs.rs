@@ -29,9 +29,11 @@ use std::env;
 use kube::{Api, Client, api::{PostParams, DeleteParams}};
 use k8s_openapi::api::core::v1::{
     Pod, PodSpec, Container, VolumeMount, Volume,
-    PersistentVolumeClaimVolumeSource, ContainerPort,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
+    PersistentVolume, PersistentVolumeSpec, ObjectReference,
+    CSIPersistentVolumeSource, ContainerPort,
     Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm,
-    NodeSelectorRequirement, ResourceRequirements,
+    NodeSelectorRequirement, PreferredSchedulingTerm, ResourceRequirements,
     Service, ServiceSpec, ServicePort,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -148,11 +150,19 @@ pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<V
     Ok(nodes)
 }
 
-/// Create NFS server pod with node affinity to replica nodes
+/// Create NFS server pod with RWO PVC/PV (HA-capable)
 /// 
 /// # Parameters
-/// - `volume_context`: Full volume metadata from PV (passed to inline CSI volume)
+/// - `volume_context`: Full volume metadata from user's PV
+/// - `capacity_bytes`: Volume size in bytes
 /// - `read_only`: If true, exports volume as read-only (for ROX volumes)
+/// 
+/// # Architecture
+/// - Creates RWO PVC+PV in flint-system namespace
+/// - PV uses synthetic volumeHandle to avoid conflicts with user PV
+/// - NFS pod mounts this RWO PVC
+/// - Leverages multi-replica/RAID for HA
+/// - Preferred node affinity for performance
 /// 
 /// # Zero-Regression Design
 /// - Only called when nfs.flint.io/enabled=true in volume_context
@@ -164,6 +174,7 @@ pub async fn create_nfs_server_pod(
     volume_id: &str,
     replica_nodes: &[String],
     volume_context: &HashMap<String, String>,
+    capacity_bytes: i64,
     read_only: bool,
 ) -> Result<(), Status> {
     // SAFETY: Early return if NFS disabled (zero-regression guarantee)
@@ -178,28 +189,143 @@ pub async fn create_nfs_server_pod(
     };
     
     let pod_name = format!("flint-nfs-{}", volume_id);
+    let pvc_name = format!("flint-nfs-pvc-{}", volume_id);
+    let pv_name = format!("flint-nfs-pv-{}", volume_id);
+    
+    // Synthetic volumeHandle to avoid conflict with user PV
+    let nfs_volume_handle = format!("nfs-server-{}", volume_id);
     
     let mode = if read_only { "ROX (ReadOnlyMany)" } else { "RWX (ReadWriteMany)" };
-    eprintln!("🚀 [NFS] Creating NFS server pod: {}", pod_name);
+    eprintln!("🚀 [NFS] Creating NFS server infrastructure: {}", pod_name);
     eprintln!("   Volume ID: {}", volume_id);
+    eprintln!("   NFS volumeHandle: {}", nfs_volume_handle);
     eprintln!("   Namespace: {}", config.namespace);
     eprintln!("   Access Mode: {}", mode);
-    eprintln!("   Mount Method: CSI inline volume");
-    eprintln!("   Replica nodes (affinity): {:?}", replica_nodes);
+    eprintln!("   Mount Method: RWO PVC (HA-capable with multi-replica)");
+    eprintln!("   Replica nodes: {:?}", replica_nodes);
     
-    // Build node affinity to constrain pod to replica nodes
-    // Kubernetes scheduler will pick the best node among these options
-    let node_affinity = NodeAffinity {
-        required_during_scheduling_ignored_during_execution: Some(NodeSelector {
-            node_selector_terms: vec![NodeSelectorTerm {
-                match_expressions: Some(vec![NodeSelectorRequirement {
-                    key: "kubernetes.io/hostname".to_string(),
-                    operator: "In".to_string(),
-                    values: Some(replica_nodes.to_vec()),
-                }]),
+    // Step 1: Create PV (RWO mode) with synthetic volumeHandle
+    eprintln!("📦 [NFS] Step 1: Creating PV for NFS pod (RWO mode)");
+    let pv_api: Api<PersistentVolume> = Api::all(kube_client.clone());
+    
+    let pv = PersistentVolume {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(pv_name.clone()),
+            labels: Some([
+                ("app".to_string(), "flint-nfs-server".to_string()),
+                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+            ].into_iter().collect()),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeSpec {
+            capacity: Some([
+                ("storage".to_string(), Quantity(format!("{}", capacity_bytes))),
+            ].into_iter().collect()),
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            persistent_volume_reclaim_policy: Some("Retain".to_string()),
+            storage_class_name: Some("flint".to_string()),
+            claim_ref: Some(ObjectReference {
+                namespace: Some(config.namespace.clone()),
+                name: Some(pvc_name.clone()),
                 ..Default::default()
-            }],
+            }),
+            csi: Some(CSIPersistentVolumeSource {
+                driver: "flint.csi.storage.io".to_string(),
+                volume_handle: nfs_volume_handle.clone(),  // Synthetic handle!
+                volume_attributes: Some({
+                    let mut attrs: BTreeMap<String, String> = volume_context.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    // Add original volume ID so CSI driver knows which real volume to mount
+                    attrs.insert("originalVolumeId".to_string(), volume_id.to_string());
+                    attrs
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
         }),
+        ..Default::default()
+    };
+    
+    match pv_api.create(&PostParams::default(), &pv).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] PV created: {}", pv_name);
+        }
+        Err(e) if e.to_string().contains("AlreadyExists") => {
+            eprintln!("ℹ️  [NFS] PV already exists: {}", pv_name);
+        }
+        Err(e) => {
+            eprintln!("❌ [NFS] Failed to create PV: {}", e);
+            return Err(Status::internal(format!("Failed to create NFS PV: {}", e)));
+        }
+    }
+    
+    // Step 2: Create PVC in flint-system
+    eprintln!("📦 [NFS] Step 2: Creating PVC for NFS pod");
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(kube_client.clone(), &config.namespace);
+    
+    let pvc = PersistentVolumeClaim {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(pvc_name.clone()),
+            namespace: Some(config.namespace.clone()),
+            labels: Some([
+                ("app".to_string(), "flint-nfs-server".to_string()),
+                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+            ].into_iter().collect()),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                requests: Some([
+                    ("storage".to_string(), Quantity(format!("{}", capacity_bytes))),
+                ].into_iter().collect()),
+                ..Default::default()
+            }),
+            storage_class_name: Some("flint".to_string()),
+            volume_name: Some(pv_name.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    
+    match pvc_api.create(&PostParams::default(), &pvc).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] PVC created: {}", pvc_name);
+        }
+        Err(e) if e.to_string().contains("AlreadyExists") => {
+            eprintln!("ℹ️  [NFS] PVC already exists: {}", pvc_name);
+        }
+        Err(e) => {
+            eprintln!("❌ [NFS] Failed to create PVC: {}", e);
+            return Err(Status::internal(format!("Failed to create NFS PVC: {}", e)));
+        }
+    }
+    
+    // Step 3: Create NFS pod
+    eprintln!("📦 [NFS] Step 3: Creating NFS pod");
+    
+    // Build preferred node affinity to optimize for replica nodes
+    // Uses "preferred" (not "required") for HA flexibility:
+    // - Scheduler tries replica nodes first (local access via ublk)
+    // - Can schedule elsewhere if needed (via NVMe-oF to replica)
+    // - Works with multi-replica RAID for HA
+    let node_affinity = NodeAffinity {
+        preferred_during_scheduling_ignored_during_execution: Some(
+            replica_nodes.iter().enumerate().map(|(i, node)| {
+                PreferredSchedulingTerm {
+                    weight: (replica_nodes.len() as i32) - (i as i32), // Prefer first replica
+                    preference: NodeSelectorTerm {
+                        match_expressions: Some(vec![NodeSelectorRequirement {
+                            key: "kubernetes.io/hostname".to_string(),
+                            operator: "In".to_string(),
+                            values: Some(vec![node.clone()]),
+                        }]),
+                        ..Default::default()
+                    },
+                }
+            }).collect()
+        ),
         ..Default::default()
     };
     
@@ -280,20 +406,10 @@ pub async fn create_nfs_server_pod(
             
             volumes: Some(vec![Volume {
                 name: "volume-data".to_string(),
-                // Use CSI inline volume with full metadata
-                // Pass all volume_context so CSI driver has complete information
-                csi: Some(k8s_openapi::api::core::v1::CSIVolumeSource {
-                    driver: "flint.csi.storage.io".to_string(),
-                    volume_attributes: Some({
-                        let mut attrs: BTreeMap<String, String> = volume_context.iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        // Ensure volumeId is present (required by CSI)
-                        attrs.insert("volumeId".to_string(), volume_id.to_string());
-                        attrs
-                    }),
-                    read_only: Some(false),
-                    ..Default::default()
+                // Mount RWO PVC - leverages multi-replica/RAID for HA
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: pvc_name.clone(),
+                    read_only: Some(false),  // NFS pod needs write access
                 }),
                 ..Default::default()
             }]),
@@ -469,11 +585,11 @@ pub async fn wait_for_nfs_pod_ready(
     ))
 }
 
-/// Delete NFS server pod for a volume
+/// Delete NFS server infrastructure (Pod, Service, PVC, PV) for a volume
 /// 
 /// # Safety
-/// - Only deletes pods with label flint.io/volume-id=<volume_id>
-/// - Safe to call even if pod doesn't exist
+/// - Only deletes resources with label flint.io/volume-id=<volume_id>
+/// - Safe to call even if resources don't exist
 pub async fn delete_nfs_server_pod(
     kube_client: Client,
     volume_id: &str,
@@ -486,8 +602,10 @@ pub async fn delete_nfs_server_pod(
     
     let pod_name = format!("flint-nfs-{}", volume_id);
     let service_name = format!("flint-nfs-{}", volume_id);
+    let pvc_name = format!("flint-nfs-pvc-{}", volume_id);
+    let pv_name = format!("flint-nfs-pv-{}", volume_id);
     
-    eprintln!("🗑️  [NFS] Deleting NFS resources for volume: {}", volume_id);
+    eprintln!("🗑️  [NFS] Deleting NFS infrastructure for volume: {}", volume_id);
     
     // Delete Service first
     let services_api: Api<Service> = Api::namespaced(kube_client.clone(), &config.namespace);
@@ -504,22 +622,49 @@ pub async fn delete_nfs_server_pod(
     }
     
     // Delete Pod
-    let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
+    let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), &config.namespace);
     match pods_api.delete(&pod_name, &DeleteParams::default()).await {
         Ok(_) => {
-            eprintln!("✅ [NFS] NFS pod deleted: {}", pod_name);
-            Ok(())
+            eprintln!("✅ [NFS] Pod deleted: {}", pod_name);
         }
         Err(e) if e.to_string().contains("NotFound") => {
             eprintln!("ℹ️  [NFS] Pod already deleted: {}", pod_name);
-            Ok(())
         }
         Err(e) => {
-            eprintln!("⚠️  [NFS] Failed to delete NFS pod: {}", e);
-            // Don't fail volume deletion if NFS pod deletion fails
-            // User can manually clean up pods if needed
-            Ok(())
+            eprintln!("⚠️  [NFS] Failed to delete pod: {}", e);
         }
     }
+    
+    // Delete PVC
+    let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(kube_client.clone(), &config.namespace);
+    match pvc_api.delete(&pvc_name, &DeleteParams::default()).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] PVC deleted: {}", pvc_name);
+        }
+        Err(e) if e.to_string().contains("NotFound") => {
+            eprintln!("ℹ️  [NFS] PVC already deleted: {}", pvc_name);
+        }
+        Err(e) => {
+            eprintln!("⚠️  [NFS] Failed to delete PVC: {}", e);
+        }
+    }
+    
+    // Delete PV
+    let pv_api: Api<PersistentVolume> = Api::all(kube_client);
+    match pv_api.delete(&pv_name, &DeleteParams::default()).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] PV deleted: {}", pv_name);
+        }
+        Err(e) if e.to_string().contains("NotFound") => {
+            eprintln!("ℹ️  [NFS] PV already deleted: {}", pv_name);
+        }
+        Err(e) => {
+            eprintln!("⚠️  [NFS] Failed to delete PV: {}", e);
+        }
+    }
+    
+    // Don't fail volume deletion if NFS resource cleanup fails
+    // User can manually clean up if needed
+    Ok(())
 }
 
