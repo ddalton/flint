@@ -1000,7 +1000,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 println!("🚀 [NFS] Creating NFS server pod for volume: {}", volume_id);
                 
                 // Create NFS server pod with appropriate access mode
-                // NFS pod uses CSI inline volume to mount directly (Longhorn share-manager pattern)
+                // NFS pod uses CSI inline volume to mount directly 
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
                     self.driver.kube_client.clone(),
                     &volume_id,

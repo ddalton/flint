@@ -180,7 +180,7 @@ pub async fn create_nfs_server_pod(
     eprintln!("   Volume ID: {}", volume_id);
     eprintln!("   Namespace: {}", config.namespace);
     eprintln!("   Access Mode: {}", mode);
-    eprintln!("   Mount Method: CSI inline volume (Longhorn share-manager pattern)");
+    eprintln!("   Mount Method: CSI inline volume");
     eprintln!("   Replica nodes (affinity): {:?}", replica_nodes);
     
     // Build node affinity to constrain pod to replica nodes
