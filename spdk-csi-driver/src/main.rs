@@ -733,6 +733,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 // Build volume_context with metadata
                 let mut volume_context = std::collections::HashMap::new();
                 
+                // Add size (needed for inline CSI volumes which treat it like ephemeral)
+                volume_context.insert(
+                    "size".to_string(),
+                    format!("{}Gi", size_bytes / (1024 * 1024 * 1024)),
+                );
+                
                 // Add replica count
                 volume_context.insert(
                     "flint.csi.storage.io/replica-count".to_string(),
@@ -1000,11 +1006,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 println!("🚀 [NFS] Creating NFS server pod for volume: {}", volume_id);
                 
                 // Create NFS server pod with appropriate access mode
-                // NFS pod uses CSI inline volume to mount directly 
+                // Pass full volume_context so inline CSI volume has all metadata
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
                     self.driver.kube_client.clone(),
                     &volume_id,
                     &replica_nodes,
+                    &req.volume_context,
                     is_rox // ROX=true (read-only), RWX=false (read-write)
                 ).await?;
             } else {

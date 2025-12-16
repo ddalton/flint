@@ -151,6 +151,7 @@ pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<V
 /// Create NFS server pod with node affinity to replica nodes
 /// 
 /// # Parameters
+/// - `volume_context`: Full volume metadata from PV (passed to inline CSI volume)
 /// - `read_only`: If true, exports volume as read-only (for ROX volumes)
 /// 
 /// # Zero-Regression Design
@@ -162,6 +163,7 @@ pub async fn create_nfs_server_pod(
     kube_client: Client,
     volume_id: &str,
     replica_nodes: &[String],
+    volume_context: &HashMap<String, String>,
     read_only: bool,
 ) -> Result<(), Status> {
     // SAFETY: Early return if NFS disabled (zero-regression guarantee)
@@ -278,13 +280,18 @@ pub async fn create_nfs_server_pod(
             
             volumes: Some(vec![Volume {
                 name: "volume-data".to_string(),
-                // Use CSI inline volume to mount the PV directly
-                // This allows NFS pod in flint-system to mount PV from any namespace
+                // Use CSI inline volume with full metadata
+                // Pass all volume_context so CSI driver has complete information
                 csi: Some(k8s_openapi::api::core::v1::CSIVolumeSource {
                     driver: "flint.csi.storage.io".to_string(),
-                    volume_attributes: Some([
-                        ("volumeId".to_string(), volume_id.to_string()),
-                    ].into_iter().collect()),
+                    volume_attributes: Some({
+                        let mut attrs: BTreeMap<String, String> = volume_context.iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        // Ensure volumeId is present (required by CSI)
+                        attrs.insert("volumeId".to_string(), volume_id.to_string());
+                        attrs
+                    }),
                     read_only: Some(false),
                     ..Default::default()
                 }),
