@@ -2101,28 +2101,76 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 "vers=4.2".to_string()
             };
             
-            // Use nsenter to execute mount in host's mount namespace
-            // This gives us access to host's mount.nfs4 helper
-            println!("🔧 [RWX] Mounting NFS via host namespace: {} → {}", nfs_source, target_path);
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("🔧 [RWX] NFS Mount Attempt");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("   Source:  {}", nfs_source);
+            println!("   Target:  {}", target_path);
             println!("   Options: {}", mount_opts);
+            println!("   Method:  nsenter to host mount namespace");
+            
+            // Check if nsenter is available
+            let nsenter_check = std::process::Command::new("which")
+                .arg("nsenter")
+                .output();
+            
+            match nsenter_check {
+                Ok(output) if output.status.success() => {
+                    let path = String::from_utf8_lossy(&output.stdout);
+                    println!("✅ [RWX] nsenter found: {}", path.trim());
+                }
+                _ => {
+                    println!("⚠️  [RWX] nsenter not found - trying anyway");
+                }
+            }
+            
+            // Check if target directory exists
+            println!("🔍 [RWX] Checking target directory...");
+            if !std::path::Path::new(&target_path).exists() {
+                println!("   Creating target directory: {}", target_path);
+                std::fs::create_dir_all(&target_path)
+                    .map_err(|e| tonic::Status::internal(format!("Failed to create mount target: {}", e)))?;
+            } else {
+                println!("   Target directory exists: {}", target_path);
+            }
+            
+            // Build full command for logging
+            let cmd_args = vec![
+                "--mount=/proc/1/ns/mnt",
+                "--",
+                "mount",
+                "-t", "nfs",
+                "-o", &mount_opts,
+                &nfs_source,
+                &target_path,
+            ];
+            println!("🔧 [RWX] Executing: nsenter {}", cmd_args.join(" "));
             
             let mount_output = std::process::Command::new("nsenter")
-                .args(&[
-                    "--mount=/proc/1/ns/mnt",
-                    "--",
-                    "mount",
-                    "-t", "nfs",
-                    "-o", &mount_opts,
-                    &nfs_source,
-                    &target_path,
-                ])
+                .args(&cmd_args)
                 .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute NFS mount: {}", e)))?;
+                .map_err(|e| {
+                    println!("❌ [RWX] Failed to execute nsenter: {}", e);
+                    tonic::Status::internal(format!("Failed to execute NFS mount: {}", e))
+                })?;
+            
+            // Log detailed output regardless of success/failure
+            println!("📊 [RWX] Mount command exit code: {}", mount_output.status.code().unwrap_or(-1));
+            
+            let stdout = String::from_utf8_lossy(&mount_output.stdout);
+            if !stdout.is_empty() {
+                println!("📤 [RWX] stdout: {}", stdout);
+            }
+            
+            let stderr = String::from_utf8_lossy(&mount_output.stderr);
+            if !stderr.is_empty() {
+                println!("📤 [RWX] stderr: {}", stderr);
+            }
             
             if !mount_output.status.success() {
-                let error = String::from_utf8_lossy(&mount_output.stderr);
-                println!("❌ [RWX] NFS mount failed: {}", error);
-                return Err(tonic::Status::internal(format!("NFS mount failed: {}", error)));
+                println!("❌ [RWX] NFS mount FAILED");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                return Err(tonic::Status::internal(format!("NFS mount failed: {}", stderr)));
             }
             
             println!("✅ [RWX] NFS volume mounted successfully at {}", target_path);
