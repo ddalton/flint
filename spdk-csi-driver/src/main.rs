@@ -1453,6 +1453,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 .ok_or_else(|| tonic::Status::invalid_argument("No volumeType in publish context"))?
         };
 
+        // Handle NFS volumes - no staging needed, mount happens in NodePublishVolume
+        if volume_type == "nfs" {
+            println!("📡 [NODE_STAGE] NFS volume detected - skipping staging (mount happens in NodePublishVolume)");
+            println!("   Volume ID: {}", volume_id);
+            println!("   NFS server IP: {}", publish_context.get("nfs.flint.io/server-ip").unwrap_or(&"unknown".to_string()));
+            
+            // For NFS volumes, just create the staging directory
+            std::fs::create_dir_all(&staging_target_path)
+                .map_err(|e| tonic::Status::internal(format!("Failed to create staging directory: {}", e)))?;
+            
+            println!("✅ [NODE_STAGE] NFS volume staged successfully (no device mount needed)");
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}));
+        }
+
         let bdev_name = if volume_type == "multi-replica" {
             // MULTI-REPLICA: Create RAID 1 from replicas
             println!("🔧 [NODE] Multi-replica volume - creating RAID");
