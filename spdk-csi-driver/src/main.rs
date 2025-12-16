@@ -787,6 +787,14 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         replica_nodes_str.clone(),
                     );
                     
+                    // Store PVC name for NFS pod creation (CSI provisioner passes this)
+                    if let Some(pvc_name) = req.parameters.get("csi.storage.k8s.io/pvc/name") {
+                        volume_context.insert(
+                            "csi.storage.k8s.io/pvc/name".to_string(),
+                            pvc_name.clone(),
+                        );
+                    }
+                    
                     if is_rox {
                         println!("🔒 [ROX] NFS metadata added to volume context (read-only)");
                     } else {
@@ -992,11 +1000,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 println!("🚀 [RWX] Creating NFS server pod for volume: {}", volume_id);
                 
                 // We need the PVC name to mount it in the NFS pod
-                // The PVC name is typically derived from the volume_id or passed in volume_context
+                // The PVC name is in volume_context, or we use volume_id (already has pvc- prefix)
                 let pvc_name = req.volume_context
                     .get("csi.storage.k8s.io/pvc/name")
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("pvc-{}", volume_id));
+                    .unwrap_or_else(|| volume_id.clone());
                 
                 // Create NFS server pod with appropriate access mode
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(

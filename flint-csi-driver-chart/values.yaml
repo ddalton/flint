@@ -209,9 +209,9 @@ affinity: {}
 # When enabled, RWX PVCs will automatically deploy an NFS server pod
 # that exports the underlying SPDK volume over NFS
 nfs:
-  # Enable NFS server support for ReadWriteMany volumes
+  # Enable NFS server support for ReadWriteMany and ReadOnlyMany volumes
   # Set to false to maintain existing RWO-only behavior (zero regression)
-  enabled: false
+  enabled: true
   
   # NFS server port (standard NFS port, do not change unless required)
   port: 2049
