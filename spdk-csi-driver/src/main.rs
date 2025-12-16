@@ -2124,6 +2124,28 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
             
+            // Check if host has mount.nfs4 helper via nsenter
+            println!("🔍 [RWX] Checking for mount.nfs4 in host namespace...");
+            let helper_check = std::process::Command::new("nsenter")
+                .args(&["--mount=/proc/1/ns/mnt", "--", "ls", "-la", "/sbin/mount.nfs", "/usr/sbin/mount.nfs4"])
+                .output();
+            
+            match helper_check {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if output.status.success() {
+                        println!("✅ [RWX] NFS helpers found in host:\n{}", stdout);
+                    } else {
+                        println!("⚠️  [RWX] NFS helpers check failed:\n{}", stderr);
+                        println!("   This likely means nfs-common/nfs-utils not installed on host");
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️  [RWX] Failed to check NFS helpers: {}", e);
+                }
+            }
+            
             // Check if target directory exists
             println!("🔍 [RWX] Checking target directory...");
             if !std::path::Path::new(&target_path).exists() {
@@ -2135,10 +2157,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
             
             // Build full command for logging
+            // Use host's mount binary to ensure it can find mount.nfs4 helper
             let cmd_args = vec![
                 "--mount=/proc/1/ns/mnt",
                 "--",
-                "mount",
+                "/bin/mount",  // Use absolute path to host's mount
                 "-t", "nfs",
                 "-o", &mount_opts,
                 &nfs_source,
