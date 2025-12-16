@@ -2101,8 +2101,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 "vers=4.2".to_string()
             };
             
-            let mount_output = std::process::Command::new("mount")
+            // Use nsenter to execute mount in host's mount namespace
+            // This gives us access to host's mount.nfs4 helper
+            println!("🔧 [RWX] Mounting NFS via host namespace: {} → {}", nfs_source, target_path);
+            println!("   Options: {}", mount_opts);
+            
+            let mount_output = std::process::Command::new("nsenter")
                 .args(&[
+                    "--mount=/proc/1/ns/mnt",
+                    "--",
+                    "mount",
                     "-t", "nfs",
                     "-o", &mount_opts,
                     &nfs_source,
