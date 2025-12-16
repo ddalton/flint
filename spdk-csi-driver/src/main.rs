@@ -934,15 +934,30 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         let mut publish_context = std::collections::HashMap::new();
 
-        // Check if this is an NFS-enabled volume (RWX)
-        // Note: volume_context is in req.volume_context (from PV.spec.csi.volumeAttributes)
-        let is_nfs_enabled = req.volume_context
+        // Check if this is a ROX (ReadOnlyMany) or RWX (ReadWriteMany) volume
+        let is_rox = req.volume_capability.as_ref()
+            .and_then(|cap| cap.access_mode.as_ref())
+            .map(|am| {
+                use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
+                am.mode == Mode::MultiNodeReaderOnly as i32
+            })
+            .unwrap_or(false);
+        
+        let is_rwx = req.volume_context
             .get("nfs.flint.io/enabled")
             .map(|v| v == "true")
             .unwrap_or(false);
         
-        if is_nfs_enabled {
-            println!("📡 [RWX] NFS-enabled volume detected");
+        // Both ROX and RWX use NFS for multi-pod access
+        // ROX exports read-only, RWX exports read-write
+        if is_rox || is_rwx {
+            if is_rox {
+                println!("🔒 [ROX] ReadOnlyMany volume detected - using NFS (read-only)");
+            } else {
+                println!("🔄 [RWX] ReadWriteMany volume detected - using NFS (read-write)");
+            }
+            println!("   Volume ID: {}", volume_id);
+            println!("   Node requesting: {}", node_id);
             
             // Parse replica nodes from volume_context
             let replica_nodes = match spdk_csi_driver::rwx_nfs::parse_replica_nodes(&req.volume_context) {
@@ -969,12 +984,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("pvc-{}", volume_id));
                 
-                // Create NFS server pod
+                // Create NFS server pod with appropriate access mode
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
                     self.driver.kube_client.clone(),
                     &volume_id,
                     &pvc_name,
-                    &replica_nodes
+                    &replica_nodes,
+                    is_rox // ROX=true (read-only), RWX=false (read-write)
                 ).await?;
             } else {
                 println!("ℹ️  [RWX] NFS server pod already exists for volume: {}", volume_id);
@@ -1035,18 +1051,9 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
                 println!("📊 [CONTROLLER] Single-replica volume on node {}", volume_info.node_name);
 
-                // Check if this is a ROX (ReadOnlyMany) volume
-                let is_rox = req.volume_capability.as_ref()
-                    .and_then(|cap| cap.access_mode.as_ref())
-                    .map(|am| {
-                        use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
-                        am.mode == Mode::MultiNodeReaderOnly as i32
-                    })
-                    .unwrap_or(false);
-
                 // Check if pod is on the same node as the logical volume
-                // For ROX volumes, ALWAYS use NVMe-oF (even local) to avoid bdev claim conflicts
-                if !is_rox && volume_info.node_name == node_id {
+                // Note: ROX volumes are now handled via NFS (see earlier check), not here
+                if volume_info.node_name == node_id {
                     println!("✅ [CONTROLLER] Volume is local to node - no NVMe-oF needed");
                     
                     // Store volume info in publish context for NodeStage
@@ -1054,11 +1061,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     publish_context.insert("bdevName".to_string(), volume_info.lvol_uuid.clone());
                     publish_context.insert("lvsName".to_string(), volume_info.lvs_name.clone());
                 } else {
-                    if is_rox {
-                        println!("🔒 [CONTROLLER] ROX volume - using NVMe-oF for consistent multi-pod access");
-                    } else {
-                        println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
-                    }
+                    println!("🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF");
                     
                     // Construct bdev name for lvol
                     let bdev_name = volume_info.lvol_uuid.clone();

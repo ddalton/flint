@@ -148,6 +148,9 @@ pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<V
 
 /// Create NFS server pod with node affinity to replica nodes
 /// 
+/// # Parameters
+/// - `read_only`: If true, exports volume as read-only (for ROX volumes)
+/// 
 /// # Zero-Regression Design
 /// - Only called when nfs.flint.io/enabled=true in volume_context
 /// - Returns early if NFS_ENABLED=false
@@ -158,6 +161,7 @@ pub async fn create_nfs_server_pod(
     volume_id: &str,
     pvc_name: &str,
     replica_nodes: &[String],
+    read_only: bool,
 ) -> Result<(), Status> {
     // SAFETY: Early return if NFS disabled (zero-regression guarantee)
     let config = match NfsConfig::from_env() {
@@ -172,9 +176,11 @@ pub async fn create_nfs_server_pod(
     
     let pod_name = format!("flint-nfs-{}", volume_id);
     
+    let mode = if read_only { "ROX (ReadOnlyMany)" } else { "RWX (ReadWriteMany)" };
     eprintln!("🚀 [NFS] Creating NFS server pod: {}", pod_name);
     eprintln!("   Volume ID: {}", volume_id);
     eprintln!("   PVC: {}", pvc_name);
+    eprintln!("   Access Mode: {}", mode);
     eprintln!("   Replica nodes (affinity): {:?}", replica_nodes);
     
     // Build node affinity to constrain pod to replica nodes
@@ -237,15 +243,22 @@ pub async fn create_nfs_server_pod(
                 image_pull_policy: Some(config.pull_policy.clone()),
                 // Override entrypoint to use flint-nfs-server instead of csi-driver
                 command: Some(vec!["/usr/local/bin/flint-nfs-server".to_string()]),
-                args: Some(vec![
-                    "--export-path".to_string(),
-                    "/mnt/volume".to_string(),
-                    "--volume-id".to_string(),
-                    volume_id.to_string(),
-                    "--port".to_string(),
-                    config.port.to_string(),
-                    "--verbose".to_string(),
-                ]),
+                args: Some({
+                    let mut args = vec![
+                        "--export-path".to_string(),
+                        "/mnt/volume".to_string(),
+                        "--volume-id".to_string(),
+                        volume_id.to_string(),
+                        "--port".to_string(),
+                        config.port.to_string(),
+                        "--verbose".to_string(),
+                    ];
+                    // Add --read-only flag for ROX volumes
+                    if read_only {
+                        args.push("--read-only".to_string());
+                    }
+                    args
+                }),
                 ports: Some(vec![ContainerPort {
                     name: Some("nfs".to_string()),
                     container_port: config.port as i32,

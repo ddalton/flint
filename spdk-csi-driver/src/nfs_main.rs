@@ -40,6 +40,10 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Export as read-only (for ROX volumes)
+    #[arg(short, long)]
+    read_only: bool,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -59,8 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     info!("╔═══════════════════════════════════════════════════════════╗");
-    info!("║        Flint NFSv4.2 Server - RWX Volume Export          ║");
-    info!("║          RFC 7862 - Concurrent I/O Support               ║");
+    if args.read_only {
+        info!("║        Flint NFSv4.2 Server - ROX Volume Export          ║");
+        info!("║          RFC 7862 - Read-Only Multi-Pod Access           ║");
+    } else {
+        info!("║        Flint NFSv4.2 Server - RWX Volume Export          ║");
+        info!("║          RFC 7862 - Concurrent I/O Support               ║");
+    }
     info!("╚═══════════════════════════════════════════════════════════╝");
     info!("");
 
@@ -85,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_port: args.port,
         volume_id: args.volume_id.clone(),
         export_path: args.export_path.clone(),
+        read_only: args.read_only,
     };
 
     // Create and start NFS server

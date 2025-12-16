@@ -33,6 +33,9 @@ pub struct NfsConfig {
 
     /// Export path (directory to serve)
     pub export_path: PathBuf,
+
+    /// Export as read-only (for ROX volumes)
+    pub read_only: bool,
 }
 
 impl Default for NfsConfig {
@@ -42,6 +45,7 @@ impl Default for NfsConfig {
             bind_port: 2049,
             volume_id: String::new(),
             export_path: PathBuf::new(),
+            read_only: false,
         }
     }
 }
