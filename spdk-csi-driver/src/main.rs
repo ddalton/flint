@@ -1430,7 +1430,21 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let publish_context = req.publish_context.clone();
         let volume_context = req.volume_context.clone();
         
-        eprintln!("📦 [NODE_STAGE] Volume ID: {}", volume_id);
+        // Handle synthetic volumeHandle for NFS PVs
+        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts
+        let actual_volume_id = if volume_id.starts_with("nfs-server-") {
+            let original_id = volume_context.get("originalVolumeId")
+                .ok_or_else(|| tonic::Status::invalid_argument(
+                    "NFS PV missing originalVolumeId in volumeAttributes"
+                ))?
+                .clone();
+            eprintln!("📦 [NODE_STAGE] NFS PV detected: {} → original volume: {}", volume_id, original_id);
+            original_id
+        } else {
+            volume_id.clone()
+        };
+        
+        eprintln!("📦 [NODE_STAGE] Volume ID: {}", actual_volume_id);
         eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);
         eprintln!("📦 [NODE_STAGE] Publish context keys: {:?}", publish_context.keys().collect::<Vec<_>>());
 
@@ -1503,8 +1517,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             } else {
                 // Persistent volume with empty publish_context (attachRequired=false)
                 // Query PV metadata to get lvol UUID
+                // Use actual_volume_id for NFS PVs (synthetic volumeHandle)
                 println!("📦 [NODE_STAGE] Persistent local volume - querying PV metadata");
-                let volume_info = self.driver.get_volume_info(&volume_id).await
+                let volume_info = self.driver.get_volume_info(&actual_volume_id).await
                     .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
                 println!("✅ [NODE_STAGE] Found volume: node={}, lvol={}", 
                          volume_info.node_name, volume_info.lvol_uuid);
@@ -1549,7 +1564,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         };
 
         // Check if ublk device already exists (idempotency)
-        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        // Use actual_volume_id for NFS PVs (matches original lvol creation)
+        let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
         let expected_device_path = format!("/dev/ublkb{}", ublk_id);
         
         let device_path = if std::path::Path::new(&expected_device_path).exists() {
@@ -1907,7 +1923,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         
-        println!("📤 [NODE] Unstaging volume {} from {}", volume_id, staging_target_path);
+        // Handle synthetic volumeHandle for NFS PVs (same logic as NodeStageVolume)
+        let actual_volume_id = if volume_id.starts_with("nfs-server-") {
+            // Extract from volume ID pattern since we don't have volume_context here
+            volume_id.strip_prefix("nfs-server-").unwrap().to_string()
+        } else {
+            volume_id.clone()
+        };
+        
+        println!("📤 [NODE] Unstaging volume {} from {}", actual_volume_id, staging_target_path);
 
         // Check if staging path is actually mounted before attempting unmount
         if std::path::Path::new(&staging_target_path).exists() {
@@ -1985,7 +2009,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         }
 
         // Only delete the ublk device after verified unmount
-        let ublk_id = self.driver.generate_ublk_id(&volume_id);
+        // Use actual_volume_id for NFS PVs (matches device creation in NodeStageVolume)
+        let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
         
         match self.driver.delete_ublk_device(ublk_id).await {
             Ok(_) => {
@@ -2069,10 +2094,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             let nfs_source = format!("{}:/", server_ip);
             
             // Build mount options
+            // Note: NFSv4 uses standard port 2049, no need to specify if default
             let mount_opts = if readonly {
-                format!("vers=4.2,port={},ro", port)
+                "vers=4.2,ro".to_string()
             } else {
-                format!("vers=4.2,port={}", port)
+                "vers=4.2".to_string()
             };
             
             let mount_output = std::process::Command::new("mount")
