@@ -2101,60 +2101,37 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 "vers=4.2".to_string()
             };
             
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("🔧 [RWX] NFS Mount Attempt");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            // Mount NFS volume
+            println!("📡 [RWX] Mounting NFS volume");
+            println!("   Server:  {}", server_ip);
             println!("   Source:  {}", nfs_source);
             println!("   Target:  {}", target_path);
             println!("   Options: {}", mount_opts);
-            println!("   Method:  Container's mount command (nfs-common in image)");
             
-            // Check if target directory exists
-            println!("🔍 [RWX] Checking target directory...");
-            if !std::path::Path::new(&target_path).exists() {
-                println!("   Creating target directory: {}", target_path);
-                std::fs::create_dir_all(&target_path)
-                    .map_err(|e| tonic::Status::internal(format!("Failed to create mount target: {}", e)))?;
-            } else {
-                println!("   Target directory exists: {}", target_path);
-            }
+            // Ensure target directory exists
+            std::fs::create_dir_all(&target_path)
+                .map_err(|e| tonic::Status::internal(format!("Failed to create mount target: {}", e)))?;
             
-            // Use container's mount command (nfs-common package provides mount.nfs4)
-            println!("🔧 [RWX] Executing: mount -t nfs -o {} {} {}", mount_opts, nfs_source, target_path);
-            
+            // Execute mount command (nfs-common package provides mount.nfs4 helper)
             let mount_output = std::process::Command::new("mount")
-                .args(&[
-                    "-t", "nfs",
-                    "-o", &mount_opts,
-                    &nfs_source,
-                    &target_path,
-                ])
+                .args(&["-t", "nfs", "-o", &mount_opts, &nfs_source, &target_path])
                 .output()
-                .map_err(|e| {
-                    println!("❌ [RWX] Failed to execute mount: {}", e);
-                    tonic::Status::internal(format!("Failed to execute NFS mount: {}", e))
-                })?;
-            
-            // Log detailed output regardless of success/failure
-            println!("📊 [RWX] Mount command exit code: {}", mount_output.status.code().unwrap_or(-1));
-            
-            let stdout = String::from_utf8_lossy(&mount_output.stdout);
-            if !stdout.is_empty() {
-                println!("📤 [RWX] stdout: {}", stdout);
-            }
-            
-            let stderr = String::from_utf8_lossy(&mount_output.stderr);
-            if !stderr.is_empty() {
-                println!("📤 [RWX] stderr: {}", stderr);
-            }
+                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
             
             if !mount_output.status.success() {
-                println!("❌ [RWX] NFS mount FAILED");
-                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                let stderr = String::from_utf8_lossy(&mount_output.stderr);
+                let stdout = String::from_utf8_lossy(&mount_output.stdout);
+                println!("❌ [RWX] NFS mount failed (exit code: {})", mount_output.status.code().unwrap_or(-1));
+                if !stderr.is_empty() {
+                    println!("   Error: {}", stderr.trim());
+                }
+                if !stdout.is_empty() {
+                    println!("   Output: {}", stdout.trim());
+                }
                 return Err(tonic::Status::internal(format!("NFS mount failed: {}", stderr)));
             }
             
-            println!("✅ [RWX] NFS volume mounted successfully at {}", target_path);
+            println!("✅ [RWX] NFS volume mounted successfully");
             
             let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
             return Ok(response);
