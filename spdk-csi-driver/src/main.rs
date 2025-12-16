@@ -690,7 +690,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
 
-        // Check if ReadWriteMany (RWX) is requested
+        // Check if ReadWriteMany (RWX) or ReadOnlyMany (ROX) is requested
+        // Both use NFS for multi-pod access
         let is_rwx = req.volume_capabilities.iter().any(|cap| {
             if let Some(access_mode) = &cap.access_mode {
                 use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
@@ -700,19 +701,28 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }
         });
         
-        if is_rwx {
-            println!("📡 [RWX] ReadWriteMany access mode detected for volume: {}", volume_id);
-            if !spdk_csi_driver::rwx_nfs::is_nfs_enabled() {
-                println!("❌ [RWX] NFS support is disabled (nfs.enabled=false)");
-                return Err(tonic::Status::failed_precondition(
-                    "ReadWriteMany volumes require NFS support. Please set nfs.enabled=true in Helm values."
-                ));
+        let is_rox = req.volume_capabilities.iter().any(|cap| {
+            if let Some(access_mode) = &cap.access_mode {
+                use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
+                access_mode.mode == Mode::MultiNodeReaderOnly as i32
+            } else {
+                false
             }
-            println!("✅ [RWX] NFS support is enabled, will create NFS-exportable volume");
+        });
+        
+        let uses_nfs = is_rwx || is_rox;
+        
+        if uses_nfs {
+            if is_rox {
+                println!("🔒 [ROX] ReadOnlyMany access mode detected for volume: {}", volume_id);
+            } else {
+                println!("📡 [RWX] ReadWriteMany access mode detected for volume: {}", volume_id);
+            }
+            println!("✅ [NFS] Volume will be served via NFS");
         }
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}", 
-                 volume_id, size_bytes, replica_count, thin_provision, is_rwx);
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}, ROX: {}", 
+                 volume_id, size_bytes, replica_count, thin_provision, is_rwx, is_rox);
 
         // Call the driver's create volume method
         match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
@@ -758,8 +768,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     );
                 }
                 
-                // Add NFS metadata if RWX is requested
-                if is_rwx {
+                // Add NFS metadata if RWX or ROX is requested
+                if uses_nfs {
                     volume_context.insert(
                         "nfs.flint.io/enabled".to_string(),
                         "true".to_string(),
@@ -777,7 +787,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         replica_nodes_str.clone(),
                     );
                     
-                    println!("📡 [RWX] NFS metadata added to volume context");
+                    if is_rox {
+                        println!("🔒 [ROX] NFS metadata added to volume context (read-only)");
+                    } else {
+                        println!("📡 [RWX] NFS metadata added to volume context (read-write)");
+                    }
                     println!("   Replica nodes (for NFS pod affinity): {}", replica_nodes_str);
                 }
                 
