@@ -2065,20 +2065,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("   Port: {}", port);
             
             // Mount NFS
-            let nfs_source = format!("{}:{}", server_ip, export_path);
-            let mut mount_cmd = std::process::Command::new("mount");
-            mount_cmd.args(&[
-                "-t", "nfs",
-                "-o", &format!("vers=3,tcp,port={}", port),
-                &nfs_source,
-                &target_path,
-            ]);
+            // Our NFS server exports at NFSv4 pseudo-root "/"
+            let nfs_source = format!("{}:/", server_ip);
             
-            if readonly {
-                mount_cmd.args(&["-o", "ro"]);
-            }
+            // Build mount options
+            let mount_opts = if readonly {
+                format!("vers=4.2,port={},ro", port)
+            } else {
+                format!("vers=4.2,port={}", port)
+            };
             
-            let mount_output = mount_cmd
+            let mount_output = std::process::Command::new("mount")
+                .args(&[
+                    "-t", "nfs",
+                    "-o", &mount_opts,
+                    &nfs_source,
+                    &target_path,
+                ])
                 .output()
                 .map_err(|e| tonic::Status::internal(format!("Failed to execute NFS mount: {}", e)))?;
             
