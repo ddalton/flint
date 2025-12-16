@@ -234,6 +234,11 @@ pub async fn create_nfs_server_pod(
                 volume_handle: nfs_volume_handle.clone(),  // Synthetic handle!
                 volume_attributes: Some({
                     let mut attrs: BTreeMap<String, String> = volume_context.iter()
+                        .filter(|(k, _)| {
+                            // Filter out NFS-specific attributes to prevent recursion
+                            // The NFS PV should be treated as a regular RWO volume
+                            !k.starts_with("nfs.flint.io/")
+                        })
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     // Add original volume ID so CSI driver knows which real volume to mount
