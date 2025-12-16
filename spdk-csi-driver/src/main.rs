@@ -997,29 +997,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             ).await?;
             
             if !pod_exists {
-                println!("🚀 [RWX] Creating NFS server pod for volume: {}", volume_id);
-                
-                // Get the actual PVC name from the PV's claimRef
-                // This is required to mount the correct PVC in the NFS server pod
-                let pvc_name = {
-                    use k8s_openapi::api::core::v1::PersistentVolume;
-                    use kube::Api;
-                    
-                    let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-                    let pv = pvs.get(&volume_id).await
-                        .map_err(|e| tonic::Status::internal(format!("Failed to get PV: {}", e)))?;
-                    
-                    pv.spec
-                        .and_then(|s| s.claim_ref)
-                        .and_then(|c| c.name)
-                        .ok_or_else(|| tonic::Status::internal("PV missing claimRef.name"))?
-                };
+                println!("🚀 [NFS] Creating NFS server pod for volume: {}", volume_id);
                 
                 // Create NFS server pod with appropriate access mode
+                // NFS pod uses CSI inline volume to mount directly (Longhorn share-manager pattern)
                 spdk_csi_driver::rwx_nfs::create_nfs_server_pod(
                     self.driver.kube_client.clone(),
                     &volume_id,
-                    &pvc_name,
                     &replica_nodes,
                     is_rox // ROX=true (read-only), RWX=false (read-write)
                 ).await?;

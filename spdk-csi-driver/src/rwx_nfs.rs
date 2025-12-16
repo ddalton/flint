@@ -159,7 +159,6 @@ pub fn parse_replica_nodes(volume_context: &HashMap<String, String>) -> Result<V
 pub async fn create_nfs_server_pod(
     kube_client: Client,
     volume_id: &str,
-    pvc_name: &str,
     replica_nodes: &[String],
     read_only: bool,
 ) -> Result<(), Status> {
@@ -179,8 +178,9 @@ pub async fn create_nfs_server_pod(
     let mode = if read_only { "ROX (ReadOnlyMany)" } else { "RWX (ReadWriteMany)" };
     eprintln!("🚀 [NFS] Creating NFS server pod: {}", pod_name);
     eprintln!("   Volume ID: {}", volume_id);
-    eprintln!("   PVC: {}", pvc_name);
+    eprintln!("   Namespace: {}", config.namespace);
     eprintln!("   Access Mode: {}", mode);
+    eprintln!("   Mount Method: CSI inline volume (Longhorn share-manager pattern)");
     eprintln!("   Replica nodes (affinity): {:?}", replica_nodes);
     
     // Build node affinity to constrain pod to replica nodes
@@ -225,7 +225,7 @@ pub async fn create_nfs_server_pod(
                 ("flint.io/component".to_string(), "nfs-server".to_string()),
             ].into_iter().collect()),
             annotations: Some([
-                ("flint.io/pvc-name".to_string(), pvc_name.to_string()),
+                ("flint.io/volume-id".to_string(), volume_id.to_string()),
                 ("flint.io/replica-nodes".to_string(), replica_nodes.join(","))
             ].into_iter().collect()),
             ..Default::default()
@@ -276,9 +276,15 @@ pub async fn create_nfs_server_pod(
             
             volumes: Some(vec![Volume {
                 name: "volume-data".to_string(),
-                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                    claim_name: pvc_name.to_string(),
+                // Use CSI inline volume to mount the PV directly
+                // This allows NFS pod in flint-system to mount PV from any namespace
+                csi: Some(k8s_openapi::api::core::v1::CSIVolumeSource {
+                    driver: "flint.csi.storage.io".to_string(),
+                    volume_attributes: Some([
+                        ("volumeId".to_string(), volume_id.to_string()),
+                    ].into_iter().collect()),
                     read_only: Some(false),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }]),
