@@ -32,8 +32,10 @@ use k8s_openapi::api::core::v1::{
     PersistentVolumeClaimVolumeSource, ContainerPort,
     Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm,
     NodeSelectorRequirement, ResourceRequirements,
+    Service, ServiceSpec, ServicePort,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use tokio::time::{sleep, Duration};
 use tonic::Status;
 
@@ -297,17 +299,61 @@ pub async fn create_nfs_server_pod(
     };
     
     // Create pod via Kubernetes API
-    let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
+    let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), &config.namespace);
     
     match pods_api.create(&PostParams::default(), &pod).await {
         Ok(_) => {
             eprintln!("✅ [NFS] NFS server pod created successfully: {}", pod_name);
             eprintln!("   Kubernetes will schedule it to one of: {:?}", replica_nodes);
-            Ok(())
         }
         Err(e) => {
             eprintln!("❌ [NFS] Failed to create NFS pod: {}", e);
-            Err(Status::internal(format!("Failed to create NFS server pod: {}", e)))
+            return Err(Status::internal(format!("Failed to create NFS server pod: {}", e)));
+        }
+    }
+    
+    // Create Service for stable NFS endpoint (Longhorn share-manager pattern)
+    // This provides a stable DNS name that survives pod restarts
+    let service_name = format!("flint-nfs-{}", volume_id);
+    let service = Service {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(service_name.clone()),
+            namespace: Some(config.namespace.clone()),
+            labels: Some([
+                ("app".to_string(), "flint-nfs-server".to_string()),
+                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+            ].into_iter().collect()),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some([
+                ("app".to_string(), "flint-nfs-server".to_string()),
+                ("flint.io/volume-id".to_string(), volume_id.to_string()),
+            ].into_iter().collect()),
+            ports: Some(vec![ServicePort {
+                name: Some("nfs".to_string()),
+                port: config.port as i32,
+                target_port: Some(IntOrString::Int(config.port as i32)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+            cluster_ip: Some("None".to_string()), // Headless service
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    
+    let services_api: Api<Service> = Api::namespaced(kube_client, &config.namespace);
+    
+    match services_api.create(&PostParams::default(), &service).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] Service created: {}.{}.svc.cluster.local", service_name, config.namespace);
+            eprintln!("   Provides stable DNS endpoint for NFS clients");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("❌ [NFS] Failed to create Service: {}", e);
+            Err(Status::internal(format!("Failed to create NFS service: {}", e)))
         }
     }
 }
@@ -370,11 +416,15 @@ pub async fn wait_for_nfs_pod_ready(
                                 .as_ref()
                                 .and_then(|s| s.node_name.as_ref()) 
                             {
+                                // Return Service DNS name instead of pod IP (stable endpoint)
+                                let service_dns = format!("flint-nfs-{}.{}.svc.cluster.local", 
+                                                         volume_id, config.namespace);
                                 eprintln!("✅ [NFS] Pod ready!");
                                 eprintln!("   Node: {}", node_name);
-                                eprintln!("   IP: {}", pod_ip);
+                                eprintln!("   Pod IP: {}", pod_ip);
+                                eprintln!("   Service DNS: {}", service_dns);
                                 eprintln!("   Attempts: {}/60", attempt);
-                                return Ok((node_name.clone(), pod_ip.clone()));
+                                return Ok((node_name.clone(), service_dns));
                             }
                         } else {
                             eprintln!("   Attempt {}/60: Pod phase: {}", attempt, phase);
@@ -411,10 +461,26 @@ pub async fn delete_nfs_server_pod(
     };
     
     let pod_name = format!("flint-nfs-{}", volume_id);
+    let service_name = format!("flint-nfs-{}", volume_id);
+    
+    eprintln!("🗑️  [NFS] Deleting NFS resources for volume: {}", volume_id);
+    
+    // Delete Service first
+    let services_api: Api<Service> = Api::namespaced(kube_client.clone(), &config.namespace);
+    match services_api.delete(&service_name, &DeleteParams::default()).await {
+        Ok(_) => {
+            eprintln!("✅ [NFS] Service deleted: {}", service_name);
+        }
+        Err(e) if e.to_string().contains("NotFound") => {
+            eprintln!("ℹ️  [NFS] Service already deleted: {}", service_name);
+        }
+        Err(e) => {
+            eprintln!("⚠️  [NFS] Failed to delete Service: {}", e);
+        }
+    }
+    
+    // Delete Pod
     let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
-    
-    eprintln!("🗑️  [NFS] Deleting NFS server pod: {}", pod_name);
-    
     match pods_api.delete(&pod_name, &DeleteParams::default()).await {
         Ok(_) => {
             eprintln!("✅ [NFS] NFS pod deleted: {}", pod_name);
