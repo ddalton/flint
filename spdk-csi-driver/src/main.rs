@@ -1922,13 +1922,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                                     println!("⚠️ [NODE] Warning: Failed to set group ownership: {}", error);
                                                 }
                                                 
-                                                // Set setgid bit (chmod g+s) so new files/dirs inherit the group
-                                                // This matches Longhorn's behavior and is required for non-root pods
-                                                let chmod_output = std::process::Command::new("chmod")
-                                                    .arg("g+s")
-                                                    .arg(&staging_target_path)
-                                                    .output()
-                                                    .map_err(|e| tonic::Status::internal(format!("Failed to chmod: {}", e)))?;
+                                            // Set group write permission and setgid bit (chmod g+ws) so:
+                                            // 1. Group members can create files/directories
+                                            // 2. New files/dirs inherit the group
+                                            // This matches Longhorn's behavior (2775 permissions)
+                                            let chmod_output = std::process::Command::new("chmod")
+                                                .arg("g+ws")
+                                                .arg(&staging_target_path)
+                                                .output()
+                                                .map_err(|e| tonic::Status::internal(format!("Failed to chmod: {}", e)))?;
                                                 
                                                 if !chmod_output.status.success() {
                                                     let error = String::from_utf8_lossy(&chmod_output.stderr);
