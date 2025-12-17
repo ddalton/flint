@@ -1904,7 +1904,6 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     // CRITICAL: Apply fsGroup ownership as required by ReadWriteOnceWithFSType policy
                                     // According to CSI spec, fsGroup is passed via volume_capability.mount.volume_mount_group
                                     // when VOLUME_MOUNT_GROUP capability is advertised.
-                                    // This is what Longhorn does via Kubernetes mount-utils.
                                     if !mount_config.volume_mount_group.is_empty() {
                                         let volume_mount_group = &mount_config.volume_mount_group;
                                         if let Ok(fs_group) = volume_mount_group.parse::<u32>() {
@@ -1924,8 +1923,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                                 
                                             // Set group write permission and setgid bit (chmod g+ws) so:
                                             // 1. Group members can create files/directories
-                                            // 2. New files/dirs inherit the group
-                                            // This matches Longhorn's behavior (2775 permissions)
+                                            // 2. New files/dirs inherit the group (2775 permissions)
                                             let chmod_output = std::process::Command::new("chmod")
                                                 .arg("g+ws")
                                                 .arg(&staging_target_path)
