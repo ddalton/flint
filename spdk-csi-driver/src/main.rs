@@ -1899,6 +1899,47 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     }
                                     
                                     println!("✅ [NODE] Device mounted to staging path");
+                                    
+                                    // CRITICAL: Apply fsGroup ownership as required by ReadWriteOnceWithFSType policy
+                                    // According to CSI spec, when fsGroupPolicy=ReadWriteOnceWithFSType, the driver
+                                    // must set the group ownership and setgid bit on the volume root.
+                                    // This is what Longhorn does via Kubernetes mount-utils.
+                                    if let Some(fs_group_str) = req.volume_context.get("csi.storage.k8s.io/pod.spec.os.securityContext.fsGroup") {
+                                        if let Ok(fs_group) = fs_group_str.parse::<u32>() {
+                                            println!("🔧 [NODE] Applying fsGroup {} to {} (required by ReadWriteOnceWithFSType)", fs_group, staging_target_path);
+                                            
+                                            // Change group ownership to fsGroup value
+                                            let chgrp_output = std::process::Command::new("chgrp")
+                                                .arg(fs_group.to_string())
+                                                .arg(&staging_target_path)
+                                                .output()
+                                                .map_err(|e| tonic::Status::internal(format!("Failed to chgrp: {}", e)))?;
+                                            
+                                            if !chgrp_output.status.success() {
+                                                let error = String::from_utf8_lossy(&chgrp_output.stderr);
+                                                println!("⚠️ [NODE] Warning: Failed to set group ownership: {}", error);
+                                            }
+                                            
+                                            // Set setgid bit (chmod g+s) so new files/dirs inherit the group
+                                            // This matches Longhorn's behavior and is required for non-root pods
+                                            let chmod_output = std::process::Command::new("chmod")
+                                                .arg("g+s")
+                                                .arg(&staging_target_path)
+                                                .output()
+                                                .map_err(|e| tonic::Status::internal(format!("Failed to chmod: {}", e)))?;
+                                            
+                                            if !chmod_output.status.success() {
+                                                let error = String::from_utf8_lossy(&chmod_output.stderr);
+                                                println!("⚠️ [NODE] Warning: Failed to set setgid bit: {}", error);
+                                            } else {
+                                                println!("✅ [NODE] fsGroup applied: group={}, setgid=true", fs_group);
+                                            }
+                                        } else {
+                                            println!("⚠️ [NODE] Invalid fsGroup value in volume_context: {}", fs_group_str);
+                                        }
+                                    } else {
+                                        println!("ℹ️ [NODE] No fsGroup in volume_context (pod may not have securityContext.fsGroup set)");
+                                    }
                                 }
                             }
                             spdk_csi_driver::csi::volume_capability::AccessType::Block(_) => {
