@@ -1902,44 +1902,45 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     println!("✅ [NODE] Device mounted to staging path");
                                     
                                     // CRITICAL: Apply fsGroup ownership as required by ReadWriteOnceWithFSType policy
-                                    // According to CSI spec, when fsGroupPolicy=ReadWriteOnceWithFSType, the driver
-                                    // must set the group ownership and setgid bit on the volume root.
+                                    // According to CSI spec, fsGroup is passed via volume_capability.mount.volume_mount_group
+                                    // when VOLUME_MOUNT_GROUP capability is advertised.
                                     // This is what Longhorn does via Kubernetes mount-utils.
-                                    if let Some(fs_group_str) = req.volume_context.get("csi.storage.k8s.io/pod.spec.os.securityContext.fsGroup") {
-                                        if let Ok(fs_group) = fs_group_str.parse::<u32>() {
-                                            println!("🔧 [NODE] Applying fsGroup {} to {} (required by ReadWriteOnceWithFSType)", fs_group, staging_target_path);
-                                            
-                                            // Change group ownership to fsGroup value
-                                            let chgrp_output = std::process::Command::new("chgrp")
-                                                .arg(fs_group.to_string())
-                                                .arg(&staging_target_path)
-                                                .output()
-                                                .map_err(|e| tonic::Status::internal(format!("Failed to chgrp: {}", e)))?;
-                                            
-                                            if !chgrp_output.status.success() {
-                                                let error = String::from_utf8_lossy(&chgrp_output.stderr);
-                                                println!("⚠️ [NODE] Warning: Failed to set group ownership: {}", error);
-                                            }
-                                            
-                                            // Set setgid bit (chmod g+s) so new files/dirs inherit the group
-                                            // This matches Longhorn's behavior and is required for non-root pods
-                                            let chmod_output = std::process::Command::new("chmod")
-                                                .arg("g+s")
-                                                .arg(&staging_target_path)
-                                                .output()
-                                                .map_err(|e| tonic::Status::internal(format!("Failed to chmod: {}", e)))?;
-                                            
-                                            if !chmod_output.status.success() {
-                                                let error = String::from_utf8_lossy(&chmod_output.stderr);
-                                                println!("⚠️ [NODE] Warning: Failed to set setgid bit: {}", error);
-                                            } else {
-                                                println!("✅ [NODE] fsGroup applied: group={}, setgid=true", fs_group);
-                                            }
+                                    if !mount_config.volume_mount_group.is_empty() {
+                                        let volume_mount_group = &mount_config.volume_mount_group;
+                                        if let Ok(fs_group) = volume_mount_group.parse::<u32>() {
+                                                println!("🔧 [NODE] Applying fsGroup {} to {} (required by ReadWriteOnceWithFSType)", fs_group, staging_target_path);
+                                                
+                                                // Change group ownership to fsGroup value
+                                                let chgrp_output = std::process::Command::new("chgrp")
+                                                    .arg(fs_group.to_string())
+                                                    .arg(&staging_target_path)
+                                                    .output()
+                                                    .map_err(|e| tonic::Status::internal(format!("Failed to chgrp: {}", e)))?;
+                                                
+                                                if !chgrp_output.status.success() {
+                                                    let error = String::from_utf8_lossy(&chgrp_output.stderr);
+                                                    println!("⚠️ [NODE] Warning: Failed to set group ownership: {}", error);
+                                                }
+                                                
+                                                // Set setgid bit (chmod g+s) so new files/dirs inherit the group
+                                                // This matches Longhorn's behavior and is required for non-root pods
+                                                let chmod_output = std::process::Command::new("chmod")
+                                                    .arg("g+s")
+                                                    .arg(&staging_target_path)
+                                                    .output()
+                                                    .map_err(|e| tonic::Status::internal(format!("Failed to chmod: {}", e)))?;
+                                                
+                                                if !chmod_output.status.success() {
+                                                    let error = String::from_utf8_lossy(&chmod_output.stderr);
+                                                    println!("⚠️ [NODE] Warning: Failed to set setgid bit: {}", error);
+                                                } else {
+                                                    println!("✅ [NODE] fsGroup applied: group={}, setgid=true", fs_group);
+                                                }
                                         } else {
-                                            println!("⚠️ [NODE] Invalid fsGroup value in volume_context: {}", fs_group_str);
+                                            println!("⚠️ [NODE] Invalid volume_mount_group value: {}", volume_mount_group);
                                         }
                                     } else {
-                                        println!("ℹ️ [NODE] No fsGroup in volume_context (pod may not have securityContext.fsGroup set)");
+                                        println!("ℹ️ [NODE] No volume_mount_group in request (pod may not have securityContext.fsGroup set)");
                                     }
                                 }
                             }
@@ -2611,9 +2612,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     r#type: RpcType::ExpandVolume as i32,
                 })),
             },
+            NodeServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::node_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::VolumeMountGroup as i32,
+                })),
+            },
         ];
         
-        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume capabilities");
+        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup capabilities");
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetCapabilitiesResponse { capabilities }))
     }
 
