@@ -1449,6 +1449,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         eprintln!("📦 [NODE_STAGE] Volume ID: {}", actual_volume_id);
         eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);
         eprintln!("📦 [NODE_STAGE] Publish context keys: {:?}", publish_context.keys().collect::<Vec<_>>());
+        eprintln!("📦 [NODE_STAGE] Volume context keys: {:?}", volume_context.keys().collect::<Vec<_>>());
 
         // Check if this is an ephemeral volume
         let is_ephemeral = volume_context.get("csi.storage.k8s.io/ephemeral")
