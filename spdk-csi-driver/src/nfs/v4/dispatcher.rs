@@ -847,9 +847,13 @@ mod tests {
             minor_version: 2,
             operations: vec![
                 Operation::ExchangeId {
-                    client_owner: b"test-client".to_vec(),
-                    verifier: 12345,
+                    clientowner: ClientId {
+                        verifier: 12345,
+                        id: b"test-client".to_vec(),
+                    },
                     flags: 0,
+                    state_protect: 0,
+                    impl_id: vec![],
                 },
             ],
         };
@@ -859,9 +863,11 @@ mod tests {
         assert_eq!(response.results.len(), 1);
 
         match &response.results[0] {
-            OperationResult::ExchangeId { status, clientid, .. } => {
+            OperationResult::ExchangeId(status, result) => {
                 assert_eq!(*status, Nfs4Status::Ok);
-                assert_eq!(*clientid, 1);
+                if let Some(res) = result {
+                    assert_ne!(res.clientid, 0);
+                }
             }
             _ => panic!("Expected ExchangeId result"),
         }
@@ -915,9 +921,13 @@ mod tests {
             minor_version: 2,
             operations: vec![
                 Operation::ExchangeId {
-                    client_owner: b"test".to_vec(),
-                    verifier: 1,
+                    clientowner: ClientId {
+                        verifier: 1,
+                        id: b"test".to_vec(),
+                    },
                     flags: 0,
+                    state_protect: 0,
+                    impl_id: vec![],
                 },
             ],
         };

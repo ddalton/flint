@@ -19,13 +19,14 @@ pub mod client;
 pub mod session;
 pub mod stateid;
 pub mod lease;
+pub mod delegation;
 
 pub use client::ClientManager;
 pub use session::SessionManager;
 pub use stateid::{StateIdManager, StateType, StateEntry};
 pub use lease::LeaseManager;
+pub use delegation::{DelegationManager, Delegation, DelegationType, DelegationStats};
 
-use super::protocol::*;
 use std::sync::Arc;
 
 /// NFSv4 state manager - coordinates all state components
@@ -34,6 +35,7 @@ pub struct StateManager {
     pub sessions: Arc<SessionManager>,
     pub stateids: Arc<StateIdManager>,
     pub leases: Arc<LeaseManager>,
+    pub delegations: Arc<DelegationManager>,
 }
 
 impl StateManager {
@@ -43,12 +45,14 @@ impl StateManager {
         let client_manager = Arc::new(ClientManager::new(lease_manager.clone()));
         let session_manager = Arc::new(SessionManager::new());
         let stateid_manager = Arc::new(StateIdManager::new());
+        let delegation_manager = Arc::new(DelegationManager::new());
 
         Self {
             clients: client_manager,
             sessions: session_manager,
             stateids: stateid_manager,
             leases: lease_manager,
+            delegations: delegation_manager,
         }
     }
 

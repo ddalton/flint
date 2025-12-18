@@ -505,8 +505,8 @@ mod tests {
             8 * 1024 * 1024,
         );
 
-        // Generate layout using ds-test-1
-        let _layout = manager
+        // Generate layout (will use available devices)
+        let layout = manager
             .generate_layout(
                 vec![0, 1, 2, 3],
                 0,
@@ -515,11 +515,14 @@ mod tests {
             )
             .unwrap();
 
-        // Recall layouts for ds-test-1
-        let recalled = manager.recall_layouts_for_device("ds-test-1");
+        // Find which device was actually used
+        let device_used = &layout.segments[0].device_id;
+        
+        // Recall layouts for that device
+        let recalled = manager.recall_layouts_for_device(device_used);
         
         // Should have recalled the layout
-        assert!(!recalled.is_empty());
+        assert!(!recalled.is_empty(), "Expected to recall layout for device {}", device_used);
     }
 }
 
