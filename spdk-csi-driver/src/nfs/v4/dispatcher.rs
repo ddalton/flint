@@ -23,6 +23,7 @@ use crate::nfs::v4::state::{StateManager, StateType};
 use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::operations::*;
 use crate::nfs::v4::operations::ioops::UNSTABLE4;
+use bytes::Bytes;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -796,26 +797,23 @@ impl CompoundDispatcher {
                 OperationResult::SecInfoNoName(Nfs4Status::Ok)
             }
 
-            // Unsupported operations (may be pNFS operations)
+            // pNFS operations
+            Operation::LayoutGet { signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount } => {
+                self.handle_layoutget(signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount, context)
+            }
+            
+            Operation::GetDeviceInfo { device_id, layout_type, maxcount, notify_types } => {
+                self.handle_getdeviceinfo(device_id, layout_type, maxcount, notify_types)
+            }
+            
+            Operation::LayoutReturn { reclaim, layout_type, iomode, layoutreturn } => {
+                self.handle_layoutreturn(reclaim, layout_type, iomode, layoutreturn)
+            }
+
+            // Unsupported operations
             Operation::Unsupported(opcode) => {
-                // Check if this is a pNFS operation and we have a pNFS handler
-                if Self::is_pnfs_opcode(opcode) {
-                    if let Some(ref _pnfs) = self.pnfs_handler {
-                        // TODO: Implement pNFS operation handling
-                        // For now, log that we detected it but can't handle it yet
-                        info!("🔧 pNFS operation detected (opcode={}), handler integration pending", opcode);
-                        warn!("Unsupported operation: opcode={} (pNFS handler exists but not wired up)", opcode);
-                        OperationResult::Unsupported(Nfs4Status::NotSupp)
-                    } else {
-                        // No pNFS handler configured
-                        warn!("Unsupported operation: opcode={} (pNFS operation, no handler)", opcode);
-                        OperationResult::Unsupported(Nfs4Status::NotSupp)
-                    }
-                } else {
-                    // Truly unsupported operation
-                    warn!("Unsupported operation: opcode={}", opcode);
-                    OperationResult::Unsupported(Nfs4Status::NotSupp)
-                }
+                warn!("Unsupported operation: opcode={}", opcode);
+                OperationResult::Unsupported(Nfs4Status::NotSupp)
             }
 
             // Catch-all for any unhandled operations
@@ -835,6 +833,224 @@ impl CompoundDispatcher {
             open_stateids: self.state_mgr.stateids.count_by_type(StateType::Open),
             lock_stateids: self.state_mgr.stateids.count_by_type(StateType::Lock),
         }
+    }
+    
+    // pNFS operation handlers
+    
+    fn handle_layoutget(
+        &self,
+        _signal_layout_avail: bool,
+        layout_type: u32,
+        iomode: u32,
+        offset: u64,
+        length: u64,
+        _minlength: u64,
+        stateid: StateId,
+        _maxcount: u32,
+        context: &CompoundContext,
+    ) -> OperationResult {
+        use crate::pnfs::mds::operations::LayoutGetArgs;
+        use crate::pnfs::mds::layout::{LayoutType, IoMode};
+        use crate::nfs::xdr::XdrEncoder;
+        
+        // Check if pNFS handler is available
+        let pnfs = match &self.pnfs_handler {
+            Some(handler) => handler,
+            None => {
+                warn!("LAYOUTGET requested but pNFS not configured");
+                return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
+            }
+        };
+        
+        info!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
+        
+        // Get current filehandle
+        let filehandle = match context.current_fh {
+            Some(ref fh) => fh.data.clone(),
+            None => {
+                warn!("❌ LAYOUTGET: No current filehandle");
+                return OperationResult::LayoutGet(Nfs4Status::NoFileHandle, None);
+            }
+        };
+        
+        // Convert arguments
+        let args = LayoutGetArgs {
+            signal_layout_avail: _signal_layout_avail,
+            layout_type: if layout_type == 1 { LayoutType::NfsV4_1Files } else {
+                warn!("❌ Unsupported layout type: {}", layout_type);
+                return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
+            },
+            iomode: match iomode {
+                1 => IoMode::Read,
+                2 => IoMode::ReadWrite,
+                3 => IoMode::Any,
+                _ => {
+                    warn!("❌ Bad iomode: {}", iomode);
+                    return OperationResult::LayoutGet(Nfs4Status::BadIoMode, None);
+                }
+            },
+            offset,
+            length,
+            minlength: _minlength,
+            stateid: {
+                let mut sid = [0u8; 16];
+                sid[0..4].copy_from_slice(&stateid.seqid.to_be_bytes());
+                sid[4..16].copy_from_slice(&stateid.other);
+                sid
+            },
+            maxcount: _maxcount,
+            filehandle,
+        };
+        
+        // Call pNFS handler
+        match pnfs.layoutget(args) {
+            Ok(result) => {
+                info!("   Available data servers: {}", result.layouts.len());
+                
+                // Encode result
+                let mut encoder = XdrEncoder::new();
+                encoder.encode_bool(result.return_on_close);
+                // Encode stateid (16 bytes)
+                encoder.encode_opaque(&result.stateid);
+                
+                // Encode layouts array
+                encoder.encode_u32(result.layouts.len() as u32);
+                for layout in &result.layouts {
+                    encoder.encode_u64(layout.offset);
+                    encoder.encode_u64(layout.length);
+                    encoder.encode_u32(iomode);
+                    encoder.encode_u32(layout_type);
+                    
+                    // Encode FILE layout content
+                    let layout_content = Self::encode_file_layout(&layout.segments);
+                    encoder.encode_opaque(&layout_content);
+                }
+                
+                info!("✅ LAYOUTGET successful: {} layouts returned", result.layouts.len());
+                OperationResult::LayoutGet(Nfs4Status::Ok, Some(encoder.finish()))
+            }
+            Err(e) => {
+                warn!("❌ LAYOUTGET failed: {:?}", e);
+                OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)
+            }
+        }
+    }
+    
+    fn handle_getdeviceinfo(
+        &self,
+        device_id: Vec<u8>,
+        layout_type: u32,
+        _maxcount: u32,
+        _notify_types: Vec<u32>,
+    ) -> OperationResult {
+        use crate::pnfs::mds::operations::GetDeviceInfoArgs;
+        use crate::pnfs::mds::layout::LayoutType;
+        use crate::pnfs::mds::device::DeviceId;
+        use crate::nfs::xdr::XdrEncoder;
+        
+        // Check if pNFS handler is available
+        let pnfs = match &self.pnfs_handler {
+            Some(handler) => handler,
+            None => {
+                warn!("GETDEVICEINFO requested but pNFS not configured");
+                return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
+            }
+        };
+        
+        info!("📥 GETDEVICEINFO: device_id len={}, layout_type={}", device_id.len(), layout_type);
+        
+        // Convert device_id to [u8; 16]
+        let mut dev_id: DeviceId = [0; 16];
+        if device_id.len() >= 16 {
+            dev_id.copy_from_slice(&device_id[0..16]);
+        } else {
+            warn!("❌ Invalid device_id length: {}", device_id.len());
+            return OperationResult::GetDeviceInfo(Nfs4Status::NoEnt, None);
+        }
+        
+        let args = GetDeviceInfoArgs {
+            device_id: dev_id,
+            layout_type: if layout_type == 1 { LayoutType::NfsV4_1Files } else {
+                warn!("❌ Unsupported layout type: {}", layout_type);
+                return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
+            },
+            maxcount: _maxcount,
+            notify_types: _notify_types,
+        };
+        
+        match pnfs.getdeviceinfo(args) {
+            Ok(result) => {
+                // Encode device address
+                let mut encoder = XdrEncoder::new();
+                encoder.encode_u32(layout_type);
+                
+                // Encode device_addr4 (netid, addr)
+                let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
+                encoder.encode_opaque(&dev_addr_encoded);
+                
+                // Notification (empty for now)
+                encoder.encode_u32(0);  // Empty notification array
+                
+                info!("✅ GETDEVICEINFO successful: {}", result.device_addr.addr);
+                OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(encoder.finish()))
+            }
+            Err(_e) => {
+                warn!("❌ GETDEVICEINFO failed");
+                OperationResult::GetDeviceInfo(Nfs4Status::NoEnt, None)
+            }
+        }
+    }
+    
+    fn handle_layoutreturn(
+        &self,
+        _reclaim: bool,
+        _layout_type: u32,
+        _iomode: u32,
+        _layoutreturn: Bytes,
+    ) -> OperationResult {
+        // For now, just acknowledge the layout return
+        info!("📥 LAYOUTRETURN acknowledged");
+        OperationResult::LayoutReturn(Nfs4Status::Ok)
+    }
+    
+    /// Encode FILE layout segments
+    fn encode_file_layout(segments: &[crate::pnfs::mds::layout::LayoutSegment]) -> Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        
+        let mut encoder = XdrEncoder::new();
+        
+        // For FILE layout, encode segments
+        // This is a simplified encoding - full FILE layout is more complex
+        encoder.encode_u32(segments.len() as u32);
+        for seg in segments {
+            // Device ID (16 bytes)
+            let device_id = seg.device_id.as_bytes();
+            let mut dev_id = vec![0u8; 16];
+            for (i, &b) in device_id.iter().take(16).enumerate() {
+                dev_id[i] = b;
+            }
+            encoder.encode_opaque(&dev_id);
+            
+            // Offset and length
+            encoder.encode_u64(seg.offset);
+            encoder.encode_u64(seg.length);
+            
+            // File handle (empty for now - DS will use same FH)
+            encoder.encode_opaque(&[]);
+        }
+        
+        encoder.finish()
+    }
+    
+    /// Encode device address (netid, addr)
+    fn encode_device_addr(addr: &crate::pnfs::mds::operations::DeviceAddr4) -> Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        
+        let mut encoder = XdrEncoder::new();
+        encoder.encode_string(&addr.netid);
+        encoder.encode_string(&addr.addr);
+        
+        encoder.finish()
     }
 }
 

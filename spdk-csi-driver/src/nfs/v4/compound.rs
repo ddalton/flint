@@ -217,6 +217,30 @@ pub enum Operation {
         hints: u32,
     },
 
+    // pNFS operations (NFSv4.1+, opcodes 47-51)
+    LayoutGet {
+        signal_layout_avail: bool,
+        layout_type: u32,
+        iomode: u32,
+        offset: u64,
+        length: u64,
+        minlength: u64,
+        stateid: StateId,
+        maxcount: u32,
+    },
+    GetDeviceInfo {
+        device_id: Vec<u8>,
+        layout_type: u32,
+        maxcount: u32,
+        notify_types: Vec<u32>,
+    },
+    LayoutReturn {
+        reclaim: bool,
+        layout_type: u32,
+        iomode: u32,
+        layoutreturn: Bytes,
+    },
+
     // Placeholder for unsupported operations
     Unsupported(u32),            // operation code
 }
@@ -367,6 +391,11 @@ pub enum OperationResult {
     Clone(Nfs4Status),
     ReadPlus(Nfs4Status, Option<ReadPlusResult>),
 
+    // pNFS operations (NFSv4.1+)
+    LayoutGet(Nfs4Status, Option<Bytes>),     // Encoded layout data
+    GetDeviceInfo(Nfs4Status, Option<Bytes>), // Encoded device info
+    LayoutReturn(Nfs4Status),
+
     // Generic result for unsupported operations
     Unsupported(Nfs4Status),
 
@@ -418,6 +447,9 @@ impl OperationResult {
             OperationResult::Lock(s, _) => *s,
             OperationResult::LockT(s) => *s,
             OperationResult::LockU(s, _) => *s,
+            OperationResult::LayoutGet(s, _) => *s,
+            OperationResult::GetDeviceInfo(s, _) => *s,
+            OperationResult::LayoutReturn(s) => *s,
             OperationResult::Unsupported(s) => *s,
         }
     }
@@ -1128,6 +1160,56 @@ impl CompoundRequest {
                 Ok(Operation::SecInfoNoName(style))
             }
 
+            // pNFS operations (opcodes 47-51)
+            opcode::LAYOUTGET => {
+                let signal_layout_avail = decoder.decode_bool()?;
+                let layout_type = decoder.decode_u32()?;
+                let iomode = decoder.decode_u32()?;
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                let minlength = decoder.decode_u64()?;
+                let stateid = decoder.decode_stateid()?;
+                let maxcount = decoder.decode_u32()?;
+                Ok(Operation::LayoutGet {
+                    signal_layout_avail,
+                    layout_type,
+                    iomode,
+                    offset,
+                    length,
+                    minlength,
+                    stateid,
+                    maxcount,
+                })
+            }
+            opcode::GETDEVICEINFO => {
+                let device_id = decoder.decode_opaque()?.to_vec();
+                let layout_type = decoder.decode_u32()?;
+                let maxcount = decoder.decode_u32()?;
+                let notify_count = decoder.decode_u32()?;
+                let mut notify_types = Vec::new();
+                for _ in 0..notify_count {
+                    notify_types.push(decoder.decode_u32()?);
+                }
+                Ok(Operation::GetDeviceInfo {
+                    device_id,
+                    layout_type,
+                    maxcount,
+                    notify_types,
+                })
+            }
+            opcode::LAYOUTRETURN => {
+                let reclaim = decoder.decode_bool()?;
+                let layout_type = decoder.decode_u32()?;
+                let iomode = decoder.decode_u32()?;
+                let layoutreturn = decoder.decode_opaque()?;
+                Ok(Operation::LayoutReturn {
+                    reclaim,
+                    layout_type,
+                    iomode,
+                    layoutreturn,
+                })
+            }
+
             // For now, return unsupported for operations we haven't implemented yet
             _ => {
                 warn!("Unsupported operation: {}", opcode);
@@ -1617,6 +1699,35 @@ impl CompoundResponse {
                             }
                         }
                     }
+                }
+            }
+
+            // pNFS operations
+            OperationResult::LayoutGet(status, data) => {
+                encoder.encode_u32(opcode::LAYOUTGET);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(layout_data) = data {
+                        encoder.append_raw(&layout_data);
+                    }
+                }
+            }
+            OperationResult::GetDeviceInfo(status, data) => {
+                encoder.encode_u32(opcode::GETDEVICEINFO);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(device_data) = data {
+                        encoder.append_raw(&device_data);
+                    }
+                }
+            }
+            OperationResult::LayoutReturn(status) => {
+                encoder.encode_u32(opcode::LAYOUTRETURN);
+                encoder.encode_status(status);
+                // LAYOUTRETURN response: lrs_present (bool) + optional stateid
+                // For now, return lrs_present = FALSE (no new stateid)
+                if status == Nfs4Status::Ok {
+                    encoder.encode_bool(false);  // lrs_present = FALSE
                 }
             }
 
