@@ -185,9 +185,18 @@ impl MetadataServer {
 
     /// Serve pNFS over TCP
     async fn serve_tcp(&self, addr: &str) -> Result<()> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
+        info!("🔧 Attempting to bind TCP server on {}", addr);
+        
+        let listener = match TcpListener::bind(addr).await {
+            Ok(l) => {
+                info!("✅ TCP listener bound successfully on {}", addr);
+                l
+            }
+            Err(e) => {
+                error!("❌ Failed to bind TCP listener on {}: {}", addr, e);
+                return Err(crate::pnfs::Error::Io(e));
+            }
+        };
         
         info!("🚀 pNFS MDS TCP server listening on {}", addr);
         info!("");
