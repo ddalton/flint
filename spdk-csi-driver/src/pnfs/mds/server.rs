@@ -38,14 +38,18 @@ pub struct MetadataServer {
 
 impl MetadataServer {
     /// Create a new metadata server
-    pub fn new(config: MdsConfig) -> Result<Self> {
+    pub fn new(config: MdsConfig, exports: Vec<crate::pnfs::config::ExportConfig>) -> Result<Self> {
         info!("Initializing Metadata Server");
 
-        // Initialize file handle manager
-        // For MDS, we use a pseudo root since MDS manages metadata only
-        let fh_manager = Arc::new(FileHandleManager::new(
-            std::path::PathBuf::from("/")
-        ));
+        // Get export path from first export, default to /data if not specified
+        let export_path = exports.first()
+            .map(|e| std::path::PathBuf::from(&e.path))
+            .unwrap_or_else(|| std::path::PathBuf::from("/data"));
+        
+        info!("📂 MDS export path: {:?}", export_path);
+
+        // Initialize file handle manager with configured export path
+        let fh_manager = Arc::new(FileHandleManager::new(export_path));
 
         // Initialize state manager (for NFSv4 sessions, stateids)
         let state_mgr = Arc::new(StateManager::new());

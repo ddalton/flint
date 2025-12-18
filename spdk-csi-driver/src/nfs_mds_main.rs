@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mds_config = config.mds.expect("MDS configuration is required");
+    let exports = config.exports;
 
     info!("📊 Configuration:");
     info!("   • Bind: {}:{}", mds_config.bind.address, mds_config.bind.port);
@@ -83,6 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for ds in &mds_config.data_servers {
         info!("     - {} @ {}", ds.device_id, ds.endpoint);
     }
+    info!("   • Exports: {}", exports.len());
+    for export in &exports {
+        info!("     - {} (fsid={})", export.path, export.fsid);
+    }
     info!("   • State Backend: {:?}", mds_config.state.backend);
     if mds_config.ha.enabled {
         info!("   • HA Enabled: {} replicas", mds_config.ha.replicas);
@@ -91,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and start MDS
     info!("⚙️  Initializing Metadata Server...");
-    let mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config)?;
+    let mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports)?;
 
     info!("🚀 Starting Metadata Server...");
     info!("");
