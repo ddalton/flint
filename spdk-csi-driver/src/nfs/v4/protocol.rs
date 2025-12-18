@@ -354,6 +354,11 @@ pub mod fattr4 {
     pub const TIME_MODIFY: u32 = 53;
     pub const TIME_MODIFY_SET: u32 = 54;
     pub const MOUNTED_ON_FILEID: u32 = 55;
+    pub const SUPPATTR_EXCLCREAT: u32 = 75;
+    
+    // pNFS attributes (RFC 8881 Section 5.12 and Section 12.2.2)
+    pub const FS_LAYOUT_TYPES: u32 = 82;      // Supported pNFS layout types
+    pub const LAYOUT_BLKSIZE: u32 = 83;       // Layout block size
 }
 
 /// File types
