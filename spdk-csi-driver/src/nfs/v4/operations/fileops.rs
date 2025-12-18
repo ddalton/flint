@@ -766,7 +766,7 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_SUPPORTED_ATTRS => {
-                // Return bitmap of attributes we support
+                // Return bitmap of attributes we support (comprehensive list)
                 let supported: u64 = (1u64 << FATTR4_TYPE)
                     | (1u64 << FATTR4_FH_EXPIRE_TYPE)
                     | (1u64 << FATTR4_SIZE)
@@ -774,20 +774,34 @@ fn encode_attributes_from_snapshot(
                     | (1u64 << FATTR4_LINK_SUPPORT)
                     | (1u64 << FATTR4_SYMLINK_SUPPORT)
                     | (1u64 << FATTR4_FSID)
-                    | (1u64 << FATTR4_FILEID)
+                    | (1u64 << FATTR4_UNIQUE_HANDLES)   // Client FH caching strategy
+                    | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
+                    | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
                     | (1u64 << FATTR4_ACL)
-                    | (1u64 << FATTR4_MAXREAD)      // Bit 30 - Critical for client wsize!
-                    | (1u64 << FATTR4_MAXWRITE)     // Bit 31 - Critical for client rsize!
+                    | (1u64 << FATTR4_CANSETTIME)       // Can set timestamps
+                    | (1u64 << FATTR4_FILEID)
+                    | (1u64 << FATTR4_FILES_AVAIL)      // For df -i command
+                    | (1u64 << FATTR4_FILES_FREE)       // For df -i command  
+                    | (1u64 << FATTR4_FILES_TOTAL)      // For df -i command
+                    | (1u64 << FATTR4_MAXFILESIZE)      // Maximum file size
+                    | (1u64 << FATTR4_MAXLINK)          // Max hard links
+                    | (1u64 << FATTR4_MAXNAME)          // Max filename length
+                    | (1u64 << FATTR4_MAXREAD)          // CRITICAL for client rsize!
+                    | (1u64 << FATTR4_MAXWRITE)         // CRITICAL for client wsize!
                     | (1u64 << FATTR4_MODE)
                     | (1u64 << FATTR4_CASE_INSENSITIVE)
                     | (1u64 << FATTR4_CASE_PRESERVING)
                     | (1u64 << FATTR4_NUMLINKS)
                     | (1u64 << FATTR4_OWNER)
                     | (1u64 << FATTR4_OWNER_GROUP)
+                    | (1u64 << FATTR4_SPACE_AVAIL)      // For df command
+                    | (1u64 << FATTR4_SPACE_FREE)       // For df command
+                    | (1u64 << FATTR4_SPACE_TOTAL)      // For df command
                     | (1u64 << FATTR4_SPACE_USED)
                     | (1u64 << FATTR4_TIME_ACCESS)
                     | (1u64 << FATTR4_TIME_METADATA)
-                    | (1u64 << FATTR4_TIME_MODIFY);
+                    | (1u64 << FATTR4_TIME_MODIFY)
+                    | (1u64 << FATTR4_MOUNTED_ON_FILEID);
                 // Encode as bitmap (up to 64 attributes in 2 words)
                 attr_vals.put_u32(2); // 2 words
                 attr_vals.put_u32((supported & 0xFFFFFFFF) as u32); // word 0
