@@ -899,7 +899,7 @@ impl CompoundDispatcher {
                 sid
             },
             maxcount: _maxcount,
-            filehandle,
+            filehandle: filehandle.clone(),
         };
         
         // Call pNFS handler
@@ -913,16 +913,35 @@ impl CompoundDispatcher {
                 // Encode stateid (16 bytes)
                 encoder.encode_opaque(&result.stateid);
                 
-                // Encode layouts array
+                // Encode layouts array - one layout per request
+                // Each layout may contain multiple segments for striping
                 encoder.encode_u32(result.layouts.len() as u32);
                 for layout in &result.layouts {
+                    // Encode layout metadata (offset, length, iomode, layout_type)
                     encoder.encode_u64(layout.offset);
                     encoder.encode_u64(layout.length);
                     encoder.encode_u32(iomode);
                     encoder.encode_u32(layout_type);
                     
-                    // Encode FILE layout content
-                    let layout_content = Self::encode_file_layout(&layout.segments);
+                    // For FILE layout, we need to encode nfsv4_1_file_layout4
+                    // For striped layouts, encode each segment as separate layout
+                    // For now, encode the first segment (simple single-device case)
+                    // TODO: Support multi-device striping with multiple file handles
+                    
+                    let stripe_unit = 8 * 1024 * 1024; // 8 MB stripe unit (typical)
+                    
+                    if layout.segments.is_empty() {
+                        warn!("❌ Layout has no segments!");
+                        return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+                    }
+                    
+                    // Encode FILE layout content for first segment
+                    // In a full implementation, we would encode all segments properly
+                    let layout_content = Self::encode_file_layout(
+                        &layout.segments[0], 
+                        &filehandle,
+                        stripe_unit
+                    );
                     encoder.encode_opaque(&layout_content);
                 }
                 
@@ -1013,31 +1032,54 @@ impl CompoundDispatcher {
         OperationResult::LayoutReturn(Nfs4Status::Ok)
     }
     
-    /// Encode FILE layout segments
-    fn encode_file_layout(segments: &[crate::pnfs::mds::layout::LayoutSegment]) -> Bytes {
+    /// Encode FILE layout for a segment (RFC 5661/8881 Section 13.2)
+    /// 
+    /// Structure: nfsv4_1_file_layout4
+    /// - deviceid (16 bytes fixed)
+    /// - nfl_util (stripe unit size in bytes)
+    /// - nfl_first_stripe_index (u32)
+    /// - nfl_pattern_offset (u64)
+    /// - nfl_fh_list<> (array of filehandles)
+    fn encode_file_layout(
+        segment: &crate::pnfs::mds::layout::LayoutSegment,
+        filehandle: &[u8],
+        stripe_unit: u64,
+    ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         
         let mut encoder = XdrEncoder::new();
         
-        // For FILE layout, encode segments
-        // This is a simplified encoding - full FILE layout is more complex
-        encoder.encode_u32(segments.len() as u32);
-        for seg in segments {
-            // Device ID (16 bytes)
-            let device_id = seg.device_id.as_bytes();
-            let mut dev_id = vec![0u8; 16];
-            for (i, &b) in device_id.iter().take(16).enumerate() {
-                dev_id[i] = b;
-            }
-            encoder.encode_opaque(&dev_id);
-            
-            // Offset and length
-            encoder.encode_u64(seg.offset);
-            encoder.encode_u64(seg.length);
-            
-            // File handle (empty for now - DS will use same FH)
-            encoder.encode_opaque(&[]);
-        }
+        // Convert device_id string to 16-byte binary format
+        // Use same hashing approach as DeviceInfo::generate_binary_id
+        let mut hasher = DefaultHasher::new();
+        segment.device_id.hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        let mut device_id_bytes = [0u8; 16];
+        device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
+        device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
+        
+        info!("   🔧 Encoding FILE layout: device_id='{}', binary_id={:02x?}", 
+              segment.device_id, &device_id_bytes[0..8]);
+        
+        // Encode deviceid (16 bytes fixed, no length prefix)
+        encoder.encode_fixed_opaque(&device_id_bytes);
+        
+        // nfl_util: stripe unit size (typically 8MB = 8388608 bytes)
+        encoder.encode_u64(stripe_unit);
+        
+        // nfl_first_stripe_index: which stripe to start with
+        encoder.encode_u32(segment.stripe_index);
+        
+        // nfl_pattern_offset: offset where stripe pattern starts
+        encoder.encode_u64(segment.pattern_offset);
+        
+        // nfl_fh_list: array of filehandles (one per DS in stripe pattern)
+        // For simple layouts with one device, we have one filehandle
+        encoder.encode_u32(1);  // Array count
+        encoder.encode_opaque(filehandle);
         
         encoder.finish()
     }
