@@ -460,6 +460,54 @@ const FATTR4_TIME_MODIFY_SET: u32 = 54;
 const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
 const FATTR4_SUPPATTR_EXCLCREAT: u32 = 75;
 
+/// Bitmap of all attributes supported by this server (RFC 5661 Section 5.8)
+///
+/// Per RFC: SUPPORTED_ATTRS represents filesystem-wide capabilities and should
+/// be consistent across all objects (files, directories, pseudo-root).
+///
+/// This bitmap is used by the client during mount to determine what attributes
+/// it can request. Critical attributes include:
+/// - MAXREAD/MAXWRITE: Control client rsize/wsize (performance!)
+/// - LEASE_TIME: NFSv4.1 lease management
+/// - SPACE_*: For df command
+/// - FILES_*: For df -i command
+const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
+    | (1u64 << FATTR4_FH_EXPIRE_TYPE)
+    | (1u64 << FATTR4_SIZE)
+    | (1u64 << FATTR4_CHANGE)
+    | (1u64 << FATTR4_LINK_SUPPORT)
+    | (1u64 << FATTR4_SYMLINK_SUPPORT)
+    | (1u64 << FATTR4_FSID)
+    | (1u64 << FATTR4_UNIQUE_HANDLES)   // Client FH caching strategy
+    | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
+    | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
+    | (1u64 << FATTR4_ACL)
+    | (1u64 << FATTR4_CANSETTIME)       // Can set timestamps
+    | (1u64 << FATTR4_FILEID)
+    | (1u64 << FATTR4_FILES_AVAIL)      // For df -i command
+    | (1u64 << FATTR4_FILES_FREE)       // For df -i command
+    | (1u64 << FATTR4_FILES_TOTAL)      // For df -i command
+    | (1u64 << FATTR4_MAXFILESIZE)      // Maximum file size
+    | (1u64 << FATTR4_MAXLINK)          // Max hard links
+    | (1u64 << FATTR4_MAXNAME)          // Max filename length
+    | (1u64 << FATTR4_MAXREAD)          // CRITICAL for client rsize!
+    | (1u64 << FATTR4_MAXWRITE)         // CRITICAL for client wsize!
+    | (1u64 << FATTR4_MODE)
+    | (1u64 << FATTR4_CASE_INSENSITIVE)
+    | (1u64 << FATTR4_CASE_PRESERVING)
+    | (1u64 << FATTR4_NUMLINKS)
+    | (1u64 << FATTR4_OWNER)
+    | (1u64 << FATTR4_OWNER_GROUP)
+    | (1u64 << FATTR4_RAWDEV)
+    | (1u64 << FATTR4_SPACE_AVAIL)      // For df command
+    | (1u64 << FATTR4_SPACE_FREE)       // For df command
+    | (1u64 << FATTR4_SPACE_TOTAL)      // For df command
+    | (1u64 << FATTR4_SPACE_USED)
+    | (1u64 << FATTR4_TIME_ACCESS)
+    | (1u64 << FATTR4_TIME_METADATA)
+    | (1u64 << FATTR4_TIME_MODIFY)
+    | (1u64 << FATTR4_MOUNTED_ON_FILEID);
+
 /// Encode NFSv4 attributes based on requested bitmap
 ///
 /// Returns (attribute_values, supported_bitmap) where:
@@ -766,42 +814,8 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_SUPPORTED_ATTRS => {
-                // Return bitmap of attributes we support (comprehensive list)
-                let supported: u64 = (1u64 << FATTR4_TYPE)
-                    | (1u64 << FATTR4_FH_EXPIRE_TYPE)
-                    | (1u64 << FATTR4_SIZE)
-                    | (1u64 << FATTR4_CHANGE)
-                    | (1u64 << FATTR4_LINK_SUPPORT)
-                    | (1u64 << FATTR4_SYMLINK_SUPPORT)
-                    | (1u64 << FATTR4_FSID)
-                    | (1u64 << FATTR4_UNIQUE_HANDLES)   // Client FH caching strategy
-                    | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
-                    | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
-                    | (1u64 << FATTR4_ACL)
-                    | (1u64 << FATTR4_CANSETTIME)       // Can set timestamps
-                    | (1u64 << FATTR4_FILEID)
-                    | (1u64 << FATTR4_FILES_AVAIL)      // For df -i command
-                    | (1u64 << FATTR4_FILES_FREE)       // For df -i command  
-                    | (1u64 << FATTR4_FILES_TOTAL)      // For df -i command
-                    | (1u64 << FATTR4_MAXFILESIZE)      // Maximum file size
-                    | (1u64 << FATTR4_MAXLINK)          // Max hard links
-                    | (1u64 << FATTR4_MAXNAME)          // Max filename length
-                    | (1u64 << FATTR4_MAXREAD)          // CRITICAL for client rsize!
-                    | (1u64 << FATTR4_MAXWRITE)         // CRITICAL for client wsize!
-                    | (1u64 << FATTR4_MODE)
-                    | (1u64 << FATTR4_CASE_INSENSITIVE)
-                    | (1u64 << FATTR4_CASE_PRESERVING)
-                    | (1u64 << FATTR4_NUMLINKS)
-                    | (1u64 << FATTR4_OWNER)
-                    | (1u64 << FATTR4_OWNER_GROUP)
-                    | (1u64 << FATTR4_SPACE_AVAIL)      // For df command
-                    | (1u64 << FATTR4_SPACE_FREE)       // For df command
-                    | (1u64 << FATTR4_SPACE_TOTAL)      // For df command
-                    | (1u64 << FATTR4_SPACE_USED)
-                    | (1u64 << FATTR4_TIME_ACCESS)
-                    | (1u64 << FATTR4_TIME_METADATA)
-                    | (1u64 << FATTR4_TIME_MODIFY)
-                    | (1u64 << FATTR4_MOUNTED_ON_FILEID);
+                // Use the single source of truth for supported attributes
+                let supported = SUPPORTED_ATTRS_BITMAP;
                 // Encode as bitmap (up to 64 attributes in 2 words)
                 attr_vals.put_u32(2); // 2 words
                 attr_vals.put_u32((supported & 0xFFFFFFFF) as u32); // word 0
@@ -992,42 +1006,9 @@ fn encode_pseudo_root_attribute(
             true
         }
         FATTR4_SUPPORTED_ATTRS => {
-            // Return bitmap of attributes we support for pseudo-root
-            // Pseudo-root is a synthetic directory, so some attrs don't apply (e.g., MAXREAD/MAXWRITE)
-            let supported: u64 = (1u64 << FATTR4_TYPE)
-                | (1u64 << FATTR4_FH_EXPIRE_TYPE)
-                | (1u64 << FATTR4_SIZE)
-                | (1u64 << FATTR4_CHANGE)
-                | (1u64 << FATTR4_LINK_SUPPORT)
-                | (1u64 << FATTR4_SYMLINK_SUPPORT)
-                | (1u64 << FATTR4_FSID)
-                | (1u64 << FATTR4_UNIQUE_HANDLES)
-                | (1u64 << FATTR4_LEASE_TIME)
-                | (1u64 << FATTR4_ACLSUPPORT)
-                | (1u64 << FATTR4_ACL)
-                | (1u64 << FATTR4_CANSETTIME)
-                | (1u64 << FATTR4_FILEID)
-                | (1u64 << FATTR4_FILES_AVAIL)
-                | (1u64 << FATTR4_FILES_FREE)
-                | (1u64 << FATTR4_FILES_TOTAL)
-                | (1u64 << FATTR4_MAXNAME)
-                | (1u64 << FATTR4_MAXLINK)
-                | (1u64 << FATTR4_MODE)
-                | (1u64 << FATTR4_CASE_INSENSITIVE)
-                | (1u64 << FATTR4_CASE_PRESERVING)
-                | (1u64 << FATTR4_NUMLINKS)
-                | (1u64 << FATTR4_OWNER)
-                | (1u64 << FATTR4_OWNER_GROUP)
-                | (1u64 << FATTR4_RAWDEV)
-                | (1u64 << FATTR4_SPACE_AVAIL)
-                | (1u64 << FATTR4_SPACE_FREE)
-                | (1u64 << FATTR4_SPACE_TOTAL)
-                | (1u64 << FATTR4_SPACE_USED)
-                | (1u64 << FATTR4_TIME_ACCESS)
-                | (1u64 << FATTR4_TIME_MODIFY)
-                | (1u64 << FATTR4_TIME_METADATA)
-                | (1u64 << FATTR4_MOUNTED_ON_FILEID);
-            
+            // Use the single source of truth for supported attributes
+            // Per RFC: Same bitmap for all filesystem objects including pseudo-root
+            let supported = SUPPORTED_ATTRS_BITMAP;
             // Encode as bitmap4
             buf.put_u32(2); // array length
             buf.put_u32((supported >> 32) as u32);
@@ -1053,45 +1034,8 @@ fn encode_single_attribute(
 ) -> bool {
     match attr_id {
         FATTR4_SUPPORTED_ATTRS => {
-            // Return bitmap of attributes we support (RFC 5661 compliant)
-            // NOTE: This should match the main SUPPORTED_ATTRS for consistency
-            let supported: u64 = (1u64 << FATTR4_TYPE)
-                | (1u64 << FATTR4_FH_EXPIRE_TYPE)
-                | (1u64 << FATTR4_SIZE)
-                | (1u64 << FATTR4_CHANGE)
-                | (1u64 << FATTR4_LINK_SUPPORT)
-                | (1u64 << FATTR4_SYMLINK_SUPPORT)
-                | (1u64 << FATTR4_FSID)
-                | (1u64 << FATTR4_UNIQUE_HANDLES)
-                | (1u64 << FATTR4_LEASE_TIME)
-                | (1u64 << FATTR4_ACLSUPPORT)
-                | (1u64 << FATTR4_ACL)
-                | (1u64 << FATTR4_CANSETTIME)
-                | (1u64 << FATTR4_FILEID)
-                | (1u64 << FATTR4_FILES_AVAIL)
-                | (1u64 << FATTR4_FILES_FREE)
-                | (1u64 << FATTR4_FILES_TOTAL)
-                | (1u64 << FATTR4_MAXFILESIZE)
-                | (1u64 << FATTR4_MAXLINK)
-                | (1u64 << FATTR4_MAXNAME)
-                | (1u64 << FATTR4_MAXREAD)          // CRITICAL: Client needs this for rsize!
-                | (1u64 << FATTR4_MAXWRITE)         // CRITICAL: Client needs this for wsize!
-                | (1u64 << FATTR4_MODE)
-                | (1u64 << FATTR4_CASE_INSENSITIVE)
-                | (1u64 << FATTR4_CASE_PRESERVING)
-                | (1u64 << FATTR4_NUMLINKS)
-                | (1u64 << FATTR4_OWNER)
-                | (1u64 << FATTR4_OWNER_GROUP)
-                | (1u64 << FATTR4_RAWDEV)
-                | (1u64 << FATTR4_SPACE_AVAIL)
-                | (1u64 << FATTR4_SPACE_FREE)
-                | (1u64 << FATTR4_SPACE_TOTAL)
-                | (1u64 << FATTR4_SPACE_USED)
-                | (1u64 << FATTR4_TIME_ACCESS)
-                | (1u64 << FATTR4_TIME_MODIFY)
-                | (1u64 << FATTR4_TIME_METADATA)
-                | (1u64 << FATTR4_MOUNTED_ON_FILEID);
-            
+            // Use the single source of truth for supported attributes
+            let supported = SUPPORTED_ATTRS_BITMAP;
             // Encode as bitmap4 (variable-length array per RFC 5661)
             // bitmap4 = array_length + words
             buf.put_u32(2); // array length (2 words for attrs 0-63)
