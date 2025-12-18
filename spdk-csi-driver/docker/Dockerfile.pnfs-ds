@@ -1,0 +1,52 @@
+# Multi-stage build for pNFS Data Server (DS)
+FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+
+# --- System-level setup ---
+USER root
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    apk add --no-cache perl protobuf-dev openssl-dev
+
+# Set OpenSSL environment variables
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+
+USER 65532
+
+# --- Application build ---
+WORKDIR /app
+
+# Copy all necessary source files
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
+
+# Build ONLY the pNFS DS binary
+# This is separate from CSI driver to avoid slowing down CSI builds
+RUN cargo build --release --bin flint-pnfs-ds
+
+# --- Runtime image ---
+FROM ubuntu:24.04
+
+# Install runtime dependencies for pNFS DS
+# DS needs NFS tools and filesystem utilities
+RUN apt-get update && apt-get install -y \
+    nfs-common \
+    e2fsprogs \
+    xfsprogs \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the DS binary
+COPY --from=builder /app/target/release/flint-pnfs-ds /usr/local/bin/
+
+# Expose NFS port (for client I/O)
+EXPOSE 2049/tcp
+
+# Default entrypoint
+ENTRYPOINT ["/usr/local/bin/flint-pnfs-ds"]
+CMD ["--config", "/etc/flint/pnfs.yaml"]
+
