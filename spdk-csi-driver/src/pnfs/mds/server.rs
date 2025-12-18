@@ -199,11 +199,13 @@ impl MetadataServer {
         };
         
         info!("🚀 pNFS MDS TCP server listening on {}", addr);
+        info!("🔄 Entering accept loop to handle client connections...");
         info!("");
         
         let mut connection_count = 0u64;
 
         loop {
+            debug!("💤 Waiting for TCP connection...");
             let (stream, peer) = listener.accept()
                 .await
                 .map_err(|e| crate::pnfs::Error::Io(e))?;

@@ -455,6 +455,15 @@ impl DataServer {
     fn start_heartbeat_sender(&self) {
         let registration_client = Arc::clone(&self.registration_client);
         let heartbeat_interval_secs = self.config.mds.heartbeat_interval;
+        
+        // Capture config data needed for re-registration
+        let device_id = self.config.device_id.clone();
+        let bind_address = self.config.bind.address.clone();
+        let bind_port = self.config.bind.port;
+        let mount_points: Vec<String> = self.config.bdevs
+            .iter()
+            .map(|b| b.mount_point.clone())
+            .collect();
 
         tokio::spawn(async move {
             let mut heartbeat_interval = interval(Duration::from_secs(heartbeat_interval_secs));
@@ -491,8 +500,29 @@ impl DataServer {
                         "Lost connection to MDS after {} failures, attempting re-registration",
                         failure_count
                     );
-                    // TODO: Attempt re-registration
-                    failure_count = 0;
+                    
+                    // Attempt re-registration
+                    let endpoint = format!("{}:{}", bind_address, bind_port);
+                    match client.register(
+                        device_id.clone(),
+                        endpoint.clone(),
+                        mount_points.clone(),
+                        capacity,
+                        used,
+                    ).await {
+                        Ok(true) => {
+                            info!("✅ Re-registration successful");
+                            failure_count = 0;
+                        }
+                        Ok(false) => {
+                            warn!("⚠️ Re-registration rejected by MDS, will retry");
+                            failure_count = 0;  // Reset to try again later
+                        }
+                        Err(e) => {
+                            error!("❌ Re-registration failed: {}, will retry", e);
+                            failure_count = 0;  // Reset to try again later
+                        }
+                    }
                 }
             }
         });
