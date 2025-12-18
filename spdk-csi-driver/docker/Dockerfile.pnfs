@@ -1,0 +1,63 @@
+# Multi-stage build for pNFS (both MDS and DS)
+# 
+# This builds both flint-pnfs-mds and flint-pnfs-ds in a single image.
+# The binaries share ~99% of their dependencies, so building together
+# is MUCH faster than building separately.
+#
+# Runtime: Select MDS or DS via entrypoint
+
+FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+
+# --- System-level setup ---
+USER root
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    apk add --no-cache perl protobuf-dev openssl-dev
+
+ENV OPENSSL_DIR=/usr
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+
+USER 65532
+
+# --- Application build ---
+WORKDIR /app
+
+# Copy source files
+COPY --chown=65532:65532 Cargo.toml Cargo.lock ./
+COPY --chown=65532:65532 src/ ./src/
+COPY --chown=65532:65532 build.rs ./
+COPY --chown=65532:65532 proto/ ./proto/
+
+# Build BOTH pNFS binaries together
+# They share dependencies, so this is much faster than building separately
+# Total time: ~6-8 minutes (vs 10-15 minutes if built separately)
+RUN cargo build --release --bin flint-pnfs-mds --bin flint-pnfs-ds
+
+# --- Runtime image ---
+FROM ubuntu:24.04
+
+# Install runtime dependencies
+# Includes both NFS client/server tools and gRPC requirements
+RUN apt-get update && apt-get install -y \
+    nfs-common \
+    e2fsprogs \
+    xfsprogs \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy BOTH binaries to the runtime image
+COPY --from=builder /app/target/release/flint-pnfs-mds /usr/local/bin/
+COPY --from=builder /app/target/release/flint-pnfs-ds /usr/local/bin/
+
+# Expose ports for both MDS and DS
+# (only the relevant ports will be used depending on which binary runs)
+EXPOSE 2049/tcp
+EXPOSE 50051/tcp
+
+# Default to MDS (can be overridden)
+# For DS, use: docker run flint/pnfs:latest /usr/local/bin/flint-pnfs-ds
+ENTRYPOINT ["/usr/local/bin/flint-pnfs-mds"]
+CMD ["--config", "/etc/flint/pnfs.yaml"]
+
