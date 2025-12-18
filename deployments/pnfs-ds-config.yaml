@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pnfs-ds-config
+  namespace: pnfs-test
+data:
+  pnfs.yaml: |
+    apiVersion: flint.io/v1alpha1
+    kind: PnfsConfig
+    
+    mode: ds
+    
+    ds:
+      bind:
+        address: "0.0.0.0"
+        port: 2049
+      
+      # Device ID will be set via env var: ${NODE_NAME}-ds
+      deviceId: "${NODE_NAME}-ds"
+      
+      mds:
+        endpoint: "pnfs-mds.pnfs-test.svc.cluster.local:50051"  # gRPC port
+        heartbeatInterval: 10
+        registrationRetry: 5
+      
+      bdevs:
+        - name: data
+          mount_point: /mnt/pnfs-data
+          spdk_volume: data
+      
+      resources:
+        maxConnections: 1000
+        ioQueueDepth: 128
+    
+    exports:
+      - path: /
+        fsid: 1
+    
+    logging:
+      level: info
+      format: json
+

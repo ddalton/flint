@@ -18,7 +18,7 @@
 use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutSegment, LayoutType};
 use crate::pnfs::mds::device::{DeviceId, DeviceRegistry};
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// pNFS operation handler
 pub struct PnfsOperationHandler {
@@ -46,14 +46,20 @@ impl PnfsOperationHandler {
         &self,
         args: LayoutGetArgs,
     ) -> Result<LayoutGetResult, LayoutGetError> {
-        debug!(
-            "LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
+        info!(
+            "📥 LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
             args.offset, args.length, args.iomode, args.layout_type
         );
 
+        // Check available devices
+        let active_devices = self.device_registry.count_by_status(
+            crate::pnfs::mds::device::DeviceStatus::Active
+        );
+        info!("   Available data servers: {}", active_devices);
+
         // Validate layout type (we only support FILE layout for now)
         if args.layout_type != LayoutType::NfsV4_1Files {
-            warn!("Unsupported layout type: {:?}", args.layout_type);
+            warn!("❌ Unsupported layout type: {:?}", args.layout_type);
             return Err(LayoutGetError::UnknownLayoutType);
         }
 
@@ -66,9 +72,11 @@ impl PnfsOperationHandler {
                 args.iomode,
             )
             .map_err(|e| {
-                warn!("Layout generation failed: {}", e);
+                warn!("❌ Layout generation failed: {}", e);
                 LayoutGetError::LayoutUnavailable
             })?;
+
+        info!("✅ LAYOUTGET successful: {} segments returned", layout.segments.len());
 
         Ok(LayoutGetResult {
             return_on_close: layout.return_on_close,

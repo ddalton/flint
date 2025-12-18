@@ -488,8 +488,49 @@ impl PnfsConfig {
     /// Load configuration from YAML file
     pub fn from_file<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        serde_yaml::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let mut config: Self = serde_yaml::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        
+        // Substitute environment variables in configuration
+        config.substitute_env_vars();
+        
+        Ok(config)
+    }
+    
+    /// Substitute environment variables in configuration strings
+    /// 
+    /// Replaces ${VAR_NAME} patterns with environment variable values.
+    /// This is particularly useful for device IDs that need to be unique per node.
+    fn substitute_env_vars(&mut self) {
+        if let Some(ref mut ds_config) = self.ds {
+            ds_config.device_id = Self::expand_env_vars(&ds_config.device_id);
+        }
+    }
+    
+    /// Expand environment variables in a string
+    /// 
+    /// Supports both ${VAR} and $VAR syntax.
+    /// Returns the original string if the environment variable is not set.
+    fn expand_env_vars(input: &str) -> String {
+        use std::env;
+        
+        let mut result = input.to_string();
+        
+        // Match ${VAR_NAME} patterns
+        while let Some(start) = result.find("${") {
+            if let Some(end) = result[start..].find('}') {
+                let var_name = &result[start + 2..start + end];
+                let replacement = env::var(var_name).unwrap_or_else(|_| {
+                    eprintln!("Warning: Environment variable '{}' not found, keeping original", var_name);
+                    format!("${{{}}}", var_name)
+                });
+                result.replace_range(start..start + end + 1, &replacement);
+            } else {
+                break;
+            }
+        }
+        
+        result
     }
 
     /// Load configuration from environment variables

@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: standalone-nfs
+  namespace: pnfs-test
+  labels:
+    app: standalone-nfs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: standalone-nfs
+  template:
+    metadata:
+      labels:
+        app: standalone-nfs
+    spec:
+      containers:
+      - name: nfs
+        image: docker-sandbox.infra.cloudera.com/ddalton/flint-driver:latest
+        imagePullPolicy: Always
+        command: ["/usr/local/bin/flint-nfs-server"]
+        args:
+          - "--export-path"
+          - "/data"
+          - "--volume-id"
+          - "standalone-nfs"
+          - "--bind-addr"
+          - "0.0.0.0"
+          - "--port"
+          - "2049"
+        ports:
+        - containerPort: 2049
+          name: nfs
+          protocol: TCP
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: standalone-nfs
+  namespace: pnfs-test
+spec:
+  selector:
+    app: standalone-nfs
+  ports:
+  - name: nfs
+    port: 2049
+    targetPort: 2049
+    protocol: TCP
+  type: ClusterIP
+

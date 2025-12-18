@@ -82,12 +82,20 @@ impl DeviceRegistry {
         let device_id = info.device_id.clone();
         
         if self.devices.contains_key(&device_id) {
-            warn!("Device {} already registered, updating", device_id);
+            warn!("🔄 Device {} already registered, updating", device_id);
+            debug!("   Previous device count: {}", self.count());
         } else {
-            info!("Registering new device: {} @ {}", device_id, info.primary_endpoint);
+            info!("✅ Registering new device: {} @ {}", device_id, info.primary_endpoint);
+            debug!("   Capacity: {} bytes ({} GB)", info.capacity, info.capacity / (1024*1024*1024));
+            debug!("   Binary device ID: {:02x?}", &info.binary_device_id[0..8]);
         }
         
-        self.devices.insert(device_id, info);
+        self.devices.insert(device_id.clone(), info);
+        
+        let total_devices = self.count();
+        let active_devices = self.count_by_status(DeviceStatus::Active);
+        info!("📊 Device registry: {} total, {} active", total_devices, active_devices);
+        
         Ok(())
     }
 

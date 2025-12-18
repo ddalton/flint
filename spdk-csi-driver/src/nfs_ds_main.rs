@@ -12,7 +12,7 @@
 use clap::Parser;
 use spdk_csi_driver::pnfs::{PnfsConfig, PnfsMode};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[derive(Parser, Debug)]
 #[command(name = "flint-pnfs-ds")]
@@ -75,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ds_config = config.ds.expect("DS configuration is required");
 
     info!("📊 Configuration:");
-    info!("   • Device ID: {}", ds_config.device_id);
+    debug!("   • NODE_NAME env var: {:?}", std::env::var("NODE_NAME"));
+    info!("   • Device ID: {} (after env var expansion)", ds_config.device_id);
     info!("   • Bind: {}:{}", ds_config.bind.address, ds_config.bind.port);
     info!("   • MDS Endpoint: {}", ds_config.mds.endpoint);
     info!("   • Heartbeat Interval: {} seconds", ds_config.mds.heartbeat_interval);

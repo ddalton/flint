@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pnfs-mds
+  namespace: pnfs-test
+  labels:
+    app: pnfs-mds
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pnfs-mds
+  template:
+    metadata:
+      labels:
+        app: pnfs-mds
+    spec:
+      containers:
+      - name: mds
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+        imagePullPolicy: Always
+        command: ["/usr/local/bin/flint-pnfs-mds"]
+        args:
+          - "--config"
+          - "/etc/flint/pnfs.yaml"
+          - "--verbose"
+        ports:
+        - containerPort: 2049
+          name: nfs
+          protocol: TCP
+        - containerPort: 50051
+          name: grpc
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/flint
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: config
+        configMap:
+          name: pnfs-mds-config
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pnfs-mds
+  namespace: pnfs-test
+spec:
+  selector:
+    app: pnfs-mds
+  ports:
+  - name: nfs
+    port: 2049
+    targetPort: 2049
+    protocol: TCP
+  - name: grpc
+    port: 50051
+    targetPort: 50051
+    protocol: TCP
+  type: ClusterIP
+

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pnfs-ds
+  namespace: pnfs-test
+  labels:
+    app: pnfs-ds
+spec:
+  selector:
+    matchLabels:
+      app: pnfs-ds
+  template:
+    metadata:
+      labels:
+        app: pnfs-ds
+    spec:
+      containers:
+      - name: ds
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+        imagePullPolicy: Always
+        command: ["/usr/local/bin/flint-pnfs-ds"]
+        args:
+          - "--config"
+          - "/etc/flint/pnfs.yaml"
+          - "--verbose"
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 2049
+          name: nfs
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/flint
+        - name: data
+          mountPath: /mnt/pnfs-data
+        securityContext:
+          privileged: true
+      volumes:
+      - name: config
+        configMap:
+          name: pnfs-ds-config
+      - name: data
+        emptyDir: {}
+
