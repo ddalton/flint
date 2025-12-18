@@ -134,11 +134,22 @@ impl Session {
             slot.sequence_id = sequence_id;
             self.highest_slotid = self.highest_slotid.max(slot_id);
             Ok(true)
-        } else {
-            // Out of order
+        } else if sequence_id > slot.sequence_id + 1 {
+            // Client is ahead - likely due to previous errors that didn't increment server-side
+            // Resync to client's sequence to recover (common pattern in session management)
             warn!(
-                "❌ SEQUENCE mismatch: slot={}, expected {}, got {} (slot_seq={})",
-                slot_id, slot.sequence_id + 1, sequence_id, slot.sequence_id
+                "⚠️ SEQUENCE resync: slot={}, server was at {}, client at {} - resyncing",
+                slot_id, slot.sequence_id, sequence_id
+            );
+            slot.sequence_id = sequence_id;
+            slot.cached_response = None;
+            self.highest_slotid = self.highest_slotid.max(slot_id);
+            Ok(true)
+        } else {
+            // Client is behind - this is a protocol violation (client went backwards)
+            warn!(
+                "❌ SEQUENCE error: slot={}, expected {}, got {} (client went backwards)",
+                slot_id, slot.sequence_id + 1, sequence_id
             );
             Err(format!("Sequence ID mismatch: expected {}, got {}",
                        slot.sequence_id + 1, sequence_id))
