@@ -821,14 +821,17 @@ fn encode_attributes_from_snapshot(
                 // RFC 8881 Section 3.3.1 - bitmap4 variable-length array
                 // Must include pNFS attributes (82, 83) in word 2
                 let supported = SUPPORTED_ATTRS_BITMAP;
-                let supported_word2: u32 = (1 << (82 % 32)) | (1 << (83 % 32)); // pNFS attrs
+                let word0 = (supported & 0xFFFFFFFF) as u32;
+                let word1 = (supported >> 32) as u32;
+                let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // attrs 82, 83
                 
                 // Encode as bitmap4 (3 words for attrs 0-95)
                 attr_vals.put_u32(3); // array length
-                attr_vals.put_u32((supported & 0xFFFFFFFF) as u32);   // word 0
-                attr_vals.put_u32((supported >> 32) as u32);          // word 1
-                attr_vals.put_u32(supported_word2);                    // word 2 (pNFS)
-                debug!("  SUPPORTED_ATTRS: 3 words with pNFS attrs");
+                attr_vals.put_u32(word0);  // word 0
+                attr_vals.put_u32(word1);  // word 1
+                attr_vals.put_u32(word2);  // word 2 (pNFS)
+                debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
+                debug!("    → Word 2 includes: attr 82 (FS_LAYOUT_TYPES), attr 83 (LAYOUT_BLKSIZE)");
                 true
             }
             FATTR4_MAXREAD => {
@@ -1035,14 +1038,17 @@ fn encode_pseudo_root_attribute(
             // Must include pNFS attributes (82, 83) which are in word 2
             // Word 0: attrs 0-31, Word 1: attrs 32-63, Word 2: attrs 64-95
             let supported = SUPPORTED_ATTRS_BITMAP;
-            let supported_word2: u32 = (1 << (82 % 32)) | (1 << (83 % 32)); // FS_LAYOUT_TYPES | LAYOUT_BLKSIZE
+            let word0 = (supported & 0xFFFFFFFF) as u32;
+            let word1 = (supported >> 32) as u32;
+            let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // FS_LAYOUT_TYPES | LAYOUT_BLKSIZE
             
             // Encode as bitmap4 (3 words to cover attrs 0-95)
             buf.put_u32(3); // array length: 3 words
-            buf.put_u32((supported & 0xFFFFFFFF) as u32);   // word 0 (attrs 0-31)
-            buf.put_u32((supported >> 32) as u32);          // word 1 (attrs 32-63)
-            buf.put_u32(supported_word2);                    // word 2 (attrs 64-95, includes 82, 83)
-            debug!("  SUPPORTED_ATTRS: 3 words, includes pNFS attrs (82, 83)");
+            buf.put_u32(word0);   // word 0 (attrs 0-31)
+            buf.put_u32(word1);   // word 1 (attrs 32-63)
+            buf.put_u32(word2);   // word 2 (attrs 64-95, includes 82, 83)
+            debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
+            debug!("    → pNFS attrs in word 2: bit 18 (attr 82), bit 19 (attr 83)");
             true
         }
         FATTR4_FS_LAYOUT_TYPES => {
@@ -1084,14 +1090,17 @@ fn encode_single_attribute(
             // RFC 8881 Section 3.3.1 - bitmap4 variable-length array
             // Must include pNFS attributes (82, 83) in word 2
             let supported = SUPPORTED_ATTRS_BITMAP;
-            let supported_word2: u32 = (1 << (82 % 32)) | (1 << (83 % 32)); // pNFS layout attrs
+            let word0 = (supported & 0xFFFFFFFF) as u32;
+            let word1 = (supported >> 32) as u32;
+            let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // pNFS layout attrs
             
             // Encode as bitmap4 (3 words for attrs 0-95)
             buf.put_u32(3); // array length
-            buf.put_u32((supported & 0xFFFFFFFF) as u32);   // word 0 (attrs 0-31)
-            buf.put_u32((supported >> 32) as u32);          // word 1 (attrs 32-63)
-            buf.put_u32(supported_word2);                    // word 2 (attrs 64-95, pNFS)
-            debug!("  SUPPORTED_ATTRS: 3 words, advertising pNFS layout types");
+            buf.put_u32(word0);  // word 0 (attrs 0-31)
+            buf.put_u32(word1);  // word 1 (attrs 32-63)
+            buf.put_u32(word2);  // word 2 (attrs 64-95, pNFS)
+            debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
+            debug!("    → Advertising pNFS: bit 18 (attr 82), bit 19 (attr 83)");
             true
         }
         
