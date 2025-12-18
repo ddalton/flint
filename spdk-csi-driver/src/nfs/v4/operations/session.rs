@@ -254,14 +254,28 @@ impl SessionOperationHandler {
             };
         }
 
-        // Create session
+        // Negotiate session buffer sizes
+        // Use the MINIMUM of what client requested and our server maximums
+        // Server maximums: 1MB for requests/responses (standard for modern NFS)
+        const SERVER_MAX_REQUEST: u32 = 1 * 1024 * 1024;  // 1MB
+        const SERVER_MAX_RESPONSE: u32 = 1 * 1024 * 1024; // 1MB
+        const SERVER_MAX_OPS: u32 = 128;
+        
+        let negotiated_max_request = op.fore_chan_attrs.max_request_size.min(SERVER_MAX_REQUEST).max(1024);
+        let negotiated_max_response = op.fore_chan_attrs.max_response_size.min(SERVER_MAX_RESPONSE).max(1024);
+        let negotiated_max_ops = op.fore_chan_attrs.max_operations.min(SERVER_MAX_OPS).max(8);
+        
+        info!("CREATE_SESSION: Negotiated buffers: req={}, resp={}, ops={}", 
+              negotiated_max_request, negotiated_max_response, negotiated_max_ops);
+        
+        // Create session with negotiated sizes
         let session = self.state_mgr.sessions.create_session(
             op.clientid,
             op.sequence,
             op.flags,
-            op.fore_chan_attrs.max_request_size,
-            op.fore_chan_attrs.max_response_size,
-            op.fore_chan_attrs.max_operations,
+            negotiated_max_request,
+            negotiated_max_response,
+            negotiated_max_ops,
         );
 
         info!("CREATE_SESSION: Session {:?} created for client {}",
