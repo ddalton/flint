@@ -398,7 +398,9 @@ impl IoOperationHandler {
 
         // Remove file descriptor from cache (file closes on drop)
         if let Some((_, cached)) = self.fd_cache.remove(&op.stateid) {
-            info!("CLOSE: Removed cached FD for {:?} (path: {:?})", op.stateid, cached.path);
+            info!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
+        } else {
+            info!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
         }
 
         // Revoke the stateid
@@ -599,11 +601,11 @@ impl IoOperationHandler {
         
         let file_arc = if let Some(entry) = cached_entry {
             // Found in cache - reuse existing FD!
-            debug!("WRITE: Using cached FD for stateid {:?}", op.stateid);
+            info!("✅ FD CACHE HIT: Reusing cached file descriptor for {:?}", op.stateid);
             Arc::clone(&entry.file)
         } else {
             // Not in cache - open and cache it
-            debug!("WRITE: Opening and caching file for stateid {:?}", op.stateid);
+            info!("🔧 FD CACHE MISS: Opening file and caching for {:?} (path: {:?})", op.stateid, path);
             
             let path_clone = path.clone();
             let file_result = tokio::task::spawn_blocking(move || {
