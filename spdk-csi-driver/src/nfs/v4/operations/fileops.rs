@@ -776,6 +776,8 @@ fn encode_attributes_from_snapshot(
                     | (1u64 << FATTR4_FSID)
                     | (1u64 << FATTR4_FILEID)
                     | (1u64 << FATTR4_ACL)
+                    | (1u64 << FATTR4_MAXREAD)      // Bit 30 - Critical for client wsize!
+                    | (1u64 << FATTR4_MAXWRITE)     // Bit 31 - Critical for client rsize!
                     | (1u64 << FATTR4_MODE)
                     | (1u64 << FATTR4_CASE_INSENSITIVE)
                     | (1u64 << FATTR4_CASE_PRESERVING)
@@ -1033,6 +1035,8 @@ fn encode_single_attribute(
                 | (1u64 << FATTR4_FILEID)
                 | (1u64 << FATTR4_MAXLINK)
                 | (1u64 << FATTR4_MAXNAME)
+                | (1u64 << FATTR4_MAXREAD)          // CRITICAL: Client needs this for rsize!
+                | (1u64 << FATTR4_MAXWRITE)         // CRITICAL: Client needs this for wsize!
                 | (1u64 << FATTR4_MODE)
                 | (1u64 << FATTR4_NUMLINKS)
                 | (1u64 << FATTR4_OWNER)
