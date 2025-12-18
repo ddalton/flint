@@ -103,6 +103,9 @@ pub mod compound_wrapper;
 // gRPC control protocol (MDS-DS communication)
 pub mod grpc;
 
+// pNFS handler trait for dispatcher integration
+pub mod handler_trait;
+
 // Metadata Server module
 pub mod mds;
 
@@ -112,6 +115,7 @@ pub mod ds;
 // Re-exports for convenience
 pub use config::{PnfsConfig, PnfsMode, MdsConfig, DsConfig};
 pub use compound_wrapper::PnfsCompoundWrapper;
+pub use handler_trait::PnfsOperations;
 
 /// pNFS result type
 pub type Result<T> = std::result::Result<T, Error>;

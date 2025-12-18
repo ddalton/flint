@@ -78,11 +78,13 @@ impl MetadataServer {
             Arc::clone(&operation_handler),
         ));
 
-        // Initialize base NFSv4 dispatcher (for non-pNFS operations)
-        let base_dispatcher = Arc::new(CompoundDispatcher::new(
+        // Initialize NFSv4 dispatcher WITH pNFS support
+        // This allows the dispatcher to handle pNFS operations (LAYOUTGET, etc.)
+        let base_dispatcher = Arc::new(CompoundDispatcher::new_with_pnfs(
             Arc::clone(&fh_manager),
             state_mgr,
             lock_mgr,
+            Some(operation_handler.clone() as Arc<dyn crate::pnfs::PnfsOperations>),
         ));
 
         // Register initial data servers from config

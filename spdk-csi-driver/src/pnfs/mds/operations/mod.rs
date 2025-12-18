@@ -409,3 +409,19 @@ pub enum GetDeviceListError {
 }
 
 
+
+// Implement PnfsOperations trait for PnfsOperationHandler
+impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
+    fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError> {
+        self.layoutget(args)
+    }
+    
+    fn getdeviceinfo(&self, args: GetDeviceInfoArgs) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
+        self.getdeviceinfo(args)
+    }
+    
+    fn layoutreturn(&self, args: LayoutReturnArgs) -> Result<(), String> {
+        self.layoutreturn(args).map(|_| ()).map_err(|e| format!("{:?}", e))
+    }
+}
+

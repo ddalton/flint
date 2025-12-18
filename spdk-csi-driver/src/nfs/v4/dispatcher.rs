@@ -43,14 +43,29 @@ pub struct CompoundDispatcher {
     io_handler: IoOperationHandler,
     perf_handler: PerfOperationHandler,
     lock_handler: LockOperationHandler,
+    
+    /// Optional pNFS handler (only set for pNFS MDS mode)
+    /// When None: pNFS operations return NFS4ERR_NOTSUPP
+    /// When Some: pNFS operations are delegated to this handler
+    pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
 }
 
 impl CompoundDispatcher {
-    /// Create a new COMPOUND dispatcher
+    /// Create a new COMPOUND dispatcher (standalone NFS mode)
     pub fn new(
         fh_mgr: Arc<FileHandleManager>,
         state_mgr: Arc<StateManager>,
         lock_mgr: Arc<LockManager>,
+    ) -> Self {
+        Self::new_with_pnfs(fh_mgr, state_mgr, lock_mgr, None)
+    }
+    
+    /// Create a new COMPOUND dispatcher with optional pNFS support
+    pub fn new_with_pnfs(
+        fh_mgr: Arc<FileHandleManager>,
+        state_mgr: Arc<StateManager>,
+        lock_mgr: Arc<LockManager>,
+        pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
     ) -> Self {
         // Create operation handlers
         let session_handler = SessionOperationHandler::new(state_mgr.clone());
@@ -68,7 +83,19 @@ impl CompoundDispatcher {
             io_handler,
             perf_handler,
             lock_handler,
+            pnfs_handler,
         }
+    }
+    
+    /// Check if an opcode is a pNFS operation
+    fn is_pnfs_opcode(opcode: u32) -> bool {
+        matches!(opcode, 
+            opcode::GETDEVICEINFO |   // 47
+            opcode::GETDEVICELIST |   // 48
+            opcode::LAYOUTCOMMIT |    // 49
+            opcode::LAYOUTGET |       // 50
+            opcode::LAYOUTRETURN      // 51
+        )
     }
 
     /// Process a COMPOUND request
@@ -769,10 +796,26 @@ impl CompoundDispatcher {
                 OperationResult::SecInfoNoName(Nfs4Status::Ok)
             }
 
-            // Unsupported operations
+            // Unsupported operations (may be pNFS operations)
             Operation::Unsupported(opcode) => {
-                warn!("Unsupported operation: opcode={}", opcode);
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+                // Check if this is a pNFS operation and we have a pNFS handler
+                if Self::is_pnfs_opcode(opcode) {
+                    if let Some(ref _pnfs) = self.pnfs_handler {
+                        // TODO: Implement pNFS operation handling
+                        // For now, log that we detected it but can't handle it yet
+                        info!("🔧 pNFS operation detected (opcode={}), handler integration pending", opcode);
+                        warn!("Unsupported operation: opcode={} (pNFS handler exists but not wired up)", opcode);
+                        OperationResult::Unsupported(Nfs4Status::NotSupp)
+                    } else {
+                        // No pNFS handler configured
+                        warn!("Unsupported operation: opcode={} (pNFS operation, no handler)", opcode);
+                        OperationResult::Unsupported(Nfs4Status::NotSupp)
+                    }
+                } else {
+                    // Truly unsupported operation
+                    warn!("Unsupported operation: opcode={}", opcode);
+                    OperationResult::Unsupported(Nfs4Status::NotSupp)
+                }
             }
 
             // Catch-all for any unhandled operations

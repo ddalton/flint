@@ -33,7 +33,7 @@ data:
         policy: recall_affected  # Only recall affected layouts
     
     exports:
-      - path: /
+      - path: /data
         fsid: 1
         options:
           - rw
