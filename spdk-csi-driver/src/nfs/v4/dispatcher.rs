@@ -857,11 +857,12 @@ impl CompoundDispatcher {
         let pnfs = match &self.pnfs_handler {
             Some(handler) => handler,
             None => {
-                warn!("LAYOUTGET requested but pNFS not configured");
+                warn!("❌ LAYOUTGET requested but pNFS not configured");
                 return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
             }
         };
         
+        info!("📥📥📥 LAYOUTGET RECEIVED 📥📥📥");
         info!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
         
         // Get current filehandle
@@ -937,16 +938,23 @@ impl CompoundDispatcher {
                     
                     // Encode FILE layout content for first segment
                     // In a full implementation, we would encode all segments properly
+                    info!("   📤 Encoding layout with {} segments", layout.segments.len());
+                    
                     let layout_content = Self::encode_file_layout(
                         &layout.segments[0], 
                         &filehandle,
                         stripe_unit
                     );
+                    
+                    info!("   📤 Layout content encoded as opaque: {} bytes", layout_content.len());
                     encoder.encode_opaque(&layout_content);
                 }
                 
+                let final_response = encoder.finish();
                 info!("✅ LAYOUTGET successful: {} layouts returned", result.layouts.len());
-                OperationResult::LayoutGet(Nfs4Status::Ok, Some(encoder.finish()))
+                info!("✅ Total LAYOUTGET response: {} bytes", final_response.len());
+                info!("✅ Response hex (first 128 bytes): {:02x?}", &final_response[..final_response.len().min(128)]);
+                OperationResult::LayoutGet(Nfs4Status::Ok, Some(final_response))
             }
             Err(e) => {
                 warn!("❌ LAYOUTGET failed: {:?}", e);
@@ -971,12 +979,14 @@ impl CompoundDispatcher {
         let pnfs = match &self.pnfs_handler {
             Some(handler) => handler,
             None => {
-                warn!("GETDEVICEINFO requested but pNFS not configured");
+                warn!("❌ GETDEVICEINFO requested but pNFS not configured");
                 return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
             }
         };
         
+        info!("🔥🔥🔥 GETDEVICEINFO RECEIVED! 🔥🔥🔥");
         info!("📥 GETDEVICEINFO: device_id len={}, layout_type={}", device_id.len(), layout_type);
+        info!("📥 Device ID bytes: {:02x?}", device_id);
         
         // Convert device_id to [u8; 16]
         let mut dev_id: DeviceId = [0; 16];
@@ -1061,8 +1071,13 @@ impl CompoundDispatcher {
         device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
         device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
         
-        info!("   🔧 Encoding FILE layout: device_id='{}', binary_id={:02x?}", 
-              segment.device_id, &device_id_bytes[0..8]);
+        info!("   🔧 Encoding FILE layout (RFC 5661 Section 13.2):");
+        info!("      device_id string: '{}'", segment.device_id);
+        info!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
+        info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
+        info!("      first_stripe_index: {}", segment.stripe_index);
+        info!("      pattern_offset: {}", segment.pattern_offset);
+        info!("      filehandle length: {} bytes", filehandle.len());
         
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
@@ -1081,7 +1096,11 @@ impl CompoundDispatcher {
         encoder.encode_u32(1);  // Array count
         encoder.encode_opaque(filehandle);
         
-        encoder.finish()
+        let result = encoder.finish();
+        info!("      📦 Encoded FILE layout: {} bytes total", result.len());
+        info!("      📦 First 64 bytes: {:02x?}", &result[..result.len().min(64)]);
+        
+        result
     }
     
     /// Encode device address (netid, addr)
