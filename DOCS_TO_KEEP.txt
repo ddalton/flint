@@ -1,0 +1,53 @@
+# Documentation to KEEP
+
+## Core Architecture (Keep)
+- README.adoc (main readme)
+- PNFS_ARCHITECTURE_DIAGRAM.md (main architecture)
+- FLINT_CSI_ARCHITECTURE.md (CSI driver architecture)
+
+## Implementation Guides (Keep)
+- PNFS_QUICKSTART.md (getting started)
+- PNFS_DEPLOYMENT_GUIDE.md (deployment)
+- REBUILD_AND_TEST.md (build instructions)
+
+## Performance & Optimization (Keep - NEW!)
+- PNFS_PERFORMANCE_ROADMAP.md (optimization roadmap)
+- READ_DELEGATIONS_IMPLEMENTATION.md (delegation implementation)
+- RDMA_IMPLEMENTATION_PLAN.md (RDMA plan)
+- RDMA_COMMUNICATION_ANALYSIS.md (RDMA analysis)
+
+## Technical Reference (Keep)
+- PNFS_RFC_GUIDE.md (RFC references)
+- PNFS_FILESYSTEM_ARCHITECTURE.md (filesystem details)
+- ACCESS_MODES_COMPLETE.md (access modes)
+
+## Test Results (Keep - NEW!)
+- ALL_TESTS_PASSING.md (final test status)
+- PERFORMANCE_OPTIMIZATIONS_SUMMARY.md (what we accomplished)
+
+# Documentation to REMOVE (Redundant/Outdated)
+
+## Remove - Redundant Status Docs
+- FINAL_TEST_RESULTS.md (superseded by ALL_TESTS_PASSING.md)
+- TEST_RESULTS_SUMMARY.md (redundant)
+- TEST_FIXES_SUMMARY.md (redundant)
+- IGNORED_TESTS_ANALYSIS.md (redundant)
+- REMAINING_IGNORED_TESTS.md (redundant)
+
+## Remove - Old Implementation Docs  
+- PNFS_IMPLEMENTATION_STATUS.md (outdated)
+- PNFS_STATE_ANALYSIS.md (too detailed, covered in architecture)
+- PNFS_ZERO_OVERHEAD_DESIGN.md (implementation detail)
+- PNFS_WITH_FLINT_REPLICATION.md (specific deployment scenario)
+- PNFS_HDFS_COMPARISON.md (comparison doc, not needed)
+
+## Remove - Old ROX Docs
+- ROX_ARCHITECTURE_DIAGRAM.md (old RWX implementation)
+- ROX_NFS_IMPLEMENTATION_COMPLETED.md (old)
+- ROX_NFS_IMPLEMENTATION.md (old)
+- ROX_TEST_RESULTS.md (old)
+- ROX_FINAL_TEST_RESULTS.md (old)
+
+## Remove - Miscellaneous
+- NFS_SERVICE_ENDPOINT.md (implementation detail)
+

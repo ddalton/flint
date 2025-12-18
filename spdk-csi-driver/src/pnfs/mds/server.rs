@@ -424,11 +424,23 @@ impl MetadataServer {
             compound_req.operations.len()
         );
 
-        // Check for pNFS operations in the compound
-        // For now, delegate to base dispatcher
-        // TODO: Intercept pNFS opcodes and route to pnfs_wrapper
+        // Dispatch through base dispatcher (which handles both pNFS and regular ops)
+        let mut compound_resp = base_dispatcher.dispatch_compound(compound_req).await;
+
+        // Post-process EXCHANGE_ID responses to set pNFS MDS flags
+        // This tells clients that we're a pNFS server capable of providing layouts
+        use crate::pnfs::exchange_id::set_pnfs_mds_flags;
+        use crate::nfs::v4::compound::OperationResult;
         
-        let compound_resp = base_dispatcher.dispatch_compound(compound_req).await;
+        for result in &mut compound_resp.results {
+            if let OperationResult::ExchangeId(status, Some(ref mut res)) = result {
+                if *status == crate::nfs::v4::protocol::Nfs4Status::Ok {
+                    // Modify flags to advertise pNFS MDS role
+                    res.flags = set_pnfs_mds_flags(res.flags);
+                    info!("✅ EXCHANGE_ID: Set pNFS MDS flags (0x{:x})", res.flags);
+                }
+            }
+        }
 
         debug!(
             "COMPOUND result: status={:?}, {} results",

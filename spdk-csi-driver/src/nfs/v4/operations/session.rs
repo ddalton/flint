@@ -170,7 +170,9 @@ impl SessionOperationHandler {
         use crate::nfs::v4::protocol::exchgid_flags;
         let mut response_flags = 0u32;
 
-        // Set server role - we're a non-pNFS server
+        // Set server role - check if we're running as pNFS MDS
+        // This will be overridden by pNFS wrapper if in MDS mode
+        // For now, default to non-pNFS for standalone NFS servers
         response_flags |= exchgid_flags::USE_NON_PNFS;
 
         // Support client capabilities we understand
