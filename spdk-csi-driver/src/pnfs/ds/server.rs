@@ -1,0 +1,591 @@
+//! Data Server Implementation
+//!
+//! The Data Server is a lightweight NFS server that handles only data I/O
+//! operations (READ, WRITE, COMMIT) for high-throughput parallel access.
+//!
+//! # Design
+//! - Minimal state (no OPEN/CLOSE tracking)
+//! - Direct I/O to SPDK bdevs
+//! - Registers with MDS at startup
+//! - Sends periodic heartbeats to MDS
+
+use crate::pnfs::config::DsConfig;
+use crate::pnfs::ds::io::{IoOperationHandler, WriteStable};
+use crate::pnfs::ds::registration::RegistrationClient;
+use crate::pnfs::Result;
+use crate::nfs::rpc::{CallMessage, ReplyBuilder};
+use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
+use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status};
+use crate::nfs::v4::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
+use bytes::{Bytes, BytesMut};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::time::interval;
+use tracing::{debug, error, info, warn};
+
+/// Data Server
+pub struct DataServer {
+    config: DsConfig,
+    io_handler: Arc<IoOperationHandler>,
+    registration_client: Arc<tokio::sync::Mutex<RegistrationClient>>,
+}
+
+impl DataServer {
+    /// Create a new data server
+    pub fn new(config: DsConfig) -> Result<Self> {
+        info!("Initializing Data Server: {}", config.device_id);
+
+        // Verify bdevs are mounted
+        for bdev in &config.bdevs {
+            let mount_point = std::path::Path::new(&bdev.mount_point);
+            if !mount_point.exists() {
+                warn!(
+                    "Mount point does not exist: {}. Ensure SPDK volume is mounted via ublk.",
+                    bdev.mount_point
+                );
+            } else {
+                info!("✓ Mount point verified: {}", bdev.mount_point);
+            }
+        }
+
+        // Initialize I/O handler with the first bdev's mount point
+        // TODO: Support multiple bdevs
+        let data_path = config.bdevs.first()
+            .ok_or_else(|| crate::pnfs::Error::Config(
+                "No bdevs configured".to_string()
+            ))?
+            .mount_point.clone();
+
+        let io_handler = Arc::new(IoOperationHandler::new(&data_path)?);
+        info!("✓ I/O handler initialized with data path: {}", data_path);
+
+        // Initialize registration client
+        let registration_client = Arc::new(tokio::sync::Mutex::new(
+            RegistrationClient::new(
+                config.device_id.clone(),
+                config.mds.endpoint.clone(),
+                Duration::from_secs(config.mds.heartbeat_interval),
+            )
+        ));
+
+        Ok(Self { config, io_handler, registration_client })
+    }
+
+    /// Start the data server
+    pub async fn serve(&self) -> Result<()> {
+        info!("╔════════════════════════════════════════════════════╗");
+        info!("║   Flint pNFS Data Server (DS) - RUNNING           ║");
+        info!("╚════════════════════════════════════════════════════╝");
+        info!("");
+        info!("Device ID: {}", self.config.device_id);
+        info!("Listening on: {}:{}", self.config.bind.address, self.config.bind.port);
+        info!("MDS Endpoint: {}", self.config.mds.endpoint);
+        info!("Block Devices: {}", self.config.bdevs.len());
+        for bdev in &self.config.bdevs {
+            info!("  - {} mounted at {}", bdev.name, bdev.mount_point);
+            if let Some(ref spdk_vol) = bdev.spdk_volume {
+                info!("    SPDK volume: {}", spdk_vol);
+            }
+        }
+        info!("");
+
+        // Register with MDS
+        info!("Registering with MDS at {}...", self.config.mds.endpoint);
+        if let Err(e) = self.register_with_mds().await {
+            error!("Failed to register with MDS: {}", e);
+            error!("Continuing anyway, will retry...");
+        }
+
+        // Start heartbeat sender
+        self.start_heartbeat_sender();
+
+        // Start status reporter
+        self.start_status_reporter();
+
+        info!("✅ Data Server is ready to serve I/O requests");
+        info!("");
+
+        // Start TCP server
+        let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        self.serve_tcp(&addr).await
+    }
+
+    /// Serve minimal NFS (READ/WRITE/COMMIT only) over TCP
+    async fn serve_tcp(&self, addr: &str) -> Result<()> {
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| crate::pnfs::Error::Io(e))?;
+        
+        info!("🚀 pNFS DS TCP server listening on {}", addr);
+        info!("   Serving: READ, WRITE, COMMIT operations only");
+        info!("");
+        
+        let mut connection_count = 0u64;
+
+        loop {
+            let (stream, peer) = listener.accept()
+                .await
+                .map_err(|e| crate::pnfs::Error::Io(e))?;
+            
+            connection_count += 1;
+            info!("📡 New TCP connection #{} from {}", connection_count, peer);
+            
+            let io_handler = Arc::clone(&self.io_handler);
+            let conn_id = connection_count;
+            
+            tokio::spawn(async move {
+                debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
+                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, peer).await {
+                    warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
+                } else {
+                    info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
+                }
+            });
+        }
+    }
+
+    /// Handle a single TCP connection (minimal NFS server)
+    async fn handle_tcp_connection(
+        stream: TcpStream,
+        io_handler: Arc<IoOperationHandler>,
+        peer: std::net::SocketAddr,
+    ) -> std::io::Result<()> {
+        use tokio::time::Instant;
+
+        let connect_time = Instant::now();
+        debug!("🔌 DS connection handler started for {}", peer);
+
+        stream.set_nodelay(true)?;
+
+        let (reader, writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
+        let mut writer = BufWriter::with_capacity(128 * 1024, writer);
+
+        let mut buf = BytesMut::with_capacity(128 * 1024);
+        let mut rpc_count = 0;
+
+        loop {
+            // Read RPC record marker
+            let mut marker_buf = [0u8; 4];
+            match reader.read_exact(&mut marker_buf).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    let duration = connect_time.elapsed();
+                    info!("🔌 DS connection from {} closed after {:?} ({} RPCs)", 
+                          peer, duration, rpc_count);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+
+            let marker = u32::from_be_bytes(marker_buf);
+            let length = (marker & 0x7FFFFFFF) as usize;
+
+            if length > 4 * 1024 * 1024 {
+                warn!("❌ Rejecting oversized RPC: {} bytes", length);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "RPC too large",
+                ));
+            }
+
+            // Read message
+            buf.clear();
+            buf.reserve(length);
+            unsafe { buf.set_len(length); }
+            reader.read_exact(&mut buf[..length]).await?;
+
+            let request = buf.split().freeze();
+
+            // Process RPC (minimal NFS)
+            let reply = Self::dispatch_minimal_nfs(request, Arc::clone(&io_handler)).await;
+            rpc_count += 1;
+
+            // Write reply
+            let reply_len = reply.len() as u32;
+            let reply_marker = 0x80000000 | reply_len;
+            
+            writer.write_all(&reply_marker.to_be_bytes()).await?;
+            writer.write_all(&reply).await?;
+            writer.flush().await?;
+        }
+    }
+
+    /// Dispatch minimal NFS RPC (READ/WRITE/COMMIT only)
+    async fn dispatch_minimal_nfs(
+        request: Bytes,
+        io_handler: Arc<IoOperationHandler>,
+    ) -> Bytes {
+        // Parse RPC call
+        let (call, args) = match CallMessage::decode_with_args(request) {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("❌ Failed to parse RPC: {}", e);
+                return ReplyBuilder::garbage_args(0).into();
+            }
+        };
+
+        debug!("DS RPC: xid={}, procedure={}", call.xid, call.procedure);
+
+        // Validate program/version
+        if call.program != NFS4_PROGRAM || call.version != 4 {
+            return ReplyBuilder::prog_unavail(call.xid);
+        }
+
+        // Handle procedure
+        match call.procedure {
+            procedure::NULL => {
+                ReplyBuilder::success(call.xid).finish()
+            }
+
+            procedure::COMPOUND => {
+                Self::handle_minimal_compound(call, args, io_handler).await
+            }
+
+            _ => ReplyBuilder::proc_unavail(call.xid),
+        }
+    }
+
+    /// Handle COMPOUND with only READ/WRITE/COMMIT
+    async fn handle_minimal_compound(
+        call: CallMessage,
+        args: Bytes,
+        io_handler: Arc<IoOperationHandler>,
+    ) -> Bytes {
+        let mut decoder = XdrDecoder::new(args);
+
+        // Decode COMPOUND header
+        let tag_len = match decoder.decode_u32() {
+            Ok(len) => len,
+            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+        };
+        
+        // Skip tag
+        for _ in 0..((tag_len + 3) / 4) {
+            let _ = decoder.decode_u32();
+        }
+
+        let minor_version = match decoder.decode_u32() {
+            Ok(v) => v,
+            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+        };
+
+        let op_count = match decoder.decode_u32() {
+            Ok(c) => c,
+            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+        };
+
+        debug!("DS COMPOUND: minor_version={}, {} operations", minor_version, op_count);
+
+        // Process operations (only READ/WRITE/COMMIT supported)
+        let mut results = Vec::new();
+        let mut current_fh: Option<Vec<u8>> = None;
+
+        for _ in 0..op_count {
+            let opcode = match decoder.decode_u32() {
+                Ok(op) => op,
+                Err(e) => {
+                    warn!("Failed to decode opcode: {}", e);
+                    break;
+                }
+            };
+
+            let (status, result_data) = match opcode {
+                opcode::PUTFH => {
+                    // Store current filehandle
+                    match decoder.decode_filehandle() {
+                        Ok(fh) => {
+                            current_fh = Some(fh.data);
+                            (Nfs4Status::Ok, Bytes::new())
+                        }
+                        Err(_) => (Nfs4Status::BadHandle, Bytes::new()),
+                    }
+                }
+
+                opcode::READ => {
+                    let stateid = match decoder.decode_stateid() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            continue;
+                        }
+                    };
+                    let offset = decoder.decode_u64().unwrap_or(0);
+                    let count = decoder.decode_u32().unwrap_or(0);
+
+                    if let Some(ref fh) = current_fh {
+                        match io_handler.read(fh, offset, count).await {
+                            Ok(read_result) => {
+                                let mut encoder = XdrEncoder::new();
+                                encoder.encode_bool(read_result.eof);
+                                encoder.encode_opaque(&read_result.data);
+                                (Nfs4Status::Ok, encoder.finish())
+                            }
+                            Err(_) => (Nfs4Status::Io, Bytes::new()),
+                        }
+                    } else {
+                        (Nfs4Status::NoFileHandle, Bytes::new())
+                    }
+                }
+
+                opcode::WRITE => {
+                    let _stateid = decoder.decode_stateid();
+                    let offset = decoder.decode_u64().unwrap_or(0);
+                    let stable = decoder.decode_u32().unwrap_or(2);
+                    let data = decoder.decode_opaque().unwrap_or_else(|_| Bytes::new());
+
+                    if let Some(ref fh) = current_fh {
+                        let stable_level = match stable {
+                            0 => WriteStable::Unstable,
+                            1 => WriteStable::DataSync,
+                            _ => WriteStable::FileSync,
+                        };
+
+                        match io_handler.write(fh, offset, &data, stable_level).await {
+                            Ok(write_result) => {
+                                let mut encoder = XdrEncoder::new();
+                                encoder.encode_u32(write_result.count);
+                                encoder.encode_u32(stable);
+                                encoder.encode_fixed_opaque(&write_result.verifier);
+                                (Nfs4Status::Ok, encoder.finish())
+                            }
+                            Err(_) => (Nfs4Status::Io, Bytes::new()),
+                        }
+                    } else {
+                        (Nfs4Status::NoFileHandle, Bytes::new())
+                    }
+                }
+
+                opcode::COMMIT => {
+                    let offset = decoder.decode_u64().unwrap_or(0);
+                    let count = decoder.decode_u32().unwrap_or(0);
+
+                    if let Some(ref fh) = current_fh {
+                        match io_handler.commit(fh, offset, count).await {
+                            Ok(commit_result) => {
+                                let mut encoder = XdrEncoder::new();
+                                encoder.encode_fixed_opaque(&commit_result.verifier);
+                                (Nfs4Status::Ok, encoder.finish())
+                            }
+                            Err(_) => (Nfs4Status::Io, Bytes::new()),
+                        }
+                    } else {
+                        (Nfs4Status::NoFileHandle, Bytes::new())
+                    }
+                }
+
+                _ => {
+                    warn!("DS received unsupported operation: {}", opcode);
+                    (Nfs4Status::NotSupp, Bytes::new())
+                }
+            };
+
+            results.push((status, result_data));
+        }
+
+        // Encode COMPOUND response
+        let mut encoder = XdrEncoder::new();
+        
+        // COMPOUND response header
+        encoder.encode_u32(0);  // tag length
+        encoder.encode_u32(Nfs4Status::Ok as u32);  // Overall status
+        encoder.encode_u32(results.len() as u32);  // Result count
+
+        // Encode each result
+        for (status, data) in results {
+            encoder.encode_u32(status as u32);
+            encoder.append_raw(&data);
+        }
+
+        let compound_data = encoder.finish();
+
+        // Build RPC reply
+        let mut reply_encoder = XdrEncoder::new();
+        reply_encoder.encode_u32(call.xid);
+        reply_encoder.encode_u32(1);  // REPLY
+        reply_encoder.encode_u32(0);  // MSG_ACCEPTED
+        reply_encoder.encode_u32(0);  // AUTH_NONE
+        reply_encoder.encode_u32(0);  // Auth length
+        reply_encoder.encode_u32(0);  // SUCCESS
+        reply_encoder.append_raw(&compound_data);
+
+        reply_encoder.finish()
+    }
+
+    /// Register with the MDS via gRPC
+    async fn register_with_mds(&self) -> Result<()> {
+        let mut client = self.registration_client.lock().await;
+        
+        let endpoint = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        let mount_points: Vec<String> = self.config.bdevs
+            .iter()
+            .map(|b| b.mount_point.clone())
+            .collect();
+        
+        // Calculate total capacity (simplified - sum all mount points)
+        // TODO: Get actual filesystem capacity
+        let capacity = 1_000_000_000_000u64;  // 1 TB placeholder
+        let used = 0u64;
+
+        match client.register(
+            self.config.device_id.clone(),
+            endpoint,
+            mount_points,
+            capacity,
+            used,
+        ).await {
+            Ok(true) => {
+                info!("✅ Successfully registered with MDS");
+                Ok(())
+            }
+            Ok(false) => {
+                warn!("⚠️ Registration was rejected by MDS");
+                Ok(())  // Don't fail, will retry
+            }
+            Err(e) => {
+                error!("❌ Registration failed: {}", e);
+                Ok(())  // Don't fail, will retry
+            }
+        }
+    }
+
+    /// Start heartbeat sender in the background
+    fn start_heartbeat_sender(&self) {
+        let registration_client = Arc::clone(&self.registration_client);
+        let heartbeat_interval_secs = self.config.mds.heartbeat_interval;
+
+        tokio::spawn(async move {
+            let mut heartbeat_interval = interval(Duration::from_secs(heartbeat_interval_secs));
+            let mut failure_count = 0u32;
+
+            loop {
+                heartbeat_interval.tick().await;
+
+                // Send heartbeat via gRPC
+                let mut client = registration_client.lock().await;
+                
+                // TODO: Get actual capacity/usage from filesystem
+                let capacity = 1_000_000_000_000u64;
+                let used = 0u64;
+                let active_connections = 0u32;
+
+                match client.heartbeat(capacity, used, active_connections).await {
+                    Ok(true) => {
+                        debug!("✅ Heartbeat acknowledged");
+                        failure_count = 0;
+                    }
+                    Ok(false) => {
+                        warn!("⚠️ Heartbeat not acknowledged");
+                        failure_count += 1;
+                    }
+                    Err(e) => {
+                        error!("❌ Heartbeat failed: {}", e);
+                        failure_count += 1;
+                    }
+                }
+
+                if failure_count >= 3 {
+                    error!(
+                        "Lost connection to MDS after {} failures, attempting re-registration",
+                        failure_count
+                    );
+                    // TODO: Attempt re-registration
+                    failure_count = 0;
+                }
+            }
+        });
+
+        info!(
+            "Heartbeat sender started (interval: {} seconds)",
+            heartbeat_interval_secs
+        );
+    }
+
+    /// Start status reporter in background
+    fn start_status_reporter(&self) {
+        let device_id = self.config.device_id.clone();
+        let bdev_count = self.config.bdevs.len();
+        let mds_endpoint = self.config.mds.endpoint.clone();
+
+        tokio::spawn(async move {
+            let mut status_interval = interval(Duration::from_secs(60));
+
+            loop {
+                status_interval.tick().await;
+
+                info!("─────────────────────────────────────────────────────");
+                info!("DS Status Report:");
+                info!("  Device ID: {}", device_id);
+                info!("  Block Devices: {}", bdev_count);
+                info!("  MDS: {}", mds_endpoint);
+                // TODO: Add I/O statistics
+                info!("─────────────────────────────────────────────────────");
+            }
+        });
+
+        info!("Status reporter started (interval: 60 seconds)");
+    }
+
+    /// Handle READ operation (opcode 25)
+    /// 
+    /// Uses filesystem I/O - this is the correct approach for pNFS FILE layout
+    /// per RFC 8881 Chapter 13.
+    pub async fn handle_read(
+        &self,
+        filehandle: &[u8],
+        _stateid: &[u8; 16],  // Minimal validation - trust MDS
+        offset: u64,
+        count: u32,
+    ) -> Result<Vec<u8>> {
+        let result = self.io_handler.read(filehandle, offset, count).await?;
+        Ok(result.data)
+    }
+
+    /// Handle WRITE operation (opcode 38)
+    /// 
+    /// Uses filesystem I/O - this is the correct approach for pNFS FILE layout
+    /// per RFC 8881 Chapter 13.
+    pub async fn handle_write(
+        &self,
+        filehandle: &[u8],
+        _stateid: &[u8; 16],  // Minimal validation - trust MDS
+        offset: u64,
+        data: &[u8],
+        stable: u32,
+    ) -> Result<u32> {
+        use crate::pnfs::ds::io::WriteStable;
+        
+        let stable_level = match stable {
+            0 => WriteStable::Unstable,
+            1 => WriteStable::DataSync,
+            2 => WriteStable::FileSync,
+            _ => WriteStable::FileSync,
+        };
+        
+        let result = self.io_handler.write(filehandle, offset, data, stable_level).await?;
+        Ok(result.count)
+    }
+
+    /// Handle COMMIT operation (opcode 5)
+    /// 
+    /// Uses filesystem sync - this is the correct approach for pNFS FILE layout
+    /// per RFC 8881 Chapter 13.
+    pub async fn handle_commit(
+        &self,
+        filehandle: &[u8],
+        offset: u64,
+        count: u32,
+    ) -> Result<[u8; 8]> {
+        let result = self.io_handler.commit(filehandle, offset, count).await?;
+        Ok(result.verifier)
+    }
+    
+    /// Get the I/O handler (for integration with NFS dispatcher)
+    pub fn io_handler(&self) -> Arc<IoOperationHandler> {
+        Arc::clone(&self.io_handler)
+    }
+}
+
+

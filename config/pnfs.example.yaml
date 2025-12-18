@@ -1,0 +1,276 @@
+# pNFS Configuration Example
+# This file demonstrates the configuration format for enabling pNFS
+# in the Flint NFS server.
+#
+# Copy this file to /etc/flint/pnfs.yaml and customize for your deployment.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+
+# Server Mode
+# - standalone: Traditional single NFS server (default, current behavior)
+# - mds: Run as pNFS Metadata Server
+# - ds: Run as pNFS Data Server
+mode: standalone
+
+# ============================================================================
+# Metadata Server Configuration (when mode: mds)
+# ============================================================================
+mds:
+  # Network binding
+  bind:
+    address: "0.0.0.0"
+    port: 2049
+  
+  # Layout configuration
+  layout:
+    # Layout type: file, block, object
+    # Start with 'file' - it's the most widely supported
+    type: file
+    
+    # Stripe size in bytes (default: 8 MiB)
+    # Larger = fewer layout requests, better sequential performance
+    # Smaller = better distribution, better for random I/O
+    stripeSize: 8388608
+    
+    # Layout policy: roundrobin, stripe, locality
+    # - roundrobin: Simple round-robin across all DSs
+    # - stripe: Interleaved striping for parallel I/O
+    # - locality: Prefer DS on same node as client (future)
+    policy: stripe
+  
+  # Data Server Registry
+  # MDS needs to know about all available data servers
+  dataServers:
+    - deviceId: ds-node1-nvme0
+      # Primary endpoint (required)
+      endpoint: "10.244.1.10:2049"
+      # Additional endpoints for multipath/RDMA (optional)
+      multipath:
+        - "10.244.2.10:20049"  # RDMA endpoint
+      # Block devices this DS serves
+      bdevs:
+        - nvme0n1
+      # Status tracking (filled in at runtime)
+      # status: active|degraded|offline
+    
+    - deviceId: ds-node2-nvme0
+      endpoint: "10.244.1.11:2049"
+      bdevs:
+        - nvme0n1
+        - nvme1n1  # This DS has two bdevs
+    
+    - deviceId: ds-node3-nvme0
+      endpoint: "10.244.1.12:2049"
+      bdevs:
+        - nvme0n1
+  
+  # State Persistence
+  state:
+    # Backend: memory, kubernetes, etcd
+    # - memory: In-memory only (dev/testing, lost on restart)
+    # - kubernetes: Store in ConfigMap (simple production)
+    # - etcd: Distributed consensus (HA production)
+    backend: kubernetes
+    
+    # Backend-specific configuration
+    config:
+      # For kubernetes backend:
+      namespace: flint-system
+      configmap: flint-pnfs-state
+      # Snapshot interval in seconds
+      snapshotInterval: 30
+      
+      # For etcd backend:
+      # endpoints:
+      #   - etcd-0.etcd:2379
+      #   - etcd-1.etcd:2379
+      #   - etcd-2.etcd:2379
+      # prefix: /flint/pnfs
+      # timeout: 5
+  
+  # High Availability
+  ha:
+    enabled: true
+    # Number of MDS replicas
+    replicas: 3
+    # Leader election (required for HA)
+    leaderElection: true
+    # Leader lease duration in seconds
+    leaseDuration: 15
+    # Leader renew deadline in seconds
+    renewDeadline: 10
+    # Leader retry period in seconds
+    retryPeriod: 2
+  
+  # Failure Handling
+  failover:
+    # DS heartbeat timeout in seconds
+    heartbeatTimeout: 30
+    # How to handle DS failure:
+    # - recall_all: Recall all layouts immediately (safe, disruptive)
+    # - recall_affected: Recall only layouts using failed DS (recommended)
+    # - lazy: Let clients discover failure (slow)
+    policy: recall_affected
+    # Grace period before removing failed DS (seconds)
+    gracePeriod: 60
+
+# ============================================================================
+# Data Server Configuration (when mode: ds)
+# ============================================================================
+ds:
+  # Network binding
+  bind:
+    address: "0.0.0.0"
+    port: 2049
+    # Optional: RDMA endpoint
+    # rdma:
+    #   enabled: true
+    #   port: 20049
+  
+  # Unique device identifier (must be unique across cluster)
+  # Format: ds-{node}-{bdev}
+  deviceId: ds-node1-nvme0
+  
+  # MDS to register with
+  mds:
+    # MDS endpoint (DNS name or IP:port)
+    endpoint: "flint-pnfs-mds.flint-system.svc.cluster.local:2049"
+    
+    # Heartbeat interval in seconds
+    heartbeatInterval: 10
+    
+    # Registration retry interval in seconds
+    registrationRetry: 5
+    
+    # Max registration attempts (0 = infinite)
+    maxRetries: 0
+  
+  # SPDK Block Devices to serve
+  # Each bdev should be:
+  # 1. Created as SPDK logical volume (with RAID for redundancy)
+  # 2. Exposed via ublk as /dev/ublkb<N>
+  # 3. Formatted with filesystem (ext4, xfs, etc.)
+  # 4. Mounted at the specified path
+  bdevs:
+    - name: lvol0
+      # Mount point where the ublk device is mounted
+      # Example setup:
+      #   spdk_rpc.py bdev_raid_create -n raid0 -r raid5f -b "nvme0n1 nvme1n1 nvme2n1 nvme3n1"
+      #   spdk_rpc.py bdev_lvol_create_lvstore raid0 lvs0
+      #   spdk_rpc.py bdev_lvol_create -l lvs0 -n lvol0 -t 1000000
+      #   spdk_rpc.py ublk_create_target --bdev lvol0
+      #   mkfs.ext4 /dev/ublkb0
+      #   mount /dev/ublkb0 /mnt/pnfs-data
+      mount_point: /mnt/pnfs-data
+      
+      # Optional: SPDK volume name for reference
+      spdk_volume: lvol0
+  
+  # Resource limits
+  resources:
+    # Maximum concurrent client connections
+    maxConnections: 1000
+    # I/O queue depth per connection
+    ioQueueDepth: 128
+    # Memory buffer size for I/O (bytes)
+    ioBufferSize: 1048576  # 1 MiB
+  
+  # Performance tuning
+  performance:
+    # Use SPDK for I/O (vs kernel I/O)
+    useSpdkIo: true
+    # Number of I/O threads
+    ioThreads: 4
+    # Enable zero-copy I/O
+    zeroCopy: true
+
+# ============================================================================
+# NFS Export Configuration (shared across all modes)
+# ============================================================================
+exports:
+  # Export the root filesystem
+  - path: /
+    # Filesystem ID (must be unique per export)
+    fsid: 1
+    # Export options
+    options:
+      - rw              # Read-write
+      - sync            # Synchronous I/O
+      - no_subtree_check
+      - no_root_squash  # Allow root access
+    # Access control
+    access:
+      # Allow entire cluster network
+      - network: 10.0.0.0/8
+        permissions: rw
+      # Allow specific client
+      # - network: 192.168.1.100/32
+      #   permissions: ro
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  # Log level: trace, debug, info, warn, error
+  level: info
+  
+  # Log format: text, json
+  format: json
+  
+  # Log to file (optional)
+  # file: /var/log/flint-pnfs.log
+  
+  # Component-specific log levels
+  components:
+    mds: info
+    ds: info
+    layout: debug    # Debug layout generation
+    state: info
+    io: warn        # Only warn/error for I/O path
+
+# ============================================================================
+# Monitoring & Metrics
+# ============================================================================
+monitoring:
+  # Prometheus metrics
+  prometheus:
+    enabled: true
+    port: 9090
+    path: /metrics
+  
+  # Health check endpoint
+  health:
+    enabled: true
+    port: 8080
+    path: /health
+  
+  # Metrics to expose
+  metrics:
+    - layout_requests
+    - layout_recalls
+    - ds_heartbeats
+    - io_operations
+    - io_bytes
+    - io_latency
+
+# ============================================================================
+# Development & Testing
+# ============================================================================
+development:
+  # Enable debug features
+  debug: false
+  
+  # Simulate DS failures for testing
+  simulateFailures:
+    enabled: false
+    interval: 300  # seconds
+    duration: 60   # seconds
+  
+  # Trace all RPC calls
+  traceRpc: false
+  
+  # Dump layouts to log
+  dumpLayouts: false
+
+

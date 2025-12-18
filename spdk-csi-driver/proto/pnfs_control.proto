@@ -1,0 +1,130 @@
+// pNFS MDS-DS Control Protocol
+// 
+// This protocol is used for Data Server registration, heartbeats,
+// and capacity reporting to the Metadata Server.
+//
+// Communication is DS -> MDS (DS initiates, MDS responds)
+
+syntax = "proto3";
+
+package pnfs.control;
+
+// MDS Control Service - manages data server registration and monitoring
+service MdsControl {
+  // Register a new data server with the MDS
+  rpc RegisterDataServer(RegisterRequest) returns (RegisterResponse);
+  
+  // Send heartbeat to MDS
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // Update capacity information
+  rpc UpdateCapacity(CapacityUpdate) returns (CapacityResponse);
+  
+  // Unregister data server (clean shutdown)
+  rpc UnregisterDataServer(UnregisterRequest) returns (UnregisterResponse);
+}
+
+// Registration request from DS to MDS
+message RegisterRequest {
+  // Unique device identifier (e.g., "ds-node1-lvol0")
+  string device_id = 1;
+  
+  // Primary endpoint (IP:port where DS is listening for NFS)
+  string endpoint = 2;
+  
+  // Additional endpoints for multipath/RDMA
+  repeated string multipath_endpoints = 3;
+  
+  // Mount points this DS serves
+  repeated string mount_points = 4;
+  
+  // Total capacity in bytes
+  uint64 capacity = 5;
+  
+  // Used capacity in bytes
+  uint64 used = 6;
+  
+  // Protocol version
+  uint32 protocol_version = 7;
+}
+
+// Registration response from MDS to DS
+message RegisterResponse {
+  // Whether registration was accepted
+  bool accepted = 1;
+  
+  // Message (error reason if not accepted, or success confirmation)
+  string message = 2;
+  
+  // Assigned device ID (may be different if MDS modified it)
+  string assigned_device_id = 3;
+}
+
+// Heartbeat request from DS to MDS
+message HeartbeatRequest {
+  // Device ID
+  string device_id = 1;
+  
+  // Current capacity in bytes
+  uint64 capacity = 2;
+  
+  // Current used space in bytes
+  uint64 used = 3;
+  
+  // Number of active connections
+  uint32 active_connections = 4;
+  
+  // Health status
+  HealthStatus health = 5;
+}
+
+// Heartbeat response from MDS to DS
+message HeartbeatResponse {
+  // Whether heartbeat was acknowledged
+  bool acknowledged = 1;
+  
+  // MDS instructions (optional)
+  repeated Instruction instructions = 2;
+}
+
+// Capacity update (can be sent independently of heartbeat)
+message CapacityUpdate {
+  string device_id = 1;
+  uint64 capacity = 2;
+  uint64 used = 3;
+}
+
+message CapacityResponse {
+  bool acknowledged = 1;
+}
+
+// Unregister request (clean shutdown)
+message UnregisterRequest {
+  string device_id = 1;
+  string reason = 2;
+}
+
+message UnregisterResponse {
+  bool acknowledged = 1;
+}
+
+// Health status of DS
+enum HealthStatus {
+  HEALTHY = 0;
+  DEGRADED = 1;
+  UNHEALTHY = 2;
+}
+
+// Instructions from MDS to DS
+message Instruction {
+  InstructionType type = 1;
+  string details = 2;
+}
+
+enum InstructionType {
+  NO_OP = 0;
+  INCREASE_HEARTBEAT_FREQUENCY = 1;
+  PREPARE_FOR_SHUTDOWN = 2;
+  REPORT_CAPACITY_IMMEDIATELY = 3;
+}
+

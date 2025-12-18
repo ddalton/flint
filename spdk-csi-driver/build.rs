@@ -32,4 +32,16 @@ fn build_protobuf() {
             panic!("Failed to compile CSI protobuf files: {}", e);
         }
     }
+    
+    // Compile pNFS control protocol
+    match tonic_build::configure()
+        .out_dir(env::var("OUT_DIR").unwrap())
+        .compile(&["proto/pnfs_control.proto"], &["proto"]) {
+        Ok(_) => {
+            println!("cargo:warning=pNFS control protobuf bindings generated successfully");
+        },
+        Err(e) => {
+            panic!("Failed to compile pNFS control protobuf files: {}", e);
+        }
+    }
 }

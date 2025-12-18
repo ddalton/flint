@@ -1,0 +1,403 @@
+//! pNFS Operations
+//!
+//! Implements pNFS-specific NFS operations as per RFC 8881:
+//! - LAYOUTGET (opcode 50) - Get layout information
+//! - LAYOUTRETURN (opcode 51) - Return layout to server
+//! - LAYOUTCOMMIT (opcode 52) - Commit layout changes
+//! - GETDEVICEINFO (opcode 47) - Get device addressing information
+//! - GETDEVICELIST (opcode 48) - List all devices
+//!
+//! # Protocol References
+//! - RFC 8881 Section 18.40 - GETDEVICEINFO
+//! - RFC 8881 Section 18.41 - GETDEVICELIST
+//! - RFC 8881 Section 18.42 - LAYOUTCOMMIT
+//! - RFC 8881 Section 18.43 - LAYOUTGET
+//! - RFC 8881 Section 18.44 - LAYOUTRETURN
+//! - RFC 8881 Chapter 13 - NFSv4.1 File Layout Type
+
+use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutSegment, LayoutType};
+use crate::pnfs::mds::device::{DeviceId, DeviceRegistry};
+use std::sync::Arc;
+use tracing::{debug, warn};
+
+/// pNFS operation handler
+pub struct PnfsOperationHandler {
+    layout_manager: Arc<LayoutManager>,
+    device_registry: Arc<DeviceRegistry>,
+}
+
+impl PnfsOperationHandler {
+    /// Create a new pNFS operation handler
+    pub fn new(
+        layout_manager: Arc<LayoutManager>,
+        device_registry: Arc<DeviceRegistry>,
+    ) -> Self {
+        Self {
+            layout_manager,
+            device_registry,
+        }
+    }
+
+    /// Handle LAYOUTGET operation (opcode 50)
+    /// 
+    /// Returns layout information telling the client which data servers
+    /// to use for I/O on a specific byte range.
+    pub fn layoutget(
+        &self,
+        args: LayoutGetArgs,
+    ) -> Result<LayoutGetResult, LayoutGetError> {
+        debug!(
+            "LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
+            args.offset, args.length, args.iomode, args.layout_type
+        );
+
+        // Validate layout type (we only support FILE layout for now)
+        if args.layout_type != LayoutType::NfsV4_1Files {
+            warn!("Unsupported layout type: {:?}", args.layout_type);
+            return Err(LayoutGetError::UnknownLayoutType);
+        }
+
+        // Generate layout
+        let layout = self.layout_manager
+            .generate_layout(
+                args.filehandle.clone(),
+                args.offset,
+                args.length,
+                args.iomode,
+            )
+            .map_err(|e| {
+                warn!("Layout generation failed: {}", e);
+                LayoutGetError::LayoutUnavailable
+            })?;
+
+        Ok(LayoutGetResult {
+            return_on_close: layout.return_on_close,
+            stateid: layout.stateid,
+            layouts: vec![Layout {
+                offset: args.offset,
+                length: args.length,
+                iomode: args.iomode,
+                layout_type: args.layout_type,
+                segments: layout.segments,
+            }],
+        })
+    }
+
+    /// Handle GETDEVICEINFO operation (opcode 47)
+    /// 
+    /// Returns network addressing information for a specific data server
+    /// device ID.
+    pub fn getdeviceinfo(
+        &self,
+        args: GetDeviceInfoArgs,
+    ) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
+        debug!(
+            "GETDEVICEINFO: device_id={:?}, layout_type={:?}",
+            &args.device_id[0..4],
+            args.layout_type
+        );
+
+        // Validate layout type
+        if args.layout_type != LayoutType::NfsV4_1Files {
+            warn!("Unsupported layout type: {:?}", args.layout_type);
+            return Err(GetDeviceInfoError::UnknownLayoutType);
+        }
+
+        // Look up device
+        let device_info = self.device_registry
+            .get_by_binary_id(&args.device_id)
+            .ok_or_else(|| {
+                warn!("Device not found: {:?}", &args.device_id[0..4]);
+                GetDeviceInfoError::NoEnt
+            })?;
+
+        // Build device address
+        let device_addr = DeviceAddr4 {
+            netid: "tcp".to_string(),
+            addr: device_info.primary_endpoint.clone(),
+            multipath: device_info.endpoints.clone(),
+        };
+
+        Ok(GetDeviceInfoResult {
+            device_addr,
+            notification: Vec::new(),
+        })
+    }
+
+    /// Handle LAYOUTRETURN operation (opcode 51)
+    /// 
+    /// Client returns a layout to the server, indicating it no longer
+    /// needs it.
+    pub fn layoutreturn(
+        &self,
+        args: LayoutReturnArgs,
+    ) -> Result<LayoutReturnResult, LayoutReturnError> {
+        debug!(
+            "LAYOUTRETURN: layout_type={:?}, iomode={:?}, return_type={:?}",
+            args.layout_type, args.iomode, args.return_type
+        );
+
+        // Validate layout type
+        if args.layout_type != LayoutType::NfsV4_1Files {
+            warn!("Unsupported layout type: {:?}", args.layout_type);
+            return Err(LayoutReturnError::UnknownLayoutType);
+        }
+
+        match args.return_type {
+            LayoutReturnType::File { stateid, .. } => {
+                // Return specific layout
+                self.layout_manager
+                    .return_layout(&stateid)
+                    .map_err(|e| {
+                        warn!("Layout return failed: {}", e);
+                        LayoutReturnError::BadStateId
+                    })?;
+            }
+            LayoutReturnType::Fsid => {
+                // Return all layouts for filesystem (not implemented)
+                warn!("LAYOUTRETURN FSID not yet implemented");
+            }
+            LayoutReturnType::All => {
+                // Return all layouts (not implemented)
+                warn!("LAYOUTRETURN ALL not yet implemented");
+            }
+        }
+
+        Ok(LayoutReturnResult {
+            new_stateid: None,
+        })
+    }
+
+    /// Handle LAYOUTCOMMIT operation (opcode 52)
+    /// 
+    /// Client commits changes made through a layout (e.g., updates file size
+    /// after writes to data servers).
+    pub fn layoutcommit(
+        &self,
+        args: LayoutCommitArgs,
+    ) -> Result<LayoutCommitResult, LayoutCommitError> {
+        debug!(
+            "LAYOUTCOMMIT: offset={}, length={}, stateid={:?}",
+            args.offset,
+            args.length,
+            &args.stateid[0..4]
+        );
+
+        // Verify layout exists
+        let _layout = self.layout_manager
+            .get_layout(&args.stateid)
+            .ok_or_else(|| {
+                warn!("Layout not found for commit: {:?}", &args.stateid[0..4]);
+                LayoutCommitError::BadStateId
+            })?;
+
+        // TODO: Update file metadata (size, mtime)
+        // For now, just acknowledge the commit
+
+        Ok(LayoutCommitResult {
+            new_size: args.new_offset,
+            new_time: None,
+        })
+    }
+
+    /// Handle GETDEVICELIST operation (opcode 48)
+    /// 
+    /// Returns a list of all available device IDs.
+    pub fn getdevicelist(
+        &self,
+        args: GetDeviceListArgs,
+    ) -> Result<GetDeviceListResult, GetDeviceListError> {
+        debug!(
+            "GETDEVICELIST: layout_type={:?}, maxdevices={}",
+            args.layout_type, args.maxdevices
+        );
+
+        // Validate layout type
+        if args.layout_type != LayoutType::NfsV4_1Files {
+            warn!("Unsupported layout type: {:?}", args.layout_type);
+            return Err(GetDeviceListError::UnknownLayoutType);
+        }
+
+        // Get all active devices
+        let devices = self.device_registry.list_active();
+        let device_ids: Vec<DeviceId> = devices
+            .iter()
+            .take(args.maxdevices as usize)
+            .map(|d| d.binary_device_id)
+            .collect();
+
+        Ok(GetDeviceListResult {
+            cookie: 0,
+            cookieverf: [0u8; 8],
+            device_ids,
+            eof: true,
+        })
+    }
+}
+
+// ============================================================================
+// Operation Arguments and Results
+// ============================================================================
+
+/// LAYOUTGET arguments (RFC 8881 Section 18.43.1)
+#[derive(Debug, Clone)]
+pub struct LayoutGetArgs {
+    pub signal_layout_avail: bool,
+    pub layout_type: LayoutType,
+    pub iomode: IoMode,
+    pub offset: u64,
+    pub length: u64,
+    pub minlength: u64,
+    pub stateid: [u8; 16],
+    pub maxcount: u32,
+    pub filehandle: Vec<u8>,
+}
+
+/// LAYOUTGET result (RFC 8881 Section 18.43.2)
+#[derive(Debug, Clone)]
+pub struct LayoutGetResult {
+    pub return_on_close: bool,
+    pub stateid: [u8; 16],
+    pub layouts: Vec<Layout>,
+}
+
+/// Layout structure
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub offset: u64,
+    pub length: u64,
+    pub iomode: IoMode,
+    pub layout_type: LayoutType,
+    pub segments: Vec<LayoutSegment>,
+}
+
+/// LAYOUTGET errors
+#[derive(Debug, Clone, Copy)]
+pub enum LayoutGetError {
+    LayoutUnavailable,
+    UnknownLayoutType,
+    BadStateId,
+    Io,
+}
+
+/// GETDEVICEINFO arguments (RFC 8881 Section 18.40.1)
+#[derive(Debug, Clone)]
+pub struct GetDeviceInfoArgs {
+    pub device_id: DeviceId,
+    pub layout_type: LayoutType,
+    pub maxcount: u32,
+    pub notify_types: Vec<u32>,
+}
+
+/// GETDEVICEINFO result (RFC 8881 Section 18.40.2)
+#[derive(Debug, Clone)]
+pub struct GetDeviceInfoResult {
+    pub device_addr: DeviceAddr4,
+    pub notification: Vec<u32>,
+}
+
+/// Device address structure (RFC 8881 Section 3.3.14)
+#[derive(Debug, Clone)]
+pub struct DeviceAddr4 {
+    pub netid: String,
+    pub addr: String,
+    pub multipath: Vec<String>,
+}
+
+/// GETDEVICEINFO errors
+#[derive(Debug, Clone, Copy)]
+pub enum GetDeviceInfoError {
+    NoEnt,
+    UnknownLayoutType,
+    TooSmall,
+}
+
+/// LAYOUTRETURN arguments (RFC 8881 Section 18.44.1)
+#[derive(Debug, Clone)]
+pub struct LayoutReturnArgs {
+    pub reclaim: bool,
+    pub layout_type: LayoutType,
+    pub iomode: IoMode,
+    pub return_type: LayoutReturnType,
+}
+
+/// Layout return type
+#[derive(Debug, Clone)]
+pub enum LayoutReturnType {
+    File {
+        offset: u64,
+        length: u64,
+        stateid: [u8; 16],
+        layout_body: Vec<u8>,
+    },
+    Fsid,
+    All,
+}
+
+/// LAYOUTRETURN result (RFC 8881 Section 18.44.2)
+#[derive(Debug, Clone)]
+pub struct LayoutReturnResult {
+    pub new_stateid: Option<[u8; 16]>,
+}
+
+/// LAYOUTRETURN errors
+#[derive(Debug, Clone, Copy)]
+pub enum LayoutReturnError {
+    BadStateId,
+    UnknownLayoutType,
+    Inval,
+}
+
+/// LAYOUTCOMMIT arguments (RFC 8881 Section 18.42.1)
+#[derive(Debug, Clone)]
+pub struct LayoutCommitArgs {
+    pub offset: u64,
+    pub length: u64,
+    pub reclaim: bool,
+    pub stateid: [u8; 16],
+    pub new_offset: Option<u64>,
+    pub new_time: Option<u64>,
+    pub layout_body: Vec<u8>,
+}
+
+/// LAYOUTCOMMIT result (RFC 8881 Section 18.42.2)
+#[derive(Debug, Clone)]
+pub struct LayoutCommitResult {
+    pub new_size: Option<u64>,
+    pub new_time: Option<u64>,
+}
+
+/// LAYOUTCOMMIT errors
+#[derive(Debug, Clone, Copy)]
+pub enum LayoutCommitError {
+    BadStateId,
+    Inval,
+    Io,
+}
+
+/// GETDEVICELIST arguments (RFC 8881 Section 18.41.1)
+#[derive(Debug, Clone)]
+pub struct GetDeviceListArgs {
+    pub layout_type: LayoutType,
+    pub maxdevices: u32,
+    pub cookie: u64,
+    pub cookieverf: [u8; 8],
+}
+
+/// GETDEVICELIST result (RFC 8881 Section 18.41.2)
+#[derive(Debug, Clone)]
+pub struct GetDeviceListResult {
+    pub cookie: u64,
+    pub cookieverf: [u8; 8],
+    pub device_ids: Vec<DeviceId>,
+    pub eof: bool,
+}
+
+/// GETDEVICELIST errors
+#[derive(Debug, Clone, Copy)]
+pub enum GetDeviceListError {
+    UnknownLayoutType,
+    TooSmall,
+}
+
+

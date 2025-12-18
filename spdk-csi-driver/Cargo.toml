@@ -20,6 +20,15 @@ path = "src/nfs_main.rs"
 name = "nfs-test-client"
 path = "tests/nfs_client_test.rs"
 
+# pNFS binaries (experimental)
+[[bin]]
+name = "flint-pnfs-mds"
+path = "src/nfs_mds_main.rs"
+
+[[bin]]
+name = "flint-pnfs-ds"
+path = "src/nfs_ds_main.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
