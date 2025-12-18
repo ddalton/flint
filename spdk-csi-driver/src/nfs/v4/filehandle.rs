@@ -399,13 +399,12 @@ mod tests {
     use std::fs;
 
     #[test]
-    #[ignore] // TODO: Fix "Path outside export" error
     fn test_filehandle_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("nfsv4_test");
-        fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
 
-        let manager = FileHandleManager::new(temp_dir.clone());
-        let test_path = temp_dir.join("test.txt");
+        let manager = FileHandleManager::new(temp_path.clone());
+        let test_path = temp_path.join("test.txt");
         fs::write(&test_path, b"test").unwrap();
 
         // Generate handle
@@ -414,10 +413,10 @@ mod tests {
         // Resolve back
         let resolved_path = manager.filehandle_to_path(&handle).unwrap();
 
-        assert_eq!(test_path.canonicalize().unwrap(), resolved_path);
+        // Compare canonicalized paths (handles symlinks like /var -> /private/var on macOS)
+        assert_eq!(test_path.canonicalize().unwrap(), resolved_path.canonicalize().unwrap());
 
-        // Cleanup
-        fs::remove_dir_all(&temp_dir).unwrap();
+        // TempDir cleanup happens automatically
     }
 
     #[test]

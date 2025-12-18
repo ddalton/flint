@@ -913,6 +913,10 @@ mod tests {
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();
+        
+        // Create a test file for I/O tests
+        std::fs::write(export_path.join("testfile.txt"), b"test data for reading").unwrap();
+        
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
         let state_mgr = Arc::new(StateManager::new());
         let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
@@ -976,13 +980,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_read() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Set current filehandle
-        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        // Get filehandle for the test file we created
+        let test_file_path = fh_mgr.get_export_path().join("testfile.txt");
+        let test_fh = fh_mgr.path_to_filehandle(&test_file_path).unwrap();
+        ctx.current_fh = Some(test_fh);
 
         // Open first
         let open_op = OpenOp {
@@ -1009,13 +1014,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_write() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Set current filehandle
-        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        // Get filehandle for the test file
+        let test_file_path = fh_mgr.get_export_path().join("testfile.txt");
+        let test_fh = fh_mgr.path_to_filehandle(&test_file_path).unwrap();
+        ctx.current_fh = Some(test_fh);
 
         // Open first
         let open_op = OpenOp {
@@ -1044,13 +1050,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_commit() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Set current filehandle
-        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        // Get filehandle for the test file
+        let test_file_path = fh_mgr.get_export_path().join("testfile.txt");
+        let test_fh = fh_mgr.path_to_filehandle(&test_file_path).unwrap();
+        ctx.current_fh = Some(test_fh);
 
         // COMMIT
         let commit_op = CommitOp {
@@ -1063,13 +1070,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix "Path outside export" error
     fn test_open_with_file_creation() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Set current filehandle to root directory
-        ctx.current_fh = Some(fh_mgr.root_filehandle().unwrap());
+        // Set current filehandle to export root (parent directory for creation)
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
 
         let op = OpenOp {
             seqid: 0,
@@ -1096,7 +1103,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_write_with_relaxed_stateid_validation() {
         let (handler, fh_mgr, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -1134,7 +1140,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_read_with_relaxed_stateid_validation() {
         let (handler, fh_mgr, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -1171,7 +1176,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix "Path outside export" error - but test passes currently
     fn test_open_without_create() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -1196,15 +1200,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix "Path outside export" error
     async fn test_full_write_workflow() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Set current filehandle to root
-        ctx.current_fh = Some(fh_mgr.root_filehandle().unwrap());
+        // Set current filehandle to export root (parent directory for file creation)
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
 
-        // 1. OPEN with create
+        // 1. OPEN with create (will create a NEW file)
         let open_op = OpenOp {
             seqid: 0,
             share_access: OPEN4_SHARE_ACCESS_BOTH,
