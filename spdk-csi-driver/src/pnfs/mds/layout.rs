@@ -188,10 +188,16 @@ impl LayoutManager {
         self.layouts.insert(stateid, layout.clone());
 
         info!(
-            "Generated layout with {} segments, stateid={:?}",
+            "🎯 Generated pNFS layout with {} segments, stateid={:?}",
             layout.segments.len(),
             &stateid[0..4]
         );
+        info!("   📊 Layout details:");
+        for (i, seg) in layout.segments.iter().enumerate() {
+            info!("      Segment {}: device={}, offset={}, length={}", 
+                  i, seg.device_id, seg.offset, seg.length);
+        }
+        info!("   ✅ Client will now perform parallel I/O across {} data servers!", layout.segments.len());
 
         Ok(layout)
     }

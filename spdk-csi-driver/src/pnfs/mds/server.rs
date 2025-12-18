@@ -435,9 +435,13 @@ impl MetadataServer {
         for result in &mut compound_resp.results {
             if let OperationResult::ExchangeId(status, Some(ref mut res)) = result {
                 if *status == crate::nfs::v4::protocol::Nfs4Status::Ok {
+                    let old_flags = res.flags;
                     // Modify flags to advertise pNFS MDS role
                     res.flags = set_pnfs_mds_flags(res.flags);
-                    info!("✅ EXCHANGE_ID: Set pNFS MDS flags (0x{:x})", res.flags);
+                    info!("🎯 EXCHANGE_ID: Modified flags for pNFS MDS");
+                    info!("   Before: 0x{:08x} (USE_NON_PNFS)", old_flags);
+                    info!("   After:  0x{:08x} (USE_PNFS_MDS)", res.flags);
+                    info!("   ✅ Client will now request layouts and use pNFS!");
                 }
             }
         }
