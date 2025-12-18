@@ -16,8 +16,12 @@ use crate::nfs::v4::state::{StateManager, StateType};
 use crate::nfs::v4::operations::fileops::Fattr4;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
+use dashmap::DashMap;
+use std::fs::File;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::os::unix::fs::FileExt;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Open claim types
@@ -179,11 +183,21 @@ pub struct CommitRes {
     pub writeverf: u64,
 }
 
-/// I/O operation handler
+/// Cached open file entry
+struct CachedFile {
+    file: Arc<std::sync::Mutex<File>>,
+    path: PathBuf,
+    last_access: Instant,
+}
+
+/// I/O operation handler with file descriptor caching
 pub struct IoOperationHandler {
     state_mgr: Arc<StateManager>,
     fh_mgr: Arc<FileHandleManager>,
     write_verifier: u64,
+    /// File descriptor cache: stateid → open file
+    /// Eliminates open/close overhead for every write
+    fd_cache: Arc<DashMap<StateId, CachedFile>>,
 }
 
 impl IoOperationHandler {
@@ -196,7 +210,12 @@ impl IoOperationHandler {
             .unwrap()
             .as_secs();
         
-        Self { state_mgr, fh_mgr, write_verifier }
+        Self { 
+            state_mgr, 
+            fh_mgr, 
+            write_verifier,
+            fd_cache: Arc::new(DashMap::new()),
+        }
     }
 
     /// Handle OPEN operation
@@ -375,6 +394,11 @@ impl IoOperationHandler {
                 status: Nfs4Status::BadStateId,
                 stateid: None,
             };
+        }
+
+        // Remove file descriptor from cache (file closes on drop)
+        if let Some((_, cached)) = self.fd_cache.remove(&op.stateid) {
+            info!("CLOSE: Removed cached FD for {:?} (path: {:?})", op.stateid, cached.path);
         }
 
         // Revoke the stateid
@@ -570,25 +594,74 @@ impl IoOperationHandler {
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
-        // Perform positioned write using blocking I/O
-        // Uses positioned I/O (pwrite) for concurrent access without seek
+        // Try to get cached file descriptor first
+        let cached_entry = self.fd_cache.get(&op.stateid);
+        
+        let file_arc = if let Some(entry) = cached_entry {
+            // Found in cache - reuse existing FD!
+            debug!("WRITE: Using cached FD for stateid {:?}", op.stateid);
+            Arc::clone(&entry.file)
+        } else {
+            // Not in cache - open and cache it
+            debug!("WRITE: Opening and caching file for stateid {:?}", op.stateid);
+            
+            let path_clone = path.clone();
+            let file_result = tokio::task::spawn_blocking(move || {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&path_clone)
+            }).await;
+            
+            let file = match file_result {
+                Ok(Ok(f)) => f,
+                Ok(Err(e)) => {
+                    warn!("WRITE: Failed to open file {:?}: {}", path, e);
+                    return WriteRes {
+                        status: Nfs4Status::Io,
+                        count: 0,
+                        committed: UNSTABLE4,
+                        writeverf: 0,
+                    };
+                }
+                Err(e) => {
+                    warn!("WRITE: spawn_blocking error: {}", e);
+                    return WriteRes {
+                        status: Nfs4Status::Io,
+                        count: 0,
+                        committed: UNSTABLE4,
+                        writeverf: 0,
+                    };
+                }
+            };
+            
+            let file_arc = Arc::new(std::sync::Mutex::new(file));
+            
+            // Cache the file descriptor
+            self.fd_cache.insert(op.stateid.clone(), CachedFile {
+                file: Arc::clone(&file_arc),
+                path: path.clone(),
+                last_access: Instant::now(),
+            });
+            
+            info!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
+            file_arc
+        };
+
+        // Perform positioned write using cached/opened file
         // ZERO-COPY: data is Bytes (Arc-backed), clone is cheap
         let offset = op.offset;
         let data_clone = op.data.clone(); // Cheap: just Arc increment
         let stable = op.stable;
         let write_verifier = self.write_verifier;
         
-        let write_result = tokio::task::spawn_blocking(move || {
-            // Open file for writing (create if doesn't exist)
-            let file = match std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(&path)
-            {
-                Ok(f) => f,
-                Err(e) => return Err(e),
-            };
-
+        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
+            use std::os::unix::fs::FileExt;
+            
+            // Get mutable access to file (lock for this write)
+            let file = file_arc.lock().unwrap();
+            
             // Write data using positioned I/O (no seek needed - concurrent safe!)
             let bytes_written = file.write_at(&data_clone, offset)?;
             
