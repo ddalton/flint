@@ -16,7 +16,7 @@
 use super::super::protocol::SessionId;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Maximum slots per session (conservative default)
 pub const MAX_SLOTS: u32 = 128;
@@ -111,18 +111,35 @@ impl Session {
 
         let slot = &mut self.slots[slot_id as usize];
 
+        debug!(
+            "🔍 SEQUENCE processing: slot={}, client_seq={}, slot_seq={}, expecting={}",
+            slot_id, sequence_id, slot.sequence_id, slot.sequence_id + 1
+        );
+
         if sequence_id == slot.sequence_id {
             // Replay - return cached response
-            debug!("SEQUENCE replay detected: slot={}, seq={}", slot_id, sequence_id);
+            debug!("✅ SEQUENCE replay detected: slot={}, seq={}", slot_id, sequence_id);
             Ok(false)
         } else if sequence_id == slot.sequence_id + 1 {
             // New request - update slot
+            debug!("✅ SEQUENCE new request: slot={}, seq={} (was {})", 
+                   slot_id, sequence_id, slot.sequence_id);
             slot.sequence_id = sequence_id;
             slot.cached_response = None; // Will be filled after operation completes
             self.highest_slotid = self.highest_slotid.max(slot_id);
             Ok(true)
+        } else if slot.sequence_id == 0 && sequence_id == 1 {
+            // Special case: first operation after session creation
+            debug!("✅ SEQUENCE first request: slot={}, seq={}", slot_id, sequence_id);
+            slot.sequence_id = sequence_id;
+            self.highest_slotid = self.highest_slotid.max(slot_id);
+            Ok(true)
         } else {
             // Out of order
+            warn!(
+                "❌ SEQUENCE mismatch: slot={}, expected {}, got {} (slot_seq={})",
+                slot_id, slot.sequence_id + 1, sequence_id, slot.sequence_id
+            );
             Err(format!("Sequence ID mismatch: expected {}, got {}",
                        slot.sequence_id + 1, sequence_id))
         }
