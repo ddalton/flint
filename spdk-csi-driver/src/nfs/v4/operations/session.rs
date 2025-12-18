@@ -199,6 +199,8 @@ impl SessionOperationHandler {
     /// Handle CREATE_SESSION operation
     pub fn handle_create_session(&self, op: CreateSessionOp) -> CreateSessionRes {
         info!("CREATE_SESSION: clientid={}, sequence={}", op.clientid, op.sequence);
+        info!("CREATE_SESSION: Client requested - max_request={}, max_response={}, max_ops={}",
+              op.fore_chan_attrs.max_request_size, op.fore_chan_attrs.max_response_size, op.fore_chan_attrs.max_operations);
 
         // Verify client exists
         if self.state_mgr.clients.get_client(op.clientid).is_none() {
@@ -265,7 +267,9 @@ impl SessionOperationHandler {
         let negotiated_max_response = op.fore_chan_attrs.max_response_size.min(SERVER_MAX_RESPONSE).max(1024);
         let negotiated_max_ops = op.fore_chan_attrs.max_operations.min(SERVER_MAX_OPS).max(8);
         
-        info!("CREATE_SESSION: Negotiated buffers: req={}, resp={}, ops={}", 
+        info!("CREATE_SESSION: Server offers: req={}, resp={}, ops={}", 
+              SERVER_MAX_REQUEST, SERVER_MAX_RESPONSE, SERVER_MAX_OPS);
+        info!("CREATE_SESSION: Negotiated (final): req={}, resp={}, ops={}", 
               negotiated_max_request, negotiated_max_response, negotiated_max_ops);
         
         // Create session with negotiated sizes
@@ -278,8 +282,8 @@ impl SessionOperationHandler {
             negotiated_max_ops,
         );
 
-        info!("CREATE_SESSION: Session {:?} created for client {}",
-              session.session_id, op.clientid);
+        info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",
+              session.session_id, op.clientid, negotiated_max_request / 1024);
 
         // Set server flags based on actual capabilities (RFC 5661 §18.36)
         // We do not support persistent reply cache or backchannel callbacks yet,
