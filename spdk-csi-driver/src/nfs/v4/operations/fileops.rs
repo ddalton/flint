@@ -461,8 +461,11 @@ const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
 const FATTR4_SUPPATTR_EXCLCREAT: u32 = 75;
 
 // pNFS attributes (RFC 8881 Section 5.12)
-const FATTR4_FS_LAYOUT_TYPES: u32 = 82;
-const FATTR4_LAYOUT_BLKSIZE: u32 = 83;
+// NOTE: Using Linux kernel attribute numbers (not RFC 8881 numbers!)
+// See: include/linux/nfs4.h in Linux kernel source
+const FATTR4_FS_LAYOUT_TYPES: u32 = 62;  // Word 1, bit 30
+const FATTR4_LAYOUT_TYPES: u32 = 64;      // Word 2, bit 0
+const FATTR4_LAYOUT_BLKSIZE: u32 = 65;    // Word 2, bit 1
 
 /// Bitmap of all attributes supported by this server (RFC 5661 Section 5.8)
 ///
@@ -819,19 +822,23 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_SUPPORTED_ATTRS => {
                 // RFC 8881 Section 3.3.1 - bitmap4 variable-length array
-                // Must include pNFS attributes (82, 83) in word 2
+                // pNFS attributes: 62 (FS_LAYOUT_TYPES) in word 1, 65 (LAYOUT_BLKSIZE) in word 2
                 let supported = SUPPORTED_ATTRS_BITMAP;
                 let word0 = (supported & 0xFFFFFFFF) as u32;
-                let word1 = (supported >> 32) as u32;
-                let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // attrs 82, 83
+                let mut word1 = (supported >> 32) as u32;
+                let mut word2 = 0u32;
                 
-                // Encode as bitmap4 (3 words for attrs 0-95)
+                // Add pNFS attributes (Linux kernel numbering)
+                word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
+                word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
+                
+                // Encode as bitmap4 (3 words)
                 attr_vals.put_u32(3); // array length
                 attr_vals.put_u32(word0);  // word 0
-                attr_vals.put_u32(word1);  // word 1
-                attr_vals.put_u32(word2);  // word 2 (pNFS)
+                attr_vals.put_u32(word1);  // word 1 (includes attr 62)
+                attr_vals.put_u32(word2);  // word 2 (includes attr 65)
                 debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-                debug!("    → Word 2 includes: attr 82 (FS_LAYOUT_TYPES), attr 83 (LAYOUT_BLKSIZE)");
+                debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
                 true
             }
             FATTR4_MAXREAD => {
@@ -900,7 +907,8 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_FS_LAYOUT_TYPES => {
                 // RFC 8881 Section 5.12 - Array of supported pNFS layout types
-                debug!("  Attr {}: FS_LAYOUT_TYPES", attr_id);
+                // Attribute 62 (Linux kernel numbering)
+                debug!("  Attr {}: FS_LAYOUT_TYPES (attr 62)", attr_id);
                 attr_vals.put_u32(2); // Array length: 2 layout types
                 attr_vals.put_u32(1); // LAYOUT4_NFSV4_1_FILES
                 attr_vals.put_u32(2); // LAYOUT4_BLOCK_VOLUME
@@ -909,7 +917,8 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_LAYOUT_BLKSIZE => {
                 // RFC 8881 Section 5.12 - Preferred layout block size (stripe size)
-                debug!("  Attr {}: LAYOUT_BLKSIZE", attr_id);
+                // Attribute 65 (Linux kernel numbering)
+                debug!("  Attr {}: LAYOUT_BLKSIZE (attr 65)", attr_id);
                 attr_vals.put_u32(4194304); // 4 MB
                 debug!("    → Layout block size: 4194304 bytes (4 MB)");
                 true
@@ -1035,26 +1044,29 @@ fn encode_pseudo_root_attribute(
         }
         FATTR4_SUPPORTED_ATTRS => {
             // RFC 8881 Section 3.3.1 - bitmap4 is variable-length array of u32
-            // Must include pNFS attributes (82, 83) which are in word 2
-            // Word 0: attrs 0-31, Word 1: attrs 32-63, Word 2: attrs 64-95
+            // pNFS attributes: 62 (FS_LAYOUT_TYPES) in word 1, 65 (LAYOUT_BLKSIZE) in word 2
             let supported = SUPPORTED_ATTRS_BITMAP;
             let word0 = (supported & 0xFFFFFFFF) as u32;
-            let word1 = (supported >> 32) as u32;
-            let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // FS_LAYOUT_TYPES | LAYOUT_BLKSIZE
+            let mut word1 = (supported >> 32) as u32;
+            let mut word2 = 0u32;
             
-            // Encode as bitmap4 (3 words to cover attrs 0-95)
+            // Add pNFS attributes (Linux kernel numbering)
+            word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
+            word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
+            
+            // Encode as bitmap4 (3 words)
             buf.put_u32(3); // array length: 3 words
             buf.put_u32(word0);   // word 0 (attrs 0-31)
-            buf.put_u32(word1);   // word 1 (attrs 32-63)
-            buf.put_u32(word2);   // word 2 (attrs 64-95, includes 82, 83)
+            buf.put_u32(word1);   // word 1 (attrs 32-63, includes attr 62)
+            buf.put_u32(word2);   // word 2 (attrs 64-95, includes attr 65)
             debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-            debug!("    → pNFS attrs in word 2: bit 18 (attr 82), bit 19 (attr 83)");
+            debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
             true
         }
         FATTR4_FS_LAYOUT_TYPES => {
             // RFC 8881 Section 5.12 - Array of supported layout types
-            // LAYOUT4_NFSV4_1_FILES = 1, LAYOUT4_BLOCK_VOLUME = 2
-            debug!("  Encoding FS_LAYOUT_TYPES for pNFS pseudo-root");
+            // Attribute 62 (Linux kernel numbering)
+            debug!("  Encoding FS_LAYOUT_TYPES (attr 62) for pNFS pseudo-root");
             buf.put_u32(2); // Array length: 2 layout types
             buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
             buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
@@ -1063,7 +1075,8 @@ fn encode_pseudo_root_attribute(
         }
         FATTR4_LAYOUT_BLKSIZE => {
             // RFC 8881 Section 5.12 - Preferred layout block size
-            debug!("  Encoding LAYOUT_BLKSIZE for pNFS pseudo-root");
+            // Attribute 65 (Linux kernel numbering)
+            debug!("  Encoding LAYOUT_BLKSIZE (attr 65) for pNFS pseudo-root");
             buf.put_u32(4194304); // 4 MB stripe size
             debug!("    → Layout block size: 4194304 bytes (4 MB)");
             true
@@ -1088,19 +1101,23 @@ fn encode_single_attribute(
     match attr_id {
         FATTR4_SUPPORTED_ATTRS => {
             // RFC 8881 Section 3.3.1 - bitmap4 variable-length array
-            // Must include pNFS attributes (82, 83) in word 2
+            // pNFS attributes: 62 (FS_LAYOUT_TYPES) in word 1, 65 (LAYOUT_BLKSIZE) in word 2
             let supported = SUPPORTED_ATTRS_BITMAP;
             let word0 = (supported & 0xFFFFFFFF) as u32;
-            let word1 = (supported >> 32) as u32;
-            let word2 = (1 << (82 % 32)) | (1 << (83 % 32)); // pNFS layout attrs
+            let mut word1 = (supported >> 32) as u32;
+            let mut word2 = 0u32;
+            
+            // Add pNFS attributes (Linux kernel numbering)
+            word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
+            word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
             
             // Encode as bitmap4 (3 words for attrs 0-95)
             buf.put_u32(3); // array length
             buf.put_u32(word0);  // word 0 (attrs 0-31)
-            buf.put_u32(word1);  // word 1 (attrs 32-63)
-            buf.put_u32(word2);  // word 2 (attrs 64-95, pNFS)
+            buf.put_u32(word1);  // word 1 (attrs 32-63, includes attr 62)
+            buf.put_u32(word2);  // word 2 (attrs 64-95, includes attr 65)
             debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-            debug!("    → Advertising pNFS: bit 18 (attr 82), bit 19 (attr 83)");
+            debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
             true
         }
         
@@ -1469,7 +1486,8 @@ fn encode_single_attribute(
         
         FATTR4_FS_LAYOUT_TYPES => {
             // RFC 8881 Section 5.12 - Supported pNFS layout types
-            debug!("  Encoding FS_LAYOUT_TYPES");
+            // Attribute 62 (Linux kernel numbering)
+            debug!("  Encoding FS_LAYOUT_TYPES (attr 62)");
             buf.put_u32(2); // Array length
             buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
             buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
@@ -1479,7 +1497,8 @@ fn encode_single_attribute(
         
         FATTR4_LAYOUT_BLKSIZE => {
             // RFC 8881 Section 5.12 - Preferred layout block size
-            debug!("  Encoding LAYOUT_BLKSIZE");
+            // Attribute 65 (Linux kernel numbering)
+            debug!("  Encoding LAYOUT_BLKSIZE (attr 65)");
             buf.put_u32(4194304); // 4 MB stripe size
             debug!("    → Layout block size: 4 MB");
             true
