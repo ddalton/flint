@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pnfs-test-client-krb5
+  namespace: pnfs-test
+spec:
+  containers:
+  - name: client
+    image: ubuntu:22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        set -e
+
+        # Copy krb5.conf before installing packages
+        cp /etc/krb5-config/krb5.conf /tmp/krb5.conf
+
+        # Install NFS client and Kerberos
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y nfs-common krb5-user coreutils kmod
+
+        # Copy our krb5.conf over the default one
+        cp /tmp/krb5.conf /etc/krb5.conf
+
+        # Verify Kerberos config
+        echo "=== Kerberos Configuration ==="
+        cat /etc/krb5.conf
+
+        echo ""
+        echo "=== Keytab Info ==="
+        klist -k /etc/krb5/keytab
+
+        # Mount rpc_pipefs (required for rpc.gssd)
+        echo ""
+        echo "=== Setting up rpc_pipefs ==="
+        mkdir -p /run/rpc_pipefs
+        mount -t rpc_pipefs sunrpc /run/rpc_pipefs || echo "rpc_pipefs mount failed (may already be mounted)"
+        ls -la /run/rpc_pipefs/
+
+        # Start rpc.gssd daemon in foreground with debug logging
+        echo ""
+        echo "=== Starting rpc.gssd daemon ==="
+        # Kill any existing defunct processes
+        pkill -9 rpc.gssd 2>/dev/null || true
+        
+        # Start rpc.gssd with explicit pipefs path
+        rpc.gssd -f -vvv -p /run/rpc_pipefs &
+        GSSD_PID=$!
+        sleep 2
+        
+        # Verify it's running
+        if ps -p $GSSD_PID > /dev/null; then
+            echo "✅ rpc.gssd started successfully (PID: $GSSD_PID)"
+            ps aux | grep rpc.gssd | grep -v grep
+        else
+            echo "❌ rpc.gssd failed to start"
+            exit 1
+        fi
+
+        # Initialize Kerberos credentials
+        echo ""
+        echo "=== Initializing Kerberos credentials ==="
+        kinit -kt /etc/krb5/keytab host/pnfs-test-client.pnfs-test.svc.cluster.local
+        klist
+
+        # Create mount point
+        mkdir -p /mnt/pnfs
+
+        # Keep container running
+        echo ""
+        echo "=== Client ready for testing ==="
+        echo "Mount with: mount -t nfs4 -o sec=krb5 pnfs-mds.pnfs-test.svc.cluster.local:/ /mnt/pnfs"
+        sleep infinity
+    env:
+    - name: KRB5_KTNAME
+      value: "/etc/krb5/keytab"
+    securityContext:
+      privileged: true
+      capabilities:
+        add: ["SYS_ADMIN"]
+    volumeMounts:
+    - name: krb5-config
+      mountPath: /etc/krb5-config/krb5.conf
+      subPath: krb5.conf
+    - name: keytab
+      mountPath: /etc/krb5/keytab
+      subPath: keytab
+  volumes:
+  - name: krb5-config
+    configMap:
+      name: krb5-config
+  - name: keytab
+    secret:
+      secretName: client-keytab
+      defaultMode: 0600
+  restartPolicy: Never

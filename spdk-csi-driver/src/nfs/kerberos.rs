@@ -73,6 +73,7 @@ pub struct ServiceKey {
 }
 
 /// Kerberos keytab
+#[derive(Debug)]
 pub struct Keytab {
     keys: Vec<ServiceKey>,
 }
@@ -431,7 +432,160 @@ mod tests {
     fn test_enctype_conversion() {
         assert_eq!(EncType::from_i32(17), Some(EncType::AES128CtsHmacSha196));
         assert_eq!(EncType::from_i32(18), Some(EncType::AES256CtsHmacSha196));
+        assert_eq!(EncType::from_i32(19), Some(EncType::AES128CtsHmacSha256128));
+        assert_eq!(EncType::from_i32(20), Some(EncType::AES256CtsHmacSha384196));
         assert_eq!(EncType::from_i32(999), None);
+    }
+    
+    #[test]
+    fn test_encode_length_short() {
+        let mut output = Vec::new();
+        KerberosContext::encode_length(&mut output, 42);
+        assert_eq!(output, vec![42]);
+    }
+    
+    #[test]
+    fn test_encode_length_long_1byte() {
+        let mut output = Vec::new();
+        KerberosContext::encode_length(&mut output, 200);
+        assert_eq!(output, vec![0x81, 200]);
+    }
+    
+    #[test]
+    fn test_encode_length_long_2bytes() {
+        let mut output = Vec::new();
+        KerberosContext::encode_length(&mut output, 300);
+        assert_eq!(output, vec![0x82, 0x01, 0x2C]);  // 0x012C = 300
+    }
+    
+    #[test]
+    fn test_ap_rep_structure() {
+        // Test that AP-REP generation doesn't panic
+        let result = KerberosContext::generate_ap_rep_token();
+        assert!(result.is_ok());
+        
+        let token = result.unwrap();
+        
+        // Verify it's not empty
+        assert!(token.len() > 20, "AP-REP token should be substantial");
+        
+        // Verify GSS-API wrapper (APPLICATION 0)
+        assert_eq!(token[0], 0x60, "Should start with GSS APPLICATION tag");
+        
+        // Token should contain Kerberos OID
+        assert!(token.len() > 15, "Should have room for OID and AP-REP");
+    }
+    
+    #[test]
+    fn test_ap_rep_contains_krb5_oid() {
+        let token = KerberosContext::generate_ap_rep_token().unwrap();
+        
+        // Kerberos OID: 1.2.840.113554.1.2.2
+        // In DER: 06 09 2a 86 48 86 f7 12 01 02 02
+        let krb5_oid = vec![0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+        
+        // Check if the OID appears in the token
+        let token_str = format!("{:02x?}", token);
+        assert!(token.windows(krb5_oid.len()).any(|window| window == krb5_oid.as_slice()),
+                "AP-REP should contain Kerberos OID");
+    }
+    
+    #[test]
+    fn test_ap_rep_has_application_tag() {
+        let token = KerberosContext::generate_ap_rep_token().unwrap();
+        
+        // Find the AP-REP application tag (0x6F = APPLICATION 15)
+        assert!(token.contains(&0x6F), "Should contain APPLICATION 15 tag for AP-REP");
+    }
+    
+    #[test]
+    fn test_keytab_invalid_version() {
+        // Keytab with invalid version
+        let data = vec![0x05, 0x01];  // Version 0x0501 (invalid)
+        let result = Keytab::parse(&data);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("Unsupported keytab version"));
+    }
+    
+    #[test]
+    fn test_keytab_empty() {
+        let data = vec![];
+        let result = Keytab::parse(&data);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("too short"));
+    }
+    
+    #[test]
+    fn test_keytab_correct_version() {
+        // Minimal keytab with correct version but no entries
+        let data = vec![0x05, 0x02];  // Version 0x0502 (correct)
+        let result = Keytab::parse(&data);
+        assert!(result.is_ok());
+        let keytab = result.unwrap();
+        assert_eq!(keytab.keys().len(), 0);
+    }
+    
+    #[test]
+    fn test_service_key_find() {
+        let key1 = ServiceKey {
+            principal: "nfs/server".to_string(),
+            realm: "EXAMPLE.COM".to_string(),
+            kvno: 1,
+            enctype: EncType::AES256CtsHmacSha196,
+            key: vec![1, 2, 3, 4],
+        };
+        
+        let key2 = ServiceKey {
+            principal: "host/server".to_string(),
+            realm: "EXAMPLE.COM".to_string(),
+            kvno: 2,
+            enctype: EncType::AES128CtsHmacSha196,
+            key: vec![5, 6, 7, 8],
+        };
+        
+        let keytab = Keytab {
+            keys: vec![key1, key2],
+        };
+        
+        // Test exact match
+        assert!(keytab.find_key("nfs/server").is_some());
+        assert!(keytab.find_key("host/server").is_some());
+        
+        // Test full principal with realm
+        assert!(keytab.find_key("nfs/server@EXAMPLE.COM").is_some());
+        
+        // Test not found
+        assert!(keytab.find_key("http/server").is_none());
+    }
+    
+    #[test]
+    fn test_kerberos_context_accept_token() {
+        // Test with minimal keytab
+        let keytab = Keytab { keys: Vec::new() };
+        
+        // Test with a minimal token
+        let token = vec![0x60, 0x10, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+        
+        let result = KerberosContext::accept_token(&keytab, &token);
+        
+        // Should succeed (placeholder mode)
+        assert!(result.is_ok());
+        
+        let (context, ap_rep) = result.unwrap();
+        assert!(context.established);
+        assert!(ap_rep.len() > 0, "Should generate non-empty AP-REP");
+    }
+    
+    #[test]
+    fn test_kerberos_context_reject_short_token() {
+        let keytab = Keytab { keys: Vec::new() };
+        let token = vec![0x60];  // Too short
+        
+        let result = KerberosContext::accept_token(&keytab, &token);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
     }
 }
 
