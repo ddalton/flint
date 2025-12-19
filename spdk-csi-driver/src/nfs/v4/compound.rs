@@ -1185,7 +1185,8 @@ impl CompoundRequest {
             }
             opcode::GETDEVICEINFO => {
                 eprintln!("🎯🎯🎯 DECODING GETDEVICEINFO (opcode 47) 🎯🎯🎯");
-                let device_id = decoder.decode_opaque()?.to_vec();
+                // Device ID is FIXED 16-byte opaque (no length prefix!)
+                let device_id = decoder.decode_fixed_opaque(16)?.to_vec();
                 eprintln!("🎯 GETDEVICEINFO device_id decoded: {} bytes", device_id.len());
                 let layout_type = decoder.decode_u32()?;
                 let maxcount = decoder.decode_u32()?;
