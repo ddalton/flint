@@ -1097,8 +1097,9 @@ impl CompoundDispatcher {
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
         
-        // nfl_util: stripe unit size (typically 8MB = 8388608 bytes)
-        encoder.encode_u64(stripe_unit);
+        // nfl_util: stripe unit size (u32 per RFC 5661, not u64!)
+        // CRITICAL: This is nfl_util4 which is a 32-bit value
+        encoder.encode_u32(stripe_unit as u32);
         
         // nfl_first_stripe_index: which stripe to start with
         encoder.encode_u32(segment.stripe_index);
