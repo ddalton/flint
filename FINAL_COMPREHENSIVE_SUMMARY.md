@@ -285,6 +285,35 @@ Investigation revealed two critical issues:
 
 ---
 
+## 🔬 **Deep Investigation: Server Trunking Issue**
+
+Despite implementing all RFC 5661 requirements properly, Linux NFS client's server trunking detection continues to fail with error -121 (EREMOTEIO).
+
+**What Was Fixed**:
+1. ✅ Consistent clientid between MDS and DS (ClientManager)
+2. ✅ Shared instance_id for filehandle compatibility
+3. ✅ Different server_scopes to prevent trunking (mds vs ds)
+4. ✅ CREATE_SESSION support in DS for session establishment
+5. ✅ Multi-segment layout encoding (all DSes in stripe)
+6. ✅ Striped device address with stripe_indices array
+
+**What's Still Failing**:
+- Client connects to DS, does EXCHANGE_ID, then disconnects with error -121
+- Server trunking detection fails despite different server_scopes
+- No CREATE_SESSION or I/O operations reach the DS
+- All data stored on MDS, DSes remain empty
+
+**Root Cause Hypothesis**:
+Error -121 (EREMOTEIO) suggests RPC-level failure, possibly:
+- XDR encoding difference between MDS and DS responses
+- Missing or malformed field in EXCHANGE_ID reply
+- Linux kernel trunking logic bug (expects specific field combinations)
+- Session state validation failing
+
+**See**: `PNFS_STRIPING_INVESTIGATION.md` for complete analysis
+
+---
+
 ## 📋 **Recommendations**
 
 ### **For Kerberos** (DONE)
