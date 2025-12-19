@@ -1500,10 +1500,14 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(res) = result {
-                        debug!("🔍 Encoding EXCHANGE_ID response: clientid={}, sequenceid={}, flags={}", 
-                               res.clientid, res.sequenceid, res.flags);
-                        debug!("   server_owner={}, server_scope={:?}", 
-                               res.server_owner, res.server_scope);
+                        warn!("🔍 MDS EXCHANGE_ID response encoding:");
+                        warn!("   clientid={} (0x{:016x})", res.clientid, res.clientid);
+                        warn!("   sequenceid={}", res.sequenceid);
+                        warn!("   flags=0x{:08x}", res.flags);
+                        warn!("   server_owner={:?}", res.server_owner);
+                        warn!("   server_scope={:?}", String::from_utf8_lossy(&res.server_scope));
+                        
+                        let before_len = encoder.len();
                         encoder.encode_u64(res.clientid);
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.flags);
@@ -1515,7 +1519,8 @@ impl CompoundResponse {
                         encoder.encode_opaque(&Bytes::from(res.server_scope));
                         // Implementation ID (empty array - length 0)
                         encoder.encode_u32(0);
-                        debug!("✅ EXCHANGE_ID encoded: total response will include clientid={}", res.clientid);
+                        let after_len = encoder.len();
+                        warn!("✅ MDS EXCHANGE_ID encoded: {} bytes", after_len - before_len);
                     }
                 }
             }

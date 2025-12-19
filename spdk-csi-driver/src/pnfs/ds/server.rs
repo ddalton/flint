@@ -411,10 +411,18 @@ impl DataServer {
                     // server_impl_id (optional) - empty for simplicity
                     encoder.encode_u32(0);  // impl_id array count = 0
                     
-                    info!("DS: EXCHANGE_ID response - clientid={}, server_owner={}, server_scope={:?}, flags=0x{:08x}", 
-                          clientid, server_owner, String::from_utf8_lossy(server_scope), response_flags);
-                    debug!("DS: ✅ EXCHANGE_ID complete - clientid={}", clientid);
-                    (Nfs4Status::Ok, encoder.finish())
+                    let result_bytes = encoder.finish();
+                    
+                    warn!("🔍 DS EXCHANGE_ID response encoding:");
+                    warn!("   clientid={} (0x{:016x})", clientid, clientid);
+                    warn!("   sequenceid={}", sequenceid);
+                    warn!("   flags=0x{:08x}", response_flags);
+                    warn!("   server_owner={:?}", server_owner);
+                    warn!("   server_scope={:?}", String::from_utf8_lossy(server_scope));
+                    warn!("   Total bytes: {}", result_bytes.len());
+                    warn!("   First 80 bytes: {:02x?}", &result_bytes[..result_bytes.len().min(80)]);
+                    
+                    (Nfs4Status::Ok, result_bytes)
                 }
 
                 opcode::CREATE_SESSION => {
