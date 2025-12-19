@@ -1119,13 +1119,34 @@ impl CompoundDispatcher {
         result
     }
     
-    /// Encode device address (netid, addr)
+    /// Encode device address as multipath_list4 per RFC 5661 Section 13.2.1
+    /// 
+    /// nfsv4_1_file_layout_ds_addr4 {
+    ///     multipath_list4 nflda_multipath_ds_list;
+    /// }
+    /// 
+    /// multipath_list4 is an array of netaddr4:
+    /// struct multipath_list4 {
+    ///     netaddr4 ml_naddr<>;
+    /// };
     fn encode_device_addr(addr: &crate::pnfs::mds::operations::DeviceAddr4) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
+        use crate::pnfs::protocol::endpoint_to_uaddr;
         
         let mut encoder = XdrEncoder::new();
-        encoder.encode_string(&addr.netid);
-        encoder.encode_string(&addr.addr);
+        
+        // Encode multipath_list4 as array of netaddr4
+        // Array count (we send 1 address for now)
+        encoder.encode_u32(1);
+        
+        // netaddr4 #1:
+        encoder.encode_string(&addr.netid);  // e.g., "tcp"
+        
+        // Convert endpoint to universal address format
+        // e.g., "10.42.214.18:2049" -> "10.42.214.18.8.1"
+        let uaddr = endpoint_to_uaddr(&addr.addr)
+            .unwrap_or_else(|_| addr.addr.clone());
+        encoder.encode_string(&uaddr);
         
         encoder.finish()
     }
