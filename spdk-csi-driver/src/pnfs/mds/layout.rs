@@ -100,6 +100,10 @@ pub enum LayoutType {
     
     /// Object layout (RFC 5664) - future
     Osd2Objects = 3,
+    
+    /// Flexible File Layout (RFC 8435) - for independent DS storage
+    /// Each DS has its own storage, filehandles are DS-specific
+    FlexFiles = 4,
 }
 
 /// Layout policy implementation
