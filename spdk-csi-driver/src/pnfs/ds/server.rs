@@ -349,13 +349,19 @@ impl DataServer {
                     let client_flags = decoder.decode_u32().unwrap_or(0);
                     
                     // Decode state_protect (we use SP4_NONE)
-                    let _state_protect = decoder.decode_u32().unwrap_or(0);
+                    let state_protect = decoder.decode_u32().unwrap_or(0);
                     
                     // Skip optional impl_id
                     let has_impl_id = decoder.decode_bool().unwrap_or(false);
                     if has_impl_id {
                         let _ = decoder.decode_opaque();
                     }
+                    
+                    warn!("📥 DS: EXCHANGE_ID REQUEST from client:");
+                    warn!("   client_owner={:?}", String::from_utf8_lossy(&client_owner));
+                    warn!("   verifier=0x{:016x}", verifier);
+                    warn!("   client_flags=0x{:08x}", client_flags);
+                    warn!("   state_protect=0x{:08x}", state_protect);
                     
                     // Use ClientManager to get consistent clientid
                     // CRITICAL: This ensures DS returns same clientid as MDS for same client_owner!
