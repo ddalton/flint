@@ -64,8 +64,13 @@ thiserror = "1.0"
 rand = "0.8"
 dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state management
 sha2 = "0.10"
+sha1 = "0.10"  # SHA-1 for Kerberos HMAC-SHA1
 crossbeam = "0.8"  # Lock-free channels and queues
-# Pure Rust Kerberos implementation - no glibc dependencies
+# Pure Rust Kerberos cryptography - no glibc dependencies
+aes = "0.8"  # AES encryption for Kerberos
+cbc = { version = "0.1", features = ["alloc"] }  # CBC mode
+hmac = "0.12"  # HMAC for Kerberos integrity
+pbkdf2 = { version = "0.12", features = ["simple"] }  # Key derivation
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation
