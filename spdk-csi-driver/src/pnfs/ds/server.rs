@@ -307,6 +307,33 @@ impl DataServer {
             };
 
             let (status, result_data) = match opcode {
+                opcode::EXCHANGE_ID => {
+                    // Client is checking if we support NFSv4.1
+                    // We accept but client will use MDS session (won't call CREATE_SESSION)
+                    // Just skip the args and return a simple response
+                    let _client_owner_len = decoder.decode_u32().unwrap_or(0);
+                    // Skip remaining EXCHANGE_ID args
+                    
+                    let mut encoder = XdrEncoder::new();
+                    // Return clientid (8 bytes)
+                    encoder.encode_u64(0x1234567890abcdef);  // Dummy clientid
+                    // sequenceid (4 bytes)
+                    encoder.encode_u32(1);
+                    // flags (4 bytes) - EXCHGID4_FLAG_USE_NON_PNFS | EXCHGID4_FLAG_SUPP_MOVED_REFER
+                    encoder.encode_u32(0x00010000);
+                    // state_protect (4 bytes) - SP4_NONE
+                    encoder.encode_u32(0);
+                    // server_owner length + data (simplified)
+                    encoder.encode_u32(0);  // Empty server owner
+                    // server_scope length + data
+                    encoder.encode_u32(0);  // Empty server scope
+                    // server_impl_id length + data  
+                    encoder.encode_u32(0);  // Empty impl id
+                    
+                    debug!("DS: Handled EXCHANGE_ID (client checking NFSv4.1 support)");
+                    (Nfs4Status::Ok, encoder.finish())
+                }
+
                 opcode::SEQUENCE => {
                     // Decode SEQUENCE arguments
                     let sessionid = match decoder.decode_fixed_opaque(16) {
