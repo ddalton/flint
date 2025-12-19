@@ -924,8 +924,10 @@ impl CompoundDispatcher {
                 // Encode result
                 let mut encoder = XdrEncoder::new();
                 encoder.encode_bool(result.return_on_close);
-                // Encode stateid (16 bytes)
-                encoder.encode_opaque(&result.stateid);
+                // Encode stateid (16 bytes fixed, NO length prefix per RFC 5661)
+                // CRITICAL: stateid is a fixed structure, not variable-length opaque
+                // Use encode_fixed_opaque which writes bytes + padding but NO length prefix
+                encoder.encode_fixed_opaque(&result.stateid);
                 
                 // Encode layouts array - one layout per request
                 // Each layout may contain multiple segments for striping
