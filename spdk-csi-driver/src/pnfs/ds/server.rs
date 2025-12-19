@@ -321,8 +321,9 @@ impl DataServer {
                     // sequenceid (4 bytes)
                     encoder.encode_u32(1);
                     
-                    // flags (4 bytes) - EXCHGID4_FLAG_USE_NON_PNFS
-                    encoder.encode_u32(0x00010000);
+                    // flags (4 bytes) - EXCHGID4_FLAG_USE_PNFS_DS (0x00040000)
+                    // Tell client we're a pNFS Data Server
+                    encoder.encode_u32(0x00040000);
                     
                     // state_protect (4 bytes) - SP4_NONE
                     encoder.encode_u32(0);
