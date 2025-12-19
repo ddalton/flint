@@ -467,21 +467,23 @@ impl DataServer {
                             // flags (0 for now)
                             encoder.encode_u32(0);
                             
-                            // fore_chan_attrs (simplified)
-                            encoder.encode_u32(4096);    // max_rqst_sz
-                            encoder.encode_u32(4096);    // max_resp_sz
+                            // fore_chan_attrs - MUST match RFC 8881 Section 18.36
+                            encoder.encode_u32(0);       // header_pad_size (CRITICAL: was missing!)
+                            encoder.encode_u32(1048576); // max_rqst_sz (1MB)
+                            encoder.encode_u32(1048576); // max_resp_sz (1MB)
                             encoder.encode_u32(4096);    // max_resp_sz_cached
                             encoder.encode_u32(128);     // max_ops
-                            encoder.encode_u32(1);       // max_reqs
+                            encoder.encode_u32(64);      // max_reqs (match MDS)
                             encoder.encode_u32(0);       // rdma_ird count (array)
                             
-                            // back_chan_attrs (same as fore)
-                            encoder.encode_u32(4096);
-                            encoder.encode_u32(4096);
-                            encoder.encode_u32(4096);
-                            encoder.encode_u32(128);
-                            encoder.encode_u32(1);
-                            encoder.encode_u32(0);
+                            // back_chan_attrs - for callbacks
+                            encoder.encode_u32(0);       // header_pad_size (CRITICAL: was missing!)
+                            encoder.encode_u32(4096);    // max_rqst_sz (smaller for callbacks)
+                            encoder.encode_u32(4096);    // max_resp_sz
+                            encoder.encode_u32(0);       // max_resp_sz_cached
+                            encoder.encode_u32(2);       // max_ops (callbacks are simple)
+                            encoder.encode_u32(16);      // max_reqs (match MDS)
+                            encoder.encode_u32(0);       // rdma_ird count (array)
                             
                             info!("DS: CREATE_SESSION successful - sessionid={:02x?}", &sessionid[0..8]);
                             (Nfs4Status::Ok, encoder.finish())
@@ -637,6 +639,20 @@ impl DataServer {
                     } else {
                         (Nfs4Status::NoFileHandle, Bytes::new())
                     }
+                }
+
+                opcode::DESTROY_CLIENTID => {
+                    // Client is cleaning up - just acknowledge it
+                    let _clientid = decoder.decode_u64().unwrap_or(0);
+                    info!("DS: DESTROY_CLIENTID - clientid={}", _clientid);
+                    (Nfs4Status::Ok, Bytes::new())
+                }
+                
+                opcode::DESTROY_SESSION => {
+                    // Client is destroying session - acknowledge it
+                    let _sessionid = decoder.decode_fixed_opaque(16).unwrap_or_default();
+                    info!("DS: DESTROY_SESSION");
+                    (Nfs4Status::Ok, Bytes::new())
                 }
 
                 _ => {
