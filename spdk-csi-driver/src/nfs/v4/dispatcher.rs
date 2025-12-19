@@ -1163,6 +1163,7 @@ impl CompoundDispatcher {
                   ds_filehandle.data.len(),
                   filehandle_pnfs::generate_file_id(filename),
                   i);
+            info!("      FH bytes: {:02x?}", ds_filehandle.data);
             
             // Convert device_id to binary
             let mut hasher = DefaultHasher::new();
