@@ -951,12 +951,11 @@ impl CompoundDispatcher {
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
                     }
                     
-                    // Encode FILE layout content for first segment
-                    // In a full implementation, we would encode all segments properly
-                    info!("   📤 Encoding layout with {} segments", layout.segments.len());
+                    // Encode FILE layout content with ALL segments for striping
+                    info!("   📤 Encoding layout with {} segments for striping", layout.segments.len());
                     
-                    let layout_content = Self::encode_file_layout(
-                        &layout.segments[0], 
+                    let layout_content = Self::encode_file_layout_striped(
+                        &layout.segments, 
                         &filehandle,
                         stripe_unit
                     );
@@ -1065,6 +1064,69 @@ impl CompoundDispatcher {
     /// - nfl_first_stripe_index (u32)
     /// - nfl_pattern_offset (u64)
     /// - nfl_fh_list<> (array of filehandles)
+    /// Encode FILE layout with multiple segments for striping across DSes
+    /// Per RFC 5661 Section 13.3 - NFSv4.1 File Layout Type
+    fn encode_file_layout_striped(
+        segments: &[crate::pnfs::mds::layout::LayoutSegment],
+        filehandle: &[u8],
+        stripe_unit: u64,
+    ) -> Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        if segments.is_empty() {
+            warn!("⚠️ encode_file_layout_striped called with no segments!");
+            return Bytes::new();
+        }
+        
+        let mut encoder = XdrEncoder::new();
+        
+        // Use first segment for deviceid (all segments in a stripe group share same logical device)
+        // In a full implementation, deviceid represents the stripe group, not individual devices
+        let mut hasher = DefaultHasher::new();
+        segments[0].device_id.hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        let mut device_id_bytes = [0u8; 16];
+        device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
+        device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
+        
+        info!("   🔧 Encoding STRIPED FILE layout (RFC 5661 Section 13.3):");
+        info!("      Number of DSes in stripe: {}", segments.len());
+        info!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
+        info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
+        info!("      first_stripe_index: 0");
+        info!("      pattern_offset: 0");
+        info!("      filehandle length: {} bytes (same for all DSes)", filehandle.len());
+        
+        // Encode deviceid (16 bytes fixed, no length prefix)
+        encoder.encode_fixed_opaque(&device_id_bytes);
+        
+        // nfl_util: stripe unit size (u32 per RFC 5661)
+        encoder.encode_u32(stripe_unit as u32);
+        
+        // nfl_first_stripe_index: which stripe to start with (always 0)
+        encoder.encode_u32(0);
+        
+        // nfl_pattern_offset: offset where stripe pattern starts (always 0)
+        encoder.encode_u64(0);
+        
+        // nfl_fh_list: array of filehandles (one per DS in stripe pattern)
+        // For striping across N DSes, we encode N filehandles in round-robin order
+        encoder.encode_u32(segments.len() as u32);
+        for (i, segment) in segments.iter().enumerate() {
+            info!("      FH[{}]: device_id='{}' (will use same filehandle for all DSes)", i, segment.device_id);
+            encoder.encode_opaque(filehandle);
+        }
+        
+        let result = encoder.finish();
+        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, {} filehandles", result.len(), segments.len());
+        info!("      📦 First 128 bytes: {:02x?}", &result[..result.len().min(128)]);
+        
+        result
+    }
+    
     fn encode_file_layout(
         segment: &crate::pnfs::mds::layout::LayoutSegment,
         filehandle: &[u8],

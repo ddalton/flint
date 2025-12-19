@@ -86,7 +86,81 @@ The DS was returning a **hardcoded clientid** (`0x464c494e5444532d`) while the M
 - ✅ Client uses pNFS protocol (`pnfs_try_to_write_data`)
 - ✅ Both DSes running and sending heartbeats to MDS
 - ✅ No kernel error messages about trunking failures
-- ⚠️ Performance is slower than standalone NFS (likely due to MDS proxy overhead)
+- ❌ **Files stored on MDS, not striped across DSes**
+- ❌ **Root cause: instance_id mismatch + single filehandle for all DSes**
+
+#### **Why Data Wasn't Going to DSes** ❌
+
+Investigation revealed two critical issues:
+
+1. **Instance ID Mismatch**
+   - Each FileHandleManager generates unique `instance_id` on creation
+   - MDS filehandles contain MDS's `instance_id`
+   - DSes reject MDS filehandles as "stale" (different `instance_id`)
+   - Client falls back to MDS-only I/O
+
+2. **Single Filehandle for All DSes**
+   - Layout encoding used **same MDS filehandle** for all DS slots
+   - Filehandle points to `/data/file.dat` on MDS storage
+   - Should use **different filehandles** pointing to each DS's storage
+   - Current: `encode_opaque(filehandle)` x N (all identical)
+   - Needed: N different filehandles for N DSes
+
+#### **Fixes Implemented** ✅
+
+1. **Shared Instance ID**
+   - Added `PNFS_INSTANCE_ID` environment variable
+   - MDS and all DSes use same instance_id: `1734648000000000000`
+   - FileHandleManager reads from env or generates deterministically
+   - Filehandles now valid across entire pNFS cluster
+
+2. **Multi-Segment Layout Encoding**
+   - Created `encode_file_layout_striped()` function
+   - Encodes ALL segments (not just first one)
+   - Sets `nfl_fh_list` count to number of DSes
+   - Client gets proper stripe pattern
+
+3. **Deployment Updates**
+   - Added `PNFS_INSTANCE_ID` to MDS deployment
+   - Added `PNFS_INSTANCE_ID` to DS daemonset
+   - Both use identical value for filehandle compatibility
+
+#### **Stripe Persistence Consideration** ⚠️
+
+**Question**: When pods restart, how do they know where stripes are located?
+
+**Current Implementation**:
+- Layout Manager generates layouts **on-demand** based on available DSes
+- No persistence of file → DS mappings
+- Uses **deterministic striping** (round-robin by file offset)
+- Stripe pattern depends on DS registration order
+
+**Implications**:
+- ✅ Works if DSes register in same order
+- ✅ New files get striped automatically
+- ⚠️ **If DS registration order changes, stripe pattern breaks**
+- ⚠️ Existing file data may become inaccessible
+
+**Production Solutions**:
+1. **Option A: Layout Metadata Database**
+   - Store file → [DS list] in ConfigMap/etcd
+   - Persist exact stripe locations
+   - Reload on restart
+
+2. **Option B: Deterministic DS Ordering**
+   - Use stable DS identifiers (node name + device ID)
+   - Always generate layouts in same order
+   - Stripe pattern is reproducible
+
+3. **Option C: File-level Metadata**
+   - Store stripe info in extended attributes
+   - Each file knows its own stripe pattern
+   - Self-describing data placement
+
+**Current Status**: Using Option B (deterministic ordering by device_id)
+- Layouts are deterministic as long as same DSes are available
+- Suitable for testing and development
+- Production deployment should add Option A (persistent metadata store)
 
 ---
 

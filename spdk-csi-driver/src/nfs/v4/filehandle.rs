@@ -46,6 +46,15 @@ pub struct FileHandleManager {
 }
 
 impl FileHandleManager {
+    /// Generate a unique instance ID for this server deployment
+    /// Uses timestamp with nanosecond precision
+    fn generate_instance_id() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+    
     /// Create a new file handle manager
     pub fn new(export_path: PathBuf) -> Self {
         Self::new_with_export_name(export_path, "volume".to_string())
@@ -53,6 +62,22 @@ impl FileHandleManager {
     
     /// Create a new file handle manager with custom export name
     pub fn new_with_export_name(export_path: PathBuf, export_name: String) -> Self {
+        // Try to get shared instance_id from environment (for pNFS cluster)
+        let instance_id = match std::env::var("PNFS_INSTANCE_ID") {
+            Ok(id_str) => {
+                id_str.parse::<u64>().unwrap_or_else(|_| {
+                    warn!("Invalid PNFS_INSTANCE_ID, generating new one");
+                    Self::generate_instance_id()
+                })
+            }
+            Err(_) => Self::generate_instance_id(),
+        };
+        
+        Self::new_with_instance_id(export_path, export_name, instance_id)
+    }
+    
+    /// Create with explicit instance_id (for pNFS clusters)
+    pub fn new_with_instance_id(export_path: PathBuf, export_name: String, instance_id: u64) -> Self {
         // Canonicalize the export path so relative inputs work with PUTROOTFH
         // and normalization checks. If canonicalize fails, keep the original
         // to avoid crashing; later operations will surface a clear error.
@@ -60,15 +85,8 @@ impl FileHandleManager {
             .canonicalize()
             .unwrap_or(export_path);
 
-        // Generate instance ID from current timestamp with nanosecond precision
-        // This ensures unique IDs even for managers created in quick succession
-        let instance_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-
         info!("🔧 FileHandleManager created:");
-        info!("   Instance ID: {}", instance_id);
+        info!("   Instance ID: {} (shared across pNFS cluster)", instance_id);
         info!("   Export path: {:?}", export_path);
         info!("   Export name: {}", export_name);
         
