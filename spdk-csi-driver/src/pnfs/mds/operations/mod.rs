@@ -100,15 +100,15 @@ impl PnfsOperationHandler {
         &self,
         args: GetDeviceInfoArgs,
     ) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
-        debug!(
-            "GETDEVICEINFO: device_id={:?}, layout_type={:?}",
-            &args.device_id[0..4],
+        warn!(
+            "🔥 GETDEVICEINFO: device_id={:02x?}, layout_type={:?}",
+            &args.device_id[0..8],
             args.layout_type
         );
 
         // Validate layout type
         if args.layout_type != LayoutType::NfsV4_1Files {
-            warn!("Unsupported layout type: {:?}", args.layout_type);
+            warn!("❌ Unsupported layout type: {:?}", args.layout_type);
             return Err(GetDeviceInfoError::UnknownLayoutType);
         }
 
@@ -116,9 +116,12 @@ impl PnfsOperationHandler {
         let device_info = self.device_registry
             .get_by_binary_id(&args.device_id)
             .ok_or_else(|| {
-                warn!("Device not found: {:?}", &args.device_id[0..4]);
+                warn!("❌ Device not found: {:02x?}", &args.device_id[0..8]);
                 GetDeviceInfoError::NoEnt
             })?;
+
+        warn!("✅ Found device: id={}, primary_endpoint={}", 
+              device_info.device_id, device_info.primary_endpoint);
 
         // Build device address
         let device_addr = DeviceAddr4 {
@@ -126,6 +129,8 @@ impl PnfsOperationHandler {
             addr: device_info.primary_endpoint.clone(),
             multipath: device_info.endpoints.clone(),
         };
+
+        warn!("📤 Returning device address: {}", device_addr.addr);
 
         Ok(GetDeviceInfoResult {
             device_addr,
