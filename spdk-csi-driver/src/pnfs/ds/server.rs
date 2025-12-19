@@ -342,6 +342,9 @@ impl DataServer {
                     // server_impl_id (optional) - empty for simplicity
                     encoder.encode_u32(0);  // impl_id array count = 0
                     
+                    info!("DS: EXCHANGE_ID response - server_owner={:?}, server_scope={:?}", 
+                          String::from_utf8_lossy(server_owner), 
+                          String::from_utf8_lossy(server_scope));
                     debug!("DS: Handled EXCHANGE_ID with server_scope for trunking");
                     (Nfs4Status::Ok, encoder.finish())
                 }
