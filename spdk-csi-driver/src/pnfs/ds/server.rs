@@ -418,7 +418,15 @@ impl DataServer {
     async fn register_with_mds(&self) -> Result<()> {
         let mut client = self.registration_client.lock().await;
         
-        let endpoint = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        // Use POD_IP if available (for Kubernetes), otherwise use bind address
+        // In K8s, bind.address is 0.0.0.0 which clients can't reach
+        let advertise_address = std::env::var("POD_IP")
+            .unwrap_or_else(|_| self.config.bind.address.clone());
+        
+        let endpoint = format!("{}:{}", advertise_address, self.config.bind.port);
+        info!("📡 Registering with endpoint: {} (POD_IP={:?})", 
+              endpoint, std::env::var("POD_IP").ok());
+        
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
             .map(|b| b.mount_point.clone())

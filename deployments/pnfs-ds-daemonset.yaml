@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: ds
-        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:final
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-pnfs-ds"]
         args:
@@ -28,6 +28,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         ports:
         - containerPort: 2049
           name: nfs
