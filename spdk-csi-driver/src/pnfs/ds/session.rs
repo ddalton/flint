@@ -61,6 +61,27 @@ impl DsSessionManager {
             max_slots: 128, // Support up to 128 slots
         }
     }
+    
+    /// Create a new session
+    /// Returns the sessionid (16 bytes)
+    pub fn create_session(&self, clientid: u64) -> Result<[u8; 16], String> {
+        // Generate deterministic sessionid from clientid
+        // This ensures same clientid always gets same sessionid
+        let mut sessionid = [0u8; 16];
+        sessionid[0..8].copy_from_slice(&clientid.to_be_bytes());
+        sessionid[8..16].copy_from_slice(&1u64.to_be_bytes()); // Instance = 1
+        
+        // Create session entry
+        let session = DsSession {
+            sessionid,
+            slot_sequences: vec![0; self.max_slots as usize],
+        };
+        
+        self.sessions.insert(sessionid, session);
+        
+        debug!("DS: Created session {:02x?} for clientid {}", &sessionid[0..8], clientid);
+        Ok(sessionid)
+    }
 
     /// Handle SEQUENCE operation (minimal - just validate and echo back)
     ///

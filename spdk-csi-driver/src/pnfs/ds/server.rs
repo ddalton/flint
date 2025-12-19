@@ -412,8 +412,67 @@ impl DataServer {
                     
                     info!("DS: EXCHANGE_ID response - clientid={}, server_owner={}, server_scope={:?}, flags=0x{:08x}", 
                           clientid, server_owner, String::from_utf8_lossy(server_scope), response_flags);
-                    debug!("DS: ✅ Server trunking enabled - returning same clientid as MDS");
+                    debug!("DS: ✅ EXCHANGE_ID complete - clientid={}", clientid);
                     (Nfs4Status::Ok, encoder.finish())
+                }
+
+                opcode::CREATE_SESSION => {
+                    // Decode CREATE_SESSION arguments
+                    let clientid = decoder.decode_u64().unwrap_or(0);
+                    let sequence = decoder.decode_u32().unwrap_or(0);
+                    
+                    // Skip channel attributes (complex structure, not critical for basic functionality)
+                    // Just decode enough to not break XDR stream
+                    let _ = decoder.decode_u32(); // fore attributes count
+                    let _ = decoder.decode_u32(); // back attributes count  
+                    let _ = decoder.decode_u32(); // cb_program
+                    
+                    // Skip security parameters array
+                    let sec_count = decoder.decode_u32().unwrap_or(0);
+                    for _ in 0..sec_count {
+                        let _ = decoder.decode_u32();
+                    }
+                    
+                    info!("DS: CREATE_SESSION - clientid={}, sequence={}", clientid, sequence);
+                    
+                    // Create session via session manager
+                    match session_mgr.create_session(clientid) {
+                        Ok(sessionid) => {
+                            let mut encoder = XdrEncoder::new();
+                            
+                            // sessionid (16 bytes)
+                            encoder.encode_fixed_opaque(&sessionid);
+                            
+                            // sequenceid
+                            encoder.encode_u32(sequence);
+                            
+                            // flags (0 for now)
+                            encoder.encode_u32(0);
+                            
+                            // fore_chan_attrs (simplified)
+                            encoder.encode_u32(4096);    // max_rqst_sz
+                            encoder.encode_u32(4096);    // max_resp_sz
+                            encoder.encode_u32(4096);    // max_resp_sz_cached
+                            encoder.encode_u32(128);     // max_ops
+                            encoder.encode_u32(1);       // max_reqs
+                            encoder.encode_u32(0);       // rdma_ird count (array)
+                            
+                            // back_chan_attrs (same as fore)
+                            encoder.encode_u32(4096);
+                            encoder.encode_u32(4096);
+                            encoder.encode_u32(4096);
+                            encoder.encode_u32(128);
+                            encoder.encode_u32(1);
+                            encoder.encode_u32(0);
+                            
+                            info!("DS: CREATE_SESSION successful - sessionid={:02x?}", &sessionid[0..8]);
+                            (Nfs4Status::Ok, encoder.finish())
+                        }
+                        Err(e) => {
+                            warn!("DS: CREATE_SESSION failed: {}", e);
+                            (Nfs4Status::BadSession, Bytes::new())
+                        }
+                    }
                 }
 
                 opcode::SEQUENCE => {
