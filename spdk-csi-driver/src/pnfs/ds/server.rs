@@ -133,7 +133,7 @@ impl DataServer {
             .map_err(|e| crate::pnfs::Error::Io(e))?;
         
         info!("🚀 pNFS DS TCP server listening on {}", addr);
-        info!("   Serving: EXCHANGE_ID, SEQUENCE, READ, WRITE, COMMIT operations");
+        info!("   Serving: EXCHANGE_ID, CREATE_SESSION, SEQUENCE, READ, WRITE, COMMIT operations");
         info!("");
         
         let mut connection_count = 0u64;
@@ -319,6 +319,7 @@ impl DataServer {
                 }
             };
 
+            debug!("DS: Processing opcode={}", opcode);
             let (status, result_data) = match opcode {
                 opcode::EXCHANGE_ID => {
                     // Decode EXCHANGE_ID arguments properly for server trunking
