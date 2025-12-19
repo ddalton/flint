@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: ds
-        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:final
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:complete
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-pnfs-ds"]
         args:
