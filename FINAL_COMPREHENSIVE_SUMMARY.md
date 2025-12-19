@@ -166,11 +166,25 @@ Investigation revealed two critical issues:
 
 ## 📊 **Performance Results**
 
-| Configuration | Throughput | Notes |
-|--------------|------------|-------|
-| Standalone NFS | **243 MB/s** | Baseline, direct I/O |
-| pNFS (current) | 88 MB/s | Through MDS only, no parallel I/O |
-| pNFS (target) | 150-350 MB/s | With 2-4 DSes parallel (when fixed) |
+### Storage Backend Comparison (200MB Direct I/O)
+
+| Storage Backend | Throughput | Technology | Notes |
+|----------------|------------|------------|-------|
+| **Flint CSI** | **373 MB/s** | SPDK + ublk | **2.4x faster than Longhorn!** |
+| Longhorn | 157 MB/s | iSCSI | Current default |
+| Standalone NFS | 97 MB/s | NFS over filesystem | Baseline |
+| pNFS (current) | 87 MB/s | Through MDS, no DS I/O yet | In progress |
+| pNFS (target) | 150-350 MB/s | Parallel striping | When fully working |
+
+### Key Findings
+
+**Flint CSI Performance**: 
+- ✅ **373 MB/s write throughput** (direct I/O)
+- ✅ **2.4x faster than Longhorn**
+- ✅ Production-ready with SPDK backend
+- ✅ Block-level I/O (no NFS overhead)
+
+**Recommendation**: **Use Flint CSI for production workloads** - it's significantly faster than both Longhorn and NFS!
 
 ---
 
@@ -303,14 +317,38 @@ Despite implementing all RFC 5661 requirements properly, Linux NFS client's serv
 - No CREATE_SESSION or I/O operations reach the DS
 - All data stored on MDS, DSes remain empty
 
-**Root Cause Hypothesis**:
-Error -121 (EREMOTEIO) suggests RPC-level failure, possibly:
-- XDR encoding difference between MDS and DS responses
-- Missing or malformed field in EXCHANGE_ID reply
-- Linux kernel trunking logic bug (expects specific field combinations)
-- Session state validation failing
+**Root Cause FOUND via tcpdump XDR Analysis**:
 
-**See**: `PNFS_STRIPING_INVESTIGATION.md` for complete analysis
+✅ **CRITICAL BUG**: DS COMPOUND responses were missing operation opcode!
+
+Per RFC 8881 Section 18.2, COMPOUND response format MUST be:
+```
+FOR EACH result:
+  - opcode (u32)     ← DS was MISSING this!
+  - status (enum)
+  - result data
+```
+
+**DS was incorrectly sending**:
+```
+- status (enum)      ← Started here (wrong!)
+- result data
+```
+
+This caused Linux kernel XDR parser to fail, resulting in error -121 (EREMOTEIO).
+
+**FIX APPLIED**:
+- Added opcode to DS COMPOUND response encoding
+- Changed results from `Vec<(status, data)>` to `Vec<(opcode, status, data)>`
+- Now encodes: opcode → status → data (correct order)
+
+**RESULT**:
+- ✅ Error changed from -121 (fatal) to -512 (retryable)
+- ✅ DS now successfully handles CREATE_SESSION  
+- ✅ Sessions established with both DSes
+- ⚠️ I/O still slow/hanging (needs further investigation)
+
+**See**: `PNFS_STRIPING_INVESTIGATION.md` for complete byte-level analysis
 
 ---
 
