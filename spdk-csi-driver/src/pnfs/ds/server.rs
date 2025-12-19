@@ -439,6 +439,17 @@ impl DataServer {
                     }
                 }
 
+                opcode::SECINFO_NO_NAME => {
+                    // Tell client we only support AUTH_NULL (flavor 0) and AUTH_SYS (flavor 1)
+                    // This prevents client from trying Kerberos
+                    let mut encoder = XdrEncoder::new();
+                    encoder.encode_u32(2);  // secinfo count (2 flavors)
+                    encoder.encode_u32(0);  // AUTH_NULL
+                    encoder.encode_u32(1);  // AUTH_SYS
+                    debug!("DS: Advertised AUTH_NULL and AUTH_SYS (no Kerberos)");
+                    (Nfs4Status::Ok, encoder.finish())
+                }
+
                 opcode::COMMIT => {
                     let offset = decoder.decode_u64().unwrap_or(0);
                     let count = decoder.decode_u32().unwrap_or(0);
