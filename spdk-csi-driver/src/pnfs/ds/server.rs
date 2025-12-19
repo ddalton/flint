@@ -328,15 +328,15 @@ impl DataServer {
                     encoder.encode_u32(0);
                     
                     // server_owner (so_major_id + so_minor_id)
-                    // Use "flint-pnfs" as the owner to match MDS
+                    // MUST match MDS for server trunking to work!
                     let server_owner = b"flint-pnfs";
                     encoder.encode_u64(0);  // so_minor_id
                     encoder.encode_opaque(server_owner);  // so_major_id
                     
-                    // server_scope - WORKAROUND: Use empty scope to disable trunking
-                    // This forces client to use AUTH_SYS instead of requiring Kerberos
-                    // Empty server_scope = no session trunking = separate auth
-                    let server_scope = b"";  // Empty scope disables trunking
+                    // server_scope - MUST match MDS for server trunking!
+                    // This tells the client that MDS and DS are part of the same storage system
+                    // When this matches, client will use parallel I/O to DS
+                    let server_scope = b"flint-pnfs-cluster";  // MATCHES MDS
                     encoder.encode_opaque(server_scope);
                     
                     // server_impl_id (optional) - empty for simplicity

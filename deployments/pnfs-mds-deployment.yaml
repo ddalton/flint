@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: mds
-        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:krb5
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-pnfs-mds"]
         args:
