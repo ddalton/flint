@@ -29,6 +29,9 @@ pub mod registration;
 /// DS server implementation
 pub mod server;
 
+/// Minimal NFSv4.1 session support for DS
+pub mod session;
+
 // Re-exports
 pub use server::DataServer;
 

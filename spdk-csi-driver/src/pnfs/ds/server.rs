@@ -12,6 +12,7 @@
 use crate::pnfs::config::DsConfig;
 use crate::pnfs::ds::io::{IoOperationHandler, WriteStable};
 use crate::pnfs::ds::registration::RegistrationClient;
+use crate::pnfs::ds::session::DsSessionManager;
 use crate::pnfs::Result;
 use crate::nfs::rpc::{CallMessage, ReplyBuilder};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
@@ -30,6 +31,7 @@ pub struct DataServer {
     config: DsConfig,
     io_handler: Arc<IoOperationHandler>,
     registration_client: Arc<tokio::sync::Mutex<RegistrationClient>>,
+    session_mgr: Arc<DsSessionManager>,
 }
 
 impl DataServer {
@@ -70,7 +72,11 @@ impl DataServer {
             )
         ));
 
-        Ok(Self { config, io_handler, registration_client })
+        // Initialize session manager (for NFSv4.1 SEQUENCE operations)
+        let session_mgr = Arc::new(DsSessionManager::new());
+        info!("✓ Session manager initialized (NFSv4.1 support)");
+
+        Ok(Self { config, io_handler, registration_client, session_mgr })
     }
 
     /// Start the data server
@@ -119,7 +125,7 @@ impl DataServer {
             .map_err(|e| crate::pnfs::Error::Io(e))?;
         
         info!("🚀 pNFS DS TCP server listening on {}", addr);
-        info!("   Serving: READ, WRITE, COMMIT operations only");
+        info!("   Serving: SEQUENCE, READ, WRITE, COMMIT operations");
         info!("");
         
         let mut connection_count = 0u64;
@@ -133,11 +139,12 @@ impl DataServer {
             info!("📡 New TCP connection #{} from {}", connection_count, peer);
             
             let io_handler = Arc::clone(&self.io_handler);
+            let session_mgr = Arc::clone(&self.session_mgr);
             let conn_id = connection_count;
             
             tokio::spawn(async move {
                 debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, peer).await {
+                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, peer).await {
                     warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
                 } else {
                     info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
@@ -150,6 +157,7 @@ impl DataServer {
     async fn handle_tcp_connection(
         stream: TcpStream,
         io_handler: Arc<IoOperationHandler>,
+        session_mgr: Arc<DsSessionManager>,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
         use tokio::time::Instant;
@@ -200,7 +208,11 @@ impl DataServer {
             let request = buf.split().freeze();
 
             // Process RPC (minimal NFS)
-            let reply = Self::dispatch_minimal_nfs(request, Arc::clone(&io_handler)).await;
+            let reply = Self::dispatch_minimal_nfs(
+                request,
+                Arc::clone(&io_handler),
+                Arc::clone(&session_mgr),
+            ).await;
             rpc_count += 1;
 
             // Write reply
@@ -213,10 +225,11 @@ impl DataServer {
         }
     }
 
-    /// Dispatch minimal NFS RPC (READ/WRITE/COMMIT only)
+    /// Dispatch minimal NFS RPC (SEQUENCE/READ/WRITE/COMMIT only)
     async fn dispatch_minimal_nfs(
         request: Bytes,
         io_handler: Arc<IoOperationHandler>,
+        session_mgr: Arc<DsSessionManager>,
     ) -> Bytes {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -241,18 +254,19 @@ impl DataServer {
             }
 
             procedure::COMPOUND => {
-                Self::handle_minimal_compound(call, args, io_handler).await
+                Self::handle_minimal_compound(call, args, io_handler, session_mgr).await
             }
 
             _ => ReplyBuilder::proc_unavail(call.xid),
         }
     }
 
-    /// Handle COMPOUND with only READ/WRITE/COMMIT
+    /// Handle COMPOUND with SEQUENCE/READ/WRITE/COMMIT
     async fn handle_minimal_compound(
         call: CallMessage,
         args: Bytes,
         io_handler: Arc<IoOperationHandler>,
+        session_mgr: Arc<DsSessionManager>,
     ) -> Bytes {
         let mut decoder = XdrDecoder::new(args);
 
@@ -293,6 +307,46 @@ impl DataServer {
             };
 
             let (status, result_data) = match opcode {
+                opcode::SEQUENCE => {
+                    // Decode SEQUENCE arguments
+                    let sessionid = match decoder.decode_fixed_opaque(16) {
+                        Ok(bytes) => {
+                            let mut sid = [0u8; 16];
+                            sid.copy_from_slice(&bytes);
+                            sid
+                        }
+                        Err(_) => {
+                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            continue;
+                        }
+                    };
+                    
+                    let sequenceid = decoder.decode_u32().unwrap_or(0);
+                    let slotid = decoder.decode_u32().unwrap_or(0);
+                    let highest_slotid = decoder.decode_u32().unwrap_or(0);
+                    let _cache_this = decoder.decode_bool().unwrap_or(false);
+                    
+                    // Handle SEQUENCE via session manager
+                    match session_mgr.handle_sequence(sessionid, sequenceid, slotid, highest_slotid) {
+                        Ok(result) => {
+                            let mut encoder = XdrEncoder::new();
+                            encoder.encode_fixed_opaque(&result.sessionid);
+                            encoder.encode_u32(result.sequenceid);
+                            encoder.encode_u32(result.slotid);
+                            encoder.encode_u32(result.highest_slotid);
+                            encoder.encode_u32(result.target_highest_slotid);
+                            encoder.encode_u32(result.status_flags);
+                            (Nfs4Status::Ok, encoder.finish())
+                        }
+                        Err(err_code) => {
+                            // Convert NFS4 error code to Nfs4Status
+                            // For now, use a generic error
+                            warn!("SEQUENCE error: {}", err_code);
+                            (Nfs4Status::BadSession, Bytes::new())
+                        }
+                    }
+                }
+
                 opcode::PUTFH => {
                     // Store current filehandle
                     match decoder.decode_filehandle() {
