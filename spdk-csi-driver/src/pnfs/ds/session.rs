@@ -138,7 +138,7 @@ impl Default for DsSessionManager {
 }
 
 /// Result of a SEQUENCE operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SequenceResult {
     /// Echo back the session ID
     pub sessionid: [u8; 16],
