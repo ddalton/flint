@@ -188,13 +188,19 @@ impl SessionOperationHandler {
             response_flags |= exchgid_flags::CONFIRMED_R;
         }
 
+        let server_owner = self.state_mgr.clients.server_owner().to_string();
+        let server_scope = self.state_mgr.clients.server_scope().to_vec();
+        
+        info!("MDS: EXCHANGE_ID response - server_owner={:?}, server_scope={:?}",
+              server_owner, String::from_utf8_lossy(&server_scope));
+        
         ExchangeIdRes {
             status: Nfs4Status::Ok,
             clientid,
             sequenceid,
             flags: response_flags,
-            server_owner: self.state_mgr.clients.server_owner().to_string(),
-            server_scope: self.state_mgr.clients.server_scope().to_vec(),
+            server_owner,
+            server_scope,
         }
     }
 
