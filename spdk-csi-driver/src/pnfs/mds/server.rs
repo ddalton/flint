@@ -113,6 +113,8 @@ impl MetadataServer {
 
     /// Start the metadata server
     pub async fn serve(&self) -> Result<()> {
+        eprintln!("🔥🔥🔥🔥🔥 FLINT-PNFS-MDS STARTING WITH DEBUG LOGGING 🔥🔥🔥🔥🔥");
+        warn!("🔥🔥🔥🔥🔥 MDS SERVER BINARY VERSION: DEBUG BUILD 🔥🔥🔥🔥🔥");
         info!("╔════════════════════════════════════════════════════╗");
         info!("║   Flint pNFS Metadata Server (MDS) - RUNNING      ║");
         info!("╚════════════════════════════════════════════════════╝");
