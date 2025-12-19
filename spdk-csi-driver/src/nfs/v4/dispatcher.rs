@@ -1027,14 +1027,34 @@ impl CompoundDispatcher {
                 let mut encoder = XdrEncoder::new();
                 encoder.encode_u32(layout_type);
                 
-                // Encode device_addr4 (netid, addr)
-                let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
+                // Check if this is a striped device (has multipath addresses = multiple DSes)
+                let dev_addr_encoded = if result.device_addr.multipath.is_empty() {
+                    // Single DS device
+                    info!("   Single DS device: {}", result.device_addr.addr);
+                    Self::encode_device_addr(&result.device_addr)
+                } else {
+                    // Striped device with multiple DSes
+                    info!("   Striped device with {} DSes", result.device_addr.multipath.len() + 1);
+                    
+                    // Build array of DeviceAddr4 for each DS
+                    let mut addrs = vec![result.device_addr.clone()];
+                    for addr_str in &result.device_addr.multipath {
+                        addrs.push(crate::pnfs::mds::operations::DeviceAddr4 {
+                            netid: result.device_addr.netid.clone(),
+                            addr: addr_str.clone(),
+                            multipath: Vec::new(),
+                        });
+                    }
+                    
+                    Self::encode_device_addr_striped(&addrs)
+                };
+                
                 encoder.encode_opaque(&dev_addr_encoded);
                 
                 // Notification (empty for now)
                 encoder.encode_u32(0);  // Empty notification array
                 
-                info!("✅ GETDEVICEINFO successful: {}", result.device_addr.addr);
+                info!("✅ GETDEVICEINFO successful");
                 OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(encoder.finish()))
             }
             Err(_e) => {
@@ -1082,10 +1102,13 @@ impl CompoundDispatcher {
         
         let mut encoder = XdrEncoder::new();
         
-        // Use first segment for deviceid (all segments in a stripe group share same logical device)
-        // In a full implementation, deviceid represents the stripe group, not individual devices
+        // Generate composite device_id for stripe group
+        // Hash ALL device IDs together to create a unique stripe group identifier
         let mut hasher = DefaultHasher::new();
-        segments[0].device_id.hash(&mut hasher);
+        for segment in segments {
+            segment.device_id.hash(&mut hasher);
+        }
+        b"STRIPE:".hash(&mut hasher);  // Add marker to distinguish from single devices
         let hash = hasher.finish();
         
         let mut device_id_bytes = [0u8; 16];
@@ -1178,6 +1201,53 @@ impl CompoundDispatcher {
         info!("      📦 Encoded FILE layout: {} bytes total", result.len());
         info!("      📦 First 64 bytes: {:02x?}", &result[..result.len().min(64)]);
         
+        result
+    }
+    
+    /// Encode striped device address per RFC 5661 Section 13.3
+    /// 
+    /// For N DSes in stripe pattern:
+    /// - stripe_indices = [0, 1, 2, ..., N-1]  // Round-robin across all DSes
+    /// - multipath_ds_list = [ [addr0], [addr1], ..., [addrN] ]  // All DS addresses
+    fn encode_device_addr_striped(addrs: &[crate::pnfs::mds::operations::DeviceAddr4]) -> Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        use crate::pnfs::protocol::endpoint_to_uaddr;
+        
+        let mut encoder = XdrEncoder::new();
+        
+        info!("🔧 Encoding STRIPED device address with {} DSes", addrs.len());
+        
+        // PART 1: stripe_indices<> array
+        // For striping: indices point to each DS in round-robin order
+        encoder.encode_u32(addrs.len() as u32);  // stripe_indices count = number of DSes
+        for i in 0..addrs.len() {
+            encoder.encode_u32(i as u32);  // stripe_indices[i] = i
+            info!("   stripe_index[{}] = {}", i, i);
+        }
+        
+        // PART 2: multipath_ds_list<> array
+        // This is an array of multipath_list4 (one per DS)
+        encoder.encode_u32(addrs.len() as u32);  // multipath_ds_list count = number of DSes
+        
+        for (i, addr) in addrs.iter().enumerate() {
+            // multipath_list4 for DS #i:
+            // This is an array of netaddr4 for this DS
+            encoder.encode_u32(1);  // netaddr4 count (1 address per DS for now)
+            
+            // netaddr4:
+            encoder.encode_string(&addr.netid);  // e.g., "tcp"
+            
+            // Convert endpoint to universal address format
+            // e.g., "10.42.214.18:2049" -> "10.42.214.18.8.1"
+            let uaddr = endpoint_to_uaddr(&addr.addr)
+                .unwrap_or_else(|_| addr.addr.clone());
+            encoder.encode_string(&uaddr);
+            
+            info!("   DS[{}]: {} ({})", i, addr.addr, uaddr);
+        }
+        
+        let result = encoder.finish();
+        info!("📦 Striped device address encoded: {} bytes", result.len());
         result
     }
     

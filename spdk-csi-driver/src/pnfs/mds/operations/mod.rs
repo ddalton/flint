@@ -112,25 +112,46 @@ impl PnfsOperationHandler {
             return Err(GetDeviceInfoError::UnknownLayoutType);
         }
 
-        // Look up device
-        let device_info = self.device_registry
-            .get_by_binary_id(&args.device_id)
-            .ok_or_else(|| {
-                warn!("❌ Device not found: {:02x?}", &args.device_id[0..8]);
-                GetDeviceInfoError::NoEnt
-            })?;
+        // Try to look up device as single DS
+        let device_addr = if let Some(device_info) = self.device_registry.get_by_binary_id(&args.device_id) {
+            // Single DS device found
+            warn!("✅ Found single device: id={}, primary_endpoint={}", 
+                  device_info.device_id, device_info.primary_endpoint);
 
-        warn!("✅ Found device: id={}, primary_endpoint={}", 
-              device_info.device_id, device_info.primary_endpoint);
-
-        // Build device address
-        let device_addr = DeviceAddr4 {
-            netid: "tcp".to_string(),
-            addr: device_info.primary_endpoint.clone(),
-            multipath: device_info.endpoints.clone(),
+            DeviceAddr4 {
+                netid: "tcp".to_string(),
+                addr: device_info.primary_endpoint.clone(),
+                multipath: device_info.endpoints.clone(),
+            }
+        } else {
+            // Not found as single device - could be composite stripe device
+            // Get ALL active DSes and return them as stripe pattern
+            warn!("🔧 Device not found as single DS - treating as composite stripe device");
+            
+            let devices = self.device_registry.list_active();
+            if devices.is_empty() {
+                warn!("❌ No active devices found");
+                return Err(GetDeviceInfoError::NoEnt);
+            }
+            
+            warn!("✅ Found {} active DSes for stripe", devices.len());
+            
+            // Return first DS as primary, rest as multipath (for striping)
+            let mut multipath = Vec::new();
+            for device in devices.iter().skip(1) {
+                multipath.push(device.primary_endpoint.clone());
+                warn!("   Stripe DS: {}", device.primary_endpoint);
+            }
+            
+            DeviceAddr4 {
+                netid: "tcp".to_string(),
+                addr: devices[0].primary_endpoint.clone(),
+                multipath,
+            }
         };
 
-        warn!("📤 Returning device address: {}", device_addr.addr);
+        warn!("📤 Returning device address with {} total DSes", 
+              1 + device_addr.multipath.len());
 
         Ok(GetDeviceInfoResult {
             device_addr,
