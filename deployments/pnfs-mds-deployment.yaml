@@ -24,6 +24,9 @@ spec:
           - "--config"
           - "/etc/flint/pnfs.yaml"
           - "--verbose"
+        env:
+        - name: RUST_LOG
+          value: "info,spdk_csi_driver=debug"
         ports:
         - containerPort: 2049
           name: nfs
