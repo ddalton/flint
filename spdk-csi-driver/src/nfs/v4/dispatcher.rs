@@ -112,6 +112,17 @@ impl CompoundDispatcher {
 
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
+            
+            // Log pNFS operations with high visibility
+            match &operation {
+                Operation::LayoutGet { .. } => {
+                    warn!("🔴🔴🔴 ABOUT TO DISPATCH LAYOUTGET OPERATION 🔴🔴🔴");
+                }
+                Operation::GetDeviceInfo { .. } => {
+                    warn!("🔴🔴🔴 ABOUT TO DISPATCH GETDEVICEINFO OPERATION 🔴🔴🔴");
+                }
+                _ => {}
+            }
 
             // Dispatch operation
             let result = self.dispatch_operation(operation, &mut context).await;
@@ -799,6 +810,8 @@ impl CompoundDispatcher {
 
             // pNFS operations
             Operation::LayoutGet { signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount } => {
+                warn!("🚨🚨🚨 LAYOUTGET OPERATION DISPATCHED IN DISPATCHER.RS 🚨🚨🚨");
+                warn!("   offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
                 self.handle_layoutget(signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount, context)
             }
             

@@ -46,6 +46,7 @@ impl PnfsOperationHandler {
         &self,
         args: LayoutGetArgs,
     ) -> Result<LayoutGetResult, LayoutGetError> {
+        warn!("🔥🔥🔥 PnfsOperationHandler::layoutget() CALLED 🔥🔥🔥");
         info!(
             "📥 LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
             args.offset, args.length, args.iomode, args.layout_type

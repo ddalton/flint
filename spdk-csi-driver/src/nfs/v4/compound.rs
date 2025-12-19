@@ -1162,6 +1162,7 @@ impl CompoundRequest {
 
             // pNFS operations (opcodes 47-51)
             opcode::LAYOUTGET => {
+                eprintln!("🎯🎯🎯 DECODING LAYOUTGET (opcode 50) 🎯🎯🎯");
                 let signal_layout_avail = decoder.decode_bool()?;
                 let layout_type = decoder.decode_u32()?;
                 let iomode = decoder.decode_u32()?;
@@ -1170,6 +1171,7 @@ impl CompoundRequest {
                 let minlength = decoder.decode_u64()?;
                 let stateid = decoder.decode_stateid()?;
                 let maxcount = decoder.decode_u32()?;
+                eprintln!("🎯 LAYOUTGET decoded: offset={}, length={}, iomode={}", offset, length, iomode);
                 Ok(Operation::LayoutGet {
                     signal_layout_avail,
                     layout_type,
@@ -1182,10 +1184,13 @@ impl CompoundRequest {
                 })
             }
             opcode::GETDEVICEINFO => {
+                eprintln!("🎯🎯🎯 DECODING GETDEVICEINFO (opcode 47) 🎯🎯🎯");
                 let device_id = decoder.decode_opaque()?.to_vec();
+                eprintln!("🎯 GETDEVICEINFO device_id decoded: {} bytes", device_id.len());
                 let layout_type = decoder.decode_u32()?;
                 let maxcount = decoder.decode_u32()?;
                 let notify_count = decoder.decode_u32()?;
+                eprintln!("🎯 GETDEVICEINFO fully decoded: layout_type={}, maxcount={}", layout_type, maxcount);
                 let mut notify_types = Vec::new();
                 for _ in 0..notify_count {
                     notify_types.push(decoder.decode_u32()?);

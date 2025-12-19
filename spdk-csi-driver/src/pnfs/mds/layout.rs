@@ -149,13 +149,16 @@ impl LayoutManager {
         length: u64,
         iomode: IoMode,
     ) -> Result<LayoutState, String> {
+        use tracing::warn;
+        warn!("💥💥💥 LayoutManager::generate_layout() CALLED 💥💥💥");
+        
         let devices = self.device_registry.list_active();
         if devices.is_empty() {
             return Err("No active data servers available".to_string());
         }
 
-        debug!(
-            "Generating layout: offset={}, length={}, iomode={:?}, devices={}",
+        warn!(
+            "💥 Generating layout: offset={}, length={}, iomode={:?}, devices={}",
             offset,
             length,
             iomode,
