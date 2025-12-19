@@ -9,8 +9,9 @@ use crate::pnfs::mds::layout::LayoutManager;
 use crate::pnfs::mds::operations::PnfsOperationHandler;
 use crate::pnfs::grpc::{MdsControlService, MdsControlServer};
 use crate::pnfs::Result;
-use crate::nfs::rpc::{CallMessage, ReplyBuilder};
-use crate::nfs::xdr::XdrEncoder;
+use crate::nfs::rpc::{CallMessage, ReplyBuilder, AuthFlavor};
+use crate::nfs::rpcsec_gss::{RpcSecGssManager, RpcGssCred, procedure as gss_proc};
+use crate::nfs::xdr::{XdrEncoder, XdrDecoder};
 use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM};
 use crate::nfs::v4::dispatcher::CompoundDispatcher;
 use crate::nfs::v4::filehandle::FileHandleManager;
@@ -32,6 +33,7 @@ pub struct MetadataServer {
     operation_handler: Arc<PnfsOperationHandler>,
     base_dispatcher: Arc<CompoundDispatcher>,
     fh_manager: Arc<FileHandleManager>,
+    gss_manager: Arc<RpcSecGssManager>,
 }
 
 impl MetadataServer {
@@ -101,13 +103,18 @@ impl MetadataServer {
             device_registry.count()
         );
 
-        Ok(        Self {
+        // Initialize RPCSEC_GSS manager with keytab from environment
+        let keytab_path = std::env::var("KRB5_KTNAME").ok();
+        let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
+
+        Ok(Self {
             config,
             device_registry,
             layout_manager,
             operation_handler,
             base_dispatcher,
             fh_manager,
+            gss_manager,
         })
     }
 
@@ -215,6 +222,7 @@ impl MetadataServer {
             
             // Clone refs for this connection
             let base_dispatcher = Arc::clone(&self.base_dispatcher);
+            let gss_manager = Arc::clone(&self.gss_manager);
             let conn_id = connection_count;
             
             tokio::spawn(async move {
@@ -222,6 +230,7 @@ impl MetadataServer {
                 if let Err(e) = Self::handle_tcp_connection(
                     stream,
                     base_dispatcher,
+                    gss_manager,
                     peer,
                 ).await {
                     warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
@@ -236,6 +245,7 @@ impl MetadataServer {
     async fn handle_tcp_connection(
         stream: TcpStream,
         base_dispatcher: Arc<CompoundDispatcher>,
+        gss_manager: Arc<RpcSecGssManager>,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
         use tokio::time::Instant;
@@ -313,6 +323,7 @@ impl MetadataServer {
             let reply = Self::dispatch_rpc_with_pnfs(
                 request,
                 Arc::clone(&base_dispatcher),
+                Arc::clone(&gss_manager),
             ).await;
             debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
             
@@ -336,6 +347,7 @@ impl MetadataServer {
     async fn dispatch_rpc_with_pnfs(
         request: Bytes,
         base_dispatcher: Arc<CompoundDispatcher>,
+        gss_manager: Arc<RpcSecGssManager>,
     ) -> Bytes {
         // Parse RPC call message
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -347,9 +359,15 @@ impl MetadataServer {
         };
 
         info!(
-            ">>> RPC CALL: xid={}, program={}, procedure={}",
-            call.xid, call.program, call.procedure
+            ">>> RPC CALL: xid={}, program={}, procedure={}, cred={:?}",
+            call.xid, call.program, call.procedure, call.cred.flavor
         );
+
+        // Handle RPCSEC_GSS authentication
+        if call.cred.flavor == AuthFlavor::RpcsecGss {
+            info!("🔐 RPCSEC_GSS authentication detected on MDS");
+            return Self::handle_rpcsec_gss_call(call, args, gss_manager, base_dispatcher).await;
+        }
 
         // Check program number
         if call.program != NFS4_PROGRAM {
@@ -453,6 +471,147 @@ impl MetadataServer {
         encoder.encode_u32(0);  // Auth length
         encoder.encode_u32(0);  // SUCCESS
         encoder.append_raw(&compound_data);
+
+        encoder.finish()
+    }
+
+    /// Handle RPCSEC_GSS authenticated RPC call
+    async fn handle_rpcsec_gss_call(
+        call: CallMessage,
+        args: Bytes,
+        gss_manager: Arc<RpcSecGssManager>,
+        dispatcher: Arc<CompoundDispatcher>,
+    ) -> Bytes {
+        // Decode RPCSEC_GSS credentials
+        let gss_cred = match RpcGssCred::decode(&call.cred.body) {
+            Ok(cred) => {
+                info!("🔐 GSS Cred: version={}, procedure={}, seq={}, service={:?}",
+                      cred.version, cred.procedure, cred.sequence_num, cred.service);
+                cred
+            }
+            Err(e) => {
+                warn!("❌ Failed to decode RPCSEC_GSS credentials: {}", e);
+                return ReplyBuilder::garbage_args(call.xid);
+            }
+        };
+
+        // Handle different GSS procedures
+        match gss_cred.procedure {
+            gss_proc::INIT => {
+                info!("🔐 RPCSEC_GSS_INIT on MDS");
+                Self::handle_gss_init(call.xid, &gss_cred, args, gss_manager).await
+            }
+
+            gss_proc::CONTINUE_INIT => {
+                info!("🔐 RPCSEC_GSS_CONTINUE_INIT on MDS");
+                Self::handle_gss_continue_init(call.xid, &gss_cred, args, gss_manager).await
+            }
+
+            gss_proc::DATA => {
+                info!("🔐 RPCSEC_GSS_DATA on MDS");
+                // Validate the GSS context
+                if let Err(e) = gss_manager.validate_data(&gss_cred).await {
+                    warn!("❌ GSS DATA validation failed: {}", e);
+                    return ReplyBuilder::system_err(call.xid);
+                }
+
+                // GSS validated, proceed with normal COMPOUND processing
+                info!("✅ GSS authentication successful on MDS, processing COMPOUND");
+                Self::handle_compound_with_pnfs(call, args, dispatcher).await
+            }
+
+            gss_proc::DESTROY => {
+                info!("🔐 RPCSEC_GSS_DESTROY on MDS");
+                gss_manager.handle_destroy(&gss_cred).await;
+                ReplyBuilder::success(call.xid).finish()
+            }
+
+            _ => {
+                warn!("❌ Unknown RPCSEC_GSS procedure: {}", gss_cred.procedure);
+                ReplyBuilder::proc_unavail(call.xid)
+            }
+        }
+    }
+
+    /// Handle RPCSEC_GSS_INIT
+    async fn handle_gss_init(
+        xid: u32,
+        gss_cred: &RpcGssCred,
+        args: Bytes,
+        gss_manager: Arc<RpcSecGssManager>,
+    ) -> Bytes {
+        // Extract init token from args
+        let mut decoder = XdrDecoder::new(args);
+        let init_token = match decoder.decode_opaque() {
+            Ok(token) => token.to_vec(),
+            Err(e) => {
+                warn!("❌ Failed to decode GSS init token: {}", e);
+                return ReplyBuilder::garbage_args(xid);
+            }
+        };
+
+        info!("🔐 GSS_INIT: service={:?}, token_len={}", gss_cred.service, init_token.len());
+
+        // Handle the initialization
+        let init_res = gss_manager.handle_init(gss_cred, &init_token).await;
+
+        // Build RPC reply with GSS init result
+        let mut encoder = XdrEncoder::new();
+
+        // RPC Reply header
+        encoder.encode_u32(xid);
+        encoder.encode_u32(1);  // Message type: REPLY
+        encoder.encode_u32(0);  // Reply status: MSG_ACCEPTED
+        encoder.encode_u32(0);  // Auth flavor: AUTH_NONE
+        encoder.encode_u32(0);  // Auth length: 0
+        encoder.encode_u32(0);  // AcceptStatus::Success
+
+        // Encode RPCSEC_GSS init result
+        let init_result_data = init_res.encode();
+        encoder.append_bytes(&init_result_data);
+
+        info!("✅ GSS_INIT complete on MDS: handle_len={}, major={}, minor={}",
+              init_res.handle.len(), init_res.major_status, init_res.minor_status);
+
+        encoder.finish()
+    }
+
+    /// Handle RPCSEC_GSS_CONTINUE_INIT
+    async fn handle_gss_continue_init(
+        xid: u32,
+        gss_cred: &RpcGssCred,
+        args: Bytes,
+        gss_manager: Arc<RpcSecGssManager>,
+    ) -> Bytes {
+        // Extract continuation token from args
+        let mut decoder = XdrDecoder::new(args);
+        let token = match decoder.decode_opaque() {
+            Ok(t) => t.to_vec(),
+            Err(e) => {
+                warn!("❌ Failed to decode GSS continue token: {}", e);
+                return ReplyBuilder::garbage_args(xid);
+            }
+        };
+
+        info!("🔐 GSS_CONTINUE_INIT: token_len={}", token.len());
+
+        // Handle the continuation
+        let init_res = gss_manager.handle_continue_init(gss_cred, &token).await;
+
+        // Build RPC reply
+        let mut encoder = XdrEncoder::new();
+        encoder.encode_u32(xid);
+        encoder.encode_u32(1);  // REPLY
+        encoder.encode_u32(0);  // MSG_ACCEPTED
+        encoder.encode_u32(0);  // AUTH_NONE
+        encoder.encode_u32(0);
+        encoder.encode_u32(0);  // SUCCESS
+
+        let init_result_data = init_res.encode();
+        encoder.append_bytes(&init_result_data);
+
+        info!("✅ GSS_CONTINUE_INIT complete on MDS: major={}, minor={}",
+              init_res.major_status, init_res.minor_status);
 
         encoder.finish()
     }
