@@ -907,12 +907,14 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_FS_LAYOUT_TYPES => {
                 // RFC 8881 Section 5.12 - Array of supported pNFS layout types
+                // RFC 8435 - Flexible File Layout
                 // Attribute 62 (Linux kernel numbering)
                 debug!("  Attr {}: FS_LAYOUT_TYPES (attr 62)", attr_id);
-                attr_vals.put_u32(2); // Array length: 2 layout types
+                attr_vals.put_u32(3); // Array length: 3 layout types
                 attr_vals.put_u32(1); // LAYOUT4_NFSV4_1_FILES
                 attr_vals.put_u32(2); // LAYOUT4_BLOCK_VOLUME
-                debug!("    → pNFS layout types: FILES(1), BLOCK(2)");
+                attr_vals.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
+                debug!("    → pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
                 true
             }
             FATTR4_LAYOUT_BLKSIZE => {
@@ -1064,13 +1066,14 @@ fn encode_pseudo_root_attribute(
             true
         }
         FATTR4_FS_LAYOUT_TYPES => {
-            // RFC 8881 Section 5.12 - Array of supported layout types
+            // RFC 8881 Section 5.12 + RFC 8435 - Array of supported layout types
             // Attribute 62 (Linux kernel numbering)
             debug!("  Encoding FS_LAYOUT_TYPES (attr 62) for pNFS pseudo-root");
-            buf.put_u32(2); // Array length: 2 layout types
+            buf.put_u32(3); // Array length: 3 layout types
             buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
             buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
-            debug!("    → Advertised pNFS layout types: FILES(1), BLOCK(2)");
+            buf.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
+            debug!("    → Advertised pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
             true
         }
         FATTR4_LAYOUT_BLKSIZE => {
@@ -1485,13 +1488,14 @@ fn encode_single_attribute(
         }
         
         FATTR4_FS_LAYOUT_TYPES => {
-            // RFC 8881 Section 5.12 - Supported pNFS layout types
+            // RFC 8881 Section 5.12 + RFC 8435 - Supported pNFS layout types
             // Attribute 62 (Linux kernel numbering)
             debug!("  Encoding FS_LAYOUT_TYPES (attr 62)");
-            buf.put_u32(2); // Array length
+            buf.put_u32(3); // Array length
             buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
             buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
-            debug!("    → pNFS layout types: FILES(1), BLOCK(2)");
+            buf.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
+            debug!("    → pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
             true
         }
         

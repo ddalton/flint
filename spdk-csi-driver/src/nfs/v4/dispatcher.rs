@@ -890,9 +890,13 @@ impl CompoundDispatcher {
         // Convert arguments
         let args = LayoutGetArgs {
             signal_layout_avail: _signal_layout_avail,
-            layout_type: if layout_type == 1 { LayoutType::NfsV4_1Files } else {
-                warn!("❌ Unsupported layout type: {}", layout_type);
-                return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
+            layout_type: match layout_type {
+                1 => LayoutType::NfsV4_1Files,
+                4 => LayoutType::FlexFiles,  // RFC 8435
+                _ => {
+                    warn!("❌ Unsupported layout type: {}", layout_type);
+                    return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
+                }
             },
             iomode: match iomode {
                 1 => IoMode::Read,
@@ -937,10 +941,12 @@ impl CompoundDispatcher {
                     encoder.encode_u64(layout.offset);
                     encoder.encode_u64(layout.length);
                     encoder.encode_u32(iomode);
-                    encoder.encode_u32(layout_type);
                     
-                    // For FILE layout, we need to encode nfsv4_1_file_layout4
-                    // For striped layouts, encode each segment as separate layout
+                    // Use FFLv4 (type 4) for independent DS storage per RFC 8435
+                    const LAYOUT_TYPE_FLEX_FILES: u32 = 4;
+                    encoder.encode_u32(LAYOUT_TYPE_FLEX_FILES);
+                    
+                    // FFLv4 layout encoding follows
                     // For now, encode the first segment (simple single-device case)
                     // TODO: Support multi-device striping with multiple file handles
                     
@@ -951,16 +957,28 @@ impl CompoundDispatcher {
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
                     }
                     
-                    // Encode FILE layout content with ALL segments for striping
-                    info!("   📤 Encoding layout with {} segments for striping", layout.segments.len());
+                    // Use FFLv4 (Flexible File Layout) for independent DS storage
+                    // RFC 8435 - designed for non-shared storage architecture
+                    info!("   📤 Encoding FFLv4 layout with {} segments for independent DS storage", layout.segments.len());
                     
-                    let layout_content = Self::encode_file_layout_striped(
-                        &layout.segments, 
-                        &filehandle,
+                    // Generate filename from filehandle hash for now
+                    // In production, would track filename in layout manager
+                    let file_id = {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        filehandle.hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let filename = format!("file_{:016x}", file_id);
+                    
+                    let layout_content = Self::encode_fflv4_layout(
+                        &layout.segments,
+                        &filename,
                         stripe_unit
                     );
                     
-                    info!("   📤 Layout content encoded as opaque: {} bytes", layout_content.len());
+                    info!("   📤 FFLv4 layout content encoded: {} bytes", layout_content.len());
                     encoder.encode_opaque(&layout_content);
                 }
                 
@@ -1013,9 +1031,13 @@ impl CompoundDispatcher {
         
         let args = GetDeviceInfoArgs {
             device_id: dev_id,
-            layout_type: if layout_type == 1 { LayoutType::NfsV4_1Files } else {
-                warn!("❌ Unsupported layout type: {}", layout_type);
-                return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
+            layout_type: match layout_type {
+                1 => LayoutType::NfsV4_1Files,
+                4 => LayoutType::FlexFiles,  // RFC 8435
+                _ => {
+                    warn!("❌ Unsupported layout type: {}", layout_type);
+                    return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
+                }
             },
             maxcount: _maxcount,
             notify_types: _notify_types,
@@ -1084,6 +1106,115 @@ impl CompoundDispatcher {
     /// - nfl_first_stripe_index (u32)
     /// - nfl_pattern_offset (u64)
     /// - nfl_fh_list<> (array of filehandles)
+    /// Encode FFLv4 (Flexible File Layout) per RFC 8435
+    /// 
+    /// FFLv4 supports independent storage per DS - exactly our use case!
+    /// Each DS gets a unique filehandle pointing to its local storage.
+    fn encode_fflv4_layout(
+        segments: &[crate::pnfs::mds::layout::LayoutSegment],
+        filename: &str,
+        stripe_unit: u64,
+    ) -> Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        use crate::nfs::v4::filehandle_pnfs;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        if segments.is_empty() {
+            warn!("⚠️ encode_fflv4_layout called with no segments!");
+            return Bytes::new();
+        }
+        
+        // Get shared instance_id for filehandles
+        let instance_id = std::env::var("PNFS_INSTANCE_ID")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1734648000000000000);
+        
+        let mut encoder = XdrEncoder::new();
+        
+        info!("🔧 Encoding FFLv4 layout (RFC 8435) for '{}':", filename);
+        info!("   Segments: {}", segments.len());
+        info!("   Stripe unit: {} bytes", stripe_unit);
+        info!("   Instance ID: {}", instance_id);
+        
+        // ffl_stripe_unit (u64)
+        encoder.encode_u64(stripe_unit);
+        
+        // ffl_mirrors<> - array of mirror groups
+        // For striping (no mirroring), we have 1 mirror with N data servers
+        encoder.encode_u32(1);  // One mirror group
+        
+        // Mirror 0: All DSes for striping
+        // ffm_data_servers<> - array of data servers
+        encoder.encode_u32(segments.len() as u32);  // N data servers
+        
+        for (i, segment) in segments.iter().enumerate() {
+            info!("   📁 Segment {}: device={}, stripe_index={}", i, segment.device_id, i);
+            
+            // Generate DS-specific filehandle for this stripe
+            let ds_filehandle = filehandle_pnfs::generate_pnfs_filehandle(
+                instance_id,
+                filename,
+                i as u32,  // stripe_index
+            );
+            
+            info!("      FH for DS: {} bytes, file_id={:016x}, stripe={}",
+                  ds_filehandle.data.len(),
+                  filehandle_pnfs::generate_file_id(filename),
+                  i);
+            
+            // Convert device_id to binary
+            let mut hasher = DefaultHasher::new();
+            segment.device_id.hash(&mut hasher);
+            let hash = hasher.finish();
+            let mut device_id_bytes = [0u8; 16];
+            device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
+            device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
+            
+            // ff_data_server4 structure:
+            // - ffds_deviceid
+            // - ffds_efficiency  
+            // - ffds_stateid
+            // - ffds_fh_vers<> (array of filehandle versions)
+            // - ffds_user
+            // - ffds_group
+            
+            // Device ID (16 bytes)
+            encoder.encode_fixed_opaque(&device_id_bytes);
+            
+            // Efficiency (u32) - 0 = unknown
+            encoder.encode_u32(0);
+            
+            // Stateid - use anonymous stateid for now
+            encoder.encode_u32(0);  // seqid
+            encoder.encode_fixed_opaque(&[0u8; 12]);  // other
+            
+            // ffds_fh_vers<> - array of filehandle versions (we use 1 version)
+            encoder.encode_u32(1);  // One filehandle version
+            
+            // Filehandle version 0
+            encoder.encode_u32(0);  // version number
+            encoder.encode_u32(0);  // minorversion
+            encoder.encode_u32(4096);  // ds_buffer_size
+            encoder.encode_opaque(&ds_filehandle.data);  // The actual filehandle!
+            
+            // User/group (0 = use client creds)
+            encoder.encode_u32(0);  // user
+            encoder.encode_u32(0);  // group
+        }
+        
+        // ffl_flags (u32) - 0 for now
+        encoder.encode_u32(0);
+        
+        // ffl_stats_collect_hint (u32) - 0 = no stats
+        encoder.encode_u32(0);
+        
+        let result = encoder.finish();
+        info!("📦 FFLv4 layout encoded: {} bytes total", result.len());
+        result
+    }
+    
     /// Encode FILE layout with multiple segments for striping across DSes
     /// Per RFC 5661 Section 13.3 - NFSv4.1 File Layout Type
     fn encode_file_layout_striped(

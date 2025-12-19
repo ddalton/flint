@@ -58,10 +58,15 @@ impl PnfsOperationHandler {
         );
         info!("   Available data servers: {}", active_devices);
 
-        // Validate layout type (we only support FILE layout for now)
-        if args.layout_type != LayoutType::NfsV4_1Files {
-            warn!("❌ Unsupported layout type: {:?}", args.layout_type);
-            return Err(LayoutGetError::UnknownLayoutType);
+        // Validate layout type (support FILE and FFLv4)
+        match args.layout_type {
+            LayoutType::NfsV4_1Files | LayoutType::FlexFiles => {
+                // Supported
+            }
+            _ => {
+                warn!("❌ Unsupported layout type: {:?}", args.layout_type);
+                return Err(LayoutGetError::UnknownLayoutType);
+            }
         }
 
         // Generate layout
@@ -107,9 +112,14 @@ impl PnfsOperationHandler {
         );
 
         // Validate layout type
-        if args.layout_type != LayoutType::NfsV4_1Files {
-            warn!("❌ Unsupported layout type: {:?}", args.layout_type);
-            return Err(GetDeviceInfoError::UnknownLayoutType);
+        match args.layout_type {
+            LayoutType::NfsV4_1Files | LayoutType::FlexFiles => {
+                // Supported
+            }
+            _ => {
+                warn!("❌ Unsupported layout type: {:?}", args.layout_type);
+                return Err(GetDeviceInfoError::UnknownLayoutType);
+            }
         }
 
         // Try to look up device as single DS

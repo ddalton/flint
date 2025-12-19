@@ -237,9 +237,11 @@ impl IoOperationHandler {
     
     /// Map NFS filehandle to filesystem path
     /// 
-    /// Reuses the existing FileHandleManager from the standalone NFS server.
-    /// This ensures consistent filehandle handling between MDS and DS.
+    /// Resolves filehandle to local path.
+    /// Supports both traditional path-based and pNFS file-ID based filehandles.
     fn filehandle_to_path(&self, filehandle: &[u8]) -> Result<PathBuf> {
+        use crate::nfs::v4::filehandle_pnfs;
+        
         if filehandle.is_empty() {
             return Err(crate::pnfs::Error::Config(
                 "Invalid empty filehandle".to_string()
@@ -251,7 +253,19 @@ impl IoOperationHandler {
             data: filehandle.to_vec(),
         };
         
-        // Use FileHandleManager to resolve (reuses existing logic!)
+        // Check if this is a pNFS filehandle (version 2, file-ID based)
+        if filehandle_pnfs::is_pnfs_filehandle(&nfs_fh) {
+            // pNFS filehandle: map (file_id, stripe_index) to local storage
+            let ds_path = filehandle_pnfs::filehandle_to_ds_path(
+                &nfs_fh,
+                &self.base_path
+            ).map_err(|e| crate::pnfs::Error::Config(format!("pNFS filehandle error: {}", e)))?;
+            
+            info!("📂 pNFS filehandle resolved to: {:?}", ds_path);
+            return Ok(ds_path);
+        }
+        
+        // Traditional filehandle: use FileHandleManager
         self.fh_manager
             .filehandle_to_path(&nfs_fh)
             .map_err(|e| crate::pnfs::Error::Config(format!("Invalid filehandle: {}", e)))
