@@ -125,7 +125,7 @@ impl DataServer {
             .map_err(|e| crate::pnfs::Error::Io(e))?;
         
         info!("🚀 pNFS DS TCP server listening on {}", addr);
-        info!("   Serving: SEQUENCE, READ, WRITE, COMMIT operations");
+        info!("   Serving: EXCHANGE_ID, SEQUENCE, READ, WRITE, COMMIT operations");
         info!("");
         
         let mut connection_count = 0u64;
