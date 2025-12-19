@@ -16,8 +16,9 @@ use crate::pnfs::ds::session::DsSessionManager;
 use crate::pnfs::Result;
 use crate::nfs::rpc::{CallMessage, ReplyBuilder};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
-use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status};
+use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status, exchgid_flags};
 use crate::nfs::v4::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
+use crate::nfs::v4::state::{ClientManager, LeaseManager};
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +33,7 @@ pub struct DataServer {
     io_handler: Arc<IoOperationHandler>,
     registration_client: Arc<tokio::sync::Mutex<RegistrationClient>>,
     session_mgr: Arc<DsSessionManager>,
+    client_mgr: Arc<ClientManager>,
 }
 
 impl DataServer {
@@ -76,7 +78,13 @@ impl DataServer {
         let session_mgr = Arc::new(DsSessionManager::new());
         info!("✓ Session manager initialized (NFSv4.1 support)");
 
-        Ok(Self { config, io_handler, registration_client, session_mgr })
+        // Initialize client manager for EXCHANGE_ID (server trunking)
+        // MUST use the same server_owner and server_scope as MDS for trunking to work!
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let client_mgr = Arc::new(ClientManager::new(lease_mgr));
+        info!("✓ Client manager initialized (same server_owner/scope as MDS)");
+
+        Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr })
     }
 
     /// Start the data server
@@ -140,11 +148,12 @@ impl DataServer {
             
             let io_handler = Arc::clone(&self.io_handler);
             let session_mgr = Arc::clone(&self.session_mgr);
+            let client_mgr = Arc::clone(&self.client_mgr);
             let conn_id = connection_count;
             
             tokio::spawn(async move {
                 debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, peer).await {
+                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, client_mgr, peer).await {
                     warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
                 } else {
                     info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
@@ -158,6 +167,7 @@ impl DataServer {
         stream: TcpStream,
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
+        client_mgr: Arc<ClientManager>,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
         use tokio::time::Instant;
@@ -212,6 +222,7 @@ impl DataServer {
                 request,
                 Arc::clone(&io_handler),
                 Arc::clone(&session_mgr),
+                Arc::clone(&client_mgr),
             ).await;
             rpc_count += 1;
 
@@ -230,6 +241,7 @@ impl DataServer {
         request: Bytes,
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
+        client_mgr: Arc<ClientManager>,
     ) -> Bytes {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -254,7 +266,7 @@ impl DataServer {
             }
 
             procedure::COMPOUND => {
-                Self::handle_minimal_compound(call, args, io_handler, session_mgr).await
+                Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr).await
             }
 
             _ => ReplyBuilder::proc_unavail(call.xid),
@@ -267,6 +279,7 @@ impl DataServer {
         args: Bytes,
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
+        client_mgr: Arc<ClientManager>,
     ) -> Bytes {
         let mut decoder = XdrDecoder::new(args);
 
@@ -308,45 +321,98 @@ impl DataServer {
 
             let (status, result_data) = match opcode {
                 opcode::EXCHANGE_ID => {
-                    // Client uses EXCHANGE_ID for server trunking discovery
-                    // WORKAROUND: Using empty server_scope to bypass Kerberos requirement
-                    // This disables session trunking but enables parallel I/O with AUTH_SYS
-                    // Skip decoding args for now (we don't need to parse them)
+                    // Decode EXCHANGE_ID arguments properly for server trunking
+                    // Per RFC 8881 Section 18.35 - client_owner structure has verifier FIRST
                     
+                    // Decode verifier (8 bytes)
+                    let verifier = match decoder.decode_u64() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("DS: Failed to decode EXCHANGE_ID verifier: {}", e);
+                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            continue;
+                        }
+                    };
+                    
+                    // Decode client owner (opaque)
+                    let client_owner = match decoder.decode_opaque() {
+                        Ok(bytes) => bytes.to_vec(),
+                        Err(e) => {
+                            warn!("DS: Failed to decode EXCHANGE_ID client_owner: {}", e);
+                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            continue;
+                        }
+                    };
+                    
+                    // Decode flags
+                    let client_flags = decoder.decode_u32().unwrap_or(0);
+                    
+                    // Decode state_protect (we use SP4_NONE)
+                    let _state_protect = decoder.decode_u32().unwrap_or(0);
+                    
+                    // Skip optional impl_id
+                    let has_impl_id = decoder.decode_bool().unwrap_or(false);
+                    if has_impl_id {
+                        let _ = decoder.decode_opaque();
+                    }
+                    
+                    // Use ClientManager to get consistent clientid
+                    // CRITICAL: This ensures DS returns same clientid as MDS for same client_owner!
+                    let (clientid, sequenceid, is_new) = client_mgr.exchange_id(
+                        client_owner.clone(),
+                        verifier,
+                        client_flags,
+                    );
+                    
+                    info!("DS: EXCHANGE_ID - client_owner={:?}, verifier={}, clientid={}, is_new={}", 
+                          String::from_utf8_lossy(&client_owner), verifier, clientid, is_new);
+                    
+                    // Build response
                     let mut encoder = XdrEncoder::new();
                     
-                    // clientid (8 bytes) - return a stable ID
-                    encoder.encode_u64(0x464c494e5444532d);  // "FLINTDS-" in hex
+                    // clientid (8 bytes) - from ClientManager, matches MDS for same client
+                    encoder.encode_u64(clientid);
                     
                     // sequenceid (4 bytes)
-                    encoder.encode_u32(1);
+                    encoder.encode_u32(sequenceid);
                     
-                    // flags (4 bytes) - EXCHGID4_FLAG_USE_PNFS_DS (0x00040000)
-                    // Tell client we're a pNFS Data Server
-                    encoder.encode_u32(0x00040000);
+                    // Build response flags
+                    let mut response_flags = exchgid_flags::USE_PNFS_DS;  // 0x00040000
+                    
+                    // Set CONFIRMED_R if this is an existing client
+                    if !is_new {
+                        response_flags |= exchgid_flags::CONFIRMED_R;
+                    }
+                    
+                    // Echo back client capability flags
+                    if client_flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
+                        response_flags |= exchgid_flags::SUPP_MOVED_REFER;
+                    }
+                    if client_flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
+                        response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
+                    }
+                    
+                    encoder.encode_u32(response_flags);
                     
                     // state_protect (4 bytes) - SP4_NONE
                     encoder.encode_u32(0);
                     
-                    // server_owner (so_major_id + so_minor_id)
+                    // server_owner (so_minor_id + so_major_id)
                     // MUST match MDS for server trunking to work!
-                    let server_owner = b"flint-pnfs";
+                    let server_owner = client_mgr.server_owner();
                     encoder.encode_u64(0);  // so_minor_id
-                    encoder.encode_opaque(server_owner);  // so_major_id
+                    encoder.encode_string(server_owner);  // so_major_id
                     
                     // server_scope - MUST match MDS for server trunking!
-                    // This tells the client that MDS and DS are part of the same storage system
-                    // When this matches, client will use parallel I/O to DS
-                    let server_scope = b"flint-pnfs-cluster";  // MATCHES MDS
+                    let server_scope = client_mgr.server_scope();
                     encoder.encode_opaque(server_scope);
                     
                     // server_impl_id (optional) - empty for simplicity
                     encoder.encode_u32(0);  // impl_id array count = 0
                     
-                    info!("DS: EXCHANGE_ID response - server_owner={:?}, server_scope={:?}", 
-                          String::from_utf8_lossy(server_owner), 
-                          String::from_utf8_lossy(server_scope));
-                    debug!("DS: Handled EXCHANGE_ID with server_scope for trunking");
+                    info!("DS: EXCHANGE_ID response - clientid={}, server_owner={}, server_scope={:?}, flags=0x{:08x}", 
+                          clientid, server_owner, String::from_utf8_lossy(server_scope), response_flags);
+                    debug!("DS: ✅ Server trunking enabled - returning same clientid as MDS");
                     (Nfs4Status::Ok, encoder.finish())
                 }
 
