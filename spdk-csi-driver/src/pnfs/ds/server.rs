@@ -309,7 +309,8 @@ impl DataServer {
             let (status, result_data) = match opcode {
                 opcode::EXCHANGE_ID => {
                     // Client uses EXCHANGE_ID for server trunking discovery
-                    // DS must return SAME server_scope as MDS for trunking to succeed!
+                    // WORKAROUND: Using empty server_scope to bypass Kerberos requirement
+                    // This disables session trunking but enables parallel I/O with AUTH_SYS
                     // Skip decoding args for now (we don't need to parse them)
                     
                     let mut encoder = XdrEncoder::new();
@@ -332,9 +333,10 @@ impl DataServer {
                     encoder.encode_u64(0);  // so_minor_id
                     encoder.encode_opaque(server_owner);  // so_major_id
                     
-                    // server_scope - CRITICAL: Must match MDS for trunking!
-                    // Use a consistent scope across MDS and all DSs
-                    let server_scope = b"flint-pnfs-cluster";
+                    // server_scope - WORKAROUND: Use empty scope to disable trunking
+                    // This forces client to use AUTH_SYS instead of requiring Kerberos
+                    // Empty server_scope = no session trunking = separate auth
+                    let server_scope = b"";  // Empty scope disables trunking
                     encoder.encode_opaque(server_scope);
                     
                     // server_impl_id (optional) - empty for simplicity
