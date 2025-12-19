@@ -307,7 +307,7 @@ impl DataServer {
         debug!("DS COMPOUND: minor_version={}, {} operations", minor_version, op_count);
 
         // Process operations (only READ/WRITE/COMMIT supported)
-        let mut results = Vec::new();
+        let mut results: Vec<(u32, Nfs4Status, Bytes)> = Vec::new();  // (opcode, status, data)
         let mut current_fh: Option<Vec<u8>> = None;
 
         for _ in 0..op_count {
@@ -330,7 +330,7 @@ impl DataServer {
                         Ok(v) => v,
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID verifier: {}", e);
-                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
                             continue;
                         }
                     };
@@ -340,7 +340,7 @@ impl DataServer {
                         Ok(bytes) => bytes.to_vec(),
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID client_owner: {}", e);
-                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
                             continue;
                         }
                     };
@@ -502,7 +502,7 @@ impl DataServer {
                             sid
                         }
                         Err(_) => {
-                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
                             continue;
                         }
                     };
@@ -548,7 +548,7 @@ impl DataServer {
                     let stateid = match decoder.decode_stateid() {
                         Ok(s) => s,
                         Err(_) => {
-                            results.push((Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
                             continue;
                         }
                     };
@@ -645,7 +645,7 @@ impl DataServer {
                 }
             };
 
-            results.push((status, result_data));
+            results.push((opcode, status, result_data));
         }
 
         // Encode COMPOUND response
@@ -656,10 +656,11 @@ impl DataServer {
         encoder.encode_u32(Nfs4Status::Ok as u32);  // Overall status
         encoder.encode_u32(results.len() as u32);  // Result count
 
-        // Encode each result
-        for (status, data) in results {
-            encoder.encode_u32(status as u32);
-            encoder.append_raw(&data);
+        // Encode each result - MUST include opcode per RFC 8881 Section 18.2
+        for (opcode, status, data) in results {
+            encoder.encode_u32(opcode);  // Operation opcode (CRITICAL!)
+            encoder.encode_u32(status as u32);  // Operation status
+            encoder.append_raw(&data);  // Operation-specific data
         }
 
         let compound_data = encoder.finish();
