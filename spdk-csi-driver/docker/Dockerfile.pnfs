@@ -10,13 +10,8 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 
 # --- System-level setup ---
 USER root
-RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
-    apk add --no-cache perl protobuf-dev openssl-dev
-
-ENV OPENSSL_DIR=/usr
-ENV OPENSSL_LIB_DIR=/usr/lib
-ENV OPENSSL_INCLUDE_DIR=/usr/include
-ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+# Pure Rust build - only need protobuf compiler, no OpenSSL!
+RUN apk add --no-cache perl protobuf-dev pkgconf
 
 USER 65532
 
