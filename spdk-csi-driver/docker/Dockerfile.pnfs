@@ -10,16 +10,13 @@ FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85
 
 # --- System-level setup ---
 USER root
-# TEMPORARY: Added clang and krb5-dev for native GSS-API bindings
-RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf clang-dev krb5-dev || \
-    apk add --no-cache perl protobuf-dev openssl-dev clang krb5-dev
+RUN apk add --no-cache perl protobuf-dev openssl-dev pkgconf || \
+    apk add --no-cache perl protobuf-dev openssl-dev
 
 ENV OPENSSL_DIR=/usr
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 ENV PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
-# TEMPORARY: For libgssapi-sys bindgen
-ENV LIBCLANG_PATH=/usr/lib
 
 USER 65532
 

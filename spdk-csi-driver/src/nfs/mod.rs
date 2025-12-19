@@ -28,8 +28,7 @@
 
 pub mod xdr;          // XDR encoding/decoding (shared with RPC)
 pub mod rpc;          // RPC message handling (shared with NFSv4)
-pub mod kerberos;     // Pure Rust Kerberos acceptor for RPCSEC_GSS (FUTURE)
-pub mod kerberos_native;  // TEMPORARY: Native GSS-API bindings (to unblock testing)
+pub mod kerberos;     // Pure Rust Kerberos acceptor for RPCSEC_GSS
 pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod server_v4;    // NFSv4.2 TCP server
 pub mod v4;           // NFSv4.2 implementation (COMPLETE)
