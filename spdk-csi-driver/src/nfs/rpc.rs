@@ -50,6 +50,7 @@ pub enum AcceptStatus {
 pub enum AuthFlavor {
     Null = 0,
     Unix = 1,
+    RpcsecGss = 6,  // RPCSEC_GSS (RFC 2203)
 }
 
 /// Authentication credentials
@@ -77,6 +78,7 @@ impl Auth {
         let flavor = match flavor_val {
             0 => AuthFlavor::Null,
             1 => AuthFlavor::Unix,
+            6 => AuthFlavor::RpcsecGss,
             _ => return Err(format!("Unknown auth flavor: {}", flavor_val)),
         };
         let body = dec.decode_opaque()?;

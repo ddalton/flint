@@ -28,6 +28,7 @@
 
 pub mod xdr;          // XDR encoding/decoding (shared with RPC)
 pub mod rpc;          // RPC message handling (shared with NFSv4)
+pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod server_v4;    // NFSv4.2 TCP server
 pub mod v4;           // NFSv4.2 implementation (COMPLETE)
 

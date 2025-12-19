@@ -1602,11 +1602,22 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     // Return array of supported security flavors
-                    // Per RFC 5661, return both AUTH_NONE and AUTH_SYS 
-                    // We accept both (parse but don't enforce credentials)
-                    encoder.encode_u32(2); // Array length: 2 flavors
-                    encoder.encode_u32(0); // AUTH_NONE
-                    encoder.encode_u32(1); // AUTH_SYS (Unix auth)
+                    // Now includes RPCSEC_GSS (Kerberos) support
+                    encoder.encode_u32(3); // Array length: 3 flavors
+
+                    // AUTH_NONE (flavor 0)
+                    encoder.encode_u32(0);
+
+                    // AUTH_SYS (flavor 1)
+                    encoder.encode_u32(1);
+
+                    // RPCSEC_GSS (flavor 6) - Kerberos
+                    encoder.encode_u32(6);
+                    // OID for Kerberos V5 (1.2.840.113554.1.2.2)
+                    let krb5_oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+                    encoder.encode_opaque(&krb5_oid);  // GSS mechanism OID
+                    encoder.encode_u32(0);  // QOP (quality of protection)
+                    encoder.encode_u32(1);  // Service: rpc_gss_svc_none (authentication only)
                 }
             }
             OperationResult::TestStateId(status, statuses) => {
@@ -1866,36 +1877,55 @@ mod tests {
 
     #[test]
     fn test_secinfo_no_name_dual_flavors() {
-        // Verify SECINFO_NO_NAME returns both AUTH_NONE and AUTH_SYS
-        
+        // Verify SECINFO_NO_NAME returns AUTH_NONE, AUTH_SYS, and RPCSEC_GSS
+
         // Encode SECINFO_NO_NAME response manually
         let mut encoder = XdrEncoder::new();
         encoder.encode_u32(opcode::SECINFO_NO_NAME);
         encoder.encode_status(Nfs4Status::Ok);
-        // Encode 2 security flavors: AUTH_NONE (0) and AUTH_SYS (1)
-        encoder.encode_u32(2); // flavor count
+        // Encode 3 security flavors: AUTH_NONE (0), AUTH_SYS (1), and RPCSEC_GSS (6)
+        encoder.encode_u32(3); // flavor count
         encoder.encode_u32(0); // AUTH_NONE
         encoder.encode_u32(1); // AUTH_SYS
+        encoder.encode_u32(6); // RPCSEC_GSS
+        // For RPCSEC_GSS, add OID, QOP, and service
+        let krb5_oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+        encoder.encode_opaque(&krb5_oid);
+        encoder.encode_u32(0); // QOP
+        encoder.encode_u32(1); // Service
         let encoded = encoder.finish();
-        
+
         let mut decoder = XdrDecoder::new(Bytes::from(encoded));
-        
+
         let opcode = decoder.decode_u32().expect("decode opcode");
         assert_eq!(opcode, opcode::SECINFO_NO_NAME);
-        
+
         let status = decoder.decode_u32().expect("decode status");
         assert_eq!(status, Nfs4Status::Ok.to_u32());
-        
-        // Should have array of 2 security flavors
+
+        // Should have array of 3 security flavors
         let flavor_count = decoder.decode_u32().expect("decode flavor count");
-        assert_eq!(flavor_count, 2, "Should return 2 security flavors");
-        
+        assert_eq!(flavor_count, 3, "Should return 3 security flavors");
+
         let flavor1 = decoder.decode_u32().expect("decode flavor 1");
         assert_eq!(flavor1, 0, "First flavor should be AUTH_NONE (0)");
-        
+
         let flavor2 = decoder.decode_u32().expect("decode flavor 2");
         assert_eq!(flavor2, 1, "Second flavor should be AUTH_SYS (1)");
-        
+
+        let flavor3 = decoder.decode_u32().expect("decode flavor 3");
+        assert_eq!(flavor3, 6, "Third flavor should be RPCSEC_GSS (6)");
+
+        // For RPCSEC_GSS, verify OID, QOP, and service
+        let oid = decoder.decode_opaque().expect("decode GSS OID");
+        assert_eq!(oid.len(), 9, "Kerberos V5 OID should be 9 bytes");
+
+        let qop = decoder.decode_u32().expect("decode QOP");
+        assert_eq!(qop, 0, "QOP should be 0");
+
+        let service = decoder.decode_u32().expect("decode service");
+        assert_eq!(service, 1, "Service should be 1 (rpc_gss_svc_none)");
+
         assert_eq!(decoder.remaining(), 0, "Should have consumed all data");
     }
 }

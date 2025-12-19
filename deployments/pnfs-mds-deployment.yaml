@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: mds
-        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:krb5
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-pnfs-mds"]
         args:
@@ -27,6 +27,8 @@ spec:
         env:
         - name: RUST_LOG
           value: "info,spdk_csi_driver=debug"
+        - name: KRB5_KTNAME
+          value: "/etc/krb5/keytab"
         ports:
         - containerPort: 2049
           name: nfs
@@ -39,12 +41,25 @@ spec:
           mountPath: /etc/flint
         - name: data
           mountPath: /data
+        - name: krb5-config
+          mountPath: /etc/krb5.conf
+          subPath: krb5.conf
+        - name: keytab
+          mountPath: /etc/krb5/keytab
+          subPath: keytab
       volumes:
       - name: config
         configMap:
           name: pnfs-mds-config
       - name: data
         emptyDir: {}
+      - name: krb5-config
+        configMap:
+          name: krb5-config
+      - name: keytab
+        secret:
+          secretName: mds-keytab
+          defaultMode: 0600
 ---
 apiVersion: v1
 kind: Service

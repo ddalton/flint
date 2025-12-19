@@ -452,13 +452,25 @@ impl DataServer {
                 }
 
                 opcode::SECINFO_NO_NAME => {
-                    // Tell client we only support AUTH_NULL (flavor 0) and AUTH_SYS (flavor 1)
-                    // This prevents client from trying Kerberos
+                    // Advertise supported auth flavors: AUTH_NULL, AUTH_SYS, and RPCSEC_GSS
                     let mut encoder = XdrEncoder::new();
-                    encoder.encode_u32(2);  // secinfo count (2 flavors)
-                    encoder.encode_u32(0);  // AUTH_NULL
-                    encoder.encode_u32(1);  // AUTH_SYS
-                    debug!("DS: Advertised AUTH_NULL and AUTH_SYS (no Kerberos)");
+                    encoder.encode_u32(3);  // secinfo count (3 flavors)
+
+                    // AUTH_NULL (flavor 0)
+                    encoder.encode_u32(0);
+
+                    // AUTH_SYS (flavor 1)
+                    encoder.encode_u32(1);
+
+                    // RPCSEC_GSS (flavor 6) - Kerberos
+                    encoder.encode_u32(6);
+                    // OID for Kerberos V5 (1.2.840.113554.1.2.2)
+                    let krb5_oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+                    encoder.encode_opaque(&krb5_oid);  // GSS mechanism OID
+                    encoder.encode_u32(0);  // QOP (quality of protection)
+                    encoder.encode_u32(1);  // Service: rpc_gss_svc_none (authentication only)
+
+                    debug!("DS: Advertised AUTH_NULL, AUTH_SYS, and RPCSEC_GSS (Kerberos)");
                     (Nfs4Status::Ok, encoder.finish())
                 }
 

@@ -38,13 +38,14 @@ RUN cargo build --release --bin flint-pnfs-mds --bin flint-pnfs-ds
 FROM ubuntu:24.04
 
 # Install runtime dependencies
-# Includes both NFS client/server tools and gRPC requirements
+# Includes NFS client/server tools, gRPC requirements, and Kerberos support
 RUN apt-get update && apt-get install -y \
     nfs-common \
     e2fsprogs \
     xfsprogs \
     ca-certificates \
     curl \
+    krb5-user \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy BOTH binaries to the runtime image

@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: ds
-        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:latest
+        image: docker-sandbox.infra.cloudera.com/ddalton/pnfs:krb5
         imagePullPolicy: Always
         command: ["/usr/local/bin/flint-pnfs-ds"]
         args:
@@ -32,6 +32,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: KRB5_KTNAME
+          value: "/etc/krb5/keytab"
         ports:
         - containerPort: 2049
           name: nfs
@@ -41,6 +43,12 @@ spec:
           mountPath: /etc/flint
         - name: data
           mountPath: /mnt/pnfs-data
+        - name: krb5-config
+          mountPath: /etc/krb5.conf
+          subPath: krb5.conf
+        - name: keytab
+          mountPath: /etc/krb5/keytab
+          subPath: keytab
         securityContext:
           privileged: true
       volumes:
@@ -49,4 +57,11 @@ spec:
           name: pnfs-ds-config
       - name: data
         emptyDir: {}
+      - name: krb5-config
+        configMap:
+          name: krb5-config
+      - name: keytab
+        secret:
+          secretName: nfs-keytab
+          defaultMode: 0600
 

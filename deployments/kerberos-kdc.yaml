@@ -1,0 +1,182 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: krb5-config
+  namespace: pnfs-test
+data:
+  krb5.conf: |
+    [libdefaults]
+        default_realm = PNFS.TEST
+        dns_lookup_realm = false
+        dns_lookup_kdc = false
+        ticket_lifetime = 24h
+        renew_lifetime = 7d
+        forwardable = true
+
+    [realms]
+        PNFS.TEST = {
+            kdc = kerberos-kdc.pnfs-test.svc.cluster.local
+            admin_server = kerberos-kdc.pnfs-test.svc.cluster.local
+        }
+
+    [domain_realm]
+        .pnfs-test.svc.cluster.local = PNFS.TEST
+        pnfs-test.svc.cluster.local = PNFS.TEST
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kdc-config
+  namespace: pnfs-test
+data:
+  kdc.conf: |
+    [kdcdefaults]
+        kdc_ports = 88
+        kdc_tcp_ports = 88
+
+    [realms]
+        PNFS.TEST = {
+            database_name = /var/kdc/principal
+            admin_keytab = FILE:/var/kdc/kadm5.keytab
+            acl_file = /etc/krb5kdc/kadm5.acl
+            key_stash_file = /var/kdc/stash
+            kdc_ports = 88
+            kdc_tcp_ports = 88
+            max_life = 10h 0m 0s
+            max_renewable_life = 7d 0h 0m 0s
+            master_key_type = aes256-cts
+            supported_enctypes = aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal
+            default_principal_flags = +preauth
+        }
+
+  kadm5.acl: |
+    */admin@PNFS.TEST *
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kdc-data
+  namespace: pnfs-test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kerberos-kdc
+  namespace: pnfs-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kerberos-kdc
+  template:
+    metadata:
+      labels:
+        app: kerberos-kdc
+    spec:
+      containers:
+      - name: kdc
+        image: ubuntu:22.04
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+
+            # Install Kerberos packages
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y krb5-kdc krb5-admin-server
+
+            # Copy config files
+            cp /etc/krb5-config/krb5.conf /etc/krb5.conf
+            mkdir -p /etc/krb5kdc
+            cp /etc/kdc-config/kdc.conf /etc/krb5kdc/kdc.conf
+            cp /etc/kdc-config/kadm5.acl /etc/krb5kdc/kadm5.acl
+
+            # Initialize KDC if not already done
+            if [ ! -f /var/kdc/principal ]; then
+              echo "Initializing Kerberos KDC database..."
+              kdb5_util create -s -P kerberos -r PNFS.TEST
+
+              # Create admin principal
+              kadmin.local -q "addprinc -pw admin admin/admin@PNFS.TEST"
+
+              echo "KDC initialized successfully"
+            fi
+
+            # Start KDC and kadmin
+            echo "Starting KDC and kadmind..."
+            krb5kdc -n &
+            KDC_PID=$!
+
+            kadmind -nofork &
+            KADMIND_PID=$!
+
+            # Wait for either process to exit
+            wait -n $KDC_PID $KADMIND_PID
+            EXIT_STATUS=$?
+
+            # Kill the other process
+            kill $KDC_PID $KADMIND_PID 2>/dev/null || true
+
+            exit $EXIT_STATUS
+        ports:
+        - containerPort: 88
+          name: kerberos-tcp
+          protocol: TCP
+        - containerPort: 88
+          name: kerberos-udp
+          protocol: UDP
+        - containerPort: 749
+          name: kadmin
+          protocol: TCP
+        volumeMounts:
+        - name: kdc-data
+          mountPath: /var/kdc
+        - name: krb5-config
+          mountPath: /etc/krb5-config
+        - name: kdc-config
+          mountPath: /etc/kdc-config
+      volumes:
+      - name: kdc-data
+        persistentVolumeClaim:
+          claimName: kdc-data
+      - name: krb5-config
+        configMap:
+          name: krb5-config
+      - name: kdc-config
+        configMap:
+          name: kdc-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kerberos-kdc
+  namespace: pnfs-test
+spec:
+  selector:
+    app: kerberos-kdc
+  ports:
+  - name: kerberos-tcp
+    port: 88
+    targetPort: 88
+    protocol: TCP
+  - name: kerberos-udp
+    port: 88
+    targetPort: 88
+    protocol: UDP
+  - name: kadmin
+    port: 749
+    targetPort: 749
+    protocol: TCP
+  type: ClusterIP

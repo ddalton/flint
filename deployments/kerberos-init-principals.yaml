@@ -1,0 +1,100 @@
+---
+# This job creates service principals for MDS and DS servers
+# and generates keytabs for each
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kerberos-init-principals
+  namespace: pnfs-test
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init
+        image: ubuntu:22.04
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+
+            # Install Kerberos client and kubectl
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y krb5-user curl
+
+            # Install kubectl
+            curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            mv kubectl /usr/local/bin/
+
+            # Copy krb5.conf
+            cp /etc/krb5-config/krb5.conf /etc/krb5.conf
+
+            # Wait for KDC to be ready
+            echo "Waiting for KDC to be ready..."
+            sleep 30
+
+            # Authenticate as admin
+            echo "Authenticating as admin..."
+            echo "admin" | kinit admin/admin@PNFS.TEST
+
+            # Create MDS principal (using service hostname)
+            echo "Creating MDS principal..."
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "addprinc -randkey nfs/pnfs-mds.pnfs-test.svc.cluster.local@PNFS.TEST" || echo "MDS principal may already exist"
+
+            # Export MDS keytab
+            echo "Exporting MDS keytab..."
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "ktadd -k /tmp/mds.keytab nfs/pnfs-mds.pnfs-test.svc.cluster.local@PNFS.TEST"
+
+            # Create DS principals for each DS pod IP
+            echo "Getting DS pod IPs..."
+            kubectl get pods -n pnfs-test -l app=pnfs-ds -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}' > /tmp/ds-ips.txt
+
+            cat /tmp/ds-ips.txt | while read IP; do
+              if [ -n "$IP" ]; then
+                echo "Creating principal for DS at $IP..."
+                kadmin -p admin/admin@PNFS.TEST -w admin -q "addprinc -randkey nfs/$IP@PNFS.TEST" || echo "DS principal for $IP may already exist"
+                kadmin -p admin/admin@PNFS.TEST -w admin -q "ktadd -k /tmp/ds-$IP.keytab nfs/$IP@PNFS.TEST"
+              fi
+            done
+
+            # Create a generic NFS service principal for fallback
+            echo "Creating generic NFS principal..."
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "addprinc -randkey nfs/pnfs@PNFS.TEST" || echo "Generic principal may already exist"
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "ktadd -k /tmp/nfs.keytab nfs/pnfs@PNFS.TEST"
+
+            # Create host principal for client
+            echo "Creating client principal..."
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "addprinc -randkey host/pnfs-test-client.pnfs-test.svc.cluster.local@PNFS.TEST" || echo "Client principal may already exist"
+            kadmin -p admin/admin@PNFS.TEST -w admin -q "ktadd -k /tmp/client.keytab host/pnfs-test-client.pnfs-test.svc.cluster.local@PNFS.TEST"
+
+            echo "All principals created successfully"
+            echo "Keytabs created in /tmp:"
+            ls -lh /tmp/*.keytab
+
+            # Create Kubernetes secrets for keytabs
+            echo "Creating Kubernetes secrets..."
+            kubectl create secret generic mds-keytab --from-file=keytab=/tmp/mds.keytab -n pnfs-test --dry-run=client -o yaml | kubectl apply -f -
+
+            # Create DS keytab secret (combining all DS keytabs)
+            cat /tmp/ds-ips.txt | while read IP; do
+              if [ -n "$IP" ] && [ -f "/tmp/ds-$IP.keytab" ]; then
+                kubectl create secret generic ds-keytab-$(echo $IP | tr '.' '-') --from-file=keytab=/tmp/ds-$IP.keytab -n pnfs-test --dry-run=client -o yaml | kubectl apply -f -
+              fi
+            done
+
+            # Create generic NFS keytab secret for DS pods to use as fallback
+            kubectl create secret generic nfs-keytab --from-file=keytab=/tmp/nfs.keytab -n pnfs-test --dry-run=client -o yaml | kubectl apply -f -
+
+            kubectl create secret generic client-keytab --from-file=keytab=/tmp/client.keytab -n pnfs-test --dry-run=client -o yaml | kubectl apply -f -
+
+            echo "Kubernetes secrets created successfully"
+        volumeMounts:
+        - name: krb5-config
+          mountPath: /etc/krb5-config
+      volumes:
+      - name: krb5-config
+        configMap:
+          name: krb5-config
+      serviceAccountName: kerberos-init
