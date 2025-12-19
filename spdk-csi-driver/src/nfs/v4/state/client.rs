@@ -95,11 +95,12 @@ pub struct ClientManager {
 impl ClientManager {
     /// Create a new client manager
     pub fn new(lease_manager: Arc<LeaseManager>) -> Self {
-        // Generate server identifiers
-        let server_owner = format!("nfsv4-server-{}", std::process::id());
-        let server_scope = format!("scope-{}", std::process::id()).into_bytes();
+        // Use FIXED server identifiers for pNFS trunking
+        // MDS and all DSs must return the SAME scope for trunking to work!
+        let server_owner = "flint-pnfs".to_string();
+        let server_scope = b"flint-pnfs-cluster".to_vec();
 
-        info!("ClientManager created - server_owner={}", server_owner);
+        info!("ClientManager created - server_owner={}, server_scope=flint-pnfs-cluster", server_owner);
 
         Self {
             next_client_id: AtomicU64::new(1),
