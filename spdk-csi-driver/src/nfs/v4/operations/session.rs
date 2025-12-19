@@ -175,12 +175,15 @@ impl SessionOperationHandler {
         // For now, default to non-pNFS for standalone NFS servers
         response_flags |= exchgid_flags::USE_NON_PNFS;
 
-        // Support client capabilities we understand
+        // Echo back ALL client capability flags (RFC 8881 Section 18.35.3)
         if op.flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
             response_flags |= exchgid_flags::SUPP_MOVED_REFER;
         }
         if op.flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
             response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
+        }
+        if op.flags & exchgid_flags::BIND_PRINC_STATEID != 0 {
+            response_flags |= exchgid_flags::BIND_PRINC_STATEID;
         }
 
         // If this is an existing client (confirmed), set CONFIRMED_R flag

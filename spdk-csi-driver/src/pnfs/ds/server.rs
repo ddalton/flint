@@ -391,12 +391,15 @@ impl DataServer {
                         response_flags |= exchgid_flags::CONFIRMED_R;
                     }
                     
-                    // Echo back client capability flags
+                    // Echo back ALL client capability flags
                     if client_flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
                         response_flags |= exchgid_flags::SUPP_MOVED_REFER;
                     }
                     if client_flags & exchgid_flags::SUPP_MOVED_MIGR != 0 {
                         response_flags |= exchgid_flags::SUPP_MOVED_MIGR;
+                    }
+                    if client_flags & exchgid_flags::BIND_PRINC_STATEID != 0 {
+                        response_flags |= exchgid_flags::BIND_PRINC_STATEID;
                     }
                     
                     encoder.encode_u32(response_flags);
