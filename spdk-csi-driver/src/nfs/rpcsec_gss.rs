@@ -9,9 +9,12 @@
 //! - RFC 1964: The Kerberos Version 5 GSS-API Mechanism
 
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
-use crate::nfs::kerberos::{Keytab, KerberosContext, KerberosError};
+// TEMPORARY: Using native GSS-API for compatibility while debugging pure Rust solution
+// TODO: Switch back to pure Rust once client-side GSSAPI issues are resolved
+use crate::nfs::kerberos_native::{KerberosContext, KerberosError};
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
@@ -162,43 +165,33 @@ impl GssContext {
 /// RPCSEC_GSS Context Manager
 pub struct RpcSecGssManager {
     contexts: Arc<RwLock<HashMap<Vec<u8>, GssContext>>>,
-    keytab: Option<Arc<Keytab>>,
+    keytab_path: Option<PathBuf>,  // TEMPORARY: Store path instead of parsed keytab for native GSS
 }
 
 impl RpcSecGssManager {
     /// Create a new RPCSEC_GSS manager
+    /// 
+    /// TEMPORARY: Using native GSS-API library bindings for compatibility
+    /// TODO: Switch back to pure Rust (kerberos.rs) once client issues resolved
     pub fn new(keytab_path: Option<String>) -> Self {
-        info!("🔐 Initializing RPCSEC_GSS manager");
+        info!("🔐 Initializing RPCSEC_GSS manager (TEMPORARY: using native GSS-API)");
         
-        let keytab = if let Some(path) = keytab_path {
-            info!("📁 Loading keytab from: {}", path);
-            match Keytab::load(&path) {
-                Ok(kt) => {
-                    info!("✅ Keytab loaded successfully with {} keys", kt.keys().len());
-                    for key in kt.keys() {
-                        debug!("  - {}@{} (kvno={}, enctype={:?})", 
-                               key.principal, key.realm, key.kvno, key.enctype);
-                    }
-                    Some(Arc::new(kt))
-                }
-                Err(e) => {
-                    error!("❌ Failed to load keytab: {}", e);
-                    error!("   RPCSEC_GSS authentication will not work!");
-                    None
-                }
-            }
-        } else {
-            warn!("⚠️  No keytab path specified, RPCSEC_GSS will use placeholder mode");
-            None
-        };
+        let keytab = keytab_path.map(|p| {
+            info!("📁 Keytab path: {}", p);
+            warn!("⚠️  TEMPORARY: Using native GSS-API library (glibc dependency)");
+            warn!("   Will be replaced with pure Rust implementation later");
+            PathBuf::from(p)
+        });
 
         Self {
             contexts: Arc::new(RwLock::new(HashMap::new())),
-            keytab,
+            keytab_path: keytab,
         }
     }
 
     /// Handle RPCSEC_GSS_INIT - establish new security context
+    /// 
+    /// TEMPORARY: Uses native GSS-API library for compatibility
     pub async fn handle_init(&self, cred: &RpcGssCred, init_token: &[u8]) -> RpcGssInitRes {
         info!("🔐 RPCSEC_GSS_INIT: service={:?}, token_len={}", cred.service, init_token.len());
         debug!("   Token (first 64 bytes): {:02x?}", &init_token[..std::cmp::min(64, init_token.len())]);
@@ -206,22 +199,22 @@ impl RpcSecGssManager {
         // Generate a new context handle
         let handle = self.generate_handle();
 
-        // Attempt to establish Kerberos context
-        let (context, gss_token, major_status, minor_status) = if let Some(ref keytab) = self.keytab {
-            match KerberosContext::accept_token(keytab, init_token) {
+        // Attempt to establish Kerberos context using NATIVE GSS-API
+        let (context, gss_token, major_status, minor_status) = if self.keytab_path.is_some() {
+            match KerberosContext::accept_token_native(self.keytab_path.as_deref(), init_token) {
                 Ok((krb_ctx, ap_rep)) => {
-                    info!("✅ Kerberos context established: client={}", krb_ctx.client_principal);
+                    info!("✅ Kerberos context established via NATIVE GSS-API: client={}", krb_ctx.client_principal);
                     let ctx = GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx);
                     (ctx, ap_rep, 0u32, 0u32)  // GSS_S_COMPLETE
                 }
                 Err(e) => {
-                    error!("❌ Kerberos context establishment failed: {}", e);
+                    error!("❌ Native GSS-API context establishment failed: {}", e);
                     let ctx = GssContext::new(handle.clone(), cred.service);
                     (ctx, Vec::new(), 1u32, 0u32)  // GSS_S_FAILURE
                 }
             }
         } else {
-            warn!("⚠️  No keytab loaded, using placeholder GSS context");
+            warn!("⚠️  No keytab path specified");
             let mut ctx = GssContext::new(handle.clone(), cred.service);
             ctx.established = true;  // Accept in placeholder mode
             (ctx, Vec::new(), 0u32, 0u32)  // GSS_S_COMPLETE (placeholder)

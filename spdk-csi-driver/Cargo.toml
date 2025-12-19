@@ -65,8 +65,9 @@ rand = "0.8"
 dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state management
 sha2 = "0.10"
 crossbeam = "0.8"  # Lock-free channels and queues
-# Note: Pure Rust Kerberos crates exist but are not yet production-ready
-# For now, we implement a minimal placeholder acceptor that can be enhanced later
+# TEMPORARY: Using native GSS-API bindings to unblock parallel I/O testing
+# TODO: Replace with pure Rust implementation once client-side GSSAPI issues are resolved
+libgssapi-sys = "0.3"  # Low-level GSSAPI bindings (temporary, glibc dependency)
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

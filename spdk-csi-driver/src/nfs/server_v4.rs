@@ -4,7 +4,8 @@
 //! Listens on TCP port, receives RPC COMPOUND calls, dispatches to NFSv4.2 handlers,
 //! and sends replies.
 
-use super::rpc::{CallMessage, ReplyBuilder};
+use super::rpc::{CallMessage, ReplyBuilder, AuthFlavor};
+use super::rpcsec_gss::{RpcSecGssManager, RpcGssCred, procedure as gss_proc};
 use super::v4::{CompoundDispatcher, CompoundRequest};
 use super::v4::filehandle::FileHandleManager;
 use super::v4::operations::lockops::LockManager;
@@ -54,6 +55,7 @@ impl Default for NfsConfig {
 pub struct NfsServer {
     config: NfsConfig,
     dispatcher: Arc<CompoundDispatcher>,
+    gss_manager: Arc<RpcSecGssManager>,
 }
 
 impl NfsServer {
@@ -71,7 +73,11 @@ impl NfsServer {
             lock_mgr,
         ));
 
-        Ok(Self { config, dispatcher })
+        // Initialize RPCSEC_GSS manager
+        let keytab_path = std::env::var("KRB5_KTNAME").ok();
+        let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
+
+        Ok(Self { config, dispatcher, gss_manager })
     }
 
     /// Start the NFSv4.2 server (TCP only - NFSv4 doesn't use UDP)
@@ -90,12 +96,12 @@ impl NfsServer {
         // and doesn't need separate MOUNT protocol
 
         // Start TCP server
-        serve_tcp(&addr, self.dispatcher.clone()).await
+        serve_tcp(&addr, self.dispatcher.clone(), self.gss_manager.clone()).await
     }
 }
 
 /// Serve NFSv4.2 over TCP
-async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>) -> std::io::Result<()> {
+async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!("✅ NFSv4.2 TCP server listening on {}", addr);
     info!("");
@@ -114,10 +120,11 @@ async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>) -> std::io::
         }
         
         let dispatcher = dispatcher.clone();
+        let gss_manager = gss_manager.clone();
         let conn_id = connection_count;
         tokio::spawn(async move {
             debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-            if let Err(e) = handle_tcp_connection(stream, dispatcher, peer).await {
+            if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer).await {
                 warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
             } else {
                 info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
@@ -130,6 +137,7 @@ async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>) -> std::io::
 async fn handle_tcp_connection(
     stream: TcpStream,
     dispatcher: Arc<CompoundDispatcher>,
+    gss_manager: Arc<RpcSecGssManager>,
     peer: std::net::SocketAddr
 ) -> std::io::Result<()> {
     use tokio::io::BufWriter;
@@ -211,7 +219,7 @@ async fn handle_tcp_connection(
 
         // Process the RPC call
         debug!(">>> Processing NFSv4 request from {}, length={} bytes", peer, length);
-        let reply = dispatch_nfsv4(request, dispatcher.clone()).await;
+        let reply = dispatch_nfsv4(request, dispatcher.clone(), gss_manager.clone()).await;
         debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
         
         rpc_count += 1;
@@ -232,10 +240,10 @@ async fn handle_tcp_connection(
 }
 
 /// Dispatch an NFSv4 RPC call
-async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> Bytes {
+async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> Bytes {
     debug!("🔍 Dispatching RPC: {} total bytes", request.len());
     debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
-    
+
     // Parse RPC call message and extract procedure arguments
     let (call, args) = match CallMessage::decode_with_args(request.clone()) {
         Ok(result) => {
@@ -244,7 +252,7 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> 
         }
         Err(e) => {
             warn!("❌ Failed to parse RPC call: {}", e);
-            warn!("   Request was {} bytes: {:02x?}", request.len(), 
+            warn!("   Request was {} bytes: {:02x?}", request.len(),
                   &request[..std::cmp::min(128, request.len())]);
             return ReplyBuilder::garbage_args(0).into();
         }
@@ -255,6 +263,12 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>) -> 
         call.xid, call.program, call.version, call.procedure
     );
     debug!("   Cred: {:?}, Verf: {:?}", call.cred.flavor, call.verf.flavor);
+
+    // Handle RPCSEC_GSS authentication
+    if call.cred.flavor == AuthFlavor::RpcsecGss {
+        info!("🔐 RPCSEC_GSS authentication detected");
+        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher).await;
+    }
 
     // Check program number
     if call.program != NFS4_PROGRAM {
@@ -353,6 +367,155 @@ async fn handle_compound(
     // Procedure-specific result (COMPOUND response data appended directly, no length prefix)
     // Per RFC 5531, procedure results are appended directly to RPC reply
     encoder.append_bytes(&compound_data);
+
+    encoder.finish()
+}
+
+/// Handle RPCSEC_GSS authenticated RPC call
+async fn handle_rpcsec_gss_call(
+    call: CallMessage,
+    args: Bytes,
+    gss_manager: Arc<RpcSecGssManager>,
+    dispatcher: Arc<CompoundDispatcher>,
+) -> Bytes {
+    // Decode RPCSEC_GSS credentials
+    let gss_cred = match RpcGssCred::decode(&call.cred.body) {
+        Ok(cred) => {
+            info!("🔐 GSS Cred: version={}, procedure={}, seq={}, service={:?}",
+                  cred.version, cred.procedure, cred.sequence_num, cred.service);
+            cred
+        }
+        Err(e) => {
+            warn!("❌ Failed to decode RPCSEC_GSS credentials: {}", e);
+            return ReplyBuilder::garbage_args(call.xid);
+        }
+    };
+
+    // Handle different GSS procedures
+    match gss_cred.procedure {
+        gss_proc::INIT => {
+            info!("🔐 RPCSEC_GSS_INIT");
+            handle_gss_init(call.xid, &gss_cred, args, gss_manager).await
+        }
+
+        gss_proc::CONTINUE_INIT => {
+            info!("🔐 RPCSEC_GSS_CONTINUE_INIT");
+            handle_gss_continue_init(call.xid, &gss_cred, args, gss_manager).await
+        }
+
+        gss_proc::DATA => {
+            info!("🔐 RPCSEC_GSS_DATA");
+            // Validate the GSS context
+            if let Err(e) = gss_manager.validate_data(&gss_cred).await {
+                warn!("❌ GSS DATA validation failed: {}", e);
+                // Return SYSTEM_ERR for authentication failure
+                return ReplyBuilder::system_err(call.xid);
+            }
+
+            // GSS validated, proceed with normal COMPOUND processing
+            info!("✅ GSS authentication successful, processing COMPOUND");
+            handle_compound(call, args, dispatcher).await
+        }
+
+        gss_proc::DESTROY => {
+            info!("🔐 RPCSEC_GSS_DESTROY");
+            gss_manager.handle_destroy(&gss_cred).await;
+            // Return success
+            ReplyBuilder::success(call.xid).finish()
+        }
+
+        _ => {
+            warn!("❌ Unknown RPCSEC_GSS procedure: {}", gss_cred.procedure);
+            ReplyBuilder::proc_unavail(call.xid)
+        }
+    }
+}
+
+/// Handle RPCSEC_GSS_INIT
+async fn handle_gss_init(
+    xid: u32,
+    gss_cred: &RpcGssCred,
+    args: Bytes,
+    gss_manager: Arc<RpcSecGssManager>,
+) -> Bytes {
+    // Extract init token from args
+    // In RPCSEC_GSS_INIT, args contains the GSS init token
+    let mut decoder = XdrDecoder::new(args);
+    let init_token = match decoder.decode_opaque() {
+        Ok(token) => token.to_vec(),
+        Err(e) => {
+            warn!("❌ Failed to decode GSS init token: {}", e);
+            return ReplyBuilder::garbage_args(xid);
+        }
+    };
+
+    info!("🔐 GSS_INIT: service={:?}, token_len={}", gss_cred.service, init_token.len());
+
+    // Handle the initialization
+    let init_res = gss_manager.handle_init(gss_cred, &init_token).await;
+
+    // Build RPC reply with GSS init result
+    let mut encoder = XdrEncoder::new();
+
+    // RPC Reply header
+    encoder.encode_u32(xid);  // XID
+    encoder.encode_u32(1);  // Message type: REPLY
+    encoder.encode_u32(0);  // Reply status: MSG_ACCEPTED
+
+    // Auth verifier (null for now)
+    encoder.encode_u32(0);  // Auth flavor: AUTH_NONE
+    encoder.encode_u32(0);  // Auth length: 0
+
+    // Accept status: SUCCESS
+    encoder.encode_u32(0);  // AcceptStatus::Success
+
+    // Encode RPCSEC_GSS init result
+    let init_result_data = init_res.encode();
+    encoder.append_bytes(&init_result_data);
+
+    info!("✅ GSS_INIT complete: handle_len={}, major={}, minor={}",
+          init_res.handle.len(), init_res.major_status, init_res.minor_status);
+
+    encoder.finish()
+}
+
+/// Handle RPCSEC_GSS_CONTINUE_INIT
+async fn handle_gss_continue_init(
+    xid: u32,
+    gss_cred: &RpcGssCred,
+    args: Bytes,
+    gss_manager: Arc<RpcSecGssManager>,
+) -> Bytes {
+    // Extract continuation token from args
+    let mut decoder = XdrDecoder::new(args);
+    let token = match decoder.decode_opaque() {
+        Ok(t) => t.to_vec(),
+        Err(e) => {
+            warn!("❌ Failed to decode GSS continue token: {}", e);
+            return ReplyBuilder::garbage_args(xid);
+        }
+    };
+
+    info!("🔐 GSS_CONTINUE_INIT: token_len={}", token.len());
+
+    // Handle the continuation
+    let init_res = gss_manager.handle_continue_init(gss_cred, &token).await;
+
+    // Build RPC reply
+    let mut encoder = XdrEncoder::new();
+
+    encoder.encode_u32(xid);
+    encoder.encode_u32(1);  // REPLY
+    encoder.encode_u32(0);  // MSG_ACCEPTED
+    encoder.encode_u32(0);  // AUTH_NONE
+    encoder.encode_u32(0);
+    encoder.encode_u32(0);  // SUCCESS
+
+    let init_result_data = init_res.encode();
+    encoder.append_bytes(&init_result_data);
+
+    info!("✅ GSS_CONTINUE_INIT complete: major={}, minor={}",
+          init_res.major_status, init_res.minor_status);
 
     encoder.finish()
 }
