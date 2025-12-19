@@ -31,6 +31,8 @@ spec:
           value: "/etc/krb5/keytab"
         - name: PNFS_INSTANCE_ID
           value: "1734648000000000000"  # Shared across MDS and all DSes for filehandle compatibility
+        - name: PNFS_SERVER_SCOPE
+          value: "flint-pnfs-mds"  # MDS scope (different from DS to prevent trunking)
         ports:
         - containerPort: 2049
           name: nfs
