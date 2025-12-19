@@ -1,0 +1,49 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pnfs-mds-nodeport
+  namespace: pnfs-test
+spec:
+  type: NodePort
+  selector:
+    app: pnfs-mds
+  ports:
+  - name: nfs
+    port: 2049
+    targetPort: 2049
+    nodePort: 32049  # MDS accessible at <node-ip>:32049
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pnfs-ds-1-nodeport
+  namespace: pnfs-test
+spec:
+  type: NodePort
+  selector:
+    app: pnfs-ds
+  ports:
+  - name: nfs
+    port: 2049
+    targetPort: 2049
+    nodePort: 32050  # DS #1 accessible at <node-ip>:32050
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pnfs-ds-2-nodeport
+  namespace: pnfs-test
+spec:
+  type: NodePort
+  selector:
+    app: pnfs-ds
+  ports:
+  - name: nfs
+    port: 2049
+    targetPort: 2049
+    nodePort: 32051  # DS #2 accessible at <node-ip>:32051
+    protocol: TCP
+
