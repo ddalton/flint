@@ -1119,27 +1119,40 @@ impl CompoundDispatcher {
         result
     }
     
-    /// Encode device address as multipath_list4 per RFC 5661 Section 13.2.1
+    /// Encode device address per RFC 5661 Section 13.2.1
     /// 
     /// nfsv4_1_file_layout_ds_addr4 {
-    ///     multipath_list4 nflda_multipath_ds_list;
+    ///     uint32_t        stripe_indices<>;       // Indices into multipath_ds_list
+    ///     multipath_list4 multipath_ds_list<>;    // Array of DS address sets
     /// }
     /// 
-    /// multipath_list4 is an array of netaddr4:
-    /// struct multipath_list4 {
-    ///     netaddr4 ml_naddr<>;
-    /// };
+    /// multipath_list4 {
+    ///     netaddr4 ml_naddr<>;    // Array of addresses for one DS
+    /// }
+    /// 
+    /// For a simple single-DS layout:
+    /// - stripe_indices = [0]      // Use DS #0
+    /// - multipath_ds_list = [ [addr] ]  // One DS with one address
     fn encode_device_addr(addr: &crate::pnfs::mds::operations::DeviceAddr4) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use crate::pnfs::protocol::endpoint_to_uaddr;
         
         let mut encoder = XdrEncoder::new();
         
-        // Encode multipath_list4 as array of netaddr4
-        // Array count (we send 1 address for now)
-        encoder.encode_u32(1);
+        // PART 1: stripe_indices<> array
+        // For simple case: one stripe index pointing to DS #0
+        encoder.encode_u32(1);  // stripe_indices count
+        encoder.encode_u32(0);  // stripe_indices[0] = 0 (use first DS)
         
-        // netaddr4 #1:
+        // PART 2: multipath_ds_list<> array
+        // This is an array of multipath_list4 (one per DS)
+        encoder.encode_u32(1);  // multipath_ds_list count (1 DS)
+        
+        // multipath_list4 for DS #0:
+        // This is an array of netaddr4 for this DS
+        encoder.encode_u32(1);  // netaddr4 count (1 address for this DS)
+        
+        // netaddr4:
         encoder.encode_string(&addr.netid);  // e.g., "tcp"
         
         // Convert endpoint to universal address format
