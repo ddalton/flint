@@ -558,8 +558,12 @@ impl DataServer {
         
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
-        let bind_address = self.config.bind.address.clone();
         let bind_port = self.config.bind.port;
+        
+        // Use POD_IP if available (same as initial registration)
+        let advertise_address = std::env::var("POD_IP")
+            .unwrap_or_else(|_| self.config.bind.address.clone());
+        
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
             .map(|b| b.mount_point.clone())
@@ -601,8 +605,8 @@ impl DataServer {
                         failure_count
                     );
                     
-                    // Attempt re-registration
-                    let endpoint = format!("{}:{}", bind_address, bind_port);
+                    // Attempt re-registration (use advertise_address, not bind.address!)
+                    let endpoint = format!("{}:{}", advertise_address, bind_port);
                     match client.register(
                         device_id.clone(),
                         endpoint.clone(),
