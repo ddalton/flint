@@ -97,9 +97,6 @@ pub mod context;
 // EXCHANGE_ID handler for pNFS role flags
 pub mod exchange_id;
 
-// COMPOUND wrapper for pNFS operations
-pub mod compound_wrapper;
-
 // gRPC control protocol (MDS-DS communication)
 pub mod grpc;
 
@@ -114,7 +111,6 @@ pub mod ds;
 
 // Re-exports for convenience
 pub use config::{PnfsConfig, PnfsMode, MdsConfig, DsConfig};
-pub use compound_wrapper::PnfsCompoundWrapper;
 pub use handler_trait::PnfsOperations;
 
 /// pNFS result type

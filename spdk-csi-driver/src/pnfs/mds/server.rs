@@ -7,7 +7,6 @@ use crate::pnfs::config::MdsConfig;
 use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry};
 use crate::pnfs::mds::layout::LayoutManager;
 use crate::pnfs::mds::operations::PnfsOperationHandler;
-use crate::pnfs::compound_wrapper::PnfsCompoundWrapper;
 use crate::pnfs::grpc::{MdsControlService, MdsControlServer};
 use crate::pnfs::Result;
 use crate::nfs::rpc::{CallMessage, ReplyBuilder};
@@ -31,7 +30,6 @@ pub struct MetadataServer {
     device_registry: Arc<DeviceRegistry>,
     layout_manager: Arc<LayoutManager>,
     operation_handler: Arc<PnfsOperationHandler>,
-    pnfs_wrapper: Arc<PnfsCompoundWrapper>,
     base_dispatcher: Arc<CompoundDispatcher>,
     fh_manager: Arc<FileHandleManager>,
 }
@@ -73,13 +71,8 @@ impl MetadataServer {
             Arc::clone(&device_registry),
         ));
 
-        // Initialize pNFS wrapper
-        let pnfs_wrapper = Arc::new(PnfsCompoundWrapper::new(
-            Arc::clone(&operation_handler),
-        ));
-
         // Initialize NFSv4 dispatcher WITH pNFS support
-        // This allows the dispatcher to handle pNFS operations (LAYOUTGET, etc.)
+        // This handles ALL NFS and pNFS operations (LAYOUTGET, GETDEVICEINFO, etc.)
         let base_dispatcher = Arc::new(CompoundDispatcher::new_with_pnfs(
             Arc::clone(&fh_manager),
             state_mgr,
@@ -108,12 +101,11 @@ impl MetadataServer {
             device_registry.count()
         );
 
-        Ok(Self {
+        Ok(        Self {
             config,
             device_registry,
             layout_manager,
             operation_handler,
-            pnfs_wrapper,
             base_dispatcher,
             fh_manager,
         })
@@ -220,7 +212,6 @@ impl MetadataServer {
             info!("📡 New TCP connection #{} from {}", connection_count, peer);
             
             // Clone refs for this connection
-            let pnfs_wrapper = Arc::clone(&self.pnfs_wrapper);
             let base_dispatcher = Arc::clone(&self.base_dispatcher);
             let conn_id = connection_count;
             
@@ -228,7 +219,6 @@ impl MetadataServer {
                 debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
                 if let Err(e) = Self::handle_tcp_connection(
                     stream,
-                    pnfs_wrapper,
                     base_dispatcher,
                     peer,
                 ).await {
@@ -243,7 +233,6 @@ impl MetadataServer {
     /// Handle a single TCP connection
     async fn handle_tcp_connection(
         stream: TcpStream,
-        pnfs_wrapper: Arc<PnfsCompoundWrapper>,
         base_dispatcher: Arc<CompoundDispatcher>,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
@@ -321,7 +310,6 @@ impl MetadataServer {
             debug!(">>> Processing pNFS/NFSv4 request from {}", peer);
             let reply = Self::dispatch_rpc_with_pnfs(
                 request,
-                Arc::clone(&pnfs_wrapper),
                 Arc::clone(&base_dispatcher),
             ).await;
             debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
@@ -345,7 +333,6 @@ impl MetadataServer {
     /// Dispatch RPC call with pNFS support
     async fn dispatch_rpc_with_pnfs(
         request: Bytes,
-        pnfs_wrapper: Arc<PnfsCompoundWrapper>,
         base_dispatcher: Arc<CompoundDispatcher>,
     ) -> Bytes {
         // Parse RPC call message
@@ -387,7 +374,6 @@ impl MetadataServer {
                 Self::handle_compound_with_pnfs(
                     call,
                     args,
-                    pnfs_wrapper,
                     base_dispatcher,
                 ).await
             }
@@ -403,7 +389,6 @@ impl MetadataServer {
     async fn handle_compound_with_pnfs(
         call: CallMessage,
         args: Bytes,
-        pnfs_wrapper: Arc<PnfsCompoundWrapper>,
         base_dispatcher: Arc<CompoundDispatcher>,
     ) -> Bytes {
         use crate::nfs::v4::compound::CompoundRequest;
