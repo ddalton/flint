@@ -312,16 +312,45 @@ setup_hugepages() {
     
     echo "   ✅ Configured ${configured_hugepages} hugepages (${configured_gb}GB)"
     
-    # Make hugepages persistent
+    # Make hugepages persistent across reboots
     if ! grep -q "vm.nr_hugepages" /etc/sysctl.conf; then
         echo "vm.nr_hugepages=${hugepages_needed}" >> /etc/sysctl.conf
-        echo "   ✅ Made hugepages persistent across reboots"
+        echo "   ✅ Made hugepages persistent in /etc/sysctl.conf"
     fi
-    
+
     # Add hugepages mount to fstab
     if ! grep -q hugetlbfs /etc/fstab; then
         echo "hugetlbfs /dev/hugepages hugetlbfs defaults 0 0" >> /etc/fstab
-        echo "   ✅ Added hugepages mount to fstab"
+        echo "   ✅ Added hugepages mount to /etc/fstab"
+    fi
+
+    # Create systemd drop-in to ensure hugepages are set before RKE2/K3s starts
+    # This prevents the timing issue where kubelet starts before sysctl applies hugepages
+    local rke2_service=""
+    if systemctl list-unit-files | grep -q "rke2-server.service"; then
+        rke2_service="rke2-server"
+    elif systemctl list-unit-files | grep -q "rke2-agent.service"; then
+        rke2_service="rke2-agent"
+    elif systemctl list-unit-files | grep -q "k3s.service"; then
+        rke2_service="k3s"
+    fi
+
+    if [ -n "$rke2_service" ]; then
+        local drop_in_dir="/etc/systemd/system/${rke2_service}.service.d"
+        mkdir -p "$drop_in_dir"
+
+        cat > "$drop_in_dir/hugepages.conf" <<EOF
+# Ensure hugepages are allocated before kubelet starts
+[Service]
+ExecStartPre=/bin/sh -c 'echo ${hugepages_needed} > /proc/sys/vm/nr_hugepages'
+ExecStartPre=/bin/sh -c 'mkdir -p /dev/hugepages && mount -t hugetlbfs hugetlbfs /dev/hugepages 2>/dev/null || true'
+EOF
+
+        systemctl daemon-reload
+        echo "   ✅ Created systemd drop-in for ${rke2_service} to ensure hugepages on boot"
+        echo "   💡 Hugepages will be allocated before kubelet starts (no more timing issues!)"
+    else
+        echo "   ℹ️  No RKE2/K3s service detected - hugepages will rely on sysctl"
     fi
 }
 
