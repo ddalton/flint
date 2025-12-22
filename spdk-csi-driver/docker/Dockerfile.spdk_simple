@@ -1,0 +1,163 @@
+#--------------------------------------------------------------------
+# Stage 1: The "Builder"
+# This stage builds SPDK with generic x86-64 optimizations for compatibility
+# with older CPUs (e.g., Sandy Bridge i3-2120)
+#--------------------------------------------------------------------
+FROM ubuntu:24.04 AS builder
+
+# Install all build-time dependencies including RDMA support
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libncurses5-dev \
+    liburing-dev \
+    libfuse3-dev \
+    python3 \
+    python3-pyelftools \
+    git \
+    wget \
+    meson \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    uuid-dev \
+    libibverbs-dev \
+    librdmacm-dev \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /spdk
+
+# Copy patches
+COPY lvol-flush.patch /tmp/
+COPY ublk-debug.patch /tmp/
+COPY blob-recovery-optimized.patch /tmp/
+COPY blob-shutdown-debug.patch /tmp/
+
+# Set compiler flags for generic x86-64 compatibility (no AVX2, BMI, etc.)
+# -march=x86-64: Generic 64-bit x86 (compatible with all x86-64 CPUs since 2003)
+# -mtune=generic: Optimize for average performance across all CPUs
+# This ensures the binary works on older CPUs like Sandy Bridge (2011)
+ENV CFLAGS="-march=x86-64 -mtune=generic -O2"
+ENV CXXFLAGS="-march=x86-64 -mtune=generic -O2"
+
+# Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
+RUN git clone https://github.com/spdk/spdk.git . && \
+    git checkout v25.09.x && \
+    git submodule update --init --recursive && \
+    # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
+    sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
+    sed -i 's/subsystem->subnqn, hostnqn);/subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype), listen_trid.traddr, listen_trid.trsvcid);/' lib/nvmf/ctrlr.c && \
+    # Apply lvol flush support patch (fixes sync hang on ublk devices)
+    patch -p1 < /tmp/lvol-flush.patch && \
+    echo "✅ FLUSH patch applied to lvol bdev" && \
+    # Apply ublk debug logging patch
+    patch -p1 < /tmp/ublk-debug.patch && \
+    echo "✅ ublk debug logging patch applied" && \
+    # Apply combined blobstore recovery optimization (progress logging + 60x batching speedup)
+    patch -p1 < /tmp/blob-recovery-optimized.patch && \
+    echo "✅ Blobstore recovery optimization applied (logging + 60x batching)" && \
+    # Apply blobstore shutdown debug logging patch
+    patch -p1 < /tmp/blob-shutdown-debug.patch && \
+    echo "✅ Blobstore shutdown debug logging patch applied" && \
+    rm /tmp/*.patch && \
+    echo "🔧 Building with generic x86-64 optimizations (no AVX2/BMI for old CPU compatibility)" && \
+    ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
+    make -j$(nproc) && \
+    echo "✅ SPDK built with generic x86-64 instructions (compatible with Sandy Bridge and newer)"
+
+#--------------------------------------------------------------------
+# Stage 2: The Final Image
+# This stage starts from a clean base and copies only the essential
+# compiled files and runtime libraries from the "builder" stage.
+#--------------------------------------------------------------------
+FROM ubuntu:24.04
+
+# Install runtime dependencies including system utilities and RDMA libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libaio1t64 \
+    libnuma1 \
+    libssl3 \
+    libpciaccess0 \
+    libcunit1 \
+    liburing2 \
+    libfuse3-3 \
+    libuuid1 \
+    python3 \
+    kmod \
+    pciutils \
+    grep \
+    util-linux \
+    openssl \
+    ca-certificates \
+    curl \
+    libibverbs1 \
+    librdmacm1 \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the compiled SPDK binaries from the builder stage
+COPY --from=builder /spdk/build/bin/ /usr/local/bin/
+
+# Copy the setup script and entire scripts directory from the builder stage
+COPY --from=builder /spdk/scripts/ /usr/local/scripts/
+COPY --from=builder /spdk/scripts/setup.sh /usr/local/bin/
+
+# Copy SPDK Python modules for RPC scripts
+COPY --from=builder /spdk/python/ /usr/local/lib/python3.12/dist-packages/
+
+# Copy SPDK headers and include files needed by setup.sh
+COPY --from=builder /spdk/build/include/ /usr/local/include/
+COPY --from=builder /spdk/include/ /usr/local/include/
+
+# Create the runtime directories and fix OpenSSL configuration
+RUN mkdir -p /var/tmp /etc/spdk /usr/lib/ssl && \
+    if [ ! -f /usr/lib/ssl/openssl.cnf ] && [ -f /etc/ssl/openssl.cnf ]; then \
+        ln -sf /etc/ssl/openssl.cnf /usr/lib/ssl/openssl.cnf; \
+    fi
+
+# Make the scripts executable
+RUN chmod +x /usr/local/bin/setup.sh /usr/local/scripts/*.sh
+
+# Create minimal SPDK config file at build time with TCP transport
+RUN mkdir -p /etc/spdk && \
+    echo '{\n\
+  "subsystems": [\n\
+    {\n\
+      "subsystem": "bdev",\n\
+      "config": []\n\
+    },\n\
+    {\n\
+      "subsystem": "nvmf",\n\
+      "config": [\n\
+        {\n\
+          "method": "nvmf_create_transport",\n\
+          "params": {\n\
+            "trtype": "TCP"\n\
+          }\n\
+        }\n\
+      ]\n\
+    }\n\
+  ]\n\
+}' > /etc/spdk/config.json
+
+# Create simple cleanup script that runs before SPDK starts
+RUN printf '#!/bin/bash\n\
+echo "SPDK Pre-start cleanup..."\n\
+rm -f /var/tmp/spdk.sock\n\
+echo "Starting SPDK v25.09.x (Generic x86-64 build for old CPU compatibility) (PID: $$)"\n\
+echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
+exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
+    chmod +x /usr/local/bin/spdk-csi-start.sh
+
+# Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)
+# RDMA transport doesn't use fixed ports - uses discovery service
+EXPOSE 4420
+
+ENTRYPOINT ["/usr/local/bin/spdk-csi-start.sh"]
