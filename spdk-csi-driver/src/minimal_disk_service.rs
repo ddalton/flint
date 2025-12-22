@@ -478,6 +478,69 @@ impl MinimalDiskService {
         })
     }
 
+    /// Retry a bind operation with exponential backoff for udev race conditions
+    ///
+    /// When a device is unbound from a kernel driver, udev may immediately try to
+    /// auto-bind it to another driver (e.g., vfio-pci), causing temporary EBUSY errors.
+    /// This function retries the bind operation with exponential backoff until either:
+    /// - The bind succeeds
+    /// - A non-retryable error occurs (not EBUSY)
+    /// - Maximum retry attempts are exhausted
+    async fn retry_bind_with_backoff<F>(
+        bind_fn: F,
+        pci_address: &str,
+        driver_name: &str,
+        correlation_id: &str,
+    ) -> Result<(), MinimalStateError>
+    where
+        F: Fn() -> std::io::Result<()>,
+    {
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match bind_fn() {
+                Ok(_) => {
+                    if attempt > 0 {
+                        println!("✅ [SPDK_USERSPACE:{}] Bind succeeded after {} retries", correlation_id, attempt);
+                    }
+                    return Ok(());
+                }
+                Err(e) if e.raw_os_error() == Some(16) => {  // EBUSY (errno 16)
+                    if attempt < MAX_RETRIES - 1 {
+                        let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                        println!("⚠️ [SPDK_USERSPACE:{}] Bind failed with EBUSY (attempt {}/{}), retrying in {}ms (likely udev race condition)...",
+                                correlation_id, attempt + 1, MAX_RETRIES, backoff_ms);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        last_error = Some(e);
+                        continue;
+                    } else {
+                        last_error = Some(e);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // Other errors are not retryable (e.g., EACCES, ENOENT, EINVAL)
+                    return Err(MinimalStateError::InternalError {
+                        message: format!("Failed to bind device {} to {}: {}", pci_address, driver_name, e)
+                    });
+                }
+            }
+        }
+
+        // If we exhausted all retries, return the last EBUSY error
+        if let Some(e) = last_error {
+            return Err(MinimalStateError::InternalError {
+                message: format!("Failed to bind device {} to {} after {} retries (EBUSY - likely udev conflict): {}",
+                                pci_address, driver_name, MAX_RETRIES, e)
+            });
+        }
+
+        Ok(())
+    }
+
     /// Try to unbind NVMe device from kernel driver and attach via SPDK userspace driver
     async fn try_unbind_and_attach_nvme(&self, device: &PhysicalDevice, correlation_id: &str) -> Result<String, MinimalStateError> {
         use std::fs;
@@ -513,13 +576,17 @@ impl MinimalDiskService {
             let _ = fs::write(&new_id_path, &id_string);
         }
 
-        // Step 5: Bind to userspace driver
+        // Step 5: Bind to userspace driver with retry logic for udev race conditions
         let bind_path = format!("/sys/bus/pci/drivers/{}/bind", userspace_driver);
         println!("🔧 [SPDK_USERSPACE:{}] Binding to {}...", correlation_id, userspace_driver);
-        fs::write(&bind_path, &device.pci_address)
-            .map_err(|e| MinimalStateError::InternalError {
-                message: format!("Failed to bind device {} to {}: {}", device.pci_address, userspace_driver, e)
-            })?;
+
+        // Retry bind operation with exponential backoff to handle udev race conditions
+        Self::retry_bind_with_backoff(
+            || fs::write(&bind_path, &device.pci_address),
+            &device.pci_address,
+            &userspace_driver,
+            correlation_id
+        ).await?;
 
         // Give driver time to initialize
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -1218,4 +1285,183 @@ struct PhysicalDevice {
     pub driver: String,
     pub size_bytes: u64,
     pub model: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Simulates the udev race condition observed on the ubuntu node
+    /// Based on dmesg showing vfio-pci probe failures causing EBUSY
+    #[tokio::test]
+    async fn test_retry_bind_with_udev_race_condition() {
+        // Simulate the actual race condition: first 2 attempts fail with EBUSY,
+        // then succeed (representing udev finishing its vfio-pci probe attempts)
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+
+            if *count <= 2 {
+                // First 2 attempts: EBUSY (udev is probing vfio-pci)
+                Err(std::io::Error::from_raw_os_error(16)) // EBUSY
+            } else {
+                // Third attempt: Success (udev finished, device is free)
+                Ok(())
+            }
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:01:00.0",
+            "uio_pci_generic",
+            "test_corr_id"
+        ).await;
+
+        assert!(result.is_ok(), "Bind should succeed after retries");
+        assert_eq!(*attempt_count.lock().unwrap(), 3, "Should have attempted 3 times");
+    }
+
+    #[tokio::test]
+    async fn test_retry_bind_immediate_success() {
+        // Device binds successfully on first attempt (no udev conflict)
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+            Ok(())
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:02:00.0",
+            "vfio-pci",
+            "test_corr_id"
+        ).await;
+
+        assert!(result.is_ok(), "Bind should succeed immediately");
+        assert_eq!(*attempt_count.lock().unwrap(), 1, "Should attempt only once");
+    }
+
+    #[tokio::test]
+    async fn test_retry_bind_exhausted_retries() {
+        // All retry attempts fail with EBUSY (persistent udev conflict)
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+            Err(std::io::Error::from_raw_os_error(16)) // Always EBUSY
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:01:00.0",
+            "uio_pci_generic",
+            "test_corr_id"
+        ).await;
+
+        assert!(result.is_err(), "Should fail after exhausting retries");
+        assert_eq!(*attempt_count.lock().unwrap(), 5, "Should attempt 5 times (max retries)");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("after 5 retries"), "Error should mention retry count");
+        assert!(err_msg.contains("EBUSY"), "Error should mention EBUSY");
+        assert!(err_msg.contains("udev conflict"), "Error should mention udev conflict");
+    }
+
+    #[tokio::test]
+    async fn test_retry_bind_non_retryable_error() {
+        // Bind fails with permission denied (EACCES) - should not retry
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+            Err(std::io::Error::from_raw_os_error(13)) // EACCES (Permission denied)
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:01:00.0",
+            "vfio-pci",
+            "test_corr_id"
+        ).await;
+
+        assert!(result.is_err(), "Should fail immediately on non-retryable error");
+        assert_eq!(*attempt_count.lock().unwrap(), 1, "Should attempt only once (no retry)");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(!err_msg.contains("retries"), "Error should not mention retries");
+    }
+
+    #[tokio::test]
+    async fn test_retry_bind_recovers_on_last_attempt() {
+        // Succeeds on the 5th (last) attempt - edge case
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+
+            if *count < 5 {
+                Err(std::io::Error::from_raw_os_error(16)) // EBUSY
+            } else {
+                Ok(())
+            }
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:01:00.0",
+            "uio_pci_generic",
+            "test_corr_id"
+        ).await;
+
+        assert!(result.is_ok(), "Should succeed on last attempt");
+        assert_eq!(*attempt_count.lock().unwrap(), 5, "Should attempt 5 times");
+    }
+
+    #[tokio::test]
+    async fn test_retry_bind_exponential_backoff_timing() {
+        // Verify exponential backoff timing is approximately correct
+        let attempt_count = Arc::new(Mutex::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        let start_time = std::time::Instant::now();
+
+        let bind_fn = move || {
+            let mut count = attempt_count_clone.lock().unwrap();
+            *count += 1;
+
+            // Fail first 2 attempts, succeed on 3rd
+            if *count <= 2 {
+                Err(std::io::Error::from_raw_os_error(16)) // EBUSY
+            } else {
+                Ok(())
+            }
+        };
+
+        let result = MinimalDiskService::retry_bind_with_backoff(
+            bind_fn,
+            "0000:01:00.0",
+            "uio_pci_generic",
+            "test_corr_id"
+        ).await;
+
+        let elapsed = start_time.elapsed();
+
+        assert!(result.is_ok());
+        // Expected delays: 100ms (after 1st fail) + 200ms (after 2nd fail) = 300ms
+        // Allow some tolerance for test execution overhead
+        assert!(elapsed.as_millis() >= 290, "Should have backoff delays totaling ~300ms, got {}ms", elapsed.as_millis());
+        assert!(elapsed.as_millis() <= 400, "Backoff should not exceed expected time significantly, got {}ms", elapsed.as_millis());
+    }
 }
