@@ -39,6 +39,7 @@ COPY lvol-flush.patch /tmp/
 COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
+COPY ublk-per-io-daemon.patch /tmp/
 
 # Set compiler flags for generic x86-64 compatibility (no AVX2, BMI, etc.)
 # -march=x86-64: Generic 64-bit x86 (compatible with all x86-64 CPUs since 2003)
@@ -66,6 +67,9 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
+    # Apply ublk per-IO daemon support patch (fixes kernel 6.17+ compatibility)
+    patch -p1 < /tmp/ublk-per-io-daemon.patch && \
+    echo "✅ UBLK_F_PER_IO_DAEMON patch applied (kernel 6.17+ support)" && \
     rm /tmp/*.patch && \
     echo "🔧 Building with generic x86-64 optimizations (no AVX2/BMI for old CPU compatibility)" && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
