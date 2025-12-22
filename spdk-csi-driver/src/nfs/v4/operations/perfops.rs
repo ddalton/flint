@@ -51,13 +51,13 @@ fn try_reflink_clone(src: &Path, dst: &Path) -> std::io::Result<u64> {
     // FICLONE ioctl number: 0x40049409
     // This is defined in linux/fs.h as _IOW(0x94, 9, int)
     // Equivalent to: ioctl(dst_fd, FICLONE, src_fd)
-    const FICLONE: u64 = 0x40049409;
-    
+    const FICLONE: nix::libc::Ioctl = 0x40049409;
+
     // Perform the reflink clone ioctl
     let result = unsafe {
         nix::libc::ioctl(
-            dst_file.as_raw_fd(), 
-            FICLONE as nix::libc::c_ulong,
+            dst_file.as_raw_fd(),
+            FICLONE,
             src_file.as_raw_fd()
         )
     };
