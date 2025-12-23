@@ -3,7 +3,7 @@
 # This stage builds SPDK with generic x86-64 optimizations for compatibility
 # with older CPUs (e.g., Sandy Bridge i3-2120)
 #--------------------------------------------------------------------
-FROM ubuntu:25.10 AS builder
+FROM ubuntu:24.04 AS builder
 
 # Install all build-time dependencies including RDMA support
 RUN apt-get update && apt-get install -y \
@@ -39,7 +39,6 @@ COPY lvol-flush.patch /tmp/
 COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
-COPY disable-per-io-daemon.patch /tmp/
 
 # Set compiler flags for generic x86-64 compatibility (no AVX2, BMI, etc.)
 # -march=x86-64: Generic 64-bit x86 (compatible with all x86-64 CPUs since 2003)
@@ -82,7 +81,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
 # compiled files and runtime libraries from the "builder" stage.
 # Using Ubuntu 25.10 for kernel 6.17+ support (UBLK_F_PER_IO_DAEMON flag)
 #--------------------------------------------------------------------
-FROM ubuntu:25.10
+FROM ubuntu:24.04
 
 # Install runtime dependencies including system utilities and RDMA libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -92,7 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpciaccess0 \
     libcunit1 \
     liburing2 \
-    libfuse3-4 \
+    libfuse3-3 \
     libuuid1 \
     python3 \
     kmod \
