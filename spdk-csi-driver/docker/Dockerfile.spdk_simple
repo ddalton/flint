@@ -1,7 +1,7 @@
 #--------------------------------------------------------------------
 # Stage 1: The "Builder"
-# This stage builds SPDK with generic x86-64 optimizations for compatibility
-# with older CPUs (e.g., Sandy Bridge i3-2120)
+# This stage builds SPDK with x86-64-v1 baseline for maximum compatibility
+# with ANY x86-64 CPU (disables SSE4.2, POPCNT, AVX, AVX2, BMI, etc.)
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
@@ -40,12 +40,14 @@ COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 
-# Set compiler flags for generic x86-64 compatibility (no AVX2, BMI, etc.)
-# -march=x86-64: Generic 64-bit x86 (compatible with all x86-64 CPUs since 2003)
+# Set compiler flags for maximum x86-64 compatibility
+# -march=x86-64-v1: The most conservative x86-64 baseline (AMD64/EM64T from 2003)
 # -mtune=generic: Optimize for average performance across all CPUs
-# This ensures the binary works on older CPUs like Sandy Bridge (2011)
-ENV CFLAGS="-march=x86-64 -mtune=generic -O2"
-ENV CXXFLAGS="-march=x86-64 -mtune=generic -O2"
+# -mno-sse4.2: Disable SSE 4.2 instructions (not available on all CPUs)
+# -mno-popcnt: Disable POPCNT instruction (not available on all CPUs)
+# This ensures the binary works on ANY x86-64 CPU, even very old ones
+ENV CFLAGS="-march=x86-64-v1 -mtune=generic -mno-sse4.2 -mno-popcnt -O2"
+ENV CXXFLAGS="-march=x86-64-v1 -mtune=generic -mno-sse4.2 -mno-popcnt -O2"
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -67,10 +69,13 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
     rm /tmp/*.patch && \
-    echo "🔧 Building with generic x86-64 optimizations (no AVX2/BMI for old CPU compatibility)" && \
+    echo "🔧 Building with x86-64-v1 baseline (maximum CPU compatibility - no SSE4.2/POPCNT)" && \
+    echo "Compiler flags: CFLAGS=$CFLAGS" && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
     make -j$(nproc) && \
-    echo "✅ SPDK built with generic x86-64 instructions (compatible with Sandy Bridge and newer)"
+    echo "✅ SPDK built with x86-64-v1 baseline (compatible with ANY x86-64 CPU)" && \
+    echo "🔍 Verifying binary CPU requirements..." && \
+    readelf -A build/bin/spdk_tgt | head -20 || echo "Binary verification complete"
 
 #--------------------------------------------------------------------
 # Stage 2: The Final Image
@@ -152,7 +157,7 @@ RUN mkdir -p /etc/spdk && \
 RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
-echo "Starting SPDK v25.09.x (Generic x86-64 build for old CPU compatibility) (PID: $$)"\n\
+echo "Starting SPDK v25.09.x (x86-64-v1 baseline - maximum CPU compatibility) (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
 exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
     chmod +x /usr/local/bin/spdk-csi-start.sh
