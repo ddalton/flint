@@ -2,7 +2,7 @@ diff --git a/lib/ublk/ublk.c b/lib/ublk/ublk.c
 index 1234567..abcdefg 100644
 --- a/lib/ublk/ublk.c
 +++ b/lib/ublk/ublk.c
-@@ -1695,6 +1695,14 @@ ublk_dev_info_init(struct spdk_ublk_dev *ublk)
+@@ -1695,6 +1695,32 @@ ublk_dev_info_init(struct spdk_ublk_dev *ublk)
  		uinfo.flags |= UBLK_F_USER_RECOVERY_REISSUE;
  	}
 
