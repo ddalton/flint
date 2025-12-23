@@ -92,7 +92,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpciaccess0 \
     libcunit1 \
     liburing2 \
-    libfuse3-3 \
+    libfuse3-4 \
     libuuid1 \
     python3 \
     kmod \
