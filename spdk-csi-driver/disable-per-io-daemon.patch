@@ -1,0 +1,37 @@
+diff --git a/lib/ublk/ublk.c b/lib/ublk/ublk.c
+index 1234567..abcdefg 100644
+--- a/lib/ublk/ublk.c
++++ b/lib/ublk/ublk.c
+@@ -1695,6 +1695,14 @@ ublk_dev_info_init(struct spdk_ublk_dev *ublk)
+ 		uinfo.flags |= UBLK_F_USER_RECOVERY_REISSUE;
+ 	}
+
++	/*
++	 * WORKAROUND: Disable UBLK_F_PER_IO_DAEMON for kernel 6.17+ compatibility
++	 *
++	 * The kernel 6.17+ requires per-IO daemon architecture, but SPDK's threading
++	 * model is designed for per-queue daemons. By NOT setting this flag, we request
++	 * the legacy per-queue daemon mode from the kernel.
++	 *
++	 * This works if the kernel still supports backward compatibility with the
++	 * per-queue model. If the kernel mandates per-IO daemons, this will fail
++	 * at ublk_start_dev() with EINVAL.
++	 *
++	 * Testing needed: Verify on kernel 6.17+ if legacy mode is still supported.
++	 */
++	#if 0
++	/* DISABLED: Do not enable per-IO daemon mode */
+ 	if (g_ublk_tgt.per_io_daemon) {
+ 		SPDK_NOTICELOG("Kernel supports UBLK_F_PER_IO_DAEMON - enabling flag\n");
+ 		uinfo.flags |= UBLK_F_PER_IO_DAEMON;
+ 	}
++	#else
++	/* Force legacy per-queue daemon mode */
++	if (g_ublk_tgt.per_io_daemon) {
++		SPDK_NOTICELOG("Kernel supports UBLK_F_PER_IO_DAEMON - but DISABLED for compatibility\n");
++		SPDK_NOTICELOG("Using legacy per-queue daemon mode\n");
++	}
++	#endif
+
+ 	ublk->dev_info = uinfo;
+ }
