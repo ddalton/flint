@@ -80,8 +80,9 @@ RUN git clone https://github.com/spdk/spdk.git . && \
 # Stage 2: The Final Image
 # This stage starts from a clean base and copies only the essential
 # compiled files and runtime libraries from the "builder" stage.
+# Using Ubuntu 25.10 for kernel 6.17+ support (UBLK_F_PER_IO_DAEMON flag)
 #--------------------------------------------------------------------
-FROM ubuntu:24.04
+FROM ubuntu:25.10
 
 # Install runtime dependencies including system utilities and RDMA libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
