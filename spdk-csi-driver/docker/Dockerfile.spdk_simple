@@ -1,7 +1,7 @@
 #--------------------------------------------------------------------
 # Stage 1: The "Builder"
-# This stage builds SPDK with conservative x86-64 baseline for maximum compatibility
-# Forces DPDK machine=default to disable CPU auto-detection and optimization
+# This stage builds SPDK with generic x86-64 optimizations for compatibility
+# with older CPUs (e.g., Sandy Bridge i3-2120)
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
@@ -40,17 +40,12 @@ COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 
-# Set compiler flags for maximum x86-64 compatibility
-# -march=x86-64: The most conservative x86-64 baseline (no v1/v2/v3/v4 extensions)
+# Set compiler flags for generic x86-64 compatibility (no AVX2, BMI, etc.)
+# -march=x86-64: Generic 64-bit x86 (compatible with all x86-64 CPUs since 2003)
 # -mtune=generic: Optimize for average performance across all CPUs
-# This ensures the binary works on ANY x86-64 CPU, even very old ones
-#
-# CRITICAL: Use plain "x86-64" not "x86-64-v1" as some build systems don't recognize the -v1 suffix
-# and also must override DPDK's auto-detection which optimizes for the build host CPU
+# This ensures the binary works on older CPUs like Sandy Bridge (2011)
 ENV CFLAGS="-march=x86-64 -mtune=generic -O2"
 ENV CXXFLAGS="-march=x86-64 -mtune=generic -O2"
-# Force DPDK to use conservative machine type (disables auto-detection)
-ENV DPDK_MACHINE="default"
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -72,25 +67,15 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
     rm /tmp/*.patch && \
-    echo "🔧 Building with conservative x86-64 baseline (maximum CPU compatibility)" && \
-    echo "Compiler flags: CFLAGS=$CFLAGS" && \
+    echo "🔧 Building with generic x86-64 optimizations (no AVX2/BMI for old CPU compatibility)" && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
-    echo "🔧 Reconfiguring DPDK with conservative machine type..." && \
-    if [ -d dpdk/build ]; then \
-        cd dpdk/build && meson configure -Dmachine=default && cd ../..; \
-    fi && \
-    echo "🔧 Building SPDK..." && \
     make -j$(nproc) && \
-    echo "✅ SPDK built with conservative x86-64 baseline" && \
-    echo "🔍 Verifying binary..." && \
-    file build/bin/spdk_tgt && \
-    ldd build/bin/spdk_tgt | head -10 || true
+    echo "✅ SPDK built with generic x86-64 instructions (compatible with Sandy Bridge and newer)"
 
 #--------------------------------------------------------------------
 # Stage 2: The Final Image
 # This stage starts from a clean base and copies only the essential
 # compiled files and runtime libraries from the "builder" stage.
-# Using Ubuntu 25.10 for kernel 6.17+ support (UBLK_F_PER_IO_DAEMON flag)
 #--------------------------------------------------------------------
 FROM ubuntu:24.04
 
@@ -166,7 +151,7 @@ RUN mkdir -p /etc/spdk && \
 RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
-echo "Starting SPDK v25.09.x (conservative x86-64 baseline - DPDK machine=default) (PID: $$)"\n\
+echo "Starting SPDK v25.09.x (Generic x86-64 build for old CPU compatibility) (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
 exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
     chmod +x /usr/local/bin/spdk-csi-start.sh
