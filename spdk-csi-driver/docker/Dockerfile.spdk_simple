@@ -1,7 +1,7 @@
 #--------------------------------------------------------------------
 # Stage 1: The "Builder"
-# This stage builds SPDK with x86-64-v1 baseline for maximum compatibility
-# with ANY x86-64 CPU (disables SSE4.2, POPCNT, AVX, AVX2, BMI, etc.)
+# This stage builds SPDK with conservative x86-64 baseline for maximum compatibility
+# Forces DPDK machine=default to disable CPU auto-detection and optimization
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
@@ -41,13 +41,16 @@ COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 
 # Set compiler flags for maximum x86-64 compatibility
-# -march=x86-64-v1: The most conservative x86-64 baseline (AMD64/EM64T from 2003)
+# -march=x86-64: The most conservative x86-64 baseline (no v1/v2/v3/v4 extensions)
 # -mtune=generic: Optimize for average performance across all CPUs
-# -mno-sse4.2: Disable SSE 4.2 instructions (not available on all CPUs)
-# -mno-popcnt: Disable POPCNT instruction (not available on all CPUs)
 # This ensures the binary works on ANY x86-64 CPU, even very old ones
-ENV CFLAGS="-march=x86-64-v1 -mtune=generic -mno-sse4.2 -mno-popcnt -O2"
-ENV CXXFLAGS="-march=x86-64-v1 -mtune=generic -mno-sse4.2 -mno-popcnt -O2"
+#
+# CRITICAL: Use plain "x86-64" not "x86-64-v1" as some build systems don't recognize the -v1 suffix
+# and also must override DPDK's auto-detection which optimizes for the build host CPU
+ENV CFLAGS="-march=x86-64 -mtune=generic -O2"
+ENV CXXFLAGS="-march=x86-64 -mtune=generic -O2"
+# Force DPDK to use conservative machine type (disables auto-detection)
+ENV DPDK_MACHINE="default"
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -69,11 +72,14 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
     rm /tmp/*.patch && \
-    echo "🔧 Building with x86-64-v1 baseline (maximum CPU compatibility - no SSE4.2/POPCNT)" && \
-    echo "Compiler flags: CFLAGS=$CFLAGS" && \
+    echo "🔧 Building with conservative x86-64 baseline (maximum CPU compatibility)" && \
+    echo "Compiler flags: CFLAGS=$CFLAGS DPDK_MACHINE=$DPDK_MACHINE" && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
-    make -j$(nproc) && \
-    echo "✅ SPDK built with x86-64-v1 baseline (compatible with ANY x86-64 CPU)" && \
+    echo "🔧 Patching DPDK build to force conservative machine type..." && \
+    find dpdk/builddir -name meson-info -type d -exec sh -c 'cd $(dirname {}) && meson configure -Dmachine=default 2>/dev/null || true' \; && \
+    echo "🔧 Building SPDK with conservative flags..." && \
+    make -j$(nproc) DPDK_MACHINE=default EXTRA_CFLAGS="-march=x86-64 -mtune=generic" && \
+    echo "✅ SPDK built with conservative x86-64 baseline (compatible with ANY x86-64 CPU)" && \
     echo "🔍 Verifying binary CPU requirements..." && \
     readelf -A build/bin/spdk_tgt | head -20 || echo "Binary verification complete"
 
@@ -157,7 +163,7 @@ RUN mkdir -p /etc/spdk && \
 RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
-echo "Starting SPDK v25.09.x (x86-64-v1 baseline - maximum CPU compatibility) (PID: $$)"\n\
+echo "Starting SPDK v25.09.x (conservative x86-64 baseline - DPDK machine=default) (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
 exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
     chmod +x /usr/local/bin/spdk-csi-start.sh
