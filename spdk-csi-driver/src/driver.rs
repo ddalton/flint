@@ -15,6 +15,33 @@ use k8s_openapi::api::core::v1::Node as k8sNode;
 use crate::minimal_models::{MinimalStateError, DiskInfo, VolumeCreationResult, ReplicaInfo};
 use crate::capacity_cache::CapacityCache;
 
+/// Block device backend type
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockDeviceBackend {
+    Ublk,
+    Nvmeof,
+}
+
+/// Cleanup data specific to each backend
+#[derive(Debug, Clone)]
+pub enum CleanupData {
+    Ublk {
+        ublk_id: u32
+    },
+    Nvmeof {
+        nqn: String,
+        nvme_device: String
+    },
+}
+
+/// Information about a created block device
+#[derive(Debug, Clone)]
+pub struct BlockDeviceInfo {
+    pub device_path: String,
+    pub backend_type: BlockDeviceBackend,
+    pub cleanup_data: CleanupData,
+}
+
 /// Minimal State SPDK CSI Driver
 /// Focuses on direct SPDK operations without heavy CRD management
 #[derive(Clone)]
@@ -740,7 +767,15 @@ impl SpdkCsiDriver {
     }
 
     /// Create ublk device (simplified - keeping core functionality)
+    /// Legacy public method - kept for backward compatibility
     pub async fn create_ublk_device(&self, bdev_name: &str, ublk_id: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let volume_id = format!("ublk-{}", ublk_id);  // Dummy volume ID for legacy calls
+        let info = self.create_ublk_block_device(bdev_name, &volume_id, ublk_id).await?;
+        Ok(info.device_path)
+    }
+
+    /// Create ublk block device (internal implementation)
+    async fn create_ublk_block_device(&self, bdev_name: &str, volume_id: &str, ublk_id: u32) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [MINIMAL_UBLK] Creating ublk device for bdev: {} with ID: {}", bdev_name, ublk_id);
 
         // Note: ublk target is initialized by node agent on startup
@@ -757,18 +792,22 @@ impl SpdkCsiDriver {
         self.call_node_agent(&self.node_id, "/api/ublk/create", &ublk_params).await?;
 
         let device_path = format!("/dev/ublkb{}", ublk_id);
-        
+
         // Wait for device to appear
         for attempt in 1..=30 {
             if std::path::Path::new(&device_path).exists() {
                 println!("✅ [MINIMAL_UBLK] Device created: {}", device_path);
-                return Ok(device_path);
+                return Ok(BlockDeviceInfo {
+                    device_path,
+                    backend_type: BlockDeviceBackend::Ublk,
+                    cleanup_data: CleanupData::Ublk { ublk_id },
+                });
             }
-            
+
             if attempt % 10 == 0 {
                 println!("🔧 [MINIMAL_UBLK] Waiting for device... ({}/30)", attempt);
             }
-            
+
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
@@ -776,7 +815,13 @@ impl SpdkCsiDriver {
     }
 
     /// Delete ublk device (simplified)
+    /// Legacy public method - kept for backward compatibility
     pub async fn delete_ublk_device(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.delete_ublk_block_device(ublk_id).await
+    }
+
+    /// Delete ublk block device (internal implementation)
+    async fn delete_ublk_block_device(&self, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🗑️ [MINIMAL_UBLK] Deleting ublk device with ID: {}", ublk_id);
 
         let delete_params = json!({
@@ -795,6 +840,182 @@ impl SpdkCsiDriver {
         }
 
         Ok(())
+    }
+
+    /// Create NVMe-oF block device (internal implementation)
+    async fn create_nvmeof_block_device(&self, bdev_name: &str, volume_id: &str) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔧 [NVMEOF_BLOCK] Creating NVMe-oF block device for bdev: {}", bdev_name);
+
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let target_ip = std::env::var("NVMEOF_LOCAL_TARGET_IP").unwrap_or("127.0.0.1".to_string());
+        let target_port = std::env::var("NVMEOF_TARGET_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(4420);
+
+        // Call node agent to create NVMe-oF target and connect via kernel initiator
+        let params = json!({
+            "bdev_name": bdev_name,
+            "nqn": nqn,
+            "target_ip": target_ip,
+            "target_port": target_port,
+        });
+
+        let response = self.call_node_agent(&self.node_id, "/api/blockdev/create_nvmeof", &params).await?;
+
+        let device_path = response["device_path"]
+            .as_str()
+            .ok_or("Missing device_path in response")?
+            .to_string();
+        let nvme_device = response["nvme_device"]
+            .as_str()
+            .ok_or("Missing nvme_device in response")?
+            .to_string();
+
+        println!("✅ [NVMEOF_BLOCK] NVMe-oF device created: {}", device_path);
+
+        Ok(BlockDeviceInfo {
+            device_path,
+            backend_type: BlockDeviceBackend::Nvmeof,
+            cleanup_data: CleanupData::Nvmeof {
+                nqn,
+                nvme_device,
+            },
+        })
+    }
+
+    /// Delete NVMe-oF block device (internal implementation)
+    async fn delete_nvmeof_block_device(&self, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🗑️ [NVMEOF_BLOCK] Deleting NVMe-oF block device with NQN: {}", nqn);
+
+        let delete_params = json!({
+            "nqn": nqn,
+        });
+
+        match self.call_node_agent(&self.node_id, "/api/blockdev/delete_nvmeof", &delete_params).await {
+            Ok(_) => println!("✅ [NVMEOF_BLOCK] Successfully deleted NVMe-oF device: {}", nqn),
+            Err(e) => {
+                println!("⚠️ [NVMEOF_BLOCK] Failed to delete device (may not exist): {}", e);
+                // Don't fail - cleanup is best effort
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create block device (wrapper that dispatches based on configuration)
+    pub async fn create_block_device(&self, bdev_name: &str, volume_id: &str) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let backend_mode = std::env::var("BLOCK_DEVICE_BACKEND").unwrap_or("ublk".to_string());
+
+        println!("🔧 [BLOCK_DEVICE] Creating block device using backend: {}", backend_mode);
+
+        match backend_mode.as_str() {
+            "nvmeof" => self.create_nvmeof_block_device(bdev_name, volume_id).await,
+            _ => {
+                // Default to ublk
+                let ublk_id = self.generate_ublk_id(volume_id);
+                self.create_ublk_block_device(bdev_name, volume_id, ublk_id).await
+            }
+        }
+    }
+
+    /// Delete block device (wrapper that dispatches based on cleanup data)
+    pub async fn delete_block_device(&self, device_info: &BlockDeviceInfo) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🗑️ [BLOCK_DEVICE] Deleting block device: {}", device_info.device_path);
+
+        match &device_info.cleanup_data {
+            CleanupData::Ublk { ublk_id } => {
+                self.delete_ublk_block_device(*ublk_id).await
+            }
+            CleanupData::Nvmeof { nqn, .. } => {
+                self.delete_nvmeof_block_device(nqn).await
+            }
+        }
+    }
+
+    /// Store block device info in PV annotations for later cleanup
+    pub async fn store_block_device_info(&self, volume_id: &str, device_info: &BlockDeviceInfo) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+
+        // Get the PV
+        let mut pv = pvs.get(volume_id).await?;
+
+        // Initialize annotations if needed
+        if pv.metadata.annotations.is_none() {
+            pv.metadata.annotations = Some(std::collections::BTreeMap::new());
+        }
+
+        let annotations = pv.metadata.annotations.as_mut().unwrap();
+
+        // Store backend type and cleanup data
+        annotations.insert("flint.io/block-device-backend".to_string(), format!("{:?}", device_info.backend_type));
+
+        match &device_info.cleanup_data {
+            CleanupData::Ublk { ublk_id } => {
+                annotations.insert("flint.io/ublk-id".to_string(), ublk_id.to_string());
+            }
+            CleanupData::Nvmeof { nqn, nvme_device } => {
+                annotations.insert("flint.io/nvmeof-nqn".to_string(), nqn.clone());
+                annotations.insert("flint.io/nvme-device".to_string(), nvme_device.clone());
+            }
+        }
+
+        // Update the PV
+        pvs.replace(volume_id, &Default::default(), &pv).await?;
+
+        Ok(())
+    }
+
+    /// Retrieve block device info from PV annotations
+    pub async fn get_block_device_info(&self, volume_id: &str) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv = pvs.get(volume_id).await?;
+
+        let annotations = pv.metadata.annotations.as_ref()
+            .ok_or("No annotations found on PV")?;
+
+        let backend_str = annotations.get("flint.io/block-device-backend")
+            .ok_or("No block-device-backend annotation")?;
+
+        let backend_type = if backend_str.contains("Nvmeof") {
+            BlockDeviceBackend::Nvmeof
+        } else {
+            BlockDeviceBackend::Ublk
+        };
+
+        let cleanup_data = match backend_type {
+            BlockDeviceBackend::Ublk => {
+                let ublk_id = annotations.get("flint.io/ublk-id")
+                    .ok_or("No ublk-id annotation")?
+                    .parse::<u32>()?;
+                CleanupData::Ublk { ublk_id }
+            }
+            BlockDeviceBackend::Nvmeof => {
+                let nqn = annotations.get("flint.io/nvmeof-nqn")
+                    .ok_or("No nvmeof-nqn annotation")?
+                    .clone();
+                let nvme_device = annotations.get("flint.io/nvme-device")
+                    .ok_or("No nvme-device annotation")?
+                    .clone();
+                CleanupData::Nvmeof { nqn, nvme_device }
+            }
+        };
+
+        // Reconstruct device path (not critical, just for logging)
+        let device_path = match &cleanup_data {
+            CleanupData::Ublk { ublk_id } => format!("/dev/ublkb{}", ublk_id),
+            CleanupData::Nvmeof { nvme_device, .. } => format!("/dev/{}n1", nvme_device),
+        };
+
+        Ok(BlockDeviceInfo {
+            device_path,
+            backend_type,
+            cleanup_data,
+        })
     }
 
     /// Ensure ublk target exists (simplified)

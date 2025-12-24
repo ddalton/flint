@@ -226,6 +226,20 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_ublk_delete);
 
+        // POST /api/blockdev/create_nvmeof - Create NVMe-oF block device
+        let blockdev_create_nvmeof = warp::path!("api" / "blockdev" / "create_nvmeof")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_blockdev_create_nvmeof);
+
+        // POST /api/blockdev/delete_nvmeof - Delete NVMe-oF block device
+        let blockdev_delete_nvmeof = warp::path!("api" / "blockdev" / "delete_nvmeof")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_blockdev_delete_nvmeof);
+
         // POST /api/volumes/get_info - Get volume information
         let get_volume_info = warp::path!("api" / "volumes" / "get_info")
             .and(warp::post())
@@ -266,6 +280,8 @@ impl NodeAgent {
             .or(ublk_create_target)
             .or(ublk_create)
             .or(ublk_delete)
+            .or(blockdev_create_nvmeof)
+            .or(blockdev_delete_nvmeof)
             .or(get_volume_info)
             .or(force_unstage)
             .or(snapshot_routes)  // Add snapshot routes
@@ -758,6 +774,280 @@ impl NodeAgent {
                 Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
             }
         }
+    }
+
+    /// Handle POST /api/blockdev/create_nvmeof - Create NVMe-oF block device
+    async fn handle_blockdev_create_nvmeof(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling NVMe-oF block device creation");
+
+        let bdev_name = match request["bdev_name"].as_str() {
+            Some(name) => name,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing bdev_name"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+        let nqn = match request["nqn"].as_str() {
+            Some(n) => n,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing nqn"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+        let target_ip = request["target_ip"].as_str().unwrap_or("127.0.0.1");
+        let target_port = request["target_port"].as_u64().unwrap_or(4420) as u16;
+
+        // 1. Check if already connected (idempotency)
+        if let Ok(existing_device) = Self::find_nvme_device_by_nqn(nqn).await {
+            println!("✅ [HTTP_API] NVMe device already exists: {} (idempotent)", existing_device);
+            let response = json!({
+                "device_path": existing_device,
+                "nvme_device": Self::extract_nvme_controller(&existing_device),
+                "nqn": nqn
+            });
+            return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
+        }
+
+        // 2. Create NVMe-oF target on SPDK
+        match Self::create_nvmeof_target_local(&node_agent, bdev_name, nqn, target_ip, target_port).await {
+            Ok(_) => println!("✅ [HTTP_API] NVMe-oF target created"),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("ℹ️ [HTTP_API] NVMe-oF target already exists");
+            }
+            Err(e) => {
+                let error_response = json!({
+                    "success": false,
+                    "error": format!("Failed to create NVMe-oF target: {}", e)
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+            }
+        }
+
+        // 3. Execute kernel nvme connect
+        if let Err(e) = Self::kernel_nvme_connect(nqn, target_ip, target_port).await {
+            let error_response = json!({
+                "success": false,
+                "error": format!("Failed to connect NVMe device: {}", e)
+            });
+            return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+        }
+
+        // 4. Wait for device to appear and discover it
+        let mut device_path = String::new();
+        for attempt in 1..=30 {
+            if let Ok(path) = Self::find_nvme_device_by_nqn(nqn).await {
+                device_path = path;
+                break;
+            }
+            if attempt % 10 == 0 {
+                println!("🔧 [HTTP_API] Waiting for NVMe device... ({}/30)", attempt);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        if device_path.is_empty() {
+            let error_response = json!({
+                "success": false,
+                "error": "NVMe device did not appear after 3 seconds"
+            });
+            return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
+        }
+
+        let nvme_device = Self::extract_nvme_controller(&device_path);
+        println!("✅ [HTTP_API] NVMe-oF block device created: {}", device_path);
+
+        let response = json!({
+            "device_path": device_path,
+            "nvme_device": nvme_device,
+            "nqn": nqn
+        });
+        Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+    }
+
+    /// Handle POST /api/blockdev/delete_nvmeof - Delete NVMe-oF block device
+    async fn handle_blockdev_delete_nvmeof(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling NVMe-oF block device deletion");
+
+        let nqn = match request["nqn"].as_str() {
+            Some(n) => n,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing nqn"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+
+        // 1. Execute nvme disconnect
+        if let Err(e) = Self::kernel_nvme_disconnect(nqn).await {
+            println!("⚠️ [HTTP_API] Failed to disconnect NVMe (may not exist): {}", e);
+            // Don't fail - continue to cleanup target
+        }
+
+        // 2. Remove SPDK target
+        let delete_params = json!({
+            "method": "nvmf_delete_subsystem",
+            "params": {
+                "nqn": nqn
+            }
+        });
+
+        match node_agent.disk_service.call_spdk_rpc(&delete_params).await {
+            Ok(_) => println!("✅ [HTTP_API] NVMe-oF subsystem deleted"),
+            Err(e) => println!("⚠️ [HTTP_API] Failed to delete subsystem (may not exist): {}", e),
+        }
+
+        let response = json!({
+            "success": true,
+            "message": "NVMe-oF device deleted"
+        });
+        Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+    }
+
+    /// Helper: Create NVMe-oF target on local SPDK
+    async fn create_nvmeof_target_local(
+        node_agent: &Arc<NodeAgent>,
+        bdev_name: &str,
+        nqn: &str,
+        target_ip: &str,
+        target_port: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Step 1: Create subsystem
+        let subsystem_params = json!({
+            "method": "nvmf_create_subsystem",
+            "params": {
+                "nqn": nqn,
+                "allow_any_host": true,
+                "serial_number": format!("SPDK{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs()),
+                "model_number": "SPDK CSI Volume"
+            }
+        });
+        node_agent.disk_service.call_spdk_rpc(&subsystem_params).await?;
+
+        // Step 2: Add namespace
+        let namespace_params = json!({
+            "method": "nvmf_subsystem_add_ns",
+            "params": {
+                "nqn": nqn,
+                "namespace": {
+                    "nsid": 1,
+                    "bdev_name": bdev_name
+                }
+            }
+        });
+        node_agent.disk_service.call_spdk_rpc(&namespace_params).await?;
+
+        // Step 3: Add listener
+        let listener_params = json!({
+            "method": "nvmf_subsystem_add_listener",
+            "params": {
+                "nqn": nqn,
+                "listen_address": {
+                    "trtype": "TCP",
+                    "traddr": target_ip,
+                    "trsvcid": target_port.to_string(),
+                    "adrfam": "ipv4"
+                }
+            }
+        });
+        node_agent.disk_service.call_spdk_rpc(&listener_params).await?;
+
+        Ok(())
+    }
+
+    /// Helper: Execute kernel nvme connect
+    async fn kernel_nvme_connect(
+        nqn: &str,
+        target_ip: &str,
+        target_port: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let output = tokio::process::Command::new("nvme")
+            .args(&[
+                "connect",
+                "-t", "tcp",
+                "-a", target_ip,
+                "-s", &target_port.to_string(),
+                "-n", nqn,
+            ])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Ignore "already connected" errors
+            if !stderr.contains("already connected") {
+                return Err(format!("nvme connect failed: {}", stderr).into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper: Execute kernel nvme disconnect
+    async fn kernel_nvme_disconnect(nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let output = tokio::process::Command::new("nvme")
+            .args(&["disconnect", "-n", nqn])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("nvme disconnect failed: {}", stderr).into());
+        }
+
+        Ok(())
+    }
+
+    /// Helper: Find NVMe device by NQN via sysfs
+    async fn find_nvme_device_by_nqn(nqn: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let nvme_path = std::path::Path::new("/sys/class/nvme");
+        if !nvme_path.exists() {
+            return Err("NVMe sysfs path does not exist".into());
+        }
+
+        for entry in std::fs::read_dir(nvme_path)? {
+            let entry = entry?;
+            let subsysnqn_path = entry.path().join("subsysnqn");
+
+            if let Ok(subsys_nqn) = std::fs::read_to_string(&subsysnqn_path) {
+                if subsys_nqn.trim() == nqn {
+                    let ctrl_name = entry.file_name().to_string_lossy().to_string();
+                    // Find namespace (usually nvme0n1)
+                    let device_path = format!("/dev/{}n1", ctrl_name);
+                    if std::path::Path::new(&device_path).exists() {
+                        return Ok(device_path);
+                    }
+                }
+            }
+        }
+
+        Err(format!("No NVMe device found for NQN: {}", nqn).into())
+    }
+
+    /// Helper: Extract NVMe controller name from device path
+    fn extract_nvme_controller(device_path: &str) -> String {
+        // Extract nvme0 from /dev/nvme0n1
+        if let Some(name) = device_path.strip_prefix("/dev/") {
+            if let Some(ctrl) = name.strip_suffix("n1") {
+                return ctrl.to_string();
+            }
+        }
+        "unknown".to_string()
     }
 
     /// Handle POST /api/volumes/get_info - Get volume information

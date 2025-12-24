@@ -106,6 +106,20 @@ controller:
       memory: "1Gi"
       cpu: "1"
 
+# Block Device Backend Configuration
+blockDevice:
+  # Backend type: "ublk" (default, high performance) or "nvmeof" (kernel NVMe-oF)
+  backend: "ublk"
+
+  # NVMe-oF specific settings (only used when backend is "nvmeof")
+  nvmeof:
+    # Local target IP for loopback connections
+    localTargetIP: "127.0.0.1"
+    # Target port (should match existing nvmeof_target_port)
+    port: 4420
+    # Transport type
+    transport: "tcp"
+
 storageClass:
   name: spdk-raid1
   numReplicas: 2
@@ -1167,6 +1181,12 @@ spec:
           value: {{ .Values.csiDriver.endpoint }}
         - name: SPDK_RPC_SOCKET  # Changed from SPDK_RPC_URL
           value: {{ .Values.spdk.rpc.socketPath | quote }}
+        - name: BLOCK_DEVICE_BACKEND
+          value: {{ .Values.blockDevice.backend | quote }}
+        - name: NVMEOF_LOCAL_TARGET_IP
+          value: {{ .Values.blockDevice.nvmeof.localTargetIP | quote }}
+        - name: NVMEOF_TARGET_PORT
+          value: {{ .Values.blockDevice.nvmeof.port | quote }}
         securityContext:
           privileged: true
           capabilities:

@@ -1566,28 +1566,27 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             return Err(tonic::Status::invalid_argument(format!("Unknown volume type: {}", volume_type)));
         };
 
-        // Check if ublk device already exists (idempotency)
-        // Use actual_volume_id for NFS PVs (matches original lvol creation)
-        let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
-        let expected_device_path = format!("/dev/ublkb{}", ublk_id);
-        
-        let device_path = if std::path::Path::new(&expected_device_path).exists() {
-            println!("✅ [NODE] ublk device already exists (idempotent): {}", expected_device_path);
-            expected_device_path
-        } else {
-            // Create ublk device from the bdev
-            println!("🔧 [NODE] Creating ublk device for bdev: {}", bdev_name);
-            
-            match self.driver.create_ublk_device(&bdev_name, ublk_id).await {
-                Ok(path) => {
-                    println!("✅ [NODE] ublk device created: {}", path);
-                    path
-                }
-                Err(e) => {
-                    println!("❌ [NODE] Failed to create ublk device: {}", e);
-                    return Err(tonic::Status::internal(format!("Failed to create ublk device: {}", e)));
-                }
+        // Create block device (ublk or NVMe-oF based on configuration)
+        // Use actual_volume_id for consistent device ID generation
+        println!("🔧 [NODE] Creating block device for bdev: {}", bdev_name);
+
+        let device_info = match self.driver.create_block_device(&bdev_name, &actual_volume_id).await {
+            Ok(info) => {
+                println!("✅ [NODE] Block device created: {} (backend: {:?})", info.device_path, info.backend_type);
+                info
             }
+            Err(e) => {
+                println!("❌ [NODE] Failed to create block device: {}", e);
+                return Err(tonic::Status::internal(format!("Failed to create block device: {}", e)));
+            }
+        };
+
+        let device_path = device_info.device_path.clone();
+
+        // Store cleanup info in PV annotations for later deletion
+        if let Err(e) = self.driver.store_block_device_info(&volume_id, &device_info).await {
+            println!("⚠️ [NODE] Failed to store block device info in PV: {}", e);
+            // Non-fatal - cleanup may be less clean but will still work
         };
         
         // Device now exists (either created or already existed)
@@ -2053,17 +2052,30 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("ℹ️ [NODE] Staging path does not exist, skipping unmount");
         }
 
-        // Only delete the ublk device after verified unmount
-        // Use actual_volume_id for NFS PVs (matches device creation in NodeStageVolume)
-        let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
-        
-        match self.driver.delete_ublk_device(ublk_id).await {
-            Ok(_) => {
-                println!("✅ [NODE] ublk device stopped successfully");
+        // Only delete the block device after verified unmount
+        // Retrieve device info from PV annotations
+        match self.driver.get_block_device_info(&volume_id).await {
+            Ok(device_info) => {
+                println!("🔧 [NODE] Deleting block device (backend: {:?})", device_info.backend_type);
+                match self.driver.delete_block_device(&device_info).await {
+                    Ok(_) => {
+                        println!("✅ [NODE] Block device deleted successfully");
+                    }
+                    Err(e) => {
+                        println!("⚠️ [NODE] Failed to delete block device (may not exist): {}", e);
+                        // Continue anyway - best effort cleanup
+                    }
+                }
             }
             Err(e) => {
-                println!("⚠️ [NODE] Failed to stop ublk device (may not exist): {}", e);
-                // Continue anyway - best effort cleanup
+                println!("⚠️ [NODE] Failed to retrieve block device info from PV: {}", e);
+                println!("⚠️ [NODE] Falling back to legacy ublk cleanup...");
+                // Fallback to legacy ublk cleanup for backward compatibility
+                let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
+                match self.driver.delete_ublk_device(ublk_id).await {
+                    Ok(_) => println!("✅ [NODE] Legacy ublk device deleted"),
+                    Err(e) => println!("⚠️ [NODE] Legacy cleanup failed: {}", e),
+                }
             }
         }
 
