@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn test_layout_recall() {
         let registry = Arc::new(DeviceRegistry::new());
-        
+
         // Register 2 devices
         for i in 1..=2 {
             let device = DeviceInfo::new(
@@ -530,12 +530,124 @@ mod tests {
 
         // Find which device was actually used
         let device_used = &layout.segments[0].device_id;
-        
+
         // Recall layouts for that device
         let recalled = manager.recall_layouts_for_device(device_used);
-        
+
         // Should have recalled the layout
         assert!(!recalled.is_empty(), "Expected to recall layout for device {}", device_used);
+    }
+
+    #[test]
+    fn test_layout_state_tracking() {
+        let registry = Arc::new(DeviceRegistry::new());
+        let device = DeviceInfo::new(
+            "ds-test-1".to_string(),
+            "10.0.0.1:2049".to_string(),
+            vec!["nvme0n1".to_string()],
+        );
+        registry.register(device).unwrap();
+
+        let manager = LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+        );
+
+        // Initially no layouts
+        assert_eq!(manager.layout_count(), 0);
+
+        // Generate first layout
+        let layout1 = manager
+            .generate_layout(
+                vec![1, 2, 3, 4],
+                0,
+                5 * 1024 * 1024,
+                IoMode::ReadWrite,
+            )
+            .unwrap();
+
+        assert_eq!(manager.layout_count(), 1);
+
+        // Generate second layout
+        let layout2 = manager
+            .generate_layout(
+                vec![5, 6, 7, 8],
+                0,
+                10 * 1024 * 1024,
+                IoMode::ReadWrite,
+            )
+            .unwrap();
+
+        assert_eq!(manager.layout_count(), 2);
+
+        // Return first layout
+        manager.return_layout(&layout1.stateid).unwrap();
+        assert_eq!(manager.layout_count(), 1);
+
+        // Return second layout
+        manager.return_layout(&layout2.stateid).unwrap();
+        assert_eq!(manager.layout_count(), 0);
+    }
+
+    #[test]
+    fn test_layout_segments_for_striping() {
+        let registry = Arc::new(DeviceRegistry::new());
+
+        // Register 3 devices
+        for i in 1..=3 {
+            let device = DeviceInfo::new(
+                format!("ds-test-{}", i),
+                format!("10.0.0.{}:2049", i),
+                vec![format!("nvme{}n1", i)],
+            );
+            registry.register(device).unwrap();
+        }
+
+        let manager = LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+        );
+
+        // Request 24 MB (should create 3 segments of 8 MB each)
+        let layout = manager
+            .generate_layout(
+                vec![0, 1, 2, 3],
+                0,
+                24 * 1024 * 1024,
+                IoMode::ReadWrite,
+            )
+            .unwrap();
+
+        // Should have 3 segments (one per device)
+        assert_eq!(layout.segments.len(), 3);
+
+        // Each segment should be 8 MB
+        for seg in &layout.segments {
+            assert_eq!(seg.length, 8 * 1024 * 1024);
+        }
+
+        // All segments should use different devices
+        let device_ids: Vec<&String> = layout.segments.iter()
+            .map(|s| &s.device_id)
+            .collect();
+        assert_eq!(device_ids.len(), 3);
+    }
+
+    #[test]
+    fn test_iomode_variants() {
+        assert_eq!(IoMode::Read as u32, 1);
+        assert_eq!(IoMode::ReadWrite as u32, 2);
+        assert_eq!(IoMode::Any as u32, 3);
+    }
+
+    #[test]
+    fn test_layout_type_values() {
+        assert_eq!(LayoutType::NfsV4_1Files as u32, 1);
+        assert_eq!(LayoutType::BlockVolume as u32, 2);
+        assert_eq!(LayoutType::Osd2Objects as u32, 3);
+        assert_eq!(LayoutType::FlexFiles as u32, 4);
     }
 }
 

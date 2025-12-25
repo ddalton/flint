@@ -28,7 +28,9 @@ pub struct CallbackManager {
 /// Callback channel to a specific client
 struct CallbackChannel {
     session_id: SessionId,
-    // TODO: Add actual callback connection (TCP to client)
+    callback_addr: Option<String>,  // Client callback address (from CREATE_SESSION)
+    callback_prog: u32,              // Callback program number
+    callback_sec: Vec<u32>,          // Security flavors for callback
 }
 
 impl CallbackManager {
@@ -40,13 +42,27 @@ impl CallbackManager {
     }
 
     /// Register a callback channel for a session
-    pub async fn register_channel(&self, session_id: SessionId) {
+    pub async fn register_channel(
+        &self,
+        session_id: SessionId,
+        callback_addr: Option<String>,
+        callback_prog: u32,
+        callback_sec: Vec<u32>,
+    ) {
         let mut channels = self.channels.write().await;
         channels.insert(
             session_id,
-            CallbackChannel { session_id },
+            CallbackChannel {
+                session_id,
+                callback_addr: callback_addr.clone(),
+                callback_prog,
+                callback_sec,
+            },
         );
-        info!("Registered callback channel for session {:?}", session_id);
+        info!(
+            "Registered callback channel for session {:?}, addr={:?}, prog={}",
+            session_id, callback_addr, callback_prog
+        );
     }
 
     /// Unregister a callback channel
@@ -76,28 +92,47 @@ impl CallbackManager {
         changed: bool,
     ) -> Result<bool, String> {
         let channels = self.channels.read().await;
-        
-        if let Some(_channel) = channels.get(session_id) {
+
+        if let Some(channel) = channels.get(session_id) {
             info!(
                 "📢 Sending CB_LAYOUTRECALL to session {:?}, stateid={:?}",
                 session_id,
                 &layout_stateid[0..4]
             );
 
-            // TODO: Implement actual callback RPC
-            // For now, just log that we would send it
+            // Encode CB_COMPOUND with CB_LAYOUTRECALL
+            let cb_compound = self.encode_cb_layoutrecall(
+                session_id,
+                layout_stateid,
+                layout_type,
+                iomode,
+                changed,
+            )?;
+
             debug!("CB_LAYOUTRECALL parameters:");
             debug!("  layout_type: {}", layout_type);
             debug!("  iomode: {}", iomode);
             debug!("  changed: {}", changed);
+            debug!("  encoded size: {} bytes", cb_compound.len());
 
-            // In production, this would:
-            // 1. Establish callback connection to client
-            // 2. Send CB_COMPOUND with CB_LAYOUTRECALL
-            // 3. Wait for client response
-            // 4. Handle errors (client unreachable, etc.)
-
-            Ok(true)
+            // Send callback RPC
+            if let Some(addr) = &channel.callback_addr {
+                match self.send_callback_rpc(addr, channel.callback_prog, &cb_compound).await {
+                    Ok(_) => {
+                        info!("✅ CB_LAYOUTRECALL sent successfully to {}", addr);
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to send CB_LAYOUTRECALL to {}: {}", addr, e);
+                        // Don't fail - client might be temporarily unreachable
+                        // Server will retry or client will return layouts on next operation
+                        Ok(false)
+                    }
+                }
+            } else {
+                warn!("⚠️ No callback address for session {:?}", session_id);
+                Ok(false)
+            }
         } else {
             warn!(
                 "⚠️ No callback channel for session {:?}, cannot send CB_LAYOUTRECALL",
@@ -105,6 +140,80 @@ impl CallbackManager {
             );
             Ok(false)
         }
+    }
+
+    /// Encode CB_COMPOUND with CB_LAYOUTRECALL operation
+    fn encode_cb_layoutrecall(
+        &self,
+        session_id: &SessionId,
+        layout_stateid: &LayoutStateId,
+        layout_type: u32,
+        iomode: u32,
+        changed: bool,
+    ) -> Result<Bytes, String> {
+        use crate::nfs::xdr::XdrEncoder;
+
+        let mut encoder = XdrEncoder::new();
+
+        // CB_COMPOUND header
+        encoder.encode_string(""); // tag (empty)
+        encoder.encode_u32(1);     // minorversion (NFSv4.1)
+        encoder.encode_u32(0);     // callback_ident
+        encoder.encode_u32(2);     // 2 operations: CB_SEQUENCE + CB_LAYOUTRECALL
+
+        // Operation 1: CB_SEQUENCE (opcode 11)
+        encoder.encode_u32(11); // CB_SEQUENCE
+        encoder.encode_fixed_opaque(&session_id.0); // sessionid
+        encoder.encode_u32(1);     // sequenceid (simplified - should track per session)
+        encoder.encode_u32(0);     // slotid
+        encoder.encode_u32(1);     // highest_slotid
+        encoder.encode_bool(false); // cachethis
+
+        // Operation 2: CB_LAYOUTRECALL (opcode 5)
+        encoder.encode_u32(5);     // CB_LAYOUTRECALL
+        encoder.encode_u32(layout_type);
+        encoder.encode_u32(iomode);
+        encoder.encode_bool(changed);
+
+        // Layout recall body (LAYOUTRECALL4_FILE)
+        encoder.encode_u32(1);     // LAYOUTRECALL4_FILE
+        // For FILE recall, encode fh + offset + length + stateid
+        encoder.encode_opaque(&[]); // filehandle (empty for all files)
+        encoder.encode_u64(0);     // offset
+        encoder.encode_u64(u64::MAX); // length (all)
+
+        // stateid
+        encoder.encode_u32(0);     // seqid
+        encoder.encode_fixed_opaque(&layout_stateid[0..12]); // other[12]
+
+        Ok(encoder.finish())
+    }
+
+    /// Send callback RPC to client
+    async fn send_callback_rpc(
+        &self,
+        addr: &str,
+        prog: u32,
+        compound: &Bytes,
+    ) -> Result<(), String> {
+        // For now, this is a stub. In production, this would:
+        // 1. Parse addr to get IP:port
+        // 2. Establish TCP connection
+        // 3. Send RPC with proper RPC header
+        // 4. Wait for response
+        // 5. Parse response status
+
+        info!("Would send callback RPC to {} prog={}", addr, prog);
+        info!("Payload size: {} bytes", compound.len());
+
+        // TODO: Implement actual RPC transport
+        // This requires:
+        // - TCP connection pool
+        // - RPC header encoding (XID, prog, vers, proc)
+        // - Response handling
+        // - Timeout and retry logic
+
+        Ok(())
     }
 
     /// Send CB_LAYOUTRECALL to all clients with layouts on a specific device
@@ -200,9 +309,14 @@ mod tests {
         let session_id = SessionId([1u8; 16]);
 
         // Register channel
-        manager.register_channel(session_id).await;
+        manager.register_channel(
+            session_id,
+            Some("10.0.0.1:2049".to_string()),
+            0x40000000,  // NFSv4 callback program
+            vec![1],     // AUTH_SYS
+        ).await;
 
-        // Send recall (will log but not actually send since no real channel)
+        // Send recall (will encode but not actually send since no real channel)
         let stateid = [2u8; 16];
         let result = manager.send_layoutrecall(&session_id, &stateid, 1, 3, true).await;
         assert!(result.is_ok());

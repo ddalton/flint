@@ -1191,18 +1191,15 @@ impl CompoundDispatcher {
             encoder.encode_u32(0);  // seqid
             encoder.encode_fixed_opaque(&[0u8; 12]);  // other
             
-            // ffds_fh_vers<> - array of filehandle versions (we use 1 version)
-            encoder.encode_u32(1);  // One filehandle version
-            
-            // Filehandle version 0
-            encoder.encode_u32(0);  // version number
-            encoder.encode_u32(0);  // minorversion
-            encoder.encode_u32(4096);  // ds_buffer_size
-            encoder.encode_opaque(&ds_filehandle.data);  // The actual filehandle!
-            
-            // User/group (0 = use client creds)
-            encoder.encode_u32(0);  // user
-            encoder.encode_u32(0);  // group
+            // ffds_fh_vers<> - array of filehandles (one per supported NFS version)
+            // Per RFC 8435: nfs_fh4 ffds_fh_vers<>
+            // We support one filehandle for NFSv4.1
+            encoder.encode_u32(1);  // Array length = 1 filehandle
+            encoder.encode_opaque(&ds_filehandle.data);  // nfs_fh4 is opaque<>
+
+            // User/group (fattr4_owner, fattr4_owner_group - empty strings = use client creds)
+            encoder.encode_string("");  // user (empty = use client)
+            encoder.encode_string("");  // group (empty = use client)
         }
         
         // ffl_flags (u32) - 0 for now

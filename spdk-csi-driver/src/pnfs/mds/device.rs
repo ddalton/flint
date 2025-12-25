@@ -20,6 +20,9 @@ pub type DeviceId = [u8; 16];
 pub struct DeviceRegistry {
     /// Map of device ID to device information
     devices: Arc<DashMap<String, DeviceInfo>>,
+
+    /// Optional callback for device status changes
+    status_change_callback: Option<Arc<dyn Fn(&str, DeviceStatus, DeviceStatus) + Send + Sync>>,
 }
 
 /// Information about a data server
@@ -74,7 +77,18 @@ impl DeviceRegistry {
     pub fn new() -> Self {
         Self {
             devices: Arc::new(DashMap::new()),
+            status_change_callback: None,
         }
+    }
+
+    /// Set a callback to be invoked when device status changes
+    ///
+    /// The callback receives (device_id, old_status, new_status)
+    pub fn set_status_change_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&str, DeviceStatus, DeviceStatus) + Send + Sync + 'static,
+    {
+        self.status_change_callback = Some(Arc::new(callback));
     }
 
     /// Register a new data server
@@ -174,8 +188,14 @@ impl DeviceRegistry {
     pub fn update_status(&self, device_id: &str, status: DeviceStatus) -> Result<(), String> {
         if let Some(mut entry) = self.devices.get_mut(device_id) {
             if entry.status != status {
-                info!("Device {} status changed: {:?} -> {:?}", device_id, entry.status, status);
+                let old_status = entry.status;
+                info!("Device {} status changed: {:?} -> {:?}", device_id, old_status, status);
                 entry.status = status;
+
+                // Invoke status change callback
+                if let Some(ref callback) = self.status_change_callback {
+                    callback(device_id, old_status, status);
+                }
             }
             Ok(())
         } else {
@@ -198,8 +218,16 @@ impl DeviceRegistry {
                         elapsed.as_secs(),
                         timeout.as_secs()
                     );
+
+                    let old_status = entry.status;
                     entry.status = DeviceStatus::Offline;
-                    stale_devices.push(entry.device_id.clone());
+                    let device_id = entry.device_id.clone();
+                    stale_devices.push(device_id.clone());
+
+                    // Invoke status change callback
+                    if let Some(ref callback) = self.status_change_callback {
+                        callback(&device_id, old_status, DeviceStatus::Offline);
+                    }
                 }
             }
         }
