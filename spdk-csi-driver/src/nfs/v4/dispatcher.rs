@@ -1568,4 +1568,305 @@ mod tests {
         let stats = dispatcher.get_stats();
         assert_eq!(stats.active_clients, 1);
     }
+
+    #[test]
+    fn test_encode_fflv4_layout_single_segment() {
+        use crate::pnfs::mds::layout::LayoutSegment;
+        use crate::pnfs::mds::layout::IoMode;
+        use crate::nfs::xdr::XdrDecoder;
+
+        let segments = vec![LayoutSegment {
+            offset: 0,
+            length: 8388608,
+            iomode: IoMode::ReadWrite,
+            device_id: "ds-1".to_string(),
+            stripe_index: 0,
+            pattern_offset: 0,
+        }];
+
+        let encoded = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "test.dat",
+            8388608,
+        );
+
+        assert!(!encoded.is_empty(), "Encoded layout should not be empty");
+
+        // Decode and verify structure
+        let mut decoder = XdrDecoder::new(encoded);
+
+        // Stripe unit
+        let stripe_unit = decoder.decode_u64().unwrap();
+        assert_eq!(stripe_unit, 8388608);
+
+        // Mirror count (should be 1 for striping)
+        let mirror_count = decoder.decode_u32().unwrap();
+        assert_eq!(mirror_count, 1);
+
+        // DS count in mirror
+        let ds_count = decoder.decode_u32().unwrap();
+        assert_eq!(ds_count, 1);
+
+        // Device ID (16 bytes)
+        let _device_id = decoder.decode_fixed_opaque(16).unwrap();
+
+        // Efficiency
+        let efficiency = decoder.decode_u32().unwrap();
+        assert_eq!(efficiency, 0);
+
+        // Stateid
+        let _stateid_seqid = decoder.decode_u32().unwrap();
+        let _stateid_other = decoder.decode_fixed_opaque(12).unwrap();
+
+        // Filehandle array length
+        let fh_count = decoder.decode_u32().unwrap();
+        assert_eq!(fh_count, 1, "Should have one filehandle");
+
+        // Filehandle (opaque)
+        let filehandle = decoder.decode_opaque().unwrap();
+        assert_eq!(filehandle.len(), 21, "pNFS filehandle should be 21 bytes");
+        assert_eq!(filehandle[0], 2, "Filehandle version should be 2 (pNFS)");
+
+        // User and group
+        let user = decoder.decode_string().unwrap();
+        assert_eq!(user, "");
+        let group = decoder.decode_string().unwrap();
+        assert_eq!(group, "");
+
+        // Flags and stats hint
+        let flags = decoder.decode_u32().unwrap();
+        assert_eq!(flags, 0);
+        let stats_hint = decoder.decode_u32().unwrap();
+        assert_eq!(stats_hint, 0);
+    }
+
+    #[test]
+    fn test_encode_fflv4_layout_multiple_segments() {
+        use crate::pnfs::mds::layout::LayoutSegment;
+        use crate::pnfs::mds::layout::IoMode;
+        use crate::nfs::xdr::XdrDecoder;
+
+        let segments = vec![
+            LayoutSegment {
+                offset: 0,
+                length: 8388608,
+                iomode: IoMode::ReadWrite,
+                device_id: "ds-1".to_string(),
+                stripe_index: 0,
+                pattern_offset: 0,
+            },
+            LayoutSegment {
+                offset: 8388608,
+                length: 8388608,
+                iomode: IoMode::ReadWrite,
+                device_id: "ds-2".to_string(),
+                stripe_index: 1,
+                pattern_offset: 0,
+            },
+            LayoutSegment {
+                offset: 16777216,
+                length: 8388608,
+                iomode: IoMode::ReadWrite,
+                device_id: "ds-3".to_string(),
+                stripe_index: 2,
+                pattern_offset: 0,
+            },
+        ];
+
+        let encoded = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "bigfile.dat",
+            8388608,
+        );
+
+        assert!(!encoded.is_empty());
+
+        let mut decoder = XdrDecoder::new(encoded);
+
+        // Stripe unit
+        let stripe_unit = decoder.decode_u64().unwrap();
+        assert_eq!(stripe_unit, 8388608);
+
+        // Mirror count
+        let mirror_count = decoder.decode_u32().unwrap();
+        assert_eq!(mirror_count, 1);
+
+        // DS count
+        let ds_count = decoder.decode_u32().unwrap();
+        assert_eq!(ds_count, 3, "Should have 3 data servers");
+
+        // Verify each DS has a unique filehandle
+        for i in 0..3 {
+            // Device ID
+            let _device_id = decoder.decode_fixed_opaque(16).unwrap();
+
+            // Efficiency
+            let _efficiency = decoder.decode_u32().unwrap();
+
+            // Stateid
+            let _stateid_seqid = decoder.decode_u32().unwrap();
+            let _stateid_other = decoder.decode_fixed_opaque(12).unwrap();
+
+            // Filehandle array
+            let fh_count = decoder.decode_u32().unwrap();
+            assert_eq!(fh_count, 1);
+
+            let filehandle = decoder.decode_opaque().unwrap();
+            assert_eq!(filehandle.len(), 21, "pNFS filehandle should be 21 bytes");
+            assert_eq!(filehandle[0], 2, "Version should be 2");
+
+            // Verify stripe index in filehandle
+            let mut stripe_bytes = [0u8; 4];
+            stripe_bytes.copy_from_slice(&filehandle[17..21]);
+            let stripe_index = u32::from_be_bytes(stripe_bytes);
+            assert_eq!(stripe_index, i, "Stripe index should match DS index");
+
+            // User and group
+            let _user = decoder.decode_string().unwrap();
+            let _group = decoder.decode_string().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_encode_fflv4_layout_empty_segments() {
+        let segments = vec![];
+
+        let encoded = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "test.dat",
+            8388608,
+        );
+
+        // Should return empty bytes for empty segments
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn test_encode_fflv4_layout_deterministic_file_id() {
+        use crate::pnfs::mds::layout::LayoutSegment;
+        use crate::pnfs::mds::layout::IoMode;
+        use crate::nfs::xdr::XdrDecoder;
+        use crate::nfs::v4::filehandle_pnfs;
+
+        let segments = vec![LayoutSegment {
+            offset: 0,
+            length: 8388608,
+            iomode: IoMode::ReadWrite,
+            device_id: "ds-1".to_string(),
+            stripe_index: 0,
+            pattern_offset: 0,
+        }];
+
+        // Encode twice with same filename
+        let encoded1 = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "myfile.txt",
+            8388608,
+        );
+
+        let encoded2 = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "myfile.txt",
+            8388608,
+        );
+
+        // Extract filehandles and verify they're identical
+        let mut decoder1 = XdrDecoder::new(encoded1);
+        let mut decoder2 = XdrDecoder::new(encoded2);
+
+        // Skip to filehandle
+        decoder1.decode_u64().unwrap(); // stripe_unit
+        decoder1.decode_u32().unwrap(); // mirror_count
+        decoder1.decode_u32().unwrap(); // ds_count
+        decoder1.decode_fixed_opaque(16).unwrap(); // device_id
+        decoder1.decode_u32().unwrap(); // efficiency
+        decoder1.decode_u32().unwrap(); // stateid seqid
+        decoder1.decode_fixed_opaque(12).unwrap(); // stateid other
+        decoder1.decode_u32().unwrap(); // fh_count
+
+        decoder2.decode_u64().unwrap();
+        decoder2.decode_u32().unwrap();
+        decoder2.decode_u32().unwrap();
+        decoder2.decode_fixed_opaque(16).unwrap();
+        decoder2.decode_u32().unwrap();
+        decoder2.decode_u32().unwrap();
+        decoder2.decode_fixed_opaque(12).unwrap();
+        decoder2.decode_u32().unwrap();
+
+        let fh1 = decoder1.decode_opaque().unwrap();
+        let fh2 = decoder2.decode_opaque().unwrap();
+
+        assert_eq!(fh1, fh2, "Same filename should produce identical filehandles");
+
+        // Verify file_id is deterministic
+        let file_id1 = filehandle_pnfs::generate_file_id("myfile.txt");
+        let file_id2 = filehandle_pnfs::generate_file_id("myfile.txt");
+        assert_eq!(file_id1, file_id2);
+    }
+
+    #[test]
+    fn test_fflv4_filehandle_uniqueness_per_stripe() {
+        use crate::pnfs::mds::layout::LayoutSegment;
+        use crate::pnfs::mds::layout::IoMode;
+        use crate::nfs::xdr::XdrDecoder;
+
+        let segments = vec![
+            LayoutSegment {
+                offset: 0,
+                length: 8388608,
+                iomode: IoMode::ReadWrite,
+                device_id: "ds-1".to_string(),
+                stripe_index: 0,
+                pattern_offset: 0,
+            },
+            LayoutSegment {
+                offset: 8388608,
+                length: 8388608,
+                iomode: IoMode::ReadWrite,
+                device_id: "ds-2".to_string(),
+                stripe_index: 1,
+                pattern_offset: 0,
+            },
+        ];
+
+        let encoded = CompoundDispatcher::encode_fflv4_layout(
+            &segments,
+            "file.dat",
+            8388608,
+        );
+
+        let mut decoder = XdrDecoder::new(encoded);
+
+        // Skip to first filehandle
+        decoder.decode_u64().unwrap(); // stripe_unit
+        decoder.decode_u32().unwrap(); // mirror_count
+        decoder.decode_u32().unwrap(); // ds_count
+
+        // First DS
+        decoder.decode_fixed_opaque(16).unwrap(); // device_id
+        decoder.decode_u32().unwrap(); // efficiency
+        decoder.decode_u32().unwrap(); // stateid
+        decoder.decode_fixed_opaque(12).unwrap();
+        decoder.decode_u32().unwrap(); // fh_count
+        let fh1 = decoder.decode_opaque().unwrap();
+        decoder.decode_string().unwrap(); // user
+        decoder.decode_string().unwrap(); // group
+
+        // Second DS
+        decoder.decode_fixed_opaque(16).unwrap(); // device_id
+        decoder.decode_u32().unwrap(); // efficiency
+        decoder.decode_u32().unwrap(); // stateid
+        decoder.decode_fixed_opaque(12).unwrap();
+        decoder.decode_u32().unwrap(); // fh_count
+        let fh2 = decoder.decode_opaque().unwrap();
+
+        // Filehandles should be different (different stripe_index)
+        assert_ne!(fh1, fh2, "Different stripes should have different filehandles");
+
+        // But they should have the same file_id (bytes 9-17)
+        assert_eq!(&fh1[1..17], &fh2[1..17], "Same file should have same instance_id and file_id");
+
+        // Different stripe_index (bytes 17-21)
+        assert_ne!(&fh1[17..21], &fh2[17..21], "Different stripes should have different stripe_index");
+    }
 }
