@@ -5,11 +5,25 @@ commands:
   - script: |
       set -e  # Exit on any error
       
-      # Wait for PVC to exist and be bound
+      # First, wait for PVC to exist (retry loop for up to 10 seconds)
+      echo "Waiting for PVC to exist..."
+      for i in $(seq 1 20); do
+        if kubectl get pvc test-multi-replica-pvc >/dev/null 2>&1; then
+          echo "✅ PVC exists"
+          break
+        fi
+        if [ $i -eq 20 ]; then
+          echo "❌ PVC does not exist after 10 seconds"
+          exit 1
+        fi
+        sleep 0.5
+      done
+      
+      # Now wait for PVC to be bound
       echo "Waiting for PVC to be bound..."
       kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-multi-replica-pvc --timeout=45s || {
         echo "❌ PVC not bound within timeout"
-        kubectl get pvc test-multi-replica-pvc || echo "PVC does not exist"
+        kubectl get pvc test-multi-replica-pvc
         exit 1
       }
       
