@@ -2,10 +2,14 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
 commands:
   - script: |
-      echo "=== Verifying cleanup ==="
+      set -e  # Exit on any error
+      
+      # Get the current namespace
+      NAMESPACE=${NAMESPACE:-default}
+      echo "=== Verifying cleanup in namespace: $NAMESPACE ==="
       
       # Verify PVC is deleted
-      if kubectl get pvc test-multi-replica-pvc 2>/dev/null; then
+      if kubectl get pvc test-multi-replica-pvc -n $NAMESPACE 2>/dev/null; then
         echo "⚠️ PVC still exists, waiting for deletion..."
         sleep 5
       else
@@ -13,7 +17,7 @@ commands:
       fi
       
       # Verify Pod is deleted
-      if kubectl get pod test-multi-replica-pod 2>/dev/null; then
+      if kubectl get pod test-multi-replica-pod -n $NAMESPACE 2>/dev/null; then
         echo "⚠️ Pod still exists, waiting for deletion..."
         sleep 5
       else
