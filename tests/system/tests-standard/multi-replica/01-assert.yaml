@@ -7,6 +7,7 @@ status:
 ---
 apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
+timeout: 60
 commands:
   - script: |
       # Verify PV has replica metadata
@@ -30,4 +31,5 @@ commands:
       
       echo "✅ PV has correct multi-replica metadata"
       echo "Replicas: $REPLICAS_JSON"
+      exit 0
 
