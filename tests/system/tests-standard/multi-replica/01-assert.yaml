@@ -10,8 +10,22 @@ kind: TestAssert
 timeout: 60
 commands:
   - script: |
+      set -e  # Exit on any error
+      
+      # Wait for PVC to exist and be bound
+      echo "Waiting for PVC to be bound..."
+      kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-multi-replica-pvc --timeout=30s || {
+        echo "❌ PVC not bound within timeout"
+        kubectl get pvc test-multi-replica-pvc || echo "PVC does not exist"
+        exit 1
+      }
+      
       # Verify PV has replica metadata
       PV_NAME=$(kubectl get pvc test-multi-replica-pvc -o jsonpath='{.spec.volumeName}')
+      if [ -z "$PV_NAME" ]; then
+        echo "❌ No PV name found for PVC"
+        exit 1
+      fi
       echo "PV Name: $PV_NAME"
       
       # Check replica count
