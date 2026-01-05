@@ -84,7 +84,7 @@ impl MinimalDiskService {
             for (i, bdev) in bdev_list.iter().enumerate() {
                 // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
                 
-                if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers).await? {
+                if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers, &bdevs).await? {
                     // Note: Per-disk details not logged (verbose). Summary logged at end.
                     
                     // Filter out system disks and non-storage devices
@@ -1355,7 +1355,7 @@ impl MinimalDiskService {
     }
 
     /// Convert SPDK bdev JSON to our DiskInfo structure
-    async fn bdev_to_disk_info(&self, bdev: &Value, lvstores: &Value, _controllers: &Value) -> Result<Option<DiskInfo>, MinimalStateError> {
+    async fn bdev_to_disk_info(&self, bdev: &Value, lvstores: &Value, _controllers: &Value, all_bdevs: &Value) -> Result<Option<DiskInfo>, MinimalStateError> {
         // Note: Raw bdev JSON not logged (too verbose). Only log extracted values.
         
         let bdev_name = bdev["name"].as_str().unwrap_or("");
@@ -1392,7 +1392,7 @@ impl MinimalDiskService {
         let pci_address = self.extract_pci_from_bdev_name(bdev_name);
         
         // Find LVS information for this bdev
-        let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores);
+        let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores, all_bdevs);
         
         // Determine if this is a system disk:
         // Simple heuristic: If it has partitions, it's a system disk (formatted for OS use)
@@ -1495,28 +1495,30 @@ impl MinimalDiskService {
     }
 
     /// Find LVS information for a bdev - Enhanced with recovery logic
-    fn find_lvs_for_bdev(&self, bdev_name: &str, lvstores: &Value) -> (Option<String>, u64, u32) {
+    fn find_lvs_for_bdev(&self, bdev_name: &str, lvstores: &Value, all_bdevs: &Value) -> (Option<String>, u64, u32) {
         println!("🔍 [LVS_SEARCH] Looking for LVS on bdev: {}", bdev_name);
         // Note: Full lvstores response not logged (verbose). Count and matches logged below.
-        
+
         if let Some(lvs_list) = lvstores["result"].as_array() {
             println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());
-            
+
             for (i, lvs) in lvs_list.iter().enumerate() {
                 // Note: Raw LVS JSON not logged (verbose). Only checking base_bdev match.
-                
+
                 if let Some(base_bdev) = lvs["base_bdev"].as_str() {
                     // Note: Per-LVS comparison not logged (verbose). Only log if match found.
-                    
+
                     if base_bdev == bdev_name {
                         let lvs_name = lvs["name"].as_str().unwrap_or("").to_string();
                         let free_clusters = lvs["free_clusters"].as_u64().unwrap_or(0);
                         let cluster_size = lvs["cluster_size"].as_u64().unwrap_or(0);
                         let free_space = free_clusters * cluster_size;
-                        let lvol_count = 0; // TODO: Count lvols
-                        
-                        println!("✅ [LVS_RECOVERY] Found existing LVS '{}' on bdev '{}' (free: {}MB)", 
-                                 lvs_name, bdev_name, free_space / 1024 / 1024);
+
+                        // Count lvols belonging to this LVS
+                        let lvol_count = self.count_lvols_in_lvs(&lvs_name, all_bdevs);
+
+                        println!("✅ [LVS_RECOVERY] Found existing LVS '{}' on bdev '{}' (free: {}MB, lvols: {})",
+                                 lvs_name, bdev_name, free_space / 1024 / 1024, lvol_count);
                         return (Some(lvs_name), free_space, lvol_count);
                     }
                 } else {
@@ -1527,8 +1529,36 @@ impl MinimalDiskService {
         } else {
             // Note: No LVS stores in cluster - not logged (normal for fresh deployment)
         }
-        
+
         (None, 0, 0)
+    }
+
+    /// Count logical volumes in an LVS
+    fn count_lvols_in_lvs(&self, lvs_name: &str, all_bdevs: &Value) -> u32 {
+        let mut count = 0;
+
+        if let Some(bdev_list) = all_bdevs["result"].as_array() {
+            for bdev in bdev_list {
+                // Check if this is a logical volume
+                if let Some(product_name) = bdev["product_name"].as_str() {
+                    if product_name == "Logical Volume" {
+                        // Check if it belongs to our LVS
+                        if let Some(driver_specific) = bdev.get("driver_specific") {
+                            if let Some(lvol) = driver_specific.get("lvol") {
+                                if let Some(bdev_lvs_name) = lvol.get("lvol_store_name")
+                                    .and_then(|v| v.as_str()) {
+                                    if bdev_lvs_name == lvs_name {
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        count
     }
 }
 
