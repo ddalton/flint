@@ -148,6 +148,8 @@ spec:
               value: "{{ .Values.logging.level | default "info" }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
+            - name: BLOCK_DEVICE_BACKEND
+              value: "{{ .Values.blockDevice.backend | default "ublk" }}"
           securityContext:
             privileged: true
           ports:
@@ -232,6 +234,8 @@ spec:
               value: "{{ .Values.driver.useHostnameTopology }}"
             - name: FLINT_NAMESPACE
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
+            - name: BLOCK_DEVICE_BACKEND
+              value: "{{ .Values.blockDevice.backend | default "ublk" }}"
           securityContext:
             runAsUser: 65532
             runAsGroup: 0
@@ -266,6 +270,8 @@ spec:
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
+            - name: BLOCK_DEVICE_BACKEND
+              value: "{{ .Values.blockDevice.backend | default "ublk" }}"
           securityContext:
             privileged: true
           ports:
