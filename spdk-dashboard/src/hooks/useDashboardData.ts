@@ -573,7 +573,8 @@ const mockData: DashboardData = {
           status: "healthy"
         }
       ],
-      orphaned_spdk_volumes: []
+      orphaned_spdk_volumes: [],
+      device_type: "NVMe"
     },
     {
       id: "nvme1n1",
@@ -619,7 +620,8 @@ const mockData: DashboardData = {
           size_gb: 25.50,
           orphaned_since: "2025-06-01T10:00:00Z"
         }
-      ]
+      ],
+      device_type: "NVMe"
     },
     {
       id: "nvme2n1",
@@ -657,7 +659,8 @@ const mockData: DashboardData = {
           status: "rebuilding"
         }
       ],
-      orphaned_spdk_volumes: []
+      orphaned_spdk_volumes: [],
+      device_type: "NVMe"
     }
   ],
 
