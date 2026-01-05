@@ -65,10 +65,14 @@ fn test_secinfo_no_name_encoding() {
 }
 
 #[test]
-#[ignore] // TODO: Fix SEQUENCE response size calculation (pre-existing issue)
 fn test_secinfo_no_name_in_compound() {
     // Test SECINFO_NO_NAME as part of a COMPOUND response
     // This is typically: SEQUENCE + PUTROOTFH + SECINFO_NO_NAME
+    //
+    // Fixed: SEQUENCE response is 11 u32 (not 9), which includes:
+    // - opcode + status (2 u32)
+    // - sessionid (4 u32 = 16 bytes)
+    // - sequenceid, slotid, highest_slotid, target_highest_slotid, status_flags (5 u32)
     
     let mut encoder = XdrEncoder::new();
     
@@ -101,9 +105,13 @@ fn test_secinfo_no_name_in_compound() {
     
     // Decode to verify structure
     let mut decoder = XdrDecoder::new(encoded);
-    
-    // Skip COMPOUND header and SEQUENCE
-    for _ in 0..12 {
+
+    // Skip COMPOUND header (3 u32) and SEQUENCE (11 u32: opcode + status + sessionid[4] + 5 fields)
+    // COMPOUND header: status(4) + tag_len(4) + op_count(4) = 12 bytes = 3 u32
+    // SEQUENCE: opcode(4) + status(4) + sessionid(16) + sequenceid(4) + slotid(4) +
+    //           highest_slotid(4) + target_highest_slotid(4) + status_flags(4) = 44 bytes = 11 u32
+    // Total: 3 + 11 = 14 u32
+    for _ in 0..14 {
         decoder.decode_u32().expect("skip header + sequence");
     }
     

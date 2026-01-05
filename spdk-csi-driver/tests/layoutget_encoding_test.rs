@@ -136,22 +136,78 @@ fn test_layoutget_response_encoding() {
     println!("✅ All fields parsed correctly!");
 }
 
-/// Test that our actual dispatcher encoding is correct
+/// Test that our actual pnfs::protocol::encode_file_layout function produces correct output
 #[test]
-fn test_dispatcher_layoutget_encoding() {
-    // This test should import and call the actual encode_file_layout function
-    // from dispatcher.rs and verify it produces correct output
-    
-    // TODO: This requires making encode_file_layout public or testable
-    // For now, this test documents what we need to verify
-    
-    println!("This test should verify dispatcher.rs::encode_file_layout() output");
-    println!("Key checks:");
-    println!("1. Stateid is 16 bytes without length prefix");
-    println!("2. Layout count is u32");
-    println!("3. Offset/length/iomode/layout_type are correct");
-    println!("4. Layout content starts with 16-byte device ID");
-    println!("5. All XDR padding is correct");
+fn test_pnfs_encode_file_layout() {
+    use spdk_csi_driver::pnfs::protocol::encode_file_layout;
+
+    // Test encode_file_layout with known values
+    let device_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33,
+                     0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB];
+    let stripe_unit = 8388608u64;  // 8 MB
+    let first_stripe_index = 0u32;
+    let pattern_offset = 0u64;
+    let filehandles = vec![vec![0x01, 0x02, 0x03, 0x04]];
+
+    let encoded = encode_file_layout(
+        &device_id,
+        stripe_unit,
+        first_stripe_index,
+        pattern_offset,
+        &filehandles,
+    );
+
+    println!("✅ encode_file_layout produced {} bytes", encoded.len());
+    println!("Hex dump:");
+    for (i, chunk) in encoded.chunks(16).enumerate() {
+        println!("  [{:3}] {:02x?}", i * 16, chunk);
+    }
+
+    // Verify structure:
+    // 1. Device ID (16 bytes, no length prefix)
+    assert_eq!(&encoded[0..16], &device_id, "Device ID should match");
+
+    // 2. stripe_unit (8 bytes, u64)
+    let parsed_stripe_unit = u64::from_be_bytes([
+        encoded[16], encoded[17], encoded[18], encoded[19],
+        encoded[20], encoded[21], encoded[22], encoded[23],
+    ]);
+    assert_eq!(parsed_stripe_unit, stripe_unit, "Stripe unit should match");
+
+    // 3. first_stripe_index (4 bytes, u32)
+    let parsed_first_stripe = u32::from_be_bytes([
+        encoded[24], encoded[25], encoded[26], encoded[27],
+    ]);
+    assert_eq!(parsed_first_stripe, first_stripe_index, "First stripe index should match");
+
+    // 4. pattern_offset (8 bytes, u64)
+    let parsed_pattern_offset = u64::from_be_bytes([
+        encoded[28], encoded[29], encoded[30], encoded[31],
+        encoded[32], encoded[33], encoded[34], encoded[35],
+    ]);
+    assert_eq!(parsed_pattern_offset, pattern_offset, "Pattern offset should match");
+
+    // 5. filehandles array count (4 bytes, u32)
+    let fh_count = u32::from_be_bytes([
+        encoded[36], encoded[37], encoded[38], encoded[39],
+    ]);
+    assert_eq!(fh_count, 1, "Should have 1 filehandle");
+
+    // 6. First filehandle length (4 bytes, u32)
+    let fh_len = u32::from_be_bytes([
+        encoded[40], encoded[41], encoded[42], encoded[43],
+    ]);
+    assert_eq!(fh_len, 4, "Filehandle should be 4 bytes");
+
+    // 7. Filehandle data
+    assert_eq!(&encoded[44..48], &[0x01, 0x02, 0x03, 0x04], "Filehandle data should match");
+
+    // Total expected size:
+    // device_id(16) + stripe_unit(8) + first_stripe_index(4) + pattern_offset(8) +
+    // fh_count(4) + fh_len(4) + fh_data(4) = 48 bytes
+    assert_eq!(encoded.len(), 48, "Total encoded size should be 48 bytes");
+
+    println!("✅ All encode_file_layout fields verified correctly!");
 }
 
 /// Test device ID hashing produces consistent 16-byte IDs
