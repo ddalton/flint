@@ -3,12 +3,38 @@ kind: TestAssert
 timeout: 180
 commands:
   - script: |
+      set -e  # Exit on any error
+      
+      # Get the current namespace (kuttl sets this)
+      NAMESPACE=${NAMESPACE:-default}
+      echo "Using namespace: $NAMESPACE"
+      
+      # Wait for pod to exist first
+      echo "Waiting for pod to exist..."
+      for i in $(seq 1 20); do
+        if kubectl get pod test-multi-replica-pod -n $NAMESPACE >/dev/null 2>&1; then
+          echo "✅ Pod exists"
+          break
+        fi
+        if [ $i -eq 20 ]; then
+          echo "❌ Pod does not exist after 10 seconds"
+          kubectl get pods -n $NAMESPACE || echo "No pods in namespace"
+          exit 1
+        fi
+        sleep 0.5
+      done
+      
       # Wait for pod to complete
       echo "Waiting for pod to complete..."
-      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/test-multi-replica-pod --timeout=120s
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/test-multi-replica-pod -n $NAMESPACE --timeout=120s || {
+        echo "❌ Pod did not complete within timeout"
+        kubectl get pod test-multi-replica-pod -n $NAMESPACE
+        kubectl describe pod test-multi-replica-pod -n $NAMESPACE | tail -30
+        exit 1
+      }
       
       # Verify pod completed successfully
-      POD_STATUS=$(kubectl get pod test-multi-replica-pod -o jsonpath='{.status.phase}')
+      POD_STATUS=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.status.phase}')
       if [ "$POD_STATUS" = "Succeeded" ]; then
         echo "✅ Pod completed successfully"
       else
@@ -18,9 +44,9 @@ commands:
       
       # Check the logs to verify data was written
       echo "Checking pod logs..."
-      kubectl logs test-multi-replica-pod | tail -20
+      kubectl logs test-multi-replica-pod -n $NAMESPACE | tail -20
       
-      if kubectl logs test-multi-replica-pod | grep -q "Data written successfully"; then
+      if kubectl logs test-multi-replica-pod -n $NAMESPACE | grep -q "Data written successfully"; then
         echo "✅ Data written successfully to multi-replica volume"
       else
         echo "❌ Data write verification failed"
@@ -28,11 +54,11 @@ commands:
       fi
       
       # Get the node where pod ran
-      NODE=$(kubectl get pod test-multi-replica-pod -o jsonpath='{.spec.nodeName}')
+      NODE=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.spec.nodeName}')
       echo "✅ Pod ran on node: $NODE"
       
       # Verify volume has 2 replicas
-      PV_NAME=$(kubectl get pvc test-multi-replica-pvc -o jsonpath='{.spec.volumeName}')
+      PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
       REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}')
       if [ "$REPLICA_COUNT" = "2" ]; then
         echo "✅ Volume configured with 2 replicas"
