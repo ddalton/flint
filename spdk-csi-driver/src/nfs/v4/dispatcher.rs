@@ -222,6 +222,9 @@ impl CompoundDispatcher {
                 };
                 let res = self.session_handler.handle_sequence(op);
                 if res.status == Nfs4Status::Ok {
+                    // Store session_id in context for subsequent operations
+                    context.session_id = Some(res.sessionid);
+
                     OperationResult::Sequence(res.status, Some(SequenceResult {
                         sessionid: res.sessionid,
                         sequenceid: res.sequenceid,

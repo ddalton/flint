@@ -517,6 +517,9 @@ pub struct CompoundContext {
     pub current_fh: Option<Nfs4FileHandle>,
     pub saved_fh: Option<Nfs4FileHandle>,
     pub minor_version: u32,
+    /// Session ID (set by SEQUENCE operation)
+    /// Used to determine client_id for stateful operations
+    pub session_id: Option<SessionId>,
 }
 
 impl CompoundContext {
@@ -525,6 +528,7 @@ impl CompoundContext {
             current_fh: None,
             saved_fh: None,
             minor_version,
+            session_id: None,
         }
     }
 

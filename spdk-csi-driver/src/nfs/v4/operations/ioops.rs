@@ -89,8 +89,6 @@ pub enum OpenClaim {
 
     /// Open by filehandle (NFSv4.1)
     Fh,
-
-    // TODO: Add other claim types as needed
 }
 
 /// Share access bits
@@ -224,6 +222,22 @@ impl IoOperationHandler {
         }
     }
 
+    /// Get client ID from compound context
+    ///
+    /// Looks up the session (set by SEQUENCE) to determine the client ID.
+    /// Falls back to 1 for backward compatibility with tests that don't use SEQUENCE.
+    fn get_client_id_from_context(&self, ctx: &CompoundContext) -> u64 {
+        if let Some(session_id) = &ctx.session_id {
+            if let Some(session) = self.state_mgr.sessions.get_session(session_id) {
+                return session.client_id;
+            }
+            warn!("OPEN: Session {:?} not found in context, falling back to client_id=1", session_id);
+        } else {
+            debug!("OPEN: No session in context (likely test), using client_id=1");
+        }
+        1 // Fallback for tests
+    }
+
     /// Handle OPEN operation
     pub fn handle_open(
         &self,
@@ -297,9 +311,9 @@ impl IoOperationHandler {
                             info!("OPEN: Generated filehandle for new file");
                             // Update current filehandle to the newly created file
                             ctx.set_current_fh(new_fh.clone());
-                            
-                            // TODO: Determine client ID from context
-                            let client_id = 1;
+
+                            // Get client ID from session (set by SEQUENCE operation)
+                            let client_id = self.get_client_id_from_context(ctx);
 
                             // Allocate stateid for this open
                             let stateid = self.state_mgr.stateids.allocate(
@@ -320,7 +334,11 @@ impl IoOperationHandler {
                                 }),
                                 result_flags: 0,
                                 delegation: OpenDelegationType::None,
-                                attrset: vec![],  // TODO: Set based on createattrs
+                                attrset: match &op.openhow {
+                                    OpenHow::Create(attrs) => attrs.attrmask.clone(),
+                                    OpenHow::Exclusive4_1 { attrs, .. } => attrs.attrmask.clone(),
+                                    _ => vec![],
+                                },
                             };
                         }
                         Err(e) => {
@@ -358,9 +376,9 @@ impl IoOperationHandler {
 
         // OPEN without CREATE or CLAIM_FH - file must exist
         debug!("OPEN: Opening existing file (no create)");
-        
-        // TODO: Determine client ID from context
-        let client_id = 1;
+
+        // Get client ID from session (set by SEQUENCE operation)
+        let client_id = self.get_client_id_from_context(ctx);
 
         // If opening for WRITE, recall any read delegations
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
