@@ -31,8 +31,8 @@ pub struct ReplicaInfo {
 pub struct DiskInfo {
     pub node_name: String,
     pub pci_address: String,
-    pub device_name: String, // e.g. "nvme3n1"
-    pub bdev_name: String,   // e.g. "uring_nvme3n1"
+    pub device_name: String, // e.g. "nvme3n1", "sda"
+    pub bdev_name: String,   // e.g. "uring_nvme3n1", "uring_sda"
     pub size_bytes: u64,
     pub free_space: u64,
     pub model: String,
@@ -45,6 +45,7 @@ pub struct DiskInfo {
     pub is_system_disk: bool,
     pub mounted_partitions: Vec<String>,
     pub driver: String, // "kernel" (kernel-managed), "SPDK userspace" (SPDK-managed), or bdev type (e.g., "Logical Volume", "RAID Volume")
+    pub device_type: String, // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
 }
 
 /// Volume information aggregated from SPDK

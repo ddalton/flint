@@ -162,6 +162,7 @@ export interface Disk {
   provisioned_volumes: ProvisionedVolume[];
   // Orphaned SPDK volumes on this disk
   orphaned_spdk_volumes: OrphanedVolumeInfo[];
+  device_type: string; // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
 }
 
 export interface ProvisionedVolume {

@@ -244,6 +244,14 @@ blockDevice:
   # Backend type: "ublk" (default, high performance) or "nvmeof" (kernel NVMe-oF)
   backend: "nvmeof"
 
+  # Device discovery mode
+  # Controls which block devices are discovered and made available for storage
+  # Options:
+  #   "nvme"  - Only discover NVMe devices (default, existing behavior)
+  #   "all"   - Discover all block devices (NVMe + SCSI/SATA)
+  #   "scsi"  - Only discover SCSI/SATA devices (for testing)
+  discoveryMode: "nvme"
+
 # Node resources configuration (e.g., CPU core masks for SPDK target)
 nodeResources:
   spdkTarget:

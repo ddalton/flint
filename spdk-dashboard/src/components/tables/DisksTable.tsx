@@ -724,7 +724,20 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         {disk.node}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.model}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded ${
+                          disk.device_type === 'NVMe' ? 'bg-purple-100 text-purple-800' :
+                          disk.device_type === 'SCSI/SATA' ? 'bg-blue-100 text-blue-800' :
+                          disk.device_type === 'VirtIO' ? 'bg-green-100 text-green-800' :
+                          disk.device_type === 'IDE' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-gray-100 text-gray-800'
+                        }`}>
+                          {disk.device_type || 'Unknown'}
+                        </span>
+                        <span>{disk.model}</span>
+                      </div>
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{Math.round(disk.free_space / (1024**3))}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap">

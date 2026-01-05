@@ -6,8 +6,33 @@ use reqwest::Client as HttpClient;
 
 use crate::minimal_models::{DiskInfo, MinimalStateError};
 
+/// Device discovery strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryMode {
+    /// Only discover NVMe devices (default, existing behavior)
+    NvmeOnly,
+    /// Discover all block devices (NVMe + SCSI/SATA)
+    All,
+    /// Only discover SCSI/SATA devices (for testing)
+    ScsiOnly,
+}
+
+impl DiscoveryMode {
+    fn from_env() -> Self {
+        match std::env::var("DEVICE_DISCOVERY_MODE")
+            .unwrap_or_else(|_| "nvme".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "all" => DiscoveryMode::All,
+            "scsi" => DiscoveryMode::ScsiOnly,
+            _ => DiscoveryMode::NvmeOnly,  // Default to existing behavior
+        }
+    }
+}
+
 /// Pure SPDK disk discovery and management service
-/// FOR NODE AGENTS ONLY - Uses direct Unix socket communication with SPDK  
+/// FOR NODE AGENTS ONLY - Uses direct Unix socket communication with SPDK
 /// Replaces all Kubernetes CRD operations with direct SPDK queries
 #[derive(Clone)]
 pub struct MinimalDiskService {
@@ -244,16 +269,33 @@ impl MinimalDiskService {
 
     // === PRIVATE HELPER METHODS ===
 
-    /// Auto-recover SPDK state for physical NVMe devices
+    /// Auto-recover SPDK state for physical devices
     async fn auto_recover_spdk_state(&self) -> Result<(), MinimalStateError> {
-        println!("🔄 [AUTO_RECOVERY] Starting SPDK state recovery for node: {}", self.node_name);
+        let mode = DiscoveryMode::from_env();
+        println!("🔄 [AUTO_RECOVERY] Starting SPDK state recovery for node: {} (mode: {:?})", self.node_name, mode);
 
-        // Get all physical NVMe devices
-        let nvme_devices = self.discover_physical_nvme_devices().await?;
-        println!("🔄 [AUTO_RECOVERY] Found {} physical NVMe devices", nvme_devices.len());
+        // Discover devices based on mode
+        let devices = match mode {
+            DiscoveryMode::NvmeOnly => {
+                // Existing path - no changes
+                self.discover_physical_nvme_devices().await?
+            }
+            DiscoveryMode::All => {
+                // New unified discovery - with fallback to NVMe-only
+                self.discover_all_block_devices_safe().await?
+            }
+            DiscoveryMode::ScsiOnly => {
+                // For testing SCSI discovery
+                self.discover_scsi_devices().await?
+            }
+        };
 
-        for device in nvme_devices {
-            println!("🔄 [AUTO_RECOVERY] Processing device: {} ({})", device.device_name, device.pci_address);
+        println!("🔄 [AUTO_RECOVERY] Found {} physical devices", devices.len());
+
+        for device in devices {
+            println!("🔄 [AUTO_RECOVERY] Processing device: {} ({}, type: {})",
+                     device.device_name, device.pci_address,
+                     Self::get_device_type(&device.device_name));
             
             // Skip system disks
             if self.is_system_disk_physical(&device).await {
@@ -293,24 +335,24 @@ impl MinimalDiskService {
         use std::process::Command;
 
         println!("🔍 [PHYSICAL_DISCOVERY] Scanning for NVMe devices via lspci...");
-        
+
         let output = Command::new("lspci")
             .args(["-D", "-d", "::0108"]) // NVMe class code
             .output()
-            .map_err(|e| MinimalStateError::InternalError { 
-                message: format!("Failed to run lspci: {}", e) 
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to run lspci: {}", e)
             })?;
 
         let stdout = String::from_utf8(output.stdout)
-            .map_err(|e| MinimalStateError::InternalError { 
-                message: format!("Invalid lspci output: {}", e) 
+            .map_err(|e| MinimalStateError::InternalError {
+                message: format!("Invalid lspci output: {}", e)
             })?;
 
         let mut devices = Vec::new();
         for line in stdout.lines() {
             if let Some(pci_addr) = line.split_whitespace().next() {
                 println!("🔍 [PHYSICAL_DISCOVERY] Found NVMe device: {}", pci_addr);
-                
+
                 // Get device info
                 if let Ok(device_info) = self.get_physical_device_info(pci_addr).await {
                     devices.push(device_info);
@@ -320,6 +362,216 @@ impl MinimalDiskService {
 
         println!("✅ [PHYSICAL_DISCOVERY] Found {} NVMe devices", devices.len());
         Ok(devices)
+    }
+
+    /// Discover all block devices with fallback to NVMe-only on failure
+    async fn discover_all_block_devices_safe(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
+        println!("🔍 [UNIFIED_DISCOVERY] Attempting to discover all block devices...");
+
+        match self.discover_all_block_devices().await {
+            Ok(devices) => {
+                println!("✅ [UNIFIED_DISCOVERY] Successfully discovered {} devices", devices.len());
+                Ok(devices)
+            }
+            Err(e) => {
+                println!("⚠️ [UNIFIED_DISCOVERY] Failed: {}", e);
+                println!("🔄 [UNIFIED_DISCOVERY] Falling back to NVMe-only discovery");
+
+                // Fallback to existing NVMe-only path
+                self.discover_physical_nvme_devices().await
+            }
+        }
+    }
+
+    /// Discover all block devices (NVMe + SCSI/SATA) via /sys/block
+    async fn discover_all_block_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
+        use std::fs;
+
+        println!("🔍 [UNIFIED_DISCOVERY] Scanning /sys/block for all block devices...");
+
+        let mut devices = Vec::new();
+        let mut nvme_count = 0;
+        let mut scsi_count = 0;
+        let mut other_count = 0;
+
+        let sys_block = fs::read_dir("/sys/block").map_err(|e| {
+            MinimalStateError::InternalError {
+                message: format!("Failed to read /sys/block: {}", e)
+            }
+        })?;
+
+        for entry in sys_block {
+            let entry = entry.map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to read /sys/block entry: {}", e)
+            })?;
+
+            let device_name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip virtual/loopback/LVM devices
+            if device_name.starts_with("loop") ||
+               device_name.starts_with("ram") ||
+               device_name.starts_with("dm-") ||
+               device_name.starts_with("sr") {  // CD-ROM
+                continue;
+            }
+
+            // Categorize device type
+            let device_type = if device_name.starts_with("nvme") {
+                nvme_count += 1;
+                "NVMe"
+            } else if device_name.starts_with("sd") {
+                scsi_count += 1;
+                "SCSI/SATA"
+            } else if device_name.starts_with("vd") {
+                other_count += 1;
+                "VirtIO"
+            } else if device_name.starts_with("hd") {
+                other_count += 1;
+                "IDE"
+            } else {
+                println!("⏭️ [UNIFIED_DISCOVERY] Skipping unknown device type: {}", device_name);
+                continue;
+            };
+
+            println!("🔍 [UNIFIED_DISCOVERY] Found {} device: {}", device_type, device_name);
+
+            match self.get_block_device_info(&device_name).await {
+                Ok(device_info) => {
+                    println!("✅ [UNIFIED_DISCOVERY]   {} - {} ({} GB, driver: {})",
+                             device_name, device_info.model,
+                             device_info.size_bytes / (1024*1024*1024),
+                             device_info.driver);
+                    devices.push(device_info);
+                }
+                Err(e) => {
+                    println!("⚠️ [UNIFIED_DISCOVERY]   Failed to get info for {}: {}",
+                             device_name, e);
+                }
+            }
+        }
+
+        println!("✅ [UNIFIED_DISCOVERY] Summary: {} NVMe, {} SCSI/SATA, {} other = {} total",
+                 nvme_count, scsi_count, other_count, devices.len());
+
+        Ok(devices)
+    }
+
+    /// Discover SCSI/SATA devices only (for testing)
+    async fn discover_scsi_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
+        use std::fs;
+
+        println!("🔍 [SCSI_DISCOVERY] Scanning for SCSI/SATA devices...");
+
+        let mut devices = Vec::new();
+
+        let sys_block = fs::read_dir("/sys/block").map_err(|e| {
+            MinimalStateError::InternalError {
+                message: format!("Failed to read /sys/block: {}", e)
+            }
+        })?;
+
+        for entry in sys_block {
+            let entry = entry.map_err(|e| MinimalStateError::InternalError {
+                message: format!("Failed to read /sys/block entry: {}", e)
+            })?;
+            let device_name = entry.file_name().to_string_lossy().to_string();
+
+            // Only process SCSI devices (sd*)
+            if !device_name.starts_with("sd") {
+                continue;
+            }
+
+            println!("🔍 [SCSI_DISCOVERY] Found SCSI/SATA device: {}", device_name);
+
+            match self.get_block_device_info(&device_name).await {
+                Ok(device_info) => {
+                    println!("✅ [SCSI_DISCOVERY]   {} - {} ({} GB)",
+                             device_name, device_info.model,
+                             device_info.size_bytes / (1024*1024*1024));
+                    devices.push(device_info);
+                }
+                Err(e) => {
+                    println!("⚠️ [SCSI_DISCOVERY]   Failed to get info: {}", e);
+                }
+            }
+        }
+
+        println!("✅ [SCSI_DISCOVERY] Found {} SCSI/SATA devices", devices.len());
+        Ok(devices)
+    }
+
+    /// Get block device information from /sys/block
+    async fn get_block_device_info(&self, device_name: &str) -> Result<PhysicalDevice, MinimalStateError> {
+        use std::fs;
+
+        let sys_path = format!("/sys/block/{}", device_name);
+
+        // Get current driver (if available)
+        let driver = if let Ok(link) = fs::read_link(format!("{}/device/driver", sys_path)) {
+            link.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            "unknown".to_string()
+        };
+
+        // Get size from sysfs (in 512-byte sectors)
+        let size_bytes = match fs::read_to_string(format!("{}/size", sys_path)) {
+            Ok(size_str) => {
+                size_str.trim()
+                    .parse::<u64>()
+                    .map(|sectors| sectors * 512)
+                    .unwrap_or(0)
+            }
+            Err(_) => 0,
+        };
+
+        // Get model (if available)
+        let model = fs::read_to_string(format!("{}/device/model", sys_path))
+            .or_else(|_| {
+                // Fallback: try vendor + device
+                let vendor = fs::read_to_string(format!("{}/device/vendor", sys_path))
+                    .unwrap_or_else(|_| "Unknown".to_string());
+                Ok(format!("{} Device", vendor.trim()))
+            })
+            .unwrap_or_else(|_: std::io::Error| "Unknown Device".to_string())
+            .trim()
+            .to_string();
+
+        // Get PCI address (if PCI-attached)
+        let pci_address = if let Ok(link) = fs::read_link(format!("{}/device", sys_path)) {
+            link.to_string_lossy()
+                .split('/')
+                .find(|s| s.contains(':') && s.len() > 4)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "N/A".to_string())
+        } else {
+            "N/A".to_string()
+        };
+
+        Ok(PhysicalDevice {
+            pci_address,
+            device_name: device_name.to_string(),
+            driver,
+            size_bytes,
+            model,
+        })
+    }
+
+    /// Determine device type from device name
+    fn get_device_type(device_name: &str) -> String {
+        if device_name.starts_with("nvme") {
+            "NVMe".to_string()
+        } else if device_name.starts_with("sd") {
+            "SCSI/SATA".to_string()
+        } else if device_name.starts_with("vd") {
+            "VirtIO".to_string()
+        } else if device_name.starts_with("hd") {
+            "IDE".to_string()
+        } else {
+            "Unknown".to_string()
+        }
     }
 
     /// Get physical device information from system
@@ -1176,10 +1428,12 @@ impl MinimalDiskService {
             product_name.to_string()
         };
         
+        let device_type = Self::get_device_type(&device_name);
+
         Ok(Some(DiskInfo {
             node_name: self.node_name.clone(),
             pci_address,
-            device_name,
+            device_name: device_name.clone(),
             bdev_name: bdev_name.to_string(),
             size_bytes,
             // A disk is healthy if it's usable for storage
@@ -1197,6 +1451,7 @@ impl MinimalDiskService {
             is_system_disk,
             mounted_partitions,
             driver,
+            device_type,
         }))
     }
 

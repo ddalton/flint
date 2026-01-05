@@ -148,6 +148,8 @@ spec:
               value: "{{ .Values.logging.level | default "info" }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
+            - name: DEVICE_DISCOVERY_MODE
+              value: "{{ .Values.blockDevice.discoveryMode | default "nvme" }}"
           securityContext:
             privileged: true
           ports:

@@ -60,6 +60,7 @@ struct DashboardDisk {
     brought_online: String,
     provisioned_volumes: Vec<ProvisionedVolume>,
     orphaned_spdk_volumes: Vec<OrphanedVolumeInfo>,
+    device_type: String, // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -383,6 +384,7 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         brought_online: Utc::now().to_rfc3339(),
         provisioned_volumes: Vec::new(), // TODO: Get from volume discovery
         orphaned_spdk_volumes: Vec::new(), // Populated later
+        device_type: disk_info.device_type.clone(),
     }
 }
 

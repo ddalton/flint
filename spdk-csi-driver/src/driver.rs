@@ -1081,6 +1081,7 @@ impl SpdkCsiDriver {
                 is_system_disk: false, // Only initialized disks are returned, not system disks
                 mounted_partitions: Vec::new(), // Not relevant for SPDK-managed disks
                 driver: disk_json["driver"].as_str().unwrap_or("unknown").to_string(),
+                device_type: disk_json["device_type"].as_str().unwrap_or("Unknown").to_string(),
             };
             disks.push(disk);
         }
@@ -1122,6 +1123,7 @@ impl SpdkCsiDriver {
                 is_system_disk: false, // Will be determined by caller/frontend
                 mounted_partitions: Vec::new(),
                 driver: disk_json["driver"].as_str().unwrap_or("unknown").to_string(),
+                device_type: disk_json["device_type"].as_str().unwrap_or("Unknown").to_string(),
             };
             disks.push(disk);
         }
