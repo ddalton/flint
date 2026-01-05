@@ -33,10 +33,7 @@ pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod server_v4;    // NFSv4.2 TCP server
 pub mod v4;           // NFSv4.2 implementation (COMPLETE)
 
-// Note: tests.rs contains old NFSv3 tests that are outdated
-// TODO: Update or remove tests.rs
-// #[cfg(test)]
-// mod tests;
+// Note: Old NFSv3 tests.rs file has been removed as it was outdated
 
 // Re-exports for convenience
 pub use server_v4::{NfsServer, NfsConfig};

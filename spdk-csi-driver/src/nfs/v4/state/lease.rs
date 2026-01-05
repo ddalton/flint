@@ -168,6 +168,23 @@ impl LeaseManager {
         }
     }
 
+    /// Get list of expired client IDs
+    ///
+    /// LOCK-FREE: Read-only iteration over DashMap
+    pub fn get_expired_clients(&self) -> Vec<u64> {
+        self.leases
+            .iter()
+            .filter_map(|entry| {
+                let (client_id, lease) = entry.pair();
+                if lease.is_expired() {
+                    Some(*client_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Cleanup expired leases
     ///
     /// LOCK-FREE: Uses DashMap's retain with per-shard locking
