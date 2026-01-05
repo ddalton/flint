@@ -285,19 +285,28 @@ async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<Dashbo
     Ok(all_disks)
 }
 
-/// Fetch IOPS statistics for a bdev
-async fn fetch_bdev_iops(
+/// Block device statistics from SPDK iostat
+#[derive(Debug, Clone, Default)]
+struct BdevStats {
+    read_iops: u64,
+    write_iops: u64,
+    read_latency_us: u64,  // Average read latency in microseconds
+    write_latency_us: u64, // Average write latency in microseconds
+}
+
+/// Fetch IOPS and latency statistics for a bdev
+async fn fetch_bdev_stats(
     node_url: &str,
     bdev_name: &str,
     state: &AppState
-) -> (u64, u64) {
+) -> BdevStats {
     let client = match HttpClient::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build() {
         Ok(c) => c,
-        Err(_) => return (0, 0)
+        Err(_) => return BdevStats::default()
     };
-    
+
     let url = format!("{}/api/spdk/rpc", node_url);
     let payload = json!({
         "method": "bdev_get_iostat",
@@ -305,15 +314,15 @@ async fn fetch_bdev_iops(
             "name": bdev_name
         }
     });
-    
+
     let response = match client.post(&url).json(&payload).send().await {
         Ok(r) if r.status().is_success() => r,
-        _ => return (0, 0)
+        _ => return BdevStats::default()
     };
-    
+
     let data: serde_json::Value = match response.json().await {
         Ok(d) => d,
-        Err(_) => return (0, 0)
+        Err(_) => return BdevStats::default()
     };
     
     // Extract current stats
@@ -321,49 +330,78 @@ async fn fetch_bdev_iops(
         if let Some(bdev) = bdevs.first() {
             let num_read_ops = bdev["num_read_ops"].as_u64().unwrap_or(0);
             let num_write_ops = bdev["num_write_ops"].as_u64().unwrap_or(0);
-            
+            let read_latency_ticks = bdev["read_latency_ticks"].as_u64().unwrap_or(0);
+            let write_latency_ticks = bdev["write_latency_ticks"].as_u64().unwrap_or(0);
+            let tick_rate = bdev["tick_rate"].as_u64().unwrap_or(1); // Default to 1 to avoid division by zero
+
+            // Calculate average latency in microseconds
+            // Formula: (latency_ticks / num_ops) / tick_rate * 1,000,000
+            let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+                ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+            } else {
+                0
+            };
+
+            let write_latency_us = if num_write_ops > 0 && tick_rate > 0 {
+                ((write_latency_ticks as f64 / num_write_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+            } else {
+                0
+            };
+
             // Calculate IOPS by comparing with previous snapshot
             let mut history = state.iostat_history.write().await;
             let key = format!("{}_{}", node_url, bdev_name);
-            
+
             if let Some((prev_time, prev_data)) = history.get(&key) {
                 let time_diff = Utc::now().signed_duration_since(*prev_time).num_seconds() as f64;
-                
+
                 if time_diff > 0.0 {
                     let prev_read_ops = prev_data["num_read_ops"].as_u64().unwrap_or(0);
                     let prev_write_ops = prev_data["num_write_ops"].as_u64().unwrap_or(0);
-                    
+
                     let read_iops = ((num_read_ops - prev_read_ops) as f64 / time_diff) as u64;
                     let write_iops = ((num_write_ops - prev_write_ops) as f64 / time_diff) as u64;
-                    
+
                     // Update history
                     let current_data = json!({
                         "num_read_ops": num_read_ops,
                         "num_write_ops": num_write_ops
                     });
                     history.insert(key, (Utc::now(), current_data));
-                    
-                    return (read_iops, write_iops);
+
+                    return BdevStats {
+                        read_iops,
+                        write_iops,
+                        read_latency_us,
+                        write_latency_us,
+                    };
                 }
             }
-            
-            // First measurement - store and return 0
+
+            // First measurement - store and return stats with 0 IOPS but valid latency
             let current_data = json!({
                 "num_read_ops": num_read_ops,
                 "num_write_ops": num_write_ops
             });
             history.insert(key, (Utc::now(), current_data));
+
+            return BdevStats {
+                read_iops: 0,
+                write_iops: 0,
+                read_latency_us,
+                write_latency_us,
+            };
         }
     }
-    
-    (0, 0)
+
+    BdevStats::default()
 }
 
-/// Convert minimal DiskInfo to dashboard format (async to fetch IOPS)
+/// Convert minimal DiskInfo to dashboard format (async to fetch stats)
 async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, state: &AppState) -> DashboardDisk {
-    // Get IOPS for the base bdev
-    let (read_iops, write_iops) = fetch_bdev_iops(node_url, &disk_info.bdev_name, state).await;
-    
+    // Get IOPS and latency stats for the base bdev
+    let stats = fetch_bdev_stats(node_url, &disk_info.bdev_name, state).await;
+
     DashboardDisk {
         id: format!("{}_{}", disk_info.node_name, disk_info.pci_address.replace(":", "-")),
         node: disk_info.node_name.clone(),
@@ -377,10 +415,10 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         blobstore_initialized: disk_info.blobstore_initialized,
         lvol_count: disk_info.lvol_count,
         model: disk_info.model.clone(),
-        read_iops,
-        write_iops,
-        read_latency: 0,  // TODO: Calculate from latency_ticks
-        write_latency: 0, // TODO: Calculate from latency_ticks
+        read_iops: stats.read_iops,
+        write_iops: stats.write_iops,
+        read_latency: stats.read_latency_us,
+        write_latency: stats.write_latency_us,
         brought_online: Utc::now().to_rfc3339(),
         provisioned_volumes: Vec::new(), // TODO: Get from volume discovery
         orphaned_spdk_volumes: Vec::new(), // Populated later
@@ -1166,6 +1204,146 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
     
     println!("✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:{}", port);
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;
-    
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test basic latency calculation with valid values
+    #[test]
+    fn test_latency_calculation_basic() {
+        // Scenario: 1000 read ops with 10,000 ticks total latency
+        // tick_rate = 1,000,000,000 ticks/second (1 GHz)
+        // Expected: (10,000 / 1000) / 1,000,000,000 * 1,000,000 = 0.01 microseconds
+        let read_latency_ticks: u64 = 10_000;
+        let num_read_ops: u64 = 1_000;
+        let tick_rate: u64 = 1_000_000_000;
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        assert_eq!(read_latency_us, 0); // Rounds down to 0 due to very low latency
+    }
+
+    /// Test latency calculation with realistic NVMe values
+    #[test]
+    fn test_latency_calculation_realistic_nvme() {
+        // Scenario: NVMe with ~100 microsecond average latency
+        // 10,000 read ops, tick_rate = 2.4 GHz (common TSC frequency)
+        // 100 us = 100 * 2.4e9 / 1e6 = 240,000 ticks per operation
+        // Total ticks = 10,000 ops * 240,000 ticks/op = 2,400,000,000 ticks
+        let read_latency_ticks: u64 = 2_400_000_000;
+        let num_read_ops: u64 = 10_000;
+        let tick_rate: u64 = 2_400_000_000; // 2.4 GHz
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        // Expected: (2,400,000,000 / 10,000) / 2,400,000,000 * 1,000,000 = 100 microseconds
+        assert_eq!(read_latency_us, 100);
+    }
+
+    /// Test latency calculation with realistic HDD values
+    #[test]
+    fn test_latency_calculation_realistic_hdd() {
+        // Scenario: HDD with ~10 millisecond average latency
+        // 1,000 read ops, tick_rate = 2.4 GHz
+        // 10 ms = 10,000 us = 10,000 * 2.4e9 / 1e6 = 24,000,000 ticks per operation
+        // Total ticks = 1,000 ops * 24,000,000 ticks/op = 24,000,000,000 ticks
+        let read_latency_ticks: u64 = 24_000_000_000;
+        let num_read_ops: u64 = 1_000;
+        let tick_rate: u64 = 2_400_000_000; // 2.4 GHz
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        // Expected: (24,000,000,000 / 1,000) / 2,400,000,000 * 1,000,000 = 10,000 microseconds (10 ms)
+        assert_eq!(read_latency_us, 10_000);
+    }
+
+    /// Test latency calculation with zero operations (avoid division by zero)
+    #[test]
+    fn test_latency_calculation_zero_ops() {
+        let read_latency_ticks: u64 = 1_000_000;
+        let num_read_ops: u64 = 0;
+        let tick_rate: u64 = 1_000_000_000;
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        assert_eq!(read_latency_us, 0);
+    }
+
+    /// Test latency calculation with zero tick rate (avoid division by zero)
+    #[test]
+    fn test_latency_calculation_zero_tick_rate() {
+        let read_latency_ticks: u64 = 1_000_000;
+        let num_read_ops: u64 = 100;
+        let tick_rate: u64 = 0;
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        assert_eq!(read_latency_us, 0);
+    }
+
+    /// Test latency calculation with both zero (edge case)
+    #[test]
+    fn test_latency_calculation_both_zero() {
+        let read_latency_ticks: u64 = 0;
+        let num_read_ops: u64 = 0;
+        let tick_rate: u64 = 1_000_000_000;
+
+        let read_latency_us = if num_read_ops > 0 && tick_rate > 0 {
+            ((read_latency_ticks as f64 / num_read_ops as f64) / tick_rate as f64 * 1_000_000.0) as u64
+        } else {
+            0
+        };
+
+        assert_eq!(read_latency_us, 0);
+    }
+
+    /// Test BdevStats struct default values
+    #[test]
+    fn test_bdev_stats_default() {
+        let stats = BdevStats::default();
+        assert_eq!(stats.read_iops, 0);
+        assert_eq!(stats.write_iops, 0);
+        assert_eq!(stats.read_latency_us, 0);
+        assert_eq!(stats.write_latency_us, 0);
+    }
+
+    /// Test BdevStats struct creation with values
+    #[test]
+    fn test_bdev_stats_with_values() {
+        let stats = BdevStats {
+            read_iops: 1000,
+            write_iops: 500,
+            read_latency_us: 100,
+            write_latency_us: 150,
+        };
+
+        assert_eq!(stats.read_iops, 1000);
+        assert_eq!(stats.write_iops, 500);
+        assert_eq!(stats.read_latency_us, 100);
+        assert_eq!(stats.write_latency_us, 150);
+    }
 }
