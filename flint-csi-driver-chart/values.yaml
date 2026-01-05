@@ -238,3 +238,14 @@ nfs:
   
   # Image pull secrets for NFS server (if registry requires authentication)
   imagePullSecrets: []
+
+# Block device configuration
+blockDevice:
+  # Backend type: "ublk" (default, high performance) or "nvmeof" (kernel NVMe-oF)
+  backend: "nvmeof"
+
+# Node resources configuration (e.g., CPU core masks for SPDK target)
+nodeResources:
+  spdkTarget:
+    # CPU core mask for SPDK target (hex format, e.g., "0x2" for core 1)
+    cpuCore: ""
