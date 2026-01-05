@@ -2170,7 +2170,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Check if this is an NFS volume (RWX)
         let nfs_server_ip = req.publish_context.get("nfs.flint.io/server-ip");
         if let Some(server_ip) = nfs_server_ip {
-            println!("📡 [RWX] NFS volume detected - mounting NFS export");
+            // ═══════════════════════════════════════════════════════════════
+            // ENHANCED NFS MOUNT DEBUG LOGGING
+            // ═══════════════════════════════════════════════════════════════
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("🌐 [NFS_MOUNT] NFS Volume Detected - Starting Mount Operation");
+            eprintln!("   Volume ID: {}", volume_id);
+            eprintln!("   Target Path: {}", target_path);
+            eprintln!("   Server IP: {}", server_ip);
+            eprintln!("   Timestamp: {:?}", std::time::SystemTime::now());
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
             let export_path = req.publish_context
                 .get("nfs.flint.io/export-path")
@@ -2180,9 +2189,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 .map(|s| s.as_str())
                 .unwrap_or("2049");
             
-            println!("   Server: {}", server_ip);
-            println!("   Export: {}", export_path);
-            println!("   Port: {}", port);
+            eprintln!("📋 [NFS_MOUNT] Mount Parameters:");
+            eprintln!("   Server: {}", server_ip);
+            eprintln!("   Export: {}", export_path);
+            eprintln!("   Port: {}", port);
+            eprintln!("   Read-only: {}", readonly);
             
             // Mount NFS
             // Our NFS server exports at NFSv4 pseudo-root "/"
@@ -2196,37 +2207,82 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 "vers=4.2".to_string()
             };
             
-            // Mount NFS volume
-            println!("📡 [RWX] Mounting NFS volume");
-            println!("   Server:  {}", server_ip);
-            println!("   Source:  {}", nfs_source);
-            println!("   Target:  {}", target_path);
-            println!("   Options: {}", mount_opts);
+            // PRE-MOUNT CHECKS
+            eprintln!("🔍 [NFS_MOUNT] Pre-mount checks:");
+            let target_path_obj = std::path::Path::new(&target_path);
+            eprintln!("   Target directory exists: {}", target_path_obj.exists());
+            
+            // Check if already mounted
+            let mountpoint_check = std::process::Command::new("mountpoint")
+                .arg("-q")
+                .arg(&target_path)
+                .status();
+            let already_mounted = mountpoint_check.map(|s| s.success()).unwrap_or(false);
+            eprintln!("   Already mounted: {}", already_mounted);
+            
+            if already_mounted {
+                eprintln!("⚠️  [NFS_MOUNT] Target path is already mounted! Skipping mount.");
+                let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
+                return Ok(response);
+            }
             
             // Ensure target directory exists
+            eprintln!("📁 [NFS_MOUNT] Creating target directory if needed...");
             std::fs::create_dir_all(&target_path)
                 .map_err(|e| tonic::Status::internal(format!("Failed to create mount target: {}", e)))?;
+            eprintln!("   Directory ready: {}", target_path);
+            
+            // MOUNT EXECUTION WITH TIMING
+            let mount_start = std::time::Instant::now();
+            eprintln!("⚡ [NFS_MOUNT] Executing mount command:");
+            eprintln!("   Command: mount -t nfs -o {} {} {}", mount_opts, nfs_source, target_path);
+            eprintln!("   Start time: {:?}", std::time::SystemTime::now());
             
             // Execute mount command (nfs-common package provides mount.nfs4 helper)
             let mount_output = std::process::Command::new("mount")
                 .args(&["-t", "nfs", "-o", &mount_opts, &nfs_source, &target_path])
                 .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+                .map_err(|e| {
+                    eprintln!("❌ [NFS_MOUNT] Failed to execute mount command: {}", e);
+                    tonic::Status::internal(format!("Failed to execute mount: {}", e))
+                })?;
+            
+            let mount_duration = mount_start.elapsed();
+            eprintln!("⏱️  [NFS_MOUNT] Mount command completed in {:?}", mount_duration);
             
             if !mount_output.status.success() {
                 let stderr = String::from_utf8_lossy(&mount_output.stderr);
                 let stdout = String::from_utf8_lossy(&mount_output.stdout);
-                println!("❌ [RWX] NFS mount failed (exit code: {})", mount_output.status.code().unwrap_or(-1));
-                if !stderr.is_empty() {
-                    println!("   Error: {}", stderr.trim());
-                }
+                eprintln!("❌ [NFS_MOUNT] Mount FAILED after {:?}", mount_duration);
+                eprintln!("   Exit code: {}", mount_output.status.code().unwrap_or(-1));
                 if !stdout.is_empty() {
-                    println!("   Output: {}", stdout.trim());
+                    eprintln!("   STDOUT: {}", stdout.trim());
                 }
+                if !stderr.is_empty() {
+                    eprintln!("   STDERR: {}", stderr.trim());
+                }
+                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 return Err(tonic::Status::internal(format!("NFS mount failed: {}", stderr)));
             }
             
-            println!("✅ [RWX] NFS volume mounted successfully");
+            // POST-MOUNT VERIFICATION
+            eprintln!("🔍 [NFS_MOUNT] Post-mount verification:");
+            let verify_mounted = std::process::Command::new("mountpoint")
+                .arg("-q")
+                .arg(&target_path)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            eprintln!("   Mountpoint verified: {}", verify_mounted);
+            
+            if !verify_mounted {
+                eprintln!("⚠️  [NFS_MOUNT] WARNING: Mount command succeeded but mountpoint check failed!");
+            }
+            
+            eprintln!("✅ [NFS_MOUNT] Mount completed successfully in {:?}", mount_duration);
+            eprintln!("   Volume: {}", volume_id);
+            eprintln!("   Mounted at: {}", target_path);
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             
             let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
             return Ok(response);

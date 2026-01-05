@@ -102,6 +102,11 @@ impl NfsServer {
 
 /// Serve NFSv4.2 over TCP
 async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    
+    // Track active connections for debugging concurrent mount issues
+    static ACTIVE_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+    
     let listener = TcpListener::bind(addr).await?;
     info!("✅ NFSv4.2 TCP server listening on {}", addr);
     info!("");
@@ -112,7 +117,11 @@ async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager:
         let (stream, peer) = listener.accept().await?;
         
         connection_count += 1;
-        info!("📡 New TCP connection #{} from {}", connection_count, peer);
+        let active = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) + 1;
+        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        info!("📡 [NFS_SERVER] Connection #{} from {} (Active connections: {})", connection_count, peer, active);
+        info!("   Timestamp: {:?}", std::time::SystemTime::now());
+        info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         // Log TCP socket info
         if let Ok(addr) = stream.local_addr() {
@@ -123,11 +132,14 @@ async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager:
         let gss_manager = gss_manager.clone();
         let conn_id = connection_count;
         tokio::spawn(async move {
-            debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-            if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer).await {
-                warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
+            info!("🚀 [NFS_SERVER] Spawned handler task for connection #{} from {}", conn_id, peer);
+            if let Err(e) = handle_tcp_connection(stream, dispatcher, gss_manager, peer, conn_id).await {
+                warn!("❌ [NFS_SERVER] Connection #{} from {} error: {}", conn_id, peer, e);
+                let active = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst) - 1;
+                info!("   Active connections remaining: {}", active);
             } else {
-                info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
+                let active = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst) - 1;
+                info!("✓ [NFS_SERVER] Connection #{} from {} closed cleanly (Active: {})", conn_id, peer, active);
             }
         });
     }
@@ -138,13 +150,15 @@ async fn handle_tcp_connection(
     stream: TcpStream,
     dispatcher: Arc<CompoundDispatcher>,
     gss_manager: Arc<RpcSecGssManager>,
-    peer: std::net::SocketAddr
+    peer: std::net::SocketAddr,
+    conn_id: u64,
 ) -> std::io::Result<()> {
     use tokio::io::BufWriter;
     use tokio::time::Instant;
 
     let connect_time = Instant::now();
-    debug!("🔌 TCP connection handler started for {}", peer);
+    info!("🔌 [NFS_SERVER] Connection #{} handler started for {}", conn_id, peer);
+    info!("   Start time: {:?}", std::time::SystemTime::now());
 
     // Set TCP_NODELAY for low latency
     stream.set_nodelay(true)?;
@@ -160,26 +174,26 @@ async fn handle_tcp_connection(
     let mut rpc_count = 0;
 
     loop {
-        debug!("📥 Waiting for RPC message #{} from {}", rpc_count + 1, peer);
+        debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
         
         // Read RPC record marker (4 bytes)
         let mut marker_buf = [0u8; 4];
         match reader.read_exact(&mut marker_buf).await {
             Ok(_) => {
-                debug!("✅ Received RPC marker from {}: {:02x?}", peer, marker_buf);
+                debug!("✅ [NFS_SERVER] Connection #{}: Received RPC marker from {}: {:02x?}", conn_id, peer, marker_buf);
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // Connection closed gracefully
                 let duration = connect_time.elapsed();
-                info!("🔌 Connection from {} closed after {:?} ({} RPCs processed)", 
-                      peer, duration, rpc_count);
+                info!("🔌 [NFS_SERVER] Connection #{} from {} closed after {:?} ({} RPCs processed)", 
+                      conn_id, peer, duration, rpc_count);
                 if rpc_count == 0 {
-                    warn!("⚠️  Client {} connected but sent NO RPC messages!", peer);
+                    warn!("⚠️  [NFS_SERVER] Client {} connected (conn #{}) but sent NO RPC messages!", peer, conn_id);
                 }
                 return Ok(());
             }
             Err(e) => {
-                warn!("❌ Error reading RPC marker from {}: {}", peer, e);
+                warn!("❌ [NFS_SERVER] Connection #{}: Error reading RPC marker from {}: {}", conn_id, peer, e);
                 return Err(e);
             }
         }
@@ -217,10 +231,14 @@ async fn handle_tcp_connection(
 
         let request = buf.split().freeze();
 
-        // Process the RPC call
-        debug!(">>> Processing NFSv4 request from {}, length={} bytes", peer, length);
-        let reply = dispatch_nfsv4(request, dispatcher.clone(), gss_manager.clone()).await;
-        debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
+        // Process the RPC call with timing
+        let rpc_start = Instant::now();
+        debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes", 
+               conn_id, rpc_count + 1, peer, length);
+        let reply = dispatch_nfsv4(request, dispatcher.clone(), gss_manager.clone(), conn_id, rpc_count + 1).await;
+        let rpc_duration = rpc_start.elapsed();
+        info!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)", 
+              conn_id, rpc_count + 1, rpc_duration, reply.len());
         
         rpc_count += 1;
 
@@ -240,18 +258,18 @@ async fn handle_tcp_connection(
 }
 
 /// Dispatch an NFSv4 RPC call
-async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> Bytes {
-    debug!("🔍 Dispatching RPC: {} total bytes", request.len());
+async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>, conn_id: u64, rpc_num: u64) -> Bytes {
+    debug!("🔍 [NFS_SERVER] Connection #{}, RPC #{}: Dispatching RPC: {} total bytes", conn_id, rpc_num, request.len());
     debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
 
     // Parse RPC call message and extract procedure arguments
     let (call, args) = match CallMessage::decode_with_args(request.clone()) {
         Ok(result) => {
-            debug!("✅ RPC message parsed successfully");
+            debug!("✅ [NFS_SERVER] Connection #{}, RPC #{}: RPC message parsed successfully", conn_id, rpc_num);
             result
         }
         Err(e) => {
-            warn!("❌ Failed to parse RPC call: {}", e);
+            warn!("❌ [NFS_SERVER] Connection #{}, RPC #{}: Failed to parse RPC call: {}", conn_id, rpc_num, e);
             warn!("   Request was {} bytes: {:02x?}", request.len(),
                   &request[..std::cmp::min(128, request.len())]);
             return ReplyBuilder::garbage_args(0).into();
@@ -259,14 +277,14 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss
     };
 
     info!(
-        ">>> RPC CALL: xid={}, program={}, version={}, procedure={}",
-        call.xid, call.program, call.version, call.procedure
+        ">>> [NFS_RPC] Connection #{}, RPC #{}: xid={}, program={}, version={}, procedure={}",
+        conn_id, rpc_num, call.xid, call.program, call.version, call.procedure
     );
     debug!("   Cred: {:?}, Verf: {:?}", call.cred.flavor, call.verf.flavor);
 
     // Handle RPCSEC_GSS authentication
     if call.cred.flavor == AuthFlavor::RpcsecGss {
-        info!("🔐 RPCSEC_GSS authentication detected");
+        info!("🔐 [NFS_SERVER] Connection #{}, RPC #{}: RPCSEC_GSS authentication detected", conn_id, rpc_num);
         return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher).await;
     }
 
