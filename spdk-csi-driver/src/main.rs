@@ -464,10 +464,18 @@ impl MinimalControllerService {
             snapshot_id.to_string(),
         );
         
+        // Add NFS replica-nodes attribute (needed for ROX volumes from snapshots)
+        // Since snapshot clones are always single replica, this is just the node where the snapshot was cloned
+        volume_context.insert(
+            "nfs.flint.io/replica-nodes".to_string(),
+            node_name.clone(),
+        );
+        
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [SNAPSHOT_RESTORE] Volume context populated:");
         eprintln!("   filesystem-initialized: true");
         eprintln!("   source-snapshot: {}", snapshot_id);
+        eprintln!("   nfs.flint.io/replica-nodes: {}", node_name);
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         // Step 4: Return volume with content_source and metadata populated
@@ -613,10 +621,18 @@ impl MinimalControllerService {
         volume_context.insert("flint.csi.storage.io/filesystem-initialized".to_string(), "true".to_string());
         volume_context.insert("flint.csi.storage.io/source-volume".to_string(), source_volume_id.to_string());
         
+        // Add NFS replica-nodes attribute (needed for ROX volumes from PVC clones)
+        // Since PVC clones are always single replica, this is just the node where the clone was created
+        volume_context.insert(
+            "nfs.flint.io/replica-nodes".to_string(),
+            source_node.clone(),
+        );
+        
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [PVC_CLONE] Volume context populated:");
         eprintln!("   filesystem-initialized: true");
         eprintln!("   source-volume: {}", source_volume_id);
+        eprintln!("   nfs.flint.io/replica-nodes: {}", source_node);
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         // Step 5: Return volume with content_source and metadata
