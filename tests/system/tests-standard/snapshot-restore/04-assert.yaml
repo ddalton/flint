@@ -15,7 +15,13 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
 commands:
   - script: |
-      PHASE=$(kubectl get pod snapshot-verifier -o jsonpath='{.status.phase}')
+      set -e  # Exit on any error
+      
+      # Get the current namespace
+      NAMESPACE=${NAMESPACE:-default}
+      echo "Using namespace: $NAMESPACE"
+      
+      PHASE=$(kubectl get pod snapshot-verifier -n $NAMESPACE -o jsonpath='{.status.phase}')
       if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
         echo "❌ Pod in $PHASE state - failing test"
         exit 1

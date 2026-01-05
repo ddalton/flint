@@ -2,12 +2,18 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
 commands:
   - script: |
+      set -e  # Exit on any error
+      
+      # Get the current namespace
+      NAMESPACE=${NAMESPACE:-default}
+      echo "Using namespace: $NAMESPACE"
+      
       # Wait for pod to be deleted
       echo "Waiting for pod deletion..."
-      kubectl wait --for=delete pod/ephemeral-test-pod --timeout=60s || true
+      kubectl wait --for=delete pod/ephemeral-test-pod -n $NAMESPACE --timeout=60s || true
       
       # Verify pod is gone
-      if kubectl get pod ephemeral-test-pod &> /dev/null; then
+      if kubectl get pod ephemeral-test-pod -n $NAMESPACE &> /dev/null; then
         echo "❌ Pod still exists after deletion"
         exit 1
       else
@@ -42,12 +48,12 @@ commands:
       fi
       
       # Verify no orphaned PVCs
-      PVC_COUNT=$(kubectl get pvc --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+      PVC_COUNT=$(kubectl get pvc -n $NAMESPACE --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
       if [ "$PVC_COUNT" = "0" ]; then
         echo "✅ No orphaned PersistentVolumeClaims found (expected for ephemeral volumes)"
       else
         echo "⚠️ Found $PVC_COUNT PVC(s) with 'ephemeral-test-pod' in name"
-        kubectl get pvc | grep "ephemeral-test-pod" || true
+        kubectl get pvc -n $NAMESPACE | grep "ephemeral-test-pod" || true
       fi
       
       echo "==================================================================="
