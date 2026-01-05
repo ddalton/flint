@@ -5,13 +5,9 @@
 //! - Performance characteristics (especially zero-copy optimizations)
 //! - Concurrent operation safety
 //!
-//! NOTE: These tests use the old LocalFilesystem API which has been refactored.
-//! Tests are currently disabled pending update to new NFSv4.2 FileHandleManager API.
-//!
-//! TODO: Update tests to use:
-//! - src/nfs/v4/filehandle.rs (FileHandleManager)
-//! - src/nfs/server_v4.rs (NfsServer)
-//! - Direct filesystem operations via std::fs
+//! NOTE: Full conformance tests were disabled during NFSv3 → NFSv4.2 refactoring.
+//! The basic server initialization test below verifies NfsServer can be created.
+//! Additional conformance tests can be added as needed for specific NFSv4 operations.
 
 use spdk_csi_driver::nfs::{NfsConfig, NfsServer};
 use tempfile::TempDir;

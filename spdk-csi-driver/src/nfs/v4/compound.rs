@@ -1768,9 +1768,6 @@ mod tests {
     use bytes::{BytesMut, BufMut};
     use crate::nfs::v4::operations::Fattr4;
 
-    // TODO: These tests need to be updated for the current dispatcher architecture
-    // They reference methods that don't exist in the current implementation
-    
     #[test]
     fn test_getattr_response_encoding() {
         // This test verifies that GETATTR response is encoded correctly per RFC 5661
