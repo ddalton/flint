@@ -119,6 +119,7 @@ pub struct GssContext {
     pub service: GssService,
     pub sequence_window: u32,
     pub last_seq_num: u32,
+    pub seq_bitmap: u128,  // Bitmap for tracking seen sequence numbers in window
     pub kerberos_ctx: Option<KerberosContext>,  // Actual Kerberos context
 }
 
@@ -128,12 +129,13 @@ impl GssContext {
             handle,
             established: false,
             service,
-            sequence_window: 128,  // Default sequence window
+            sequence_window: 128,  // Default sequence window (must match bitmap size)
             last_seq_num: 0,
+            seq_bitmap: 0,  // Initialize empty bitmap
             kerberos_ctx: None,
         }
     }
-    
+
     pub fn with_kerberos(handle: Vec<u8>, service: GssService, krb_ctx: KerberosContext) -> Self {
         Self {
             handle,
@@ -141,21 +143,66 @@ impl GssContext {
             service,
             sequence_window: 128,
             last_seq_num: 0,
+            seq_bitmap: 0,  // Initialize empty bitmap
             kerberos_ctx: Some(krb_ctx),
         }
     }
 
     /// Verify sequence number to prevent replay attacks
+    ///
+    /// Uses a sliding window bitmap to track seen sequence numbers,
+    /// allowing out-of-order packet acceptance within the window.
+    ///
+    /// Algorithm:
+    /// 1. If seq_num > last_seq_num: Accept and advance window
+    /// 2. If seq_num is within window: Check bitmap for replay
+    /// 3. If seq_num is too old (outside window): Reject as replay
     pub fn verify_sequence(&mut self, seq_num: u32) -> bool {
-        // Simple check: sequence number must be greater than last seen
-        // TODO: Implement proper sequence window bitmap for out-of-order packets
+        // Case 1: New highest sequence number - advance the window
         if seq_num > self.last_seq_num {
+            let diff = seq_num - self.last_seq_num;
+
+            if diff < self.sequence_window {
+                // Shift bitmap left by diff positions, moving window forward
+                // Set bit for last_seq_num (mark it as seen before advancing)
+                self.seq_bitmap <<= diff;
+                self.seq_bitmap |= 1;  // Mark current position as seen
+            } else {
+                // Gap is larger than window, reset bitmap
+                self.seq_bitmap = 0;
+            }
+
             self.last_seq_num = seq_num;
-            true
-        } else {
-            warn!("Replay detected: seq_num {} <= last_seq_num {}", seq_num, self.last_seq_num);
-            false
+            debug!("Sequence number accepted (new highest): {}", seq_num);
+            return true;
         }
+
+        // Case 2: seq_num is within the window (out-of-order packet)
+        let diff = self.last_seq_num - seq_num;
+
+        if diff >= self.sequence_window {
+            // Too old - outside the window
+            warn!("Replay detected: seq_num {} is outside window (last: {}, window: {})",
+                  seq_num, self.last_seq_num, self.sequence_window);
+            return false;
+        }
+
+        // Check if this sequence number was already seen
+        let bit_position = diff;
+        let mask = 1u128 << bit_position;
+
+        if (self.seq_bitmap & mask) != 0 {
+            // Bit is set - this is a replay
+            warn!("Replay detected: seq_num {} already seen (last: {})",
+                  seq_num, self.last_seq_num);
+            return false;
+        }
+
+        // Mark this sequence number as seen
+        self.seq_bitmap |= mask;
+        debug!("Sequence number accepted (within window): {} (diff: {})",
+               seq_num, diff);
+        true
     }
 }
 
@@ -355,9 +402,83 @@ mod tests {
     async fn test_gss_context_sequence_verification() {
         let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
 
+        // Test basic sequence advancement
         assert!(ctx.verify_sequence(1));
+        assert_eq!(ctx.last_seq_num, 1);
+
         assert!(ctx.verify_sequence(2));
-        assert!(!ctx.verify_sequence(1));  // Replay
+        assert_eq!(ctx.last_seq_num, 2);
+
+        // Test replay detection (same number)
+        assert!(!ctx.verify_sequence(2));
+
+        // Test replay detection (old number)
+        assert!(!ctx.verify_sequence(1));
+
+        // Test forward jump
         assert!(ctx.verify_sequence(10));
+        assert_eq!(ctx.last_seq_num, 10);
+    }
+
+    #[tokio::test]
+    async fn test_gss_sequence_window_out_of_order() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+
+        // Accept sequence numbers: 10, 5, 8, 3
+        assert!(ctx.verify_sequence(10));  // New highest
+        assert_eq!(ctx.last_seq_num, 10);
+
+        // Out-of-order: 5 (within window, diff=5)
+        assert!(ctx.verify_sequence(5));
+        assert_eq!(ctx.last_seq_num, 10);  // Highest unchanged
+
+        // Out-of-order: 8 (within window, diff=2)
+        assert!(ctx.verify_sequence(8));
+
+        // Out-of-order: 3 (within window, diff=7)
+        assert!(ctx.verify_sequence(3));
+
+        // Replay: 5 again (should fail)
+        assert!(!ctx.verify_sequence(5));
+
+        // Replay: 8 again (should fail)
+        assert!(!ctx.verify_sequence(8));
+
+        // New highest: 15
+        assert!(ctx.verify_sequence(15));
+    }
+
+    #[tokio::test]
+    async fn test_gss_sequence_window_boundaries() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+
+        // Set up window at seq 150
+        assert!(ctx.verify_sequence(150));
+
+        // Test within window (150 - 127 = 23, just inside)
+        assert!(ctx.verify_sequence(23));
+
+        // Test outside window (150 - 128 = 22, outside for 128-bit window)
+        assert!(!ctx.verify_sequence(22));
+
+        // Test far outside window (ancient packet)
+        assert!(!ctx.verify_sequence(1));
+    }
+
+    #[tokio::test]
+    async fn test_gss_sequence_large_gap() {
+        let mut ctx = GssContext::new(vec![1, 2, 3, 4], GssService::None);
+
+        // Start at 100
+        assert!(ctx.verify_sequence(100));
+
+        // Large jump (> window size) should reset bitmap
+        assert!(ctx.verify_sequence(500));
+
+        // Old sequence from before gap (should fail)
+        assert!(!ctx.verify_sequence(100));
+
+        // Within new window should work
+        assert!(ctx.verify_sequence(490));
     }
 }

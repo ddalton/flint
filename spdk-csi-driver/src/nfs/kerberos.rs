@@ -1622,6 +1622,21 @@ fn parse_encryption_key(data: &[u8]) -> Result<SessionKey> {
 }
 
 /// Parse KerberosTime (GeneralizedTime)
+///
+/// Parses ASN.1 GeneralizedTime format: "YYYYMMDDHHMMSSz"
+/// where 'z' or 'Z' indicates UTC timezone.
+///
+/// # Format
+/// - YYYY: 4-digit year
+/// - MM: 2-digit month (01-12)
+/// - DD: 2-digit day (01-31)
+/// - HH: 2-digit hour (00-23)
+/// - MM: 2-digit minute (00-59)
+/// - SS: 2-digit second (00-60, 60 = leap second)
+/// - z/Z: UTC indicator
+///
+/// # Returns
+/// Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
 fn parse_kerberos_time(data: &[u8]) -> Result<i64> {
     // KerberosTime is GeneralizedTime: YYYYMMDDHHMMSSz
     let (tag, length, header_size) = parse_der_tag_length(data)?;
@@ -1630,14 +1645,130 @@ fn parse_kerberos_time(data: &[u8]) -> Result<i64> {
             format!("Expected GeneralizedTime tag 0x18, got 0x{:02x}", tag)
         ));
     }
-    
-    let time_str = String::from_utf8_lossy(&data[header_size..header_size + length]);
-    
-    // Parse "YYYYMMDDHHMMSSz" format
-    // For simplicity, just use current time (production would parse properly)
-    // TODO: Implement proper GeneralizedTime parsing
-    debug!("   Parsed KerberosTime: {}", time_str);
-    Ok(current_time())
+
+    let time_bytes = &data[header_size..header_size + length];
+    let time_str = std::str::from_utf8(time_bytes)
+        .map_err(|e| KerberosError::ParseError(
+            format!("Invalid UTF-8 in GeneralizedTime: {}", e)
+        ))?;
+
+    debug!("   Parsing KerberosTime: {}", time_str);
+
+    // Expected format: "YYYYMMDDHHMMSSz" (15 characters)
+    if time_str.len() < 15 {
+        return Err(KerberosError::ParseError(
+            format!("GeneralizedTime too short: {} (expected 15 chars)", time_str.len())
+        ));
+    }
+
+    // Parse components
+    let year = parse_digits(&time_str[0..4], "year")?;
+    let month = parse_digits(&time_str[4..6], "month")?;
+    let day = parse_digits(&time_str[6..8], "day")?;
+    let hour = parse_digits(&time_str[8..10], "hour")?;
+    let minute = parse_digits(&time_str[10..12], "minute")?;
+    let second = parse_digits(&time_str[12..14], "second")?;
+
+    // Verify UTC indicator
+    let tz_indicator = time_str.chars().nth(14).unwrap_or(' ');
+    if tz_indicator != 'Z' && tz_indicator != 'z' {
+        return Err(KerberosError::ParseError(
+            format!("Expected UTC indicator 'Z', got '{}'", tz_indicator)
+        ));
+    }
+
+    // Validate ranges
+    if month < 1 || month > 12 {
+        return Err(KerberosError::ParseError(
+            format!("Invalid month: {}", month)
+        ));
+    }
+    if day < 1 || day > 31 {
+        return Err(KerberosError::ParseError(
+            format!("Invalid day: {}", day)
+        ));
+    }
+    if hour > 23 {
+        return Err(KerberosError::ParseError(
+            format!("Invalid hour: {}", hour)
+        ));
+    }
+    if minute > 59 {
+        return Err(KerberosError::ParseError(
+            format!("Invalid minute: {}", minute)
+        ));
+    }
+    if second > 60 {  // 60 allowed for leap seconds
+        return Err(KerberosError::ParseError(
+            format!("Invalid second: {}", second)
+        ));
+    }
+
+    // Convert to Unix timestamp
+    // This is a simplified calculation - proper implementation would use
+    // a time library, but we avoid dependencies for this critical security code
+    let timestamp = calculate_unix_timestamp(year, month, day, hour, minute, second)?;
+
+    debug!("   Parsed timestamp: {} ({}-{:02}-{:02} {:02}:{:02}:{:02} UTC)",
+           timestamp, year, month, day, hour, minute, second);
+
+    Ok(timestamp)
+}
+
+/// Parse decimal digits from string
+fn parse_digits(s: &str, field_name: &str) -> Result<i32> {
+    s.parse::<i32>()
+        .map_err(|e| KerberosError::ParseError(
+            format!("Failed to parse {}: {} ('{}')", field_name, e, s)
+        ))
+}
+
+/// Calculate Unix timestamp from date/time components
+///
+/// Simplified calculation without external dependencies.
+/// Accurate for dates from 1970 onwards.
+fn calculate_unix_timestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) -> Result<i64> {
+    if year < 1970 {
+        return Err(KerberosError::ParseError(
+            format!("Year {} is before Unix epoch (1970)", year)
+        ));
+    }
+
+    // Days in each month (non-leap year)
+    const DAYS_IN_MONTH: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    // Calculate days since epoch
+    let mut days: i64 = 0;
+
+    // Add complete years
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+
+    // Add complete months in current year
+    for m in 1..month {
+        days += DAYS_IN_MONTH[(m - 1) as usize] as i64;
+        // Add leap day if February and leap year
+        if m == 2 && is_leap_year(year) {
+            days += 1;
+        }
+    }
+
+    // Add days in current month (subtract 1 because day 1 = 0 days elapsed)
+    days += (day - 1) as i64;
+
+    // Convert to seconds and add time components
+    let timestamp = days * 86400  // days to seconds
+        + (hour as i64) * 3600    // hours to seconds
+        + (minute as i64) * 60    // minutes to seconds
+        + second as i64;
+
+    Ok(timestamp)
+}
+
+/// Check if year is a leap year
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Encode ASN.1 INTEGER
@@ -2147,15 +2278,162 @@ mod tests {
     #[test]
     fn test_ap_rep_contains_krb5_oid() {
         let token = KerberosContext::generate_ap_rep_token().unwrap();
-        
+
         // Kerberos OID: 1.2.840.113554.1.2.2
         // In DER: 06 09 2a 86 48 86 f7 12 01 02 02
         let krb5_oid = vec![0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-        
+
         // Check if the OID appears in the token
         let token_str = format!("{:02x?}", token);
         assert!(token.windows(krb5_oid.len()).any(|window| window == krb5_oid.as_slice()),
                 "AP-REP should contain Kerberos OID");
+    }
+
+    #[test]
+    fn test_is_leap_year() {
+        // Regular leap years (divisible by 4)
+        assert!(is_leap_year(2020));
+        assert!(is_leap_year(2024));
+
+        // Not leap years
+        assert!(!is_leap_year(2021));
+        assert!(!is_leap_year(2022));
+        assert!(!is_leap_year(2023));
+
+        // Century years (divisible by 100 but not 400)
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2100));
+
+        // Century years (divisible by 400)
+        assert!(is_leap_year(2000));
+        assert!(is_leap_year(2400));
+    }
+
+    #[test]
+    fn test_calculate_unix_timestamp_epoch() {
+        // Unix epoch: 1970-01-01 00:00:00 UTC = 0
+        let ts = calculate_unix_timestamp(1970, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(ts, 0);
+    }
+
+    #[test]
+    fn test_calculate_unix_timestamp_known_dates() {
+        // 2000-01-01 00:00:00 UTC = 946684800
+        let ts = calculate_unix_timestamp(2000, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(ts, 946684800);
+
+        // 2020-01-01 12:00:00 UTC = 1577880000
+        let ts = calculate_unix_timestamp(2020, 1, 1, 12, 0, 0).unwrap();
+        assert_eq!(ts, 1577880000);
+
+        // 2024-12-31 23:59:59 UTC (leap year)
+        let ts = calculate_unix_timestamp(2024, 12, 31, 23, 59, 59).unwrap();
+        assert_eq!(ts, 1735689599);
+    }
+
+    #[test]
+    fn test_calculate_unix_timestamp_leap_year() {
+        // Feb 29, 2020 (leap year)
+        let ts_feb29 = calculate_unix_timestamp(2020, 2, 29, 0, 0, 0).unwrap();
+        let ts_mar01 = calculate_unix_timestamp(2020, 3, 1, 0, 0, 0).unwrap();
+
+        // Should be exactly 1 day apart
+        assert_eq!(ts_mar01 - ts_feb29, 86400);
+    }
+
+    #[test]
+    fn test_parse_digits() {
+        assert_eq!(parse_digits("2024", "year").unwrap(), 2024);
+        assert_eq!(parse_digits("12", "month").unwrap(), 12);
+        assert_eq!(parse_digits("01", "day").unwrap(), 1);
+        assert_eq!(parse_digits("00", "hour").unwrap(), 0);
+
+        // Invalid
+        assert!(parse_digits("abc", "test").is_err());
+        assert!(parse_digits("", "test").is_err());
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_valid() {
+        // Create a GeneralizedTime: "20240101120000Z" (2024-01-01 12:00:00 UTC)
+        let time_str = b"20240101120000Z";
+        let mut data = vec![0x18]; // GeneralizedTime tag
+        data.push(time_str.len() as u8); // Length
+        data.extend_from_slice(time_str);
+
+        let ts = parse_kerberos_time(&data).unwrap();
+
+        // Verify it's a reasonable timestamp (after 2024-01-01 00:00:00)
+        assert!(ts > 1704067200); // 2024-01-01 00:00:00 UTC
+        assert!(ts < 1704153600); // 2024-01-02 00:00:00 UTC
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_epoch() {
+        // Unix epoch: "19700101000000Z"
+        let time_str = b"19700101000000Z";
+        let mut data = vec![0x18]; // GeneralizedTime tag
+        data.push(time_str.len() as u8); // Length
+        data.extend_from_slice(time_str);
+
+        let ts = parse_kerberos_time(&data).unwrap();
+        assert_eq!(ts, 0);
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_year_2000() {
+        // "20000101000000Z" (Y2K)
+        let time_str = b"20000101000000Z";
+        let mut data = vec![0x18];
+        data.push(time_str.len() as u8);
+        data.extend_from_slice(time_str);
+
+        let ts = parse_kerberos_time(&data).unwrap();
+        assert_eq!(ts, 946684800);
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_invalid_tag() {
+        // Wrong tag (not 0x18)
+        let time_str = b"20240101120000Z";
+        let mut data = vec![0x17]; // Wrong tag
+        data.push(time_str.len() as u8);
+        data.extend_from_slice(time_str);
+
+        assert!(parse_kerberos_time(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_invalid_format() {
+        // Too short
+        let time_str = b"202401Z";
+        let mut data = vec![0x18];
+        data.push(time_str.len() as u8);
+        data.extend_from_slice(time_str);
+
+        assert!(parse_kerberos_time(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_invalid_month() {
+        // Month = 13 (invalid)
+        let time_str = b"20241301120000Z";
+        let mut data = vec![0x18];
+        data.push(time_str.len() as u8);
+        data.extend_from_slice(time_str);
+
+        assert!(parse_kerberos_time(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_kerberos_time_lowercase_z() {
+        // Lowercase 'z' should also work
+        let time_str = b"20240101120000z";
+        let mut data = vec![0x18];
+        data.push(time_str.len() as u8);
+        data.extend_from_slice(time_str);
+
+        assert!(parse_kerberos_time(&data).is_ok());
     }
     
     #[test]
