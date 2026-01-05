@@ -376,7 +376,13 @@ impl MinimalControllerService {
         snapshot_id: &str,
         size_bytes: u64,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
-        println!("🔄 [CONTROLLER] Creating volume {} from snapshot {}", volume_id, snapshot_id);
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("🔄 [SNAPSHOT_RESTORE] ⚠️  ENTRY POINT - Creating volume from snapshot");
+        eprintln!("   Volume ID: {}", volume_id);
+        eprintln!("   Snapshot ID: {}", snapshot_id);
+        eprintln!("   Size: {} bytes", size_bytes);
+        eprintln!("   This log proves the NEW CODE is running!");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         // Step 1: Find which node has the snapshot
         let nodes = self.driver.get_all_nodes().await
@@ -473,9 +479,14 @@ impl MinimalControllerService {
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [SNAPSHOT_RESTORE] Volume context populated:");
-        eprintln!("   filesystem-initialized: true");
-        eprintln!("   source-snapshot: {}", snapshot_id);
-        eprintln!("   nfs.flint.io/replica-nodes: {}", node_name);
+        eprintln!("   replica-count: {}", volume_context.get("flint.csi.storage.io/replica-count").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   node-name: {}", volume_context.get("flint.csi.storage.io/node-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvol-uuid: {}", volume_context.get("flint.csi.storage.io/lvol-uuid").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   source-snapshot: {}", volume_context.get("flint.csi.storage.io/source-snapshot").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   ⚠️  nfs.flint.io/replica-nodes: {}", volume_context.get("nfs.flint.io/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
+        eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         // Step 4: Return volume with content_source and metadata populated
@@ -508,7 +519,13 @@ impl MinimalControllerService {
         source_volume_id: &str,
         size_bytes: u64,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
-        println!("🔄 [CONTROLLER] Creating volume {} as clone of {}", volume_id, source_volume_id);
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("🔄 [PVC_CLONE] ⚠️  ENTRY POINT - Creating volume as PVC clone");
+        eprintln!("   New Volume ID: {}", volume_id);
+        eprintln!("   Source Volume ID: {}", source_volume_id);
+        eprintln!("   Size: {} bytes", size_bytes);
+        eprintln!("   This log proves the NEW CODE is running!");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         // Step 1: Get source volume metadata to find which node it's on
         // Query Kubernetes API for the source PV
@@ -630,9 +647,14 @@ impl MinimalControllerService {
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📝 [PVC_CLONE] Volume context populated:");
-        eprintln!("   filesystem-initialized: true");
-        eprintln!("   source-volume: {}", source_volume_id);
-        eprintln!("   nfs.flint.io/replica-nodes: {}", source_node);
+        eprintln!("   replica-count: {}", volume_context.get("flint.csi.storage.io/replica-count").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   node-name: {}", volume_context.get("flint.csi.storage.io/node-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvol-uuid: {}", volume_context.get("flint.csi.storage.io/lvol-uuid").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvs-name: {}", volume_context.get("flint.csi.storage.io/lvs-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   filesystem-initialized: {}", volume_context.get("flint.csi.storage.io/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   source-volume: {}", volume_context.get("flint.csi.storage.io/source-volume").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   ⚠️  nfs.flint.io/replica-nodes: {}", volume_context.get("nfs.flint.io/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
+        eprintln!("   Total attributes: {}", volume_context.len());
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         // Step 5: Return volume with content_source and metadata
