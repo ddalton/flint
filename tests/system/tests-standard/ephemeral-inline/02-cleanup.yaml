@@ -1,6 +1,10 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ephemeral-test-pod
-$patch: delete
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      set -e
+      NAMESPACE=${NAMESPACE:-default}
+      echo "Deleting ephemeral-test-pod in namespace: $NAMESPACE"
+      kubectl delete pod ephemeral-test-pod -n $NAMESPACE --ignore-not-found=true
+      echo "✅ Pod deletion initiated"
 
