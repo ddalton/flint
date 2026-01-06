@@ -2514,9 +2514,28 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         println!("🔍 [DEBUG] Target path: {}", target_path);
 
         // Check if target path exists BEFORE unmount
-        println!("🔍 [DEBUG] Step 1: Checking if target path exists...");
-        let path_exists_before = std::path::Path::new(&target_path).exists();
-        println!("🔍 [DEBUG] Target path exists before unmount: {}", path_exists_before);
+        // IMPORTANT: Use 'test -e' with timeout instead of Path::exists() because
+        // Path::exists() can hang indefinitely if the path is on a stale NFS mount
+        println!("🔍 [DEBUG] Step 1: Checking if target path exists (with timeout)...");
+        let path_check = std::process::Command::new("timeout")
+            .arg("3")  // 3 second timeout for existence check
+            .arg("test")
+            .arg("-e")
+            .arg(&target_path)
+            .status();
+        
+        let path_exists_before = match path_check {
+            Ok(status) => {
+                let exists = status.success();
+                println!("🔍 [DEBUG] Target path exists before unmount: {}", exists);
+                exists
+            }
+            Err(e) => {
+                println!("⚠️ [DEBUG] Path existence check failed or timed out: {}", e);
+                println!("⚠️ [DEBUG] Assuming path does not exist to continue safely");
+                false
+            }
+        };
         
         if path_exists_before {
             println!("🔍 [DEBUG] Step 2: Path exists, checking if mounted...");
