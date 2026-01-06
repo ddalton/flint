@@ -2619,9 +2619,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 println!("ℹ️ [NODE] Target path exists but is not mounted, skipping umount");
             }
             
-            // Check directory state before removal
+            // Check directory state before removal (with timeout)
             println!("🔍 [DEBUG] Step 4: Checking directory state before removal...");
-            let is_dir = std::path::Path::new(&target_path).is_dir();
+            let dir_check = std::process::Command::new("timeout")
+                .arg("3")
+                .arg("test")
+                .arg("-d")  // test if it's a directory
+                .arg(&target_path)
+                .status();
+            let is_dir = dir_check.map(|s| s.success()).unwrap_or(false);
             println!("🔍 [DEBUG] Target path is directory: {}", is_dir);
             
             // Try to remove the directory
@@ -2630,8 +2636,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 Ok(_) => {
                     println!("✅ [NODE] Target directory removed successfully");
                     
-                    // Verify removal
-                    let still_exists = std::path::Path::new(&target_path).exists();
+                    // Verify removal (with timeout)
+                    let verify_check = std::process::Command::new("timeout")
+                        .arg("3")
+                        .arg("test")
+                        .arg("-e")
+                        .arg(&target_path)
+                        .status();
+                    let still_exists = verify_check.map(|s| s.success()).unwrap_or(false);
                     if still_exists {
                         println!("⚠️ [NODE] WARNING: Directory still exists after removal!");
                     } else {
@@ -2646,17 +2658,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     println!("🔍 [DEBUG] Step 5b: Failed to remove directory");
                     println!("⚠️ [NODE] Failed to remove target directory: {}", e);
                     println!("🔍 [DEBUG] Error kind: {:?}", e.kind());
-                    // Check if directory still exists and what's in it
-                    if std::path::Path::new(&target_path).exists() {
-                        if let Ok(entries) = std::fs::read_dir(&target_path) {
-                            let count = entries.count();
-                            println!("🔍 [DEBUG] Directory still exists with {} entries", count);
-                            // If directory not empty, we can't remove it
-                            // This might be why kubelet retries!
-                            if count > 0 {
-                                println!("⚠️ [NODE] CRITICAL: Directory not empty! This may cause kubelet retries!");
-                            }
-                        }
+                    // Check if directory still exists and what's in it (with timeout)
+                    let exists_check = std::process::Command::new("timeout")
+                        .arg("3")
+                        .arg("test")
+                        .arg("-e")
+                        .arg(&target_path)
+                        .status();
+                    if exists_check.map(|s| s.success()).unwrap_or(false) {
+                        // Try to count entries, but don't block if it hangs
+                        // read_dir itself can hang on stale mounts, so just skip it
+                        println!("🔍 [DEBUG] Directory still exists (skipping entry count to avoid hanging)");
                     }
                 }
             }
@@ -2665,9 +2677,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("ℹ️ [NODE] Target path does not exist, nothing to clean up");
         }
         
-        // Final state check
+        // Final state check (with timeout to avoid hanging on stale mounts)
         println!("🔍 [DEBUG] Step 6: Final state check...");
-        let path_exists_after = std::path::Path::new(&target_path).exists();
+        let final_check = std::process::Command::new("timeout")
+            .arg("3")
+            .arg("test")
+            .arg("-e")
+            .arg(&target_path)
+            .status();
+        let path_exists_after = final_check.map(|s| s.success()).unwrap_or(false);
         println!("🔍 [DEBUG] Target path exists after cleanup: {}", path_exists_after);
 
         println!("🔍 [DEBUG] Step 7: Preparing success response...");
