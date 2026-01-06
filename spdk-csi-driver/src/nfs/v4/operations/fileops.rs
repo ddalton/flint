@@ -582,6 +582,7 @@ fn encode_attributes(
 fn encode_pseudo_root_attributes(
     requested_bitmap: &[u32],
     attrs: &crate::nfs::v4::pseudo::PseudoRootAttrs,
+    pnfs_enabled: bool,
 ) -> (Vec<u8>, Vec<u32>) {
     use std::collections::BTreeSet;
     use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
@@ -605,7 +606,7 @@ fn encode_pseudo_root_attributes(
     
     for attr_id in requested_attrs {
         let before_len = attr_vals.len();
-        if encode_pseudo_root_attribute(attr_id, attrs, &mut attr_vals) {
+        if encode_pseudo_root_attribute(attr_id, attrs, &mut attr_vals, pnfs_enabled) {
             let after_len = attr_vals.len();
             let bytes_added = after_len - before_len;
             debug!("  Encoded pseudo-root attr {}: {} bytes", attr_id, bytes_added);
@@ -637,7 +638,7 @@ fn encode_pseudo_root_attributes(
 /// This is critical - returning unrequested attributes causes XDR decode errors!
 ///
 /// Uses the snapshot-based approach for consistency with GETATTR.
-fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u8>, Vec<u32>) {
+fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enabled: bool) -> (Vec<u8>, Vec<u32>) {
     use std::hash::{Hash, Hasher};
     
     // Generate a unique FILEID for this export based on name hash
@@ -670,9 +671,9 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u
         group: 0, // root (will be translated to "root" by gid_to_groupname)
         path: PathBuf::from(format!("/{}", name)),
     };
-    
+
     // Use the standard snapshot encoder for consistency
-    encode_attributes_from_snapshot(requested_attrs, &snapshot)
+    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled)
 }
 
 /// Encode attributes from a snapshot (NO VFS I/O)
@@ -684,6 +685,7 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32]) -> (Vec<u
 fn encode_attributes_from_snapshot(
     requested_bitmap: &[u32],
     snapshot: &AttributeSnapshot,
+    pnfs_enabled: bool,
 ) -> (Vec<u8>, Vec<u32>) {
     use std::collections::BTreeSet;
     
@@ -822,23 +824,32 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_SUPPORTED_ATTRS => {
                 // RFC 8881 Section 3.3.1 - bitmap4 variable-length array
-                // pNFS attributes: 62 (FS_LAYOUT_TYPES) in word 1, 65 (LAYOUT_BLKSIZE) in word 2
                 let supported = SUPPORTED_ATTRS_BITMAP;
                 let word0 = (supported & 0xFFFFFFFF) as u32;
                 let mut word1 = (supported >> 32) as u32;
                 let mut word2 = 0u32;
-                
-                // Add pNFS attributes (Linux kernel numbering)
-                word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
-                word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
-                
-                // Encode as bitmap4 (3 words)
-                attr_vals.put_u32(3); // array length
-                attr_vals.put_u32(word0);  // word 0
-                attr_vals.put_u32(word1);  // word 1 (includes attr 62)
-                attr_vals.put_u32(word2);  // word 2 (includes attr 65)
-                debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-                debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
+
+                // Only advertise pNFS attributes if pNFS is enabled
+                if pnfs_enabled {
+                    // pNFS attributes (Linux kernel numbering)
+                    word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
+                    word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
+                }
+
+                // Encode as bitmap4 (3 words if pNFS enabled, 2 words otherwise)
+                if pnfs_enabled {
+                    attr_vals.put_u32(3); // array length
+                    attr_vals.put_u32(word0);  // word 0
+                    attr_vals.put_u32(word1);  // word 1 (may include attr 62)
+                    attr_vals.put_u32(word2);  // word 2 (may include attr 65)
+                    debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pNFS enabled)", word0, word1, word2);
+                    debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
+                } else {
+                    attr_vals.put_u32(2); // array length (no word2 needed)
+                    attr_vals.put_u32(word0);  // word 0
+                    attr_vals.put_u32(word1);  // word 1
+                    debug!("  SUPPORTED_ATTRS: 2 words [0x{:08x}, 0x{:08x}] (pNFS disabled)", word0, word1);
+                }
                 true
             }
             FATTR4_MAXREAD => {
@@ -907,15 +918,21 @@ fn encode_attributes_from_snapshot(
             }
             FATTR4_FS_LAYOUT_TYPES => {
                 // RFC 8881 Section 5.12 - Array of supported pNFS layout types
-                // RFC 8435 - Flexible File Layout
-                // Attribute 62 (Linux kernel numbering)
-                debug!("  Attr {}: FS_LAYOUT_TYPES (attr 62)", attr_id);
-                attr_vals.put_u32(3); // Array length: 3 layout types
-                attr_vals.put_u32(1); // LAYOUT4_NFSV4_1_FILES
-                attr_vals.put_u32(2); // LAYOUT4_BLOCK_VOLUME
-                attr_vals.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
-                debug!("    → pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
-                true
+                // Only advertise if pNFS is enabled
+                if pnfs_enabled {
+                    // RFC 8435 - Flexible File Layout
+                    // Attribute 62 (Linux kernel numbering)
+                    debug!("  Attr {}: FS_LAYOUT_TYPES (attr 62)", attr_id);
+                    attr_vals.put_u32(3); // Array length: 3 layout types
+                    attr_vals.put_u32(1); // LAYOUT4_NFSV4_1_FILES
+                    attr_vals.put_u32(2); // LAYOUT4_BLOCK_VOLUME
+                    attr_vals.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
+                    debug!("    → pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
+                    true
+                } else {
+                    debug!("  Attr {}: FS_LAYOUT_TYPES - skipped (pNFS disabled)", attr_id);
+                    false
+                }
             }
             FATTR4_LAYOUT_BLKSIZE => {
                 // RFC 8881 Section 5.12 - Preferred layout block size (stripe size)
@@ -970,6 +987,7 @@ fn encode_pseudo_root_attribute(
     attr_id: u32,
     attrs: &crate::nfs::v4::pseudo::PseudoRootAttrs,
     buf: &mut BytesMut,
+    pnfs_enabled: bool,
 ) -> bool {
     use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
     
@@ -1046,43 +1064,64 @@ fn encode_pseudo_root_attribute(
         }
         FATTR4_SUPPORTED_ATTRS => {
             // RFC 8881 Section 3.3.1 - bitmap4 is variable-length array of u32
-            // pNFS attributes: 62 (FS_LAYOUT_TYPES) in word 1, 65 (LAYOUT_BLKSIZE) in word 2
             let supported = SUPPORTED_ATTRS_BITMAP;
             let word0 = (supported & 0xFFFFFFFF) as u32;
             let mut word1 = (supported >> 32) as u32;
             let mut word2 = 0u32;
-            
-            // Add pNFS attributes (Linux kernel numbering)
-            word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
-            word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
-            
-            // Encode as bitmap4 (3 words)
-            buf.put_u32(3); // array length: 3 words
-            buf.put_u32(word0);   // word 0 (attrs 0-31)
-            buf.put_u32(word1);   // word 1 (attrs 32-63, includes attr 62)
-            buf.put_u32(word2);   // word 2 (attrs 64-95, includes attr 65)
-            debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-            debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
+
+            // Only advertise pNFS attributes if pNFS is enabled
+            if pnfs_enabled {
+                // pNFS attributes (Linux kernel numbering)
+                word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
+                word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
+            }
+
+            // Encode as bitmap4 (3 words if pNFS enabled, 2 words otherwise)
+            if pnfs_enabled {
+                buf.put_u32(3); // array length: 3 words
+                buf.put_u32(word0);   // word 0 (attrs 0-31)
+                buf.put_u32(word1);   // word 1 (attrs 32-63, may include attr 62)
+                buf.put_u32(word2);   // word 2 (attrs 64-95, may include attr 65)
+                debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pNFS enabled)", word0, word1, word2);
+                debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
+            } else {
+                buf.put_u32(2); // array length: 2 words (no word2 needed)
+                buf.put_u32(word0);   // word 0 (attrs 0-31)
+                buf.put_u32(word1);   // word 1 (attrs 32-63)
+                debug!("  SUPPORTED_ATTRS (pseudo-root): 2 words [0x{:08x}, 0x{:08x}] (pNFS disabled)", word0, word1);
+            }
             true
         }
         FATTR4_FS_LAYOUT_TYPES => {
             // RFC 8881 Section 5.12 + RFC 8435 - Array of supported layout types
-            // Attribute 62 (Linux kernel numbering)
-            debug!("  Encoding FS_LAYOUT_TYPES (attr 62) for pNFS pseudo-root");
-            buf.put_u32(3); // Array length: 3 layout types
-            buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
-            buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
-            buf.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
-            debug!("    → Advertised pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
-            true
+            // Only advertise if pNFS is enabled
+            if pnfs_enabled {
+                // Attribute 62 (Linux kernel numbering)
+                debug!("  Encoding FS_LAYOUT_TYPES (attr 62) for pNFS pseudo-root");
+                buf.put_u32(3); // Array length: 3 layout types
+                buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
+                buf.put_u32(2); // LAYOUT4_BLOCK_VOLUME
+                buf.put_u32(4); // LAYOUT4_FLEX_FILES (RFC 8435)
+                debug!("    → Advertised pNFS layout types: FILES(1), BLOCK(2), FLEX_FILES(4)");
+                true
+            } else {
+                debug!("  FS_LAYOUT_TYPES (attr 62) - skipped (pNFS disabled)");
+                false
+            }
         }
         FATTR4_LAYOUT_BLKSIZE => {
             // RFC 8881 Section 5.12 - Preferred layout block size
-            // Attribute 65 (Linux kernel numbering)
-            debug!("  Encoding LAYOUT_BLKSIZE (attr 65) for pNFS pseudo-root");
-            buf.put_u32(4194304); // 4 MB stripe size
-            debug!("    → Layout block size: 4194304 bytes (4 MB)");
-            true
+            // Only advertise if pNFS is enabled
+            if pnfs_enabled {
+                // Attribute 65 (Linux kernel numbering)
+                debug!("  Encoding LAYOUT_BLKSIZE (attr 65) for pNFS pseudo-root");
+                buf.put_u32(4194304); // 4 MB stripe size
+                debug!("    → Layout block size: 4194304 bytes (4 MB)");
+                true
+            } else {
+                debug!("  LAYOUT_BLKSIZE (attr 65) - skipped (pNFS disabled)");
+                false
+            }
         }
         _ => {
             // Attribute not supported for pseudo-root
@@ -1519,12 +1558,14 @@ fn encode_single_attribute(
 /// File operation handler
 pub struct FileOperationHandler {
     fh_mgr: Arc<FileHandleManager>,
+    /// Whether pNFS support is enabled (affects advertised attributes)
+    pnfs_enabled: bool,
 }
 
 impl FileOperationHandler {
     /// Create a new file operation handler
-    pub fn new(fh_mgr: Arc<FileHandleManager>) -> Self {
-        Self { fh_mgr }
+    pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
+        Self { fh_mgr, pnfs_enabled }
     }
 
     /// Handle PUTROOTFH operation
@@ -2117,6 +2158,7 @@ impl FileOperationHandler {
         let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
             &op.attr_request,
             &snapshot,
+            self.pnfs_enabled,
         );
         
         let fattr = Fattr4 {
@@ -2282,7 +2324,7 @@ impl FileOperationHandler {
                 
                 // Create attributes for export entry based on what client requested
                 debug!("   Encoding entry '{}': client requested bitmap={:?}", name, op.attr_request);
-                let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request);
+                let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request, self.pnfs_enabled);
                 info!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
                 
                 // Decode bitmap to show which attributes (debug only)
@@ -2485,7 +2527,7 @@ impl FileOperationHandler {
             let cookie = (idx + 1) as u64;
 
             // Encode attributes based on client's request
-            let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(&op.attr_request, snapshot);
+            let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(&op.attr_request, snapshot, self.pnfs_enabled);
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
                    file_name, attr_vals.len(), supported_bitmap);
@@ -3077,6 +3119,7 @@ impl FileOperationHandler {
         let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
             &op.attr_request,
             &snapshot,
+            self.pnfs_enabled,
         );
         
         let fattr = Fattr4 {
@@ -3102,7 +3145,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let handler = FileOperationHandler::new(fh_mgr);
+        let handler = FileOperationHandler::new(fh_mgr, false); // false = standalone mode (no pNFS)
         (handler, temp_dir)
     }
 
