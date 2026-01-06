@@ -2524,21 +2524,34 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             .arg(&target_path)
             .status();
         
-        let path_exists_before = match path_check {
+        let path_check_result = match path_check {
             Ok(status) => {
                 let exists = status.success();
-                println!("🔍 [DEBUG] Target path exists before unmount: {}", exists);
-                exists
+                println!("🔍 [DEBUG] Path check completed: exists={}", exists);
+                if exists {
+                    "exists"
+                } else {
+                    "not_found"
+                }
             }
             Err(e) => {
                 println!("⚠️ [DEBUG] Path existence check failed or timed out: {}", e);
-                println!("⚠️ [DEBUG] Assuming path does not exist to continue safely");
-                false
+                println!("⚠️ [DEBUG] This likely means a stale mount - will try cleanup anyway");
+                "timeout_or_error"
             }
         };
         
-        if path_exists_before {
-            println!("🔍 [DEBUG] Step 2: Path exists, checking if mounted...");
+        // IMPORTANT: If path check timed out, that's a strong signal of a stale mount!
+        // We should try to clean it up, not skip cleanup.
+        let should_try_cleanup = match path_check_result {
+            "exists" => true,
+            "timeout_or_error" => true,  // Timeout = likely stale mount = try cleanup!
+            "not_found" => false,
+            _ => false,
+        };
+        
+        if should_try_cleanup {
+            println!("🔍 [DEBUG] Step 2: Attempting cleanup (path check result: {})...", path_check_result);
             // Check if it's actually mounted (with timeout to prevent hanging on stale mounts)
             println!("🔍 [DEBUG] Step 2a: Executing 'timeout 5 mountpoint -q {}' command...", target_path);
             let mount_check = match std::process::Command::new("timeout")
@@ -2673,7 +2686,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
         } else {
-            println!("🔍 [DEBUG] Step 2: Path does NOT exist, nothing to clean up");
+            println!("🔍 [DEBUG] Step 2: Path confirmed not found, skipping cleanup");
             println!("ℹ️ [NODE] Target path does not exist, nothing to clean up");
         }
         
