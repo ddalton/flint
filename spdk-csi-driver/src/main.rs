@@ -2547,52 +2547,53 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 println!("🔧 [NODE] Unmounting target path: {}", target_path);
                 println!("🔍 [DEBUG] Step 3a: Executing 'timeout 10 umount -f -l {}' command (force + lazy)...", target_path);
                 
-                let umount_output = match std::process::Command::new("timeout")
+                let umount_result = std::process::Command::new("timeout")
                     .arg("10")  // 10 second timeout
                     .arg("umount")
                     .arg("-f")  // force unmount
                     .arg("-l")  // lazy unmount (detach immediately, cleanup later)
                     .arg(&target_path)
-                    .output()
-                {
+                    .output();
+                
+                let umount_output = match umount_result {
                     Ok(output) => {
                         println!("🔍 [DEBUG] Step 3b: umount command completed");
-                        output
+                        Some(output)
                     }
                     Err(e) => {
                         println!("⚠️ [DEBUG] Step 3b: umount command execution failed: {}", e);
-                        println!("⚠️ [DEBUG] This is not fatal - will continue with cleanup");
-                        // Continue with cleanup - don't fail the entire operation
-                        std::process::Output {
-                            status: std::process::ExitStatus::from_raw(1),  // Non-zero exit
-                            stdout: Vec::new(),
-                            stderr: format!("Command failed: {}", e).into_bytes(),
-                        }
+                        println!("⚠️ [DEBUG] This is not fatal - will skip unmount check and continue with cleanup");
+                        // Can't create ExitStatus portably, so just skip the status check
+                        None
                     }
                 };
                 
                 println!("🔍 [DEBUG] Step 3c: Checking umount exit status...");
-                if !umount_output.status.success() {
-                    let error = String::from_utf8_lossy(&umount_output.stderr);
-                    let stdout = String::from_utf8_lossy(&umount_output.stdout);
-                    println!("⚠️ [NODE] Unmount failed - stderr: {}", error);
-                    println!("⚠️ [NODE] Unmount failed - stdout: {}", stdout);
-                    println!("⚠️ [NODE] Unmount exit code: {:?}", umount_output.status.code());
-                    // Continue anyway - best effort cleanup
-                } else {
-                    println!("✅ [NODE] Target path unmounted successfully");
-                    
-                    // Verify it's actually unmounted
-                    let verify_mount = std::process::Command::new("mountpoint")
-                        .arg("-q")
-                        .arg(&target_path)
-                        .status();
-                    let still_mounted = verify_mount.map(|s| s.success()).unwrap_or(false);
-                    if still_mounted {
-                        println!("⚠️ [NODE] WARNING: Path still shows as mounted after umount!");
+                if let Some(output) = umount_output {
+                    if !output.status.success() {
+                        let error = String::from_utf8_lossy(&output.stderr);
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        println!("⚠️ [NODE] Unmount failed - stderr: {}", error);
+                        println!("⚠️ [NODE] Unmount failed - stdout: {}", stdout);
+                        println!("⚠️ [NODE] Unmount exit code: {:?}", output.status.code());
+                        // Continue anyway - best effort cleanup
                     } else {
-                        println!("✅ [NODE] Verified: Target path is no longer mounted");
+                        println!("✅ [NODE] Target path unmounted successfully");
+                        
+                        // Verify it's actually unmounted
+                        let verify_mount = std::process::Command::new("mountpoint")
+                            .arg("-q")
+                            .arg(&target_path)
+                            .status();
+                        let still_mounted = verify_mount.map(|s| s.success()).unwrap_or(false);
+                        if still_mounted {
+                            println!("⚠️ [NODE] WARNING: Path still shows as mounted after umount!");
+                        } else {
+                            println!("✅ [NODE] Verified: Target path is no longer mounted");
+                        }
                     }
+                } else {
+                    println!("⚠️ [NODE] Skipping unmount status check (command failed to execute)");
                 }
             } else {
                 println!("🔍 [DEBUG] Step 3: Path is NOT mounted, skipping umount");
