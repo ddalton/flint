@@ -679,8 +679,43 @@ const mockData: DashboardData = {
   nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
 };
 
-// Enhanced hook implementation with API integration
-export const useDashboardData = (autoRefresh: boolean = true) => {
+// Backend filter options interface
+export interface DashboardFilters {
+  volumeFilter?: VolumeFilter;
+  volumeNode?: string;
+  diskNode?: string;
+  diskInitialized?: boolean;
+  node?: string; // Global node filter
+}
+
+// Build query string from filters
+const buildQueryString = (filters?: DashboardFilters): string => {
+  if (!filters) return '';
+  
+  const params = new URLSearchParams();
+  
+  if (filters.volumeFilter && filters.volumeFilter !== 'all') {
+    params.append('volume_filter', filters.volumeFilter);
+  }
+  if (filters.volumeNode) {
+    params.append('volume_node', filters.volumeNode);
+  }
+  if (filters.diskNode) {
+    params.append('disk_node', filters.diskNode);
+  }
+  if (filters.diskInitialized !== undefined) {
+    params.append('disk_initialized', filters.diskInitialized.toString());
+  }
+  if (filters.node) {
+    params.append('node', filters.node);
+  }
+  
+  const queryString = params.toString();
+  return queryString ? `?${queryString}` : '';
+};
+
+// Enhanced hook implementation with API integration and backend filtering
+export const useDashboardData = (autoRefresh: boolean = true, filters?: DashboardFilters) => {
   const [data, setData] = useState<DashboardData>({
     volumes: [],
     raw_volumes: [],
@@ -731,15 +766,20 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     try {
       setLoading(true);
       
+      // Build query string with filters for backend filtering
+      const queryString = buildQueryString(filters);
+      console.log(`[DASHBOARD] Fetching with backend filters: ${queryString || 'none'}`);
+      
       // Try to fetch from API, fall back to mock data
       try {
-        const response = await fetch('/api/dashboard');
+        const response = await fetch(`/api/dashboard${queryString}`);
         const contentType = response.headers.get("content-type");
         if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
           const dashboardData = await response.json();
           // Transform backend data to match frontend interface if needed
           const transformedData = transformBackendData(dashboardData);
           setData(transformedData);
+          console.log(`[DASHBOARD] Received ${transformedData.volumes.length} volumes, ${transformedData.disks.length} disks from backend`);
         } else {
           // Fallback if the response is not ok or not JSON
           throw new Error(response.ok ? 'Received non-JSON response' : `HTTP error! status: ${response.status}`);
@@ -748,7 +788,16 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
       } catch (apiError) {
         console.warn('API not available, using mock data:', apiError);
         // Use mock data for development/demo
-        setData(mockData);
+        // Apply client-side filters to mock data as fallback
+        const filtered = filters ? {
+          ...mockData,
+          volumes: filterVolumesByType(mockData.volumes, filters.volumeFilter || 'all'),
+          disks: mockData.disks.filter(d => 
+            (!filters.diskNode || d.node.toLowerCase().includes(filters.diskNode.toLowerCase())) &&
+            (filters.diskInitialized === undefined || d.blobstore_initialized === filters.diskInitialized)
+          )
+        } : mockData;
+        setData(filtered);
         setUsingMockData(true);
       }
     } catch (error) {
@@ -759,7 +808,7 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [filters]);
 
   useEffect(() => {
     refreshData();
@@ -775,6 +824,14 @@ export const useDashboardData = (autoRefresh: boolean = true) => {
     
     return () => clearInterval(interval);
   }, [autoRefresh, refreshData]);
+  
+  // Refresh when filters change
+  useEffect(() => {
+    if (filters) {
+      console.log('[DASHBOARD] Filters changed, refreshing data');
+      refreshData();
+    }
+  }, [filters, refreshData]);
 
   return {
     data,

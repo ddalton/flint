@@ -2,7 +2,7 @@
 // Replaces CRD queries with Node Agent API calls for better performance
 
 use warp::{Filter, Reply};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +14,21 @@ use std::env;
 use k8s_openapi::api::core::v1::Pod;
 
 use crate::minimal_models::DiskInfo;
+
+// Query parameters for backend filtering
+#[derive(Debug, Deserialize, Clone)]
+struct DashboardQuery {
+    // Volume filters
+    volume_filter: Option<String>, // "all", "healthy", "degraded", "failed", "rebuilding", "local-nvme", "orphaned"
+    volume_node: Option<String>,   // Filter volumes by node
+    
+    // Disk filters
+    disk_node: Option<String>,     // Filter disks by node
+    disk_initialized: Option<bool>, // Filter by blobstore initialization status
+    
+    // Global filters
+    node: Option<String>,          // Apply to both volumes and disks
+}
 
 // Dashboard data structures - kept compatible with frontend
 #[derive(Serialize, Debug, Clone)]
@@ -177,8 +192,6 @@ struct DashboardData {
 pub struct AppState {
     kube_client: Client,
     node_agents: Arc<RwLock<HashMap<String, String>>>, // node -> agent_url
-    cache: Arc<RwLock<Option<DashboardData>>>,
-    last_update: Arc<RwLock<DateTime<Utc>>>,
     target_namespace: String,
     // IOPS calculation: store previous iostat snapshots
     iostat_history: Arc<RwLock<HashMap<String, (DateTime<Utc>, serde_json::Value)>>>, // bdev_name -> (timestamp, iostat)
@@ -186,7 +199,7 @@ pub struct AppState {
 
 
 /// Get the current pod's namespace from the service account token
-async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(namespace) = env::var("FLINT_NAMESPACE") {
         return Ok(namespace);
     }
@@ -210,7 +223,7 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 /// Discover node agents by finding node agent pods
-async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
     let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), namespace);
     let list_params = ListParams::default().labels("app=flint-csi-node");
     
@@ -234,54 +247,88 @@ async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<H
     Ok(node_agents)
 }
 
-/// Fetch all disks from all node agents
-async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<DashboardDisk>, Box<dyn std::error::Error>> {
+/// Fetch all disks from all node agents in parallel
+async fn fetch_all_disks_from_node_agents(state: &AppState) -> Result<Vec<DashboardDisk>, Box<dyn std::error::Error + Send + Sync>> {
     let node_agents = state.node_agents.read().await;
-    let http_client = HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
-    let mut all_disks = Vec::new();
+    let node_count = node_agents.len();
     
+    println!("🔍 [DISK_FETCH] Fetching disks from {} nodes in parallel...", node_count);
+    
+    // Create parallel tasks for each node
+    let mut tasks = Vec::new();
     for (node_name, agent_url) in node_agents.iter() {
-        println!("🔍 [DISK_FETCH] Fetching disks from node: {} (fast mode)", node_name);
+        let node_name = node_name.clone();
+        let agent_url = agent_url.clone();
+        let state_clone = state.clone();
         
-        // Use POST endpoint which calls discover_local_disks_fast() - skips expensive auto-recovery
-        match http_client
-            .post(&format!("{}/api/disks", agent_url))
-            .json(&json!({}))  // Empty body for POST request
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
-            .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => {
-                            if let Some(disks_array) = data["disks"].as_array() {
-                                for disk_json in disks_array {
-                                    if let Ok(disk_info) = serde_json::from_value::<DiskInfo>(disk_json.clone()) {
-                                        let dashboard_disk = convert_disk_info_to_dashboard(&disk_info, agent_url, state).await;
-                                        all_disks.push(dashboard_disk);
+        tasks.push(tokio::spawn(async move {
+            println!("🔍 [DISK_FETCH] Querying node: {}", node_name);
+            
+            let http_client = match HttpClient::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+            {
+                Ok(client) => client,
+                Err(e) => {
+                    println!("⚠️ [DISK_FETCH] Failed to create HTTP client for {}: {}", node_name, e);
+                    return Vec::new();
+                }
+            };
+            
+            // Use POST endpoint which calls discover_local_disks_fast() - skips expensive auto-recovery
+            match http_client
+                .post(&format!("{}/api/disks", agent_url))
+                .json(&json!({}))  // Empty body for POST request
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        match response.json::<serde_json::Value>().await {
+                            Ok(data) => {
+                                if let Some(disks_array) = data["disks"].as_array() {
+                                    let mut node_disks = Vec::new();
+                                    for disk_json in disks_array {
+                                        if let Ok(disk_info) = serde_json::from_value::<DiskInfo>(disk_json.clone()) {
+                                            let dashboard_disk = convert_disk_info_to_dashboard(&disk_info, &agent_url, &state_clone).await;
+                                            node_disks.push(dashboard_disk);
+                                        }
                                     }
+                                    println!("✅ [DISK_FETCH] Node {} returned {} disks", node_name, node_disks.len());
+                                    return node_disks;
                                 }
                             }
+                            Err(e) => {
+                                println!("⚠️ [DISK_FETCH] Failed to parse response from {}: {}", node_name, e);
+                            }
                         }
-                        Err(e) => {
-                            println!("⚠️ [DISK_FETCH] Failed to parse response from {}: {}", node_name, e);
-                        }
+                    } else {
+                        println!("⚠️ [DISK_FETCH] HTTP error from {}: {}", node_name, response.status());
                     }
-                } else {
-                    println!("⚠️ [DISK_FETCH] HTTP error from {}: {}", node_name, response.status());
+                }
+                Err(e) => {
+                    println!("⚠️ [DISK_FETCH] Failed to connect to {} (timeout or connection error): {}", node_name, e);
                 }
             }
+            Vec::new()
+        }));
+    }
+    
+    // Wait for all tasks to complete and collect results
+    let mut all_disks = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(node_disks) => {
+                all_disks.extend(node_disks);
+            }
             Err(e) => {
-                println!("⚠️ [DISK_FETCH] Failed to connect to {} (timeout or connection error): {}", node_name, e);
-                // Continue with other nodes instead of failing completely
+                println!("⚠️ [DISK_FETCH] Task join error: {}", e);
             }
         }
     }
     
-    println!("✅ [DISK_FETCH] Collected {} disks from {} node agents", all_disks.len(), node_agents.len());
+    println!("✅ [DISK_FETCH] Collected {} disks from {} node agents (parallel)", all_disks.len(), node_count);
     Ok(all_disks)
 }
 
@@ -427,7 +474,7 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
 }
 
 /// Get all active PV lvol UUIDs from Kubernetes
-async fn get_active_pv_lvol_uuids(kube_client: &Client) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error>> {
+async fn get_active_pv_lvol_uuids(kube_client: &Client) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
     use k8s_openapi::api::core::v1::PersistentVolume;
     
     let pvs_api: Api<PersistentVolume> = Api::all(kube_client.clone());
@@ -488,7 +535,7 @@ async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<se
 }
 
 /// Detect orphaned lvols across all nodes
-async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<OrphanedVolumeInfo>>, Box<dyn std::error::Error>> {
+async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<OrphanedVolumeInfo>>, Box<dyn std::error::Error + Send + Sync>> {
     println!("🔍 [DASHBOARD] Detecting orphaned lvols...");
     
     // Get active PV lvol UUIDs from Kubernetes
@@ -548,15 +595,75 @@ async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<O
     Ok(orphaned_by_node)
 }
 
-/// Refresh dashboard data using minimal state approach
-async fn refresh_dashboard_data_minimal(state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
-    println!("🔄 [MINIMAL_DASHBOARD_REFRESH] Starting minimal state dashboard refresh...");
+/// Filter volumes based on query parameters
+fn filter_volumes(volumes: Vec<DashboardVolume>, query: &DashboardQuery) -> Vec<DashboardVolume> {
+    let mut filtered = volumes;
     
-    // Discover node agents
+    // Apply node filter (global or volume-specific)
+    if let Some(node) = query.node.as_ref().or(query.volume_node.as_ref()) {
+        let node = node.to_lowercase();
+        filtered.retain(|v| v.nodes.iter().any(|n| n.to_lowercase().contains(&node)));
+        println!("🔍 [FILTER] Volume node filter: {} volumes match '{}'", filtered.len(), node);
+    }
+    
+    // Apply volume state filter
+    if let Some(filter) = &query.volume_filter {
+        let original_count = filtered.len();
+        filtered = match filter.as_str() {
+            "healthy" => filtered.into_iter().filter(|v| v.state == "Healthy").collect(),
+            "degraded" => filtered.into_iter().filter(|v| v.state == "Degraded").collect(),
+            "failed" => filtered.into_iter().filter(|v| v.state == "Failed").collect(),
+            "faulted" => filtered.into_iter().filter(|v| v.state == "Degraded" || v.state == "Failed").collect(),
+            "rebuilding" => filtered.into_iter().filter(|v| {
+                v.replica_statuses.iter().any(|r| 
+                    r.status == "rebuilding" || 
+                    r.rebuild_progress.is_some() ||
+                    r.is_new_replica == Some(true)
+                ) || v.raid_status.as_ref().map(|rs| rs.rebuild_info.is_some()).unwrap_or(false)
+            }).collect(),
+            "local-nvme" => filtered.into_iter().filter(|v| v.local_nvme).collect(),
+            "orphaned" => Vec::new(), // Orphaned volumes are in raw_volumes, not main volumes
+            "all" | _ => filtered,
+        };
+        println!("🔍 [FILTER] Volume state filter '{}': {} -> {} volumes", filter, original_count, filtered.len());
+    }
+    
+    filtered
+}
+
+/// Filter disks based on query parameters
+fn filter_disks(disks: Vec<DashboardDisk>, query: &DashboardQuery) -> Vec<DashboardDisk> {
+    let mut filtered = disks;
+    
+    // Apply node filter (global or disk-specific)
+    if let Some(node) = query.node.as_ref().or(query.disk_node.as_ref()) {
+        let node = node.to_lowercase();
+        filtered.retain(|d| d.node.to_lowercase().contains(&node));
+        println!("🔍 [FILTER] Disk node filter: {} disks match '{}'", filtered.len(), node);
+    }
+    
+    // Apply initialization status filter
+    if let Some(initialized) = query.disk_initialized {
+        let original_count = filtered.len();
+        filtered.retain(|d| d.blobstore_initialized == initialized);
+        println!("🔍 [FILTER] Disk initialized={}: {} -> {} disks", initialized, original_count, filtered.len());
+    }
+    
+    filtered
+}
+
+/// Fetch fresh dashboard data using minimal state approach (no caching)
+async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQuery>) -> Result<DashboardData, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [MINIMAL_DASHBOARD_FETCH] Fetching fresh dashboard data...");
+    if let Some(ref q) = query {
+        println!("🔍 [FILTER] Query params: {:?}", q);
+    }
+    
+    // Discover node agents (updates state for future queries)
     let node_agents = discover_node_agents(&state.kube_client, &state.target_namespace).await?;
     *state.node_agents.write().await = node_agents;
     
-    // Fetch disks from all node agents
+    // Fetch disks from all node agents in parallel
     let mut dashboard_disks = fetch_all_disks_from_node_agents(state).await?;
     
     // Detect orphaned lvols and populate disk orphaned_spdk_volumes
@@ -574,65 +681,86 @@ async fn refresh_dashboard_data_minimal(state: &AppState) -> Result<(), Box<dyn 
     let dashboard_volumes = Vec::new();
     let raw_volumes = Vec::new();
     
-    // Get unique node names
-    let nodes: Vec<String> = dashboard_disks.iter()
+    // Apply filters if provided
+    let (filtered_volumes, filtered_disks) = if let Some(query) = query {
+        let vols = filter_volumes(dashboard_volumes, &query);
+        let disks = filter_disks(dashboard_disks, &query);
+        (vols, disks)
+    } else {
+        (dashboard_volumes, dashboard_disks)
+    };
+    
+    // Get unique node names from filtered disks
+    let nodes: Vec<String> = filtered_disks.iter()
         .map(|d| d.node.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
     
     let dashboard_data = DashboardData {
-        volumes: dashboard_volumes,
+        volumes: filtered_volumes,
         raw_volumes,
-        disks: dashboard_disks,
+        disks: filtered_disks,
         nodes,
     };
     
-    *state.cache.write().await = Some(dashboard_data);
-    *state.last_update.write().await = Utc::now();
+    println!("✅ [MINIMAL_DASHBOARD_FETCH] Fetch completed: {} volumes, {} disks, {} nodes", 
+        dashboard_data.volumes.len(), dashboard_data.disks.len(), dashboard_data.nodes.len());
     
-    println!("✅ [MINIMAL_DASHBOARD_REFRESH] Refresh completed successfully");
-    Ok(())
+    Ok(dashboard_data)
 }
 
-/// Handle GET /api/dashboard - Main dashboard endpoint
-async fn get_dashboard_data_minimal(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    println!("🌐 [DASHBOARD_API] Handling /api/dashboard request");
+/// Handle GET /api/dashboard - Main dashboard endpoint (always fetches fresh data)
+/// Supports query parameters for backend filtering:
+/// - volume_filter: "all", "healthy", "degraded", "failed", "rebuilding", "local-nvme"
+/// - volume_node: filter volumes by node name (partial match)
+/// - disk_node: filter disks by node name (partial match)
+/// - disk_initialized: filter disks by blobstore initialization (true/false)
+/// - node: global filter for both volumes and disks
+async fn get_dashboard_data_minimal(
+    query: Option<DashboardQuery>,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🌐 [DASHBOARD_API] Handling /api/dashboard request (no cache, fresh data)");
     
-    // Check if we need to refresh (every 5 minutes or if no cache)
-    let should_refresh = {
-        let last_update = state.last_update.read().await;
-        let cache = state.cache.read().await;
-        cache.is_none() || Utc::now().signed_duration_since(*last_update).num_seconds() > 300
-    };
-    
-    if should_refresh {
-        if let Err(e) = refresh_dashboard_data_minimal(&state).await {
-            println!("❌ [DASHBOARD_API] Failed to refresh data: {}", e);
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&json!({"error": "Failed to refresh dashboard data"})),
-                warp::http::StatusCode::INTERNAL_SERVER_ERROR
-            ));
-        }
-    }
-    
-    let cache = state.cache.read().await;
-    match cache.as_ref() {
-        Some(data) => {
-            println!("✅ [DASHBOARD_API] Returning dashboard data: {} volumes, {} disks, {} nodes", 
+    // Always fetch fresh data - parallel queries make this fast even with 100+ nodes
+    // Backend filtering reduces network transfer significantly
+    match fetch_dashboard_data_minimal(&state, query).await {
+        Ok(data) => {
+            println!("✅ [DASHBOARD_API] Returning fresh dashboard data: {} volumes, {} disks, {} nodes", 
                 data.volumes.len(), data.disks.len(), data.nodes.len());
             Ok(warp::reply::with_status(
-                warp::reply::json(data),
+                warp::reply::json(&data),
                 warp::http::StatusCode::OK
             ))
         }
-        None => {
-            println!("❌ [DASHBOARD_API] No cached data available");
+        Err(e) => {
+            println!("❌ [DASHBOARD_API] Failed to fetch dashboard data: {}", e);
             Ok(warp::reply::with_status(
-                warp::reply::json(&json!({"error": "No data available"})),
-                warp::http::StatusCode::SERVICE_UNAVAILABLE
+                warp::reply::json(&json!({"error": format!("Failed to fetch dashboard data: {}", e)})),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR
             ))
         }
+    }
+}
+
+/// Handle POST /api/refresh - Rediscover node agents (no cache to refresh)
+async fn handle_refresh(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
+    println!("🔄 [REFRESH_API] Rediscovering node agents");
+    
+    // No cache to refresh - just rediscover node agents for backwards compatibility
+    match discover_node_agents(&state.kube_client, &state.target_namespace).await {
+        Ok(node_agents) => {
+            *state.node_agents.write().await = node_agents;
+            Ok::<_, warp::Rejection>(warp::reply::json(&json!({
+                "status": "success",
+                "message": "Node agents rediscovered (no cache in use)"
+            })))
+        }
+        Err(e) => Ok(warp::reply::json(&json!({
+            "status": "error", 
+            "error": e.to_string()
+        }))),
     }
 }
 
@@ -939,10 +1067,6 @@ async fn delete_orphaned_lvol(
             Ok(response) if response.status().is_success() => {
                 println!("✅ [DASHBOARD] Orphaned lvol {} deleted from node {}", lvol_uuid, node_name);
                 
-                // Invalidate cache to force refresh on next dashboard request
-                *state.cache.write().await = None;
-                println!("🔄 [DASHBOARD] Cache invalidated - next request will refresh");
-                
                 return Ok(warp::reply::json(&json!({
                     "success": true,
                     "lvol_uuid": lvol_uuid,
@@ -1038,10 +1162,11 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
     
     let state_filter = warp::any().map(move || app_state.clone());
     
-    // Main dashboard endpoint
+    // Main dashboard endpoint with optional query parameters for backend filtering
     let dashboard_route = warp::path("api")
         .and(warp::path("dashboard"))
         .and(warp::get())
+        .and(warp::query::<DashboardQuery>().map(Some).or(warp::any().map(|| None)).unify())
         .and(state_filter.clone())
         .and_then(get_dashboard_data_minimal);
 
@@ -1126,12 +1251,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("refresh"))
         .and(warp::post())
         .and(state_filter.clone())
-        .and_then(|state: AppState| async move {
-            match refresh_dashboard_data_minimal(&state).await {
-                Ok(_) => Ok::<_, warp::Rejection>(warp::reply::json(&json!({"status": "success"}))),
-                Err(e) => Ok(warp::reply::json(&json!({"status": "error", "error": e.to_string()}))),
-            }
-        });
+        .and_then(handle_refresh);
     
     // Snapshot aggregation routes
     let snapshots_list = warp::path("api")
@@ -1179,8 +1299,9 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
 }
 
 /// Initialize and start the minimal dashboard backend
-pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🚀 [MINIMAL_DASHBOARD] Starting minimal state dashboard backend on port {}", port);
+    println!("   Architecture: Cache-free, parallel node queries for real-time data");
     
     let kube_client = Client::try_default().await?;
     let target_namespace = get_current_namespace().await?;
@@ -1188,21 +1309,23 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
     let app_state = AppState {
         kube_client,
         node_agents: Arc::new(RwLock::new(HashMap::new())),
-        cache: Arc::new(RwLock::new(None)),
-        last_update: Arc::new(RwLock::new(DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now))),
         target_namespace,
         iostat_history: Arc::new(RwLock::new(HashMap::new())),
     };
     
     println!("🎯 [MINIMAL_DASHBOARD] Using namespace: {}", app_state.target_namespace);
     
-    // Initial discovery
+    // Initial discovery of node agents
     let node_agents = discover_node_agents(&app_state.kube_client, &app_state.target_namespace).await?;
+    let node_count = node_agents.len();
     *app_state.node_agents.write().await = node_agents;
+    
+    println!("🔍 [MINIMAL_DASHBOARD] Discovered {} node agents", node_count);
     
     let routes = setup_minimal_dashboard_routes(app_state);
     
     println!("✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:{}", port);
+    println!("   Real-time mode: All queries fetch fresh data with parallel node requests");
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;
 
     Ok(())
@@ -1345,5 +1468,431 @@ mod tests {
         assert_eq!(stats.write_iops, 500);
         assert_eq!(stats.read_latency_us, 100);
         assert_eq!(stats.write_latency_us, 150);
+    }
+
+    // Helper function to create test volumes
+    fn create_test_volume(id: &str, state: &str, nodes: Vec<String>, local_nvme: bool, rebuilding: bool) -> DashboardVolume {
+        let replica_statuses = nodes.iter().map(|node| DashboardReplicaStatus {
+            node: node.clone(),
+            status: if rebuilding { "rebuilding".to_string() } else { "healthy".to_string() },
+            is_local: node == &nodes[0],
+            last_io_timestamp: Some("2025-01-06T00:00:00Z".to_string()),
+            rebuild_progress: if rebuilding { Some(50.0) } else { None },
+            rebuild_target: None,
+            is_new_replica: Some(rebuilding),
+            nvmf_target: None,
+            access_method: "nvmeof".to_string(),
+            raid_member_slot: None,
+            raid_member_state: "online".to_string(),
+        }).collect();
+
+        DashboardVolume {
+            id: id.to_string(),
+            name: id.to_string(),
+            size: "100GB".to_string(),
+            state: state.to_string(),
+            replicas: nodes.len() as i32,
+            active_replicas: nodes.len() as i32,
+            local_nvme,
+            access_method: "nvmeof".to_string(),
+            rebuild_progress: if rebuilding { Some(50.0) } else { None },
+            nodes,
+            replica_statuses,
+            nvmeof_targets: vec![],
+            nvmeof_enabled: false,
+            transport_type: "TCP".to_string(),
+            target_port: 4420,
+            raid_status: None,
+            ublk_device: None,
+            spdk_validation_status: SpdkValidationStatus {
+                has_spdk_backing: true,
+                validation_message: None,
+                validation_severity: "info".to_string(),
+            },
+            pvc_info: None,
+        }
+    }
+
+    // Helper function to create test disks
+    fn create_test_disk(id: &str, node: &str, initialized: bool) -> DashboardDisk {
+        DashboardDisk {
+            id: id.to_string(),
+            node: node.to_string(),
+            pci_addr: "0000:3b:00.0".to_string(),
+            capacity: 1000000000000,
+            capacity_gb: 1000,
+            allocated_space: 500,
+            free_space: 500,
+            free_space_display: "500GB".to_string(),
+            healthy: true,
+            blobstore_initialized: initialized,
+            lvol_count: 2,
+            model: "Test NVMe SSD".to_string(),
+            read_iops: 10000,
+            write_iops: 8000,
+            read_latency: 100,
+            write_latency: 150,
+            brought_online: "2025-01-06T00:00:00Z".to_string(),
+            provisioned_volumes: vec![],
+            orphaned_spdk_volumes: vec![],
+            device_type: "NVMe".to_string(),
+        }
+    }
+
+    // Volume filtering tests
+
+    #[test]
+    fn test_filter_volumes_by_healthy_state() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
+            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
+            create_test_volume("vol4", "Failed", vec!["node1".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("healthy".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].state, "Healthy");
+        assert_eq!(filtered[1].state, "Healthy");
+    }
+
+    #[test]
+    fn test_filter_volumes_by_degraded_state() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("degraded".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|v| v.state == "Degraded"));
+    }
+
+    #[test]
+    fn test_filter_volumes_by_failed_state() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Failed", vec!["node1".to_string()], true, false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("failed".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].state, "Failed");
+    }
+
+    #[test]
+    fn test_filter_volumes_by_faulted_state() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Failed", vec!["node1".to_string()], true, false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("faulted".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 2); // Both Failed and Degraded
+        assert!(filtered.iter().any(|v| v.state == "Failed"));
+        assert!(filtered.iter().any(|v| v.state == "Degraded"));
+    }
+
+    #[test]
+    fn test_filter_volumes_by_rebuilding_state() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, true),
+            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("rebuilding".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].rebuild_progress.is_some());
+    }
+
+    #[test]
+    fn test_filter_volumes_by_local_nvme() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Healthy", vec!["node1".to_string()], false, false),
+            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("local-nvme".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|v| v.local_nvme));
+    }
+
+    #[test]
+    fn test_filter_volumes_by_node() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], true, false),
+            create_test_volume("vol2", "Healthy", vec!["worker-node-2".to_string()], true, false),
+            create_test_volume("vol3", "Healthy", vec!["worker-node-1".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: Some("node-1".to_string()), // Partial match
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|v| v.nodes[0].contains("node-1")));
+    }
+
+    #[test]
+    fn test_filter_volumes_combined() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], true, false),
+            create_test_volume("vol2", "Degraded", vec!["worker-node-1".to_string()], true, false),
+            create_test_volume("vol3", "Healthy", vec!["worker-node-2".to_string()], true, false),
+            create_test_volume("vol4", "Degraded", vec!["worker-node-2".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("degraded".to_string()),
+            volume_node: Some("node-1".to_string()),
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].state, "Degraded");
+        assert!(filtered[0].nodes[0].contains("node-1"));
+    }
+
+    #[test]
+    fn test_filter_volumes_empty_result() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("failed".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes, &query);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_volumes_all_filter() {
+        let volumes = vec![
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: Some("all".to_string()),
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_volumes(volumes.clone(), &query);
+        assert_eq!(filtered.len(), volumes.len());
+    }
+
+    // Disk filtering tests
+
+    #[test]
+    fn test_filter_disks_by_node() {
+        let disks = vec![
+            create_test_disk("disk1", "worker-node-1", true),
+            create_test_disk("disk2", "worker-node-2", true),
+            create_test_disk("disk3", "worker-node-1", false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: Some("node-1".to_string()),
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|d| d.node.contains("node-1")));
+    }
+
+    #[test]
+    fn test_filter_disks_by_initialized_true() {
+        let disks = vec![
+            create_test_disk("disk1", "node1", true),
+            create_test_disk("disk2", "node1", false),
+            create_test_disk("disk3", "node2", true),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: Some(true),
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|d| d.blobstore_initialized));
+    }
+
+    #[test]
+    fn test_filter_disks_by_initialized_false() {
+        let disks = vec![
+            create_test_disk("disk1", "node1", true),
+            create_test_disk("disk2", "node1", false),
+            create_test_disk("disk3", "node2", false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: Some(false),
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|d| !d.blobstore_initialized));
+    }
+
+    #[test]
+    fn test_filter_disks_combined() {
+        let disks = vec![
+            create_test_disk("disk1", "worker-node-1", true),
+            create_test_disk("disk2", "worker-node-1", false),
+            create_test_disk("disk3", "worker-node-2", true),
+            create_test_disk("disk4", "worker-node-2", false),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: Some("node-1".to_string()),
+            disk_initialized: Some(true),
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].node.contains("node-1"));
+        assert!(filtered[0].blobstore_initialized);
+    }
+
+    #[test]
+    fn test_filter_disks_global_node_filter() {
+        let disks = vec![
+            create_test_disk("disk1", "worker-node-1", true),
+            create_test_disk("disk2", "worker-node-2", true),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: None,
+            disk_initialized: None,
+            node: Some("node-2".to_string()), // Global node filter
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].node.contains("node-2"));
+    }
+
+    #[test]
+    fn test_filter_disks_empty_result() {
+        let disks = vec![
+            create_test_disk("disk1", "node1", true),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: Some("nonexistent".to_string()),
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_disks_case_insensitive() {
+        let disks = vec![
+            create_test_disk("disk1", "Worker-Node-1", true),
+            create_test_disk("disk2", "worker-node-2", true),
+        ];
+
+        let query = DashboardQuery {
+            volume_filter: None,
+            volume_node: None,
+            disk_node: Some("WORKER-NODE-1".to_string()), // Different case
+            disk_initialized: None,
+            node: None,
+        };
+
+        let filtered = filter_disks(disks, &query);
+        assert_eq!(filtered.len(), 1);
     }
 }
