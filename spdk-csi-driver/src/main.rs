@@ -2526,16 +2526,29 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         let path_check_result = match path_check {
             Ok(status) => {
-                let exists = status.success();
-                println!("🔍 [DEBUG] Path check completed: exists={}", exists);
-                if exists {
+                if status.success() {
+                    println!("🔍 [DEBUG] Path check completed: exists=true");
                     "exists"
                 } else {
-                    "not_found"
+                    // Check if it was a timeout (exit code 124)
+                    match status.code() {
+                        Some(124) => {
+                            println!("⚠️ [DEBUG] Path check TIMED OUT (exit 124) - likely stale mount!");
+                            "timeout_or_error"
+                        }
+                        Some(code) => {
+                            println!("🔍 [DEBUG] Path check completed: exists=false (exit {})", code);
+                            "not_found"
+                        }
+                        None => {
+                            println!("⚠️ [DEBUG] Path check terminated by signal - treating as timeout");
+                            "timeout_or_error"
+                        }
+                    }
                 }
             }
             Err(e) => {
-                println!("⚠️ [DEBUG] Path existence check failed or timed out: {}", e);
+                println!("⚠️ [DEBUG] Path existence check failed: {}", e);
                 println!("⚠️ [DEBUG] This likely means a stale mount - will try cleanup anyway");
                 "timeout_or_error"
             }
