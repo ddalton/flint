@@ -2520,9 +2520,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         if path_exists_before {
             println!("🔍 [DEBUG] Step 2: Path exists, checking if mounted...");
-            // Check if it's actually mounted
-            println!("🔍 [DEBUG] Step 2a: Executing 'mountpoint -q {}' command...", target_path);
-            let mount_check = match std::process::Command::new("mountpoint")
+            // Check if it's actually mounted (with timeout to prevent hanging on stale mounts)
+            println!("🔍 [DEBUG] Step 2a: Executing 'timeout 5 mountpoint -q {}' command...", target_path);
+            let mount_check = match std::process::Command::new("timeout")
+                .arg("5")  // 5 second timeout
+                .arg("mountpoint")
                 .arg("-q")
                 .arg(&target_path)
                 .status()
@@ -2533,6 +2535,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
                 Err(e) => {
                     println!("⚠️ [DEBUG] Step 2b: mountpoint command failed: {}", e);
+                    println!("⚠️ [DEBUG] Assuming NOT mounted to continue cleanup");
                     Err(e)
                 }
             };
@@ -2542,21 +2545,31 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             if is_mounted {
                 println!("🔍 [DEBUG] Step 3: Path is mounted, attempting unmount...");
                 println!("🔧 [NODE] Unmounting target path: {}", target_path);
-                println!("🔍 [DEBUG] Step 3a: Executing 'umount {}' command...", target_path);
+                println!("🔍 [DEBUG] Step 3a: Executing 'timeout 10 umount -f -l {}' command (force + lazy)...", target_path);
                 
-                let umount_output = match std::process::Command::new("umount")
+                let umount_output = match std::process::Command::new("timeout")
+                    .arg("10")  // 10 second timeout
+                    .arg("umount")
+                    .arg("-f")  // force unmount
+                    .arg("-l")  // lazy unmount (detach immediately, cleanup later)
                     .arg(&target_path)
                     .output()
                 {
                     Ok(output) => {
                         println!("🔍 [DEBUG] Step 3b: umount command completed");
-                        Ok(output)
+                        output
                     }
                     Err(e) => {
                         println!("⚠️ [DEBUG] Step 3b: umount command execution failed: {}", e);
-                        return Err(tonic::Status::internal(format!("Failed to execute umount: {}", e)));
+                        println!("⚠️ [DEBUG] This is not fatal - will continue with cleanup");
+                        // Continue with cleanup - don't fail the entire operation
+                        std::process::Output {
+                            status: std::process::ExitStatus::from_raw(1),  // Non-zero exit
+                            stdout: Vec::new(),
+                            stderr: format!("Command failed: {}", e).into_bytes(),
+                        }
                     }
-                }?;
+                };
                 
                 println!("🔍 [DEBUG] Step 3c: Checking umount exit status...");
                 if !umount_output.status.success() {
