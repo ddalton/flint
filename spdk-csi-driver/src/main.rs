@@ -2514,25 +2514,51 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         println!("🔍 [DEBUG] Target path: {}", target_path);
 
         // Check if target path exists BEFORE unmount
+        println!("🔍 [DEBUG] Step 1: Checking if target path exists...");
         let path_exists_before = std::path::Path::new(&target_path).exists();
         println!("🔍 [DEBUG] Target path exists before unmount: {}", path_exists_before);
         
         if path_exists_before {
+            println!("🔍 [DEBUG] Step 2: Path exists, checking if mounted...");
             // Check if it's actually mounted
-            let mount_check = std::process::Command::new("mountpoint")
+            println!("🔍 [DEBUG] Step 2a: Executing 'mountpoint -q {}' command...", target_path);
+            let mount_check = match std::process::Command::new("mountpoint")
                 .arg("-q")
                 .arg(&target_path)
-                .status();
+                .status()
+            {
+                Ok(status) => {
+                    println!("🔍 [DEBUG] Step 2b: mountpoint command completed with status: {:?}", status);
+                    Ok(status)
+                }
+                Err(e) => {
+                    println!("⚠️ [DEBUG] Step 2b: mountpoint command failed: {}", e);
+                    Err(e)
+                }
+            };
             let is_mounted = mount_check.map(|s| s.success()).unwrap_or(false);
-            println!("🔍 [DEBUG] Target path is mounted: {}", is_mounted);
+            println!("🔍 [DEBUG] Step 2c: Target path is mounted: {}", is_mounted);
             
             if is_mounted {
+                println!("🔍 [DEBUG] Step 3: Path is mounted, attempting unmount...");
                 println!("🔧 [NODE] Unmounting target path: {}", target_path);
-                let umount_output = std::process::Command::new("umount")
+                println!("🔍 [DEBUG] Step 3a: Executing 'umount {}' command...", target_path);
+                
+                let umount_output = match std::process::Command::new("umount")
                     .arg(&target_path)
                     .output()
-                    .map_err(|e| tonic::Status::internal(format!("Failed to execute umount: {}", e)))?;
+                {
+                    Ok(output) => {
+                        println!("🔍 [DEBUG] Step 3b: umount command completed");
+                        Ok(output)
+                    }
+                    Err(e) => {
+                        println!("⚠️ [DEBUG] Step 3b: umount command execution failed: {}", e);
+                        return Err(tonic::Status::internal(format!("Failed to execute umount: {}", e)));
+                    }
+                }?;
                 
+                println!("🔍 [DEBUG] Step 3c: Checking umount exit status...");
                 if !umount_output.status.success() {
                     let error = String::from_utf8_lossy(&umount_output.stderr);
                     let stdout = String::from_utf8_lossy(&umount_output.stdout);
@@ -2556,14 +2582,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
             } else {
+                println!("🔍 [DEBUG] Step 3: Path is NOT mounted, skipping umount");
                 println!("ℹ️ [NODE] Target path exists but is not mounted, skipping umount");
             }
             
             // Check directory state before removal
+            println!("🔍 [DEBUG] Step 4: Checking directory state before removal...");
             let is_dir = std::path::Path::new(&target_path).is_dir();
             println!("🔍 [DEBUG] Target path is directory: {}", is_dir);
             
             // Try to remove the directory
+            println!("🔍 [DEBUG] Step 5: Attempting to remove directory...");
             match std::fs::remove_dir(&target_path) {
                 Ok(_) => {
                     println!("✅ [NODE] Target directory removed successfully");
@@ -2581,6 +2610,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     println!("ℹ️ [NODE] Target directory already removed (not an error)");
                 }
                 Err(e) => {
+                    println!("🔍 [DEBUG] Step 5b: Failed to remove directory");
                     println!("⚠️ [NODE] Failed to remove target directory: {}", e);
                     println!("🔍 [DEBUG] Error kind: {:?}", e.kind());
                     // Check if directory still exists and what's in it
@@ -2598,17 +2628,21 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
         } else {
+            println!("🔍 [DEBUG] Step 2: Path does NOT exist, nothing to clean up");
             println!("ℹ️ [NODE] Target path does not exist, nothing to clean up");
         }
         
         // Final state check
+        println!("🔍 [DEBUG] Step 6: Final state check...");
         let path_exists_after = std::path::Path::new(&target_path).exists();
         println!("🔍 [DEBUG] Target path exists after cleanup: {}", path_exists_after);
 
+        println!("🔍 [DEBUG] Step 7: Preparing success response...");
         println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
         
         let response = tonic::Response::new(spdk_csi_driver::csi::NodeUnpublishVolumeResponse {});
         println!("🔵 [GRPC] NodeUnpublishVolume returning success response");
+        println!("🔍 [DEBUG] Step 8: Returning response to caller");
         Ok(response)
     }
 
