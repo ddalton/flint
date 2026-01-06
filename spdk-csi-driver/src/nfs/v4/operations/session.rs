@@ -170,10 +170,26 @@ impl SessionOperationHandler {
         use crate::nfs::v4::protocol::exchgid_flags;
         let mut response_flags = 0u32;
 
-        // Set server role - check if we're running as pNFS MDS
-        // This will be overridden by pNFS wrapper if in MDS mode
-        // For now, default to non-pNFS for standalone NFS servers
-        response_flags |= exchgid_flags::USE_NON_PNFS;
+        // Set server role based on server identity (from ClientManager)
+        // pNFS servers have owner "flint-pnfs", standalone has "flint-nfs"
+        let server_owner = self.state_mgr.clients.server_owner().to_string();
+        let is_pnfs = server_owner.contains("pnfs");
+        
+        if is_pnfs {
+            // Check PNFS_MODE to determine if MDS or DS
+            let pnfs_mode = std::env::var("PNFS_MODE").ok();
+            if pnfs_mode.as_deref() == Some("ds") {
+                response_flags |= exchgid_flags::USE_PNFS_DS;
+                debug!("EXCHANGE_ID: Server mode = pNFS Data Server");
+            } else {
+                response_flags |= exchgid_flags::USE_PNFS_MDS;
+                debug!("EXCHANGE_ID: Server mode = pNFS Metadata Server");
+            }
+        } else {
+            // Standalone NFS server - no pNFS support
+            response_flags |= exchgid_flags::USE_NON_PNFS;
+            debug!("EXCHANGE_ID: Server mode = Standalone NFS (no pNFS)");
+        }
 
         // Echo back ALL client capability flags (RFC 8881 Section 18.35.3)
         if op.flags & exchgid_flags::SUPP_MOVED_REFER != 0 {
@@ -191,11 +207,10 @@ impl SessionOperationHandler {
             response_flags |= exchgid_flags::CONFIRMED_R;
         }
 
-        let server_owner = self.state_mgr.clients.server_owner().to_string();
         let server_scope = self.state_mgr.clients.server_scope().to_vec();
         
-        info!("MDS: EXCHANGE_ID response - server_owner={:?}, server_scope={:?}",
-              server_owner, String::from_utf8_lossy(&server_scope));
+        info!("EXCHANGE_ID response - server_owner={:?}, server_scope={:?}, flags=0x{:08x}",
+              server_owner, String::from_utf8_lossy(&server_scope), response_flags);
         
         ExchangeIdRes {
             status: Nfs4Status::Ok,

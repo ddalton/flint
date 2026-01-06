@@ -95,17 +95,30 @@ pub struct ClientManager {
 impl ClientManager {
     /// Create a new client manager
     pub fn new(lease_manager: Arc<LeaseManager>) -> Self {
-        // Server identifiers for pNFS
+        // Determine server mode: standalone NFS vs pNFS (MDS/DS)
+        // PNFS_MODE can be: "standalone", "mds", "ds"
+        // If not set, assume standalone mode (safer default for flint-nfs-server)
+        let pnfs_mode = std::env::var("PNFS_MODE").ok();
+        let is_pnfs = pnfs_mode.as_deref() == Some("mds") || pnfs_mode.as_deref() == Some("ds");
+        
+        // Server identifiers: different for pNFS vs standalone
         // IMPORTANT: MDS and DS must have DIFFERENT server_scope to prevent trunking!
-        // Server trunking is for multiple paths to SAME storage (not for pNFS MDS/DS separation)
-        let server_owner = "flint-pnfs".to_string();
+        let server_owner = if is_pnfs {
+            "flint-pnfs".to_string()
+        } else {
+            "flint-nfs".to_string()
+        };
         
         // Read server_scope from environment (allows MDS vs DS differentiation)
-        let server_scope = std::env::var("PNFS_SERVER_SCOPE")
-            .unwrap_or_else(|_| "flint-pnfs-mds".to_string())
-            .into_bytes();
+        let server_scope = if is_pnfs {
+            std::env::var("PNFS_SERVER_SCOPE")
+                .unwrap_or_else(|_| "flint-pnfs-mds".to_string())
+        } else {
+            "flint-nfs-standalone".to_string()
+        }.into_bytes();
 
-        info!("ClientManager created - server_owner={}, server_scope={}", 
+        info!("ClientManager created - mode={:?}, server_owner={}, server_scope={}", 
+              pnfs_mode.as_deref().unwrap_or("standalone"),
               server_owner, String::from_utf8_lossy(&server_scope));
 
         Self {
