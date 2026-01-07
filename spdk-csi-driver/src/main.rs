@@ -2383,12 +2383,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 uuid
             };
             
-            // Create ublk device
-            let ublk_id = self.driver.generate_ublk_id(&volume_id);
-            self.driver.create_ublk_device(&lvol_uuid, ublk_id).await
-                .map_err(|e| tonic::Status::internal(format!("Failed to create ublk device: {}", e)))?;
-            
-            let device_path = format!("/dev/ublkb{}", ublk_id);
+            // Create block device (respects BLOCK_DEVICE_BACKEND environment variable)
+            let device_info = self.driver.create_block_device(&lvol_uuid, &volume_id).await
+                .map_err(|e| tonic::Status::internal(format!("Failed to create block device: {}", e)))?;
+
+            let device_path = device_info.device_path;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             
             if is_block_volume {
