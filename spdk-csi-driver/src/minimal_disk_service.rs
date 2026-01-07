@@ -803,6 +803,18 @@ impl MinimalDiskService {
         let userspace_driver = self.detect_available_userspace_driver().await?;
         println!("🔧 [SPDK_USERSPACE:{}] Using userspace driver: {}", correlation_id, userspace_driver);
 
+        // Step 1.5: Check if device is already bound to userspace driver
+        let current_driver = self.get_current_driver(&device.pci_address).await
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        if current_driver == userspace_driver {
+            println!("✅ [SPDK_USERSPACE:{}] Device already bound to {}, skipping bind/unbind", correlation_id, userspace_driver);
+            // Device is already bound to userspace driver, skip to SPDK attach
+            return self.try_spdk_nvme_attach(device, correlation_id).await;
+        }
+
+        println!("🔧 [SPDK_USERSPACE:{}] Current driver: {}, needs binding to {}", correlation_id, current_driver, userspace_driver);
+
         // Step 2: Get device vendor/device IDs for driver binding
         let (vendor_id, device_id) = self.get_pci_ids(&device.pci_address)?;
         println!("🔧 [SPDK_USERSPACE:{}] Device IDs: vendor={}, device={}", correlation_id, vendor_id, device_id);
