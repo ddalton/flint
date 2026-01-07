@@ -152,6 +152,9 @@ spec:
               value: "{{ .Values.blockDevice.discoveryMode | default "nvme" }}"
           securityContext:
             privileged: true
+            capabilities:
+              add:
+                - SYS_RAWIO  # Required for setpci to enable bus mastering on PCI devices
           ports:
             - name: healthz
               containerPort: {{ .Values.healthCheck.csiDriverPort | default 9809 }}
@@ -270,6 +273,9 @@ spec:
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
           securityContext:
             privileged: true
+            capabilities:
+              add:
+                - SYS_RAWIO  # Required for setpci to enable bus mastering on PCI devices
           ports:
             - name: healthz
               containerPort: {{ .Values.healthCheck.csiDriverPort | default 9809 }}
