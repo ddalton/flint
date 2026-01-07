@@ -936,14 +936,36 @@ impl MinimalDiskService {
         match setpci_result {
             Ok(output) => {
                 if output.status.success() {
-                    println!("✅ [SPDK_USERSPACE:{}] Bus mastering enabled via setpci", correlation_id);
+                    println!("✅ [SPDK_USERSPACE:{}] setpci command succeeded", correlation_id);
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    println!("⚠️ [SPDK_USERSPACE:{}] setpci failed: {}", correlation_id, stderr);
+                    println!("⚠️ [SPDK_USERSPACE:{}] setpci command failed: {}", correlation_id, stderr);
                 }
             }
             Err(e) => {
                 println!("⚠️ [SPDK_USERSPACE:{}] Failed to run setpci: {}", correlation_id, e);
+            }
+        }
+
+        // Verify bus mastering was actually enabled by reading back the COMMAND register
+        let verify_result = tokio::process::Command::new("setpci")
+            .args(&["-s", &device.pci_address, "COMMAND"])
+            .output()
+            .await;
+
+        match verify_result {
+            Ok(output) if output.status.success() => {
+                let command_value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("🔍 [SPDK_USERSPACE:{}] PCI COMMAND register readback: 0x{}", correlation_id, command_value);
+                if command_value == "0406" {
+                    println!("✅ [SPDK_USERSPACE:{}] Bus mastering verified enabled (BusMaster+ bit is set)", correlation_id);
+                } else {
+                    println!("❌ [SPDK_USERSPACE:{}] Bus mastering NOT enabled! Expected 0x0406, got 0x{}", correlation_id, command_value);
+                    println!("⚠️ [SPDK_USERSPACE:{}] This will likely cause SPDK attach to fail", correlation_id);
+                }
+            }
+            _ => {
+                println!("⚠️ [SPDK_USERSPACE:{}] Could not verify bus mastering status", correlation_id);
             }
         }
 
