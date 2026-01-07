@@ -867,15 +867,25 @@ impl MinimalDiskService {
             correlation_id
         ).await;
 
+        // Log the retry result
+        match &bind_result {
+            Ok(_) => println!("🔧 [SPDK_USERSPACE:{}] Bind retries completed successfully", correlation_id),
+            Err(e) => println!("⚠️ [SPDK_USERSPACE:{}] Bind retries exhausted: {}", correlation_id, e),
+        }
+
         // Give driver time to initialize (even if bind appeared to fail)
+        println!("⏳ [SPDK_USERSPACE:{}] Waiting 200ms for driver to initialize...", correlation_id);
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Step 6: Verify binding succeeded (bind may succeed after retries timeout)
+        println!("🔍 [SPDK_USERSPACE:{}] Checking actual driver binding state...", correlation_id);
         let current_driver = self.get_current_driver(&device.pci_address).await
             .unwrap_or_else(|_| "unknown".to_string());
+        println!("🔍 [SPDK_USERSPACE:{}] Current driver: '{}', expected: '{}'", correlation_id, current_driver, userspace_driver);
 
         if current_driver != userspace_driver {
             // Bind truly failed - propagate the original error if we have one
+            println!("❌ [SPDK_USERSPACE:{}] Driver binding verification failed", correlation_id);
             if let Err(e) = bind_result {
                 return Err(e);
             }
@@ -892,7 +902,13 @@ impl MinimalDiskService {
         println!("✅ [SPDK_USERSPACE:{}] Device bound to {}", correlation_id, userspace_driver);
 
         // Step 7: Attach via SPDK bdev_nvme_attach_controller
-        self.try_spdk_nvme_attach(device, correlation_id).await
+        println!("🔧 [SPDK_USERSPACE:{}] Proceeding to SPDK NVMe attach...", correlation_id);
+        let attach_result = self.try_spdk_nvme_attach(device, correlation_id).await;
+        match &attach_result {
+            Ok(bdev) => println!("✅ [SPDK_USERSPACE:{}] try_spdk_nvme_attach succeeded: {}", correlation_id, bdev),
+            Err(e) => println!("❌ [SPDK_USERSPACE:{}] try_spdk_nvme_attach failed: {}", correlation_id, e),
+        }
+        attach_result
     }
 
     /// Try to attach an NVMe device via SPDK's bdev_nvme_attach_controller
@@ -913,8 +929,10 @@ impl MinimalDiskService {
             }
         });
 
+        println!("🔧 [SPDK_USERSPACE:{}] Calling SPDK RPC: bdev_nvme_attach_controller", correlation_id);
         match self.call_spdk_rpc(&attach_params).await {
             Ok(response) => {
+                println!("🔧 [SPDK_USERSPACE:{}] SPDK RPC response: {}", correlation_id, serde_json::to_string(&response).unwrap_or_else(|_| "unable to serialize".to_string()));
                 // bdev_nvme_attach_controller returns array of created bdev names
                 if let Some(bdevs) = response["result"].as_array() {
                     if let Some(first_bdev) = bdevs.first() {
