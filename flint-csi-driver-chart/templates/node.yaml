@@ -25,9 +25,11 @@ spec:
       containers:
         {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
         # SPDK Target Container (v25.05.x)
+        # Marked as sidecar - must start and be ready before flint-csi-driver
         - name: spdk-tgt
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
+          restartPolicy: Always  # Sidecar ordering: start before other containers
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -37,6 +39,17 @@ spec:
               add:
                 - SYS_ADMIN
                 - SYS_RAWIO
+          # Startup probe: container is "ready" when SPDK socket exists
+          # flint-csi-driver won't start until this probe succeeds
+          startupProbe:
+            exec:
+              command:
+                - test
+                - -S
+                - /var/tmp/spdk.sock
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 60  # Wait up to 60 seconds for SPDK to create socket
           lifecycle:
             preStop:
               exec:
@@ -188,9 +201,11 @@ spec:
           # The separate node-agent container has been removed to prevent port conflicts
         {{- else if .Values.deployment.nodeMode | eq "two-container" }}
         # SPDK Target Container (v25.05.x)
+        # Marked as sidecar - must start and be ready before node-agent
         - name: spdk-tgt
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
+          restartPolicy: Always  # Sidecar ordering: start before other containers
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -200,6 +215,16 @@ spec:
               add:
                 - SYS_ADMIN
                 - SYS_RAWIO
+          # Startup probe: container is "ready" when SPDK socket exists
+          startupProbe:
+            exec:
+              command:
+                - test
+                - -S
+                - /var/tmp/spdk.sock
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 60
           resources:
             limits:
               hugepages-2Mi: "1Gi"
