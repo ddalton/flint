@@ -925,7 +925,7 @@ impl NodeAgent {
         target_ip: &str,
         target_port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Step 0: Check if subsystem already exists and delete it (idempotency)
+        // Step 0: Check if subsystem already exists (idempotency + safety)
         // This handles the case where NodeUnstageVolume wasn't called (e.g., pod completed vs deleted)
         let check_params = json!({
             "method": "nvmf_get_subsystems",
@@ -936,15 +936,30 @@ impl NodeAgent {
                 for subsystem in subsystems {
                     if let Some(existing_nqn) = subsystem["nqn"].as_str() {
                         if existing_nqn == nqn {
-                            println!("🔄 [NVMEOF] Subsystem already exists, deleting for idempotency: {}", nqn);
-                            let delete_params = json!({
-                                "method": "nvmf_delete_subsystem",
-                                "params": {
-                                    "nqn": nqn
-                                }
-                            });
-                            // Best effort delete - ignore errors
-                            let _ = node_agent.disk_service.call_spdk_rpc(&delete_params).await;
+                            // SAFETY CHECK: Only delete if no active namespaces
+                            let namespace_count = subsystem["namespaces"]
+                                .as_array()
+                                .map(|ns| ns.len())
+                                .unwrap_or(0);
+
+                            if namespace_count == 0 {
+                                // Stale subsystem with no active connections - safe to cleanup
+                                println!("🔄 [NVMEOF] Subsystem exists with 0 namespaces (stale), cleaning up: {}", nqn);
+                                let delete_params = json!({
+                                    "method": "nvmf_delete_subsystem",
+                                    "params": {
+                                        "nqn": nqn
+                                    }
+                                });
+                                // Best effort delete - ignore errors
+                                let _ = node_agent.disk_service.call_spdk_rpc(&delete_params).await;
+                            } else {
+                                // Active subsystem with connections - DO NOT DELETE
+                                // This handles RWX/ROX or concurrent pod scenarios
+                                println!("✅ [NVMEOF] Subsystem exists with {} active namespace(s), reusing (RWX/ROX or concurrent attach): {}", namespace_count, nqn);
+                                // Skip creation steps - subsystem is already properly configured
+                                return Ok(());
+                            }
                             break;
                         }
                     }
