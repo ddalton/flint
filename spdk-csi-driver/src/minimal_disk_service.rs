@@ -642,6 +642,21 @@ impl MinimalDiskService {
                 }
             }
 
+            // Device is unbound, try to bind to userspace driver
+            if device.driver == "unbound" || device.driver == "unknown" {
+                println!("🔧 [BDEV_RECOVERY:{}] Device is unbound, attempting to bind to userspace driver", correlation_id);
+                match self.try_unbind_and_attach_nvme(device, &correlation_id).await {
+                    Ok(bdev_name) => {
+                        println!("✅ [BDEV_RECOVERY:{}] Successfully bound and attached unbound device: {}", correlation_id, bdev_name);
+                        return Ok(bdev_name);
+                    }
+                    Err(e) => {
+                        println!("⚠️ [BDEV_RECOVERY:{}] Failed to bind unbound device: {}, skipping", correlation_id, e);
+                        return Err(e);
+                    }
+                }
+            }
+
             // Device is kernel-bound (nvme driver), try to switch to userspace
             if device.driver == "nvme" {
                 // First check if an SPDK NVMe bdev already exists for this PCI address
@@ -922,25 +937,25 @@ impl MinimalDiskService {
         }
     }
 
-    /// Detect which userspace driver is available (prefer vfio-pci if IOMMU available)
+    /// Detect which userspace driver is available (prefer uio_pci_generic for faster binding)
     async fn detect_available_userspace_driver(&self) -> Result<String, MinimalStateError> {
         use std::path::Path;
 
-        // Check if IOMMU is available (vfio-pci requires it)
+        // Prefer uio_pci_generic - it binds faster than vfio-pci and works without IOMMU
+        // vfio-pci requires IOMMU operations which can take several seconds on first bind
+        if Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
+            return Ok("uio_pci_generic".to_string());
+        }
+
+        // Fall back to vfio-pci if uio_pci_generic not available (requires IOMMU)
         let iommu_groups = std::fs::read_dir("/sys/kernel/iommu_groups")
             .map(|d| d.count())
             .unwrap_or(0);
 
         if iommu_groups > 0 {
-            // IOMMU available, check if vfio-pci driver is loaded
             if Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
                 return Ok("vfio-pci".to_string());
             }
-        }
-
-        // Fall back to uio_pci_generic (doesn't require IOMMU, but less secure)
-        if Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
-            return Ok("uio_pci_generic".to_string());
         }
 
         // Try igb_uio (legacy DPDK driver)
