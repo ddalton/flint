@@ -925,6 +925,33 @@ impl NodeAgent {
         target_ip: &str,
         target_port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Step 0: Check if subsystem already exists and delete it (idempotency)
+        // This handles the case where NodeUnstageVolume wasn't called (e.g., pod completed vs deleted)
+        let check_params = json!({
+            "method": "nvmf_get_subsystems",
+        });
+
+        if let Ok(result) = node_agent.disk_service.call_spdk_rpc(&check_params).await {
+            if let Some(subsystems) = result["result"].as_array() {
+                for subsystem in subsystems {
+                    if let Some(existing_nqn) = subsystem["nqn"].as_str() {
+                        if existing_nqn == nqn {
+                            println!("🔄 [NVMEOF] Subsystem already exists, deleting for idempotency: {}", nqn);
+                            let delete_params = json!({
+                                "method": "nvmf_delete_subsystem",
+                                "params": {
+                                    "nqn": nqn
+                                }
+                            });
+                            // Best effort delete - ignore errors
+                            let _ = node_agent.disk_service.call_spdk_rpc(&delete_params).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Step 1: Create subsystem
         let subsystem_params = json!({
             "method": "nvmf_create_subsystem",

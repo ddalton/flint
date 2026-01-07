@@ -163,6 +163,8 @@ spec:
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
             - name: DEVICE_DISCOVERY_MODE
               value: "{{ .Values.blockDevice.discoveryMode | default "nvme" }}"
+            - name: BLOCK_DEVICE_BACKEND
+              value: "{{ .Values.blockDevice.backend | default "ublk" }}"
           securityContext:
             privileged: true
             capabilities:

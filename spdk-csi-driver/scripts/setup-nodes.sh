@@ -142,7 +142,17 @@ setup_vfio_drivers() {
     
     # Load ublk driver for userspace block devices
     modprobe ublk_drv 2>/dev/null || echo "⚠️  ublk_drv module load failed"
-    
+
+    # Load NVMe-oF modules for nvmeof backend
+    modprobe nvme-tcp 2>/dev/null || echo "⚠️  nvme-tcp module load failed"
+
+    # Make nvme-tcp persistent across reboots
+    if ! grep -q "^nvme-tcp" /etc/modules-load.d/nvme.conf 2>/dev/null; then
+        mkdir -p /etc/modules-load.d
+        echo "nvme-tcp" >> /etc/modules-load.d/nvme.conf
+        echo "   ✅ nvme-tcp module configured to load at boot"
+    fi
+
     # Check IOMMU groups
     local iommu_groups=$(ls /sys/kernel/iommu_groups/ 2>/dev/null | wc -l)
     echo "   📊 IOMMU groups available: $iommu_groups"
@@ -179,9 +189,19 @@ setup_bare_metal_drivers() {
     
     # Also make vfio-pci available as fallback
     modprobe vfio-pci 2>/dev/null || echo "   ⚠️  vfio-pci fallback not available"
-    
+
     # Load ublk driver for userspace block devices
     modprobe ublk_drv 2>/dev/null || echo "   ⚠️  ublk_drv module load failed"
+
+    # Load NVMe-oF modules for nvmeof backend
+    modprobe nvme-tcp 2>/dev/null || echo "   ⚠️  nvme-tcp module load failed"
+
+    # Make nvme-tcp persistent across reboots
+    if ! grep -q "^nvme-tcp" /etc/modules-load.d/nvme.conf 2>/dev/null; then
+        mkdir -p /etc/modules-load.d
+        echo "nvme-tcp" >> /etc/modules-load.d/nvme.conf
+        echo "   ✅ nvme-tcp module configured to load at boot"
+    fi
 }
 
 # Function to detect CPU vendor and configure IOMMU if needed
