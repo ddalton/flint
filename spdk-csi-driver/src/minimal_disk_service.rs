@@ -1032,26 +1032,56 @@ impl MinimalDiskService {
     /// Detect which userspace driver is available (prefer uio_pci_generic for faster binding)
     async fn detect_available_userspace_driver(&self) -> Result<String, MinimalStateError> {
         use std::path::Path;
+        use std::fs;
 
-        // Prefer uio_pci_generic - it binds faster than vfio-pci and works without IOMMU
-        // vfio-pci requires IOMMU operations which can take several seconds on first bind
-        if Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
-            return Ok("uio_pci_generic".to_string());
-        }
-
-        // Fall back to vfio-pci if uio_pci_generic not available (requires IOMMU)
+        // Check if IOMMU is enabled and in enforcement mode
         let iommu_groups = std::fs::read_dir("/sys/kernel/iommu_groups")
             .map(|d| d.count())
             .unwrap_or(0);
 
-        if iommu_groups > 0 {
+        let iommu_enabled = iommu_groups > 0;
+
+        // Check if IOMMU is in passthrough mode by reading kernel command line
+        let iommu_passthrough = if iommu_enabled {
+            fs::read_to_string("/proc/cmdline")
+                .unwrap_or_default()
+                .contains("iommu=pt")
+        } else {
+            false
+        };
+
+        println!("🔍 [DRIVER_DETECT] IOMMU enabled: {}, passthrough: {}", iommu_enabled, iommu_passthrough);
+
+        // If IOMMU is enabled and NOT in passthrough mode, we MUST use vfio-pci
+        // uio_pci_generic doesn't support IOMMU mappings and will cause DMAR faults
+        if iommu_enabled && !iommu_passthrough {
+            println!("⚠️ [DRIVER_DETECT] IOMMU in enforcement mode - vfio-pci required for proper DMA mapping");
             if Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
+                println!("✅ [DRIVER_DETECT] Using vfio-pci (IOMMU enforcement mode)");
                 return Ok("vfio-pci".to_string());
+            } else {
+                return Err(MinimalStateError::InternalError {
+                    message: "IOMMU is in enforcement mode but vfio-pci driver is not available. Load vfio-pci module or set iommu=pt in kernel parameters.".to_string()
+                });
             }
+        }
+
+        // Prefer uio_pci_generic when IOMMU is disabled or in passthrough mode
+        // It binds faster than vfio-pci and works without IOMMU overhead
+        if Path::new("/sys/bus/pci/drivers/uio_pci_generic").exists() {
+            println!("✅ [DRIVER_DETECT] Using uio_pci_generic (fast, no IOMMU enforcement)");
+            return Ok("uio_pci_generic".to_string());
+        }
+
+        // Fall back to vfio-pci if uio_pci_generic not available
+        if Path::new("/sys/bus/pci/drivers/vfio-pci").exists() {
+            println!("✅ [DRIVER_DETECT] Using vfio-pci (fallback)");
+            return Ok("vfio-pci".to_string());
         }
 
         // Try igb_uio (legacy DPDK driver)
         if Path::new("/sys/bus/pci/drivers/igb_uio").exists() {
+            println!("✅ [DRIVER_DETECT] Using igb_uio (legacy)");
             return Ok("igb_uio".to_string());
         }
 
