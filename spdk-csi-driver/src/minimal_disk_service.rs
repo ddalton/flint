@@ -901,6 +901,43 @@ impl MinimalDiskService {
 
         println!("✅ [SPDK_USERSPACE:{}] Device bound to {}", correlation_id, userspace_driver);
 
+        // Step 6.5: Enable bus mastering (required for DMA operations)
+        // When binding/unbinding devices, the BusMaster bit can get cleared
+        // SPDK requires bus mastering to be enabled for NVMe operations
+        println!("🔧 [SPDK_USERSPACE:{}] Enabling bus mastering for DMA...", correlation_id);
+        let enable_path = format!("/sys/bus/pci/devices/{}/enable", device.pci_address);
+        if let Err(e) = fs::write(&enable_path, "1") {
+            println!("⚠️ [SPDK_USERSPACE:{}] Failed to enable device: {}", correlation_id, e);
+        }
+
+        // Also try to enable via config space manipulation (PCI_COMMAND register, bit 2)
+        let config_path = format!("/sys/bus/pci/devices/{}/config", device.pci_address);
+        if let Ok(mut config_data) = fs::read(&config_path) {
+            if config_data.len() >= 6 {
+                // Read PCI_COMMAND register (offset 0x04, 2 bytes)
+                let mut command = u16::from_le_bytes([config_data[4], config_data[5]]);
+                let bus_master_bit = 0x04; // Bit 2 is Bus Master Enable
+
+                if command & bus_master_bit == 0 {
+                    println!("🔧 [SPDK_USERSPACE:{}] Bus mastering was disabled, enabling...", correlation_id);
+                    command |= bus_master_bit;
+                    config_data[4] = (command & 0xFF) as u8;
+                    config_data[5] = ((command >> 8) & 0xFF) as u8;
+
+                    if let Err(e) = fs::write(&config_path, &config_data) {
+                        println!("⚠️ [SPDK_USERSPACE:{}] Failed to write PCI config: {}", correlation_id, e);
+                    } else {
+                        println!("✅ [SPDK_USERSPACE:{}] Bus mastering enabled", correlation_id);
+                    }
+                } else {
+                    println!("✅ [SPDK_USERSPACE:{}] Bus mastering already enabled", correlation_id);
+                }
+            }
+        }
+
+        // Give hardware time to stabilize after enabling bus mastering
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         // Step 7: Attach via SPDK bdev_nvme_attach_controller
         println!("🔧 [SPDK_USERSPACE:{}] Proceeding to SPDK NVMe attach...", correlation_id);
         let attach_result = self.try_spdk_nvme_attach(device, correlation_id).await;
