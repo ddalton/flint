@@ -681,6 +681,17 @@ impl MinimalDiskService {
                     }
                     Err(e) => {
                         println!("⚠️ [BDEV_RECOVERY:{}] SPDK userspace driver failed: {}, falling back to io_uring", correlation_id, e);
+
+                        // Rebind to kernel nvme driver for io_uring fallback
+                        // After userspace SPDK fails, device is bound to uio_pci_generic which doesn't create /dev/nvmeX
+                        // We need to rebind to kernel nvme driver so /dev/nvmeXnY exists for io_uring
+                        println!("🔄 [BDEV_RECOVERY:{}] Rebinding device to kernel nvme driver for io_uring fallback", correlation_id);
+
+                        if let Err(rebind_err) = self.rebind_to_kernel_driver(&device.pci_address, "nvme", &correlation_id).await {
+                            println!("❌ [BDEV_RECOVERY:{}] Failed to rebind to kernel driver: {}, io_uring fallback may fail", correlation_id, rebind_err);
+                        } else {
+                            println!("✅ [BDEV_RECOVERY:{}] Successfully rebound to kernel nvme driver", correlation_id);
+                        }
                         // Fall through to io_uring fallback
                     }
                 }
@@ -1178,6 +1189,56 @@ impl MinimalDiskService {
                 }
             }
             Err(_) => Ok("unbound".to_string()),
+        }
+    }
+
+    /// Rebind a PCI device from userspace driver back to kernel driver
+    /// This is needed when SPDK userspace attach fails and we want to fall back to io_uring
+    async fn rebind_to_kernel_driver(&self, pci_addr: &str, kernel_driver: &str, correlation_id: &str) -> Result<(), MinimalStateError> {
+        use std::fs;
+
+        println!("🔄 [REBIND:{}] Rebinding {} to kernel driver: {}", correlation_id, pci_addr, kernel_driver);
+
+        // Step 1: Check current driver
+        let current_driver = self.get_current_driver(pci_addr).await?;
+        println!("🔍 [REBIND:{}] Current driver: {}", correlation_id, current_driver);
+
+        if current_driver == kernel_driver {
+            println!("✅ [REBIND:{}] Already bound to {}, nothing to do", correlation_id, kernel_driver);
+            return Ok(());
+        }
+
+        // Step 2: Unbind from current driver
+        if current_driver != "unbound" && current_driver != "unknown" {
+            let unbind_path = format!("/sys/bus/pci/drivers/{}/unbind", current_driver);
+            println!("🔧 [REBIND:{}] Unbinding from {}", correlation_id, current_driver);
+
+            if let Err(e) = fs::write(&unbind_path, pci_addr) {
+                println!("⚠️ [REBIND:{}] Failed to unbind from {}: {}", correlation_id, current_driver, e);
+                // Continue anyway - device might already be unbound
+            } else {
+                println!("✅ [REBIND:{}] Unbound from {}", correlation_id, current_driver);
+            }
+        }
+
+        // Step 3: Bind to kernel driver
+        let bind_path = format!("/sys/bus/pci/drivers/{}/bind", kernel_driver);
+        println!("🔧 [REBIND:{}] Binding to {}", correlation_id, kernel_driver);
+
+        match fs::write(&bind_path, pci_addr) {
+            Ok(_) => {
+                println!("✅ [REBIND:{}] Successfully bound to {}", correlation_id, kernel_driver);
+
+                // Give kernel driver time to initialize
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                Ok(())
+            }
+            Err(e) => {
+                Err(MinimalStateError::InternalError {
+                    message: format!("Failed to bind {} to {}: {}", pci_addr, kernel_driver, e)
+                })
+            }
         }
     }
 
