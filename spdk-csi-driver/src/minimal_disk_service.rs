@@ -950,11 +950,51 @@ impl MinimalDiskService {
 
     /// Try to attach an NVMe device via SPDK's bdev_nvme_attach_controller
     async fn try_spdk_nvme_attach(&self, device: &PhysicalDevice, correlation_id: &str) -> Result<String, MinimalStateError> {
+        use std::fs;
+
         // Generate controller name based on PCI address
         let controller_name = format!("nvme_{}", device.pci_address.replace(":", "_").replace(".", "_"));
 
         println!("🔧 [SPDK_USERSPACE:{}] Attaching NVMe controller: {} (PCI: {})",
                  correlation_id, controller_name, device.pci_address);
+
+        // CRITICAL: Enable bus mastering before SPDK attach
+        // When devices are bound to userspace drivers (uio_pci_generic/vfio-pci),
+        // the Bus Master Enable bit can be cleared during bind/unbind operations.
+        // SPDK requires bus mastering enabled for DMA operations.
+        println!("🔧 [SPDK_USERSPACE:{}] Enabling bus mastering for DMA...", correlation_id);
+        let enable_path = format!("/sys/bus/pci/devices/{}/enable", device.pci_address);
+        if let Err(e) = fs::write(&enable_path, "1") {
+            println!("⚠️ [SPDK_USERSPACE:{}] Failed to enable device: {}", correlation_id, e);
+        }
+
+        // Also enable via config space manipulation (PCI_COMMAND register, bit 2)
+        let config_path = format!("/sys/bus/pci/devices/{}/config", device.pci_address);
+        if let Ok(mut config_data) = fs::read(&config_path) {
+            if config_data.len() >= 6 {
+                // Read PCI_COMMAND register (offset 0x04, 2 bytes)
+                let mut command = u16::from_le_bytes([config_data[4], config_data[5]]);
+                let bus_master_bit = 0x04; // Bit 2 is Bus Master Enable
+
+                if command & bus_master_bit == 0 {
+                    println!("🔧 [SPDK_USERSPACE:{}] Bus mastering was disabled, enabling...", correlation_id);
+                    command |= bus_master_bit;
+                    config_data[4] = (command & 0xFF) as u8;
+                    config_data[5] = ((command >> 8) & 0xFF) as u8;
+
+                    if let Err(e) = fs::write(&config_path, &config_data) {
+                        println!("⚠️ [SPDK_USERSPACE:{}] Failed to write PCI config: {}", correlation_id, e);
+                    } else {
+                        println!("✅ [SPDK_USERSPACE:{}] Bus mastering enabled", correlation_id);
+                    }
+                } else {
+                    println!("✅ [SPDK_USERSPACE:{}] Bus mastering already enabled", correlation_id);
+                }
+            }
+        }
+
+        // Give hardware time to stabilize after enabling bus mastering
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // SPDK expects PCI address in traddr format
         let attach_params = serde_json::json!({
