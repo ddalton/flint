@@ -860,23 +860,33 @@ impl MinimalDiskService {
         println!("🔧 [SPDK_USERSPACE:{}] Binding to {}...", correlation_id, userspace_driver);
 
         // Retry bind operation with exponential backoff to handle udev race conditions
-        Self::retry_bind_with_backoff(
+        let bind_result = Self::retry_bind_with_backoff(
             || fs::write(&bind_path, &device.pci_address),
             &device.pci_address,
             &userspace_driver,
             correlation_id
-        ).await?;
+        ).await;
 
-        // Give driver time to initialize
+        // Give driver time to initialize (even if bind appeared to fail)
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        // Step 6: Verify binding succeeded
+        // Step 6: Verify binding succeeded (bind may succeed after retries timeout)
         let current_driver = self.get_current_driver(&device.pci_address).await
             .unwrap_or_else(|_| "unknown".to_string());
+
         if current_driver != userspace_driver {
+            // Bind truly failed - propagate the original error if we have one
+            if let Err(e) = bind_result {
+                return Err(e);
+            }
             return Err(MinimalStateError::InternalError {
                 message: format!("Driver binding failed: expected {}, got {}", userspace_driver, current_driver)
             });
+        }
+
+        // Bind succeeded (either during retries or shortly after)
+        if bind_result.is_err() {
+            println!("✅ [SPDK_USERSPACE:{}] Device bound to {} (succeeded after retry timeout)", correlation_id, userspace_driver);
         }
 
         println!("✅ [SPDK_USERSPACE:{}] Device bound to {}", correlation_id, userspace_driver);
