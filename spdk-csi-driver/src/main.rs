@@ -159,7 +159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_namespace = get_current_namespace().await?;
     
     let spdk_socket_path = std::env::var("SPDK_RPC_URL").unwrap_or("unix:///var/tmp/spdk.sock".to_string());
-    
+    let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
+
     // Create minimal state driver
     let driver = Arc::new(SpdkCsiDriver::new(
         kube_client.clone(),
@@ -169,12 +170,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tcp".to_string(), // nvmeof_transport
         4420, // nvmeof_target_port
     ));
-    
+
     println!("🎯 [CONFIG] Using namespace for custom resources: {}", driver.target_namespace);
-    
+
     // Initialize driver (warm up capacity cache, start background tasks)
     println!("🚀 [MAIN] Initializing CSI driver...");
-    driver.initialize().await.map_err(|e| {
+    driver.initialize(&mode).await.map_err(|e| {
         eprintln!("❌ [MAIN] Failed to initialize driver: {}", e);
         std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
     })?;
@@ -204,8 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    
-    let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
+
     let endpoint = std::env::var("CSI_ENDPOINT")
         .unwrap_or("unix:///csi/csi.sock".to_string());
     

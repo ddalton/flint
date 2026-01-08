@@ -83,23 +83,29 @@ impl SpdkCsiDriver {
     }
     
     /// Initialize driver (warm up cache, start background tasks)
-    pub async fn initialize(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 [DRIVER] Initializing CSI driver...");
-        
-        // Warm up capacity cache
-        println!("🔥 [DRIVER] Warming up capacity cache...");
-        self.capacity_cache.warm_up(self).await?;
-        
-        // Start background cache refresh (every 60 seconds)
-        // Note: Cache is also invalidated after every volume creation, so this is mainly
-        // to catch external changes (manual SPDK operations, disk failures, etc.)
-        println!("🔄 [DRIVER] Starting background capacity refresh (every 60s)...");
-        CapacityCache::start_background_refresh(
-            Arc::new(self.capacity_cache.clone()),
-            Arc::new(self.clone()),
-            60,
-        );
-        
+    pub async fn initialize(&self, mode: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🚀 [DRIVER] Initializing CSI driver in {} mode...", mode);
+
+        // Capacity cache is only needed for controller mode (volume placement decisions)
+        // Node mode only handles local operations (mount/unmount/stage/unstage)
+        if mode == "controller" || mode == "all" {
+            // Warm up capacity cache
+            println!("🔥 [DRIVER] Warming up capacity cache...");
+            self.capacity_cache.warm_up(self).await?;
+
+            // Start background cache refresh (every 60 seconds)
+            // Note: Cache is also invalidated after every volume creation, so this is mainly
+            // to catch external changes (manual SPDK operations, disk failures, etc.)
+            println!("🔄 [DRIVER] Starting background capacity refresh (every 60s)...");
+            CapacityCache::start_background_refresh(
+                Arc::new(self.capacity_cache.clone()),
+                Arc::new(self.clone()),
+                60,
+            );
+        } else {
+            println!("⏭️  [DRIVER] Skipping capacity cache initialization in node mode");
+        }
+
         println!("✅ [DRIVER] Initialization complete");
         Ok(())
     }
