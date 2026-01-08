@@ -787,11 +787,28 @@ impl SpdkCsiDriver {
         // Note: ublk target is initialized by node agent on startup
         // No need to call ensure_ublk_target() here
 
+        // Performance tuning: Use multiple queues for better parallelism
+        // num_queues: Match number of CPU cores for optimal throughput
+        // queue_depth: Higher depth allows more outstanding I/O operations
+        let num_queues = std::env::var("UBLK_NUM_QUEUES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4); // Default: 4 queues for good parallelism
+
+        let queue_depth = std::env::var("UBLK_QUEUE_DEPTH")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(256); // Default: 256 for better pipeline depth
+
+        println!("🔧 [UBLK_PERF] Using num_queues={}, queue_depth={}", num_queues, queue_depth);
+
         let ublk_params = json!({
             "method": "ublk_start_disk",
             "params": {
                 "bdev_name": bdev_name,
-                "ublk_id": ublk_id
+                "ublk_id": ublk_id,
+                "num_queues": num_queues,
+                "queue_depth": queue_depth
             }
         });
 
