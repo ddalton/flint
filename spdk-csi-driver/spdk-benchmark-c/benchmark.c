@@ -24,6 +24,7 @@ struct io_context {
     void *buffer;
     int completed;
     int success;
+    int in_use;  // Track if this context is currently being used by an in-flight I/O
 };
 
 static void io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
@@ -145,21 +146,37 @@ static double run_sequential_read(struct nvme_controller *nvme)
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;  // Mark context as free
                 completed++;
                 in_flight--;
             }
         }
 
-        // NOW submit new I/Os using freed contexts
+        // NOW submit new I/Os using free contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            uint32_t ctx_idx = submitted % QUEUE_DEPTH;
+            // Find a free context slot
+            int ctx_idx = -1;
+            for (int i = 0; i < QUEUE_DEPTH; i++) {
+                if (!contexts[i].in_use) {
+                    ctx_idx = i;
+                    break;
+                }
+            }
+
+            if (ctx_idx == -1) {
+                // No free contexts available, break and poll more
+                break;
+            }
+
+            // Mark context as in-use and reset completion state
+            contexts[ctx_idx].in_use = 1;
             contexts[ctx_idx].completed = 0;
             contexts[ctx_idx].success = 0;
 
@@ -169,6 +186,7 @@ static double run_sequential_read(struct nvme_controller *nvme)
                                        io_complete, &contexts[ctx_idx], 0);
             if (rc != 0) {
                 printf("Failed to submit read command: %d\n", rc);
+                contexts[ctx_idx].in_use = 0;  // Free the context on error
                 spdk_free(buffer);
                 return -1;
             }
@@ -193,13 +211,14 @@ static double run_sequential_read(struct nvme_controller *nvme)
         // Check for completed I/Os
         uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed during drain\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;
                 completed++;
                 in_flight--;
                 newly_completed++;
@@ -332,13 +351,14 @@ static double run_sequential_write(struct nvme_controller *nvme)
         // Check for completed I/Os
         uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed during drain\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;
                 completed++;
                 in_flight--;
                 newly_completed++;
@@ -472,13 +492,14 @@ static double run_random_read(struct nvme_controller *nvme)
         // Check for completed I/Os
         uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed during drain\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;
                 completed++;
                 in_flight--;
                 newly_completed++;
