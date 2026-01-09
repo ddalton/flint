@@ -123,8 +123,8 @@ static double run_sequential_read(struct nvme_controller *nvme)
     while (completed < NUM_BLOCKS) {
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            printf("  Progress: %lu%% (%lu/%u blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
             fflush(stdout);
             last_progress = completed;
         }
@@ -222,8 +222,8 @@ static double run_sequential_write(struct nvme_controller *nvme)
     while (completed < NUM_BLOCKS) {
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            printf("  Progress: %lu%% (%lu/%u blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
             fflush(stdout);
             last_progress = completed;
         }
@@ -319,8 +319,8 @@ static double run_random_read(struct nvme_controller *nvme)
     while (completed < NUM_BLOCKS) {
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            printf("  Progress: %lu%% (%lu/%u blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
             fflush(stdout);
             last_progress = completed;
         }
