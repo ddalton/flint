@@ -324,6 +324,15 @@ int main(void)
     printf("\n");
     fflush(stdout);
 
+    // Sequential write test (run first to evaluate write performance)
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("SEQUENTIAL WRITE TEST (SPDK Native Polling Mode)\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
+    write_throughput = run_test(nvme, 0);
+    printf("\n");
+    fflush(stdout);
+
     // Sequential read test
     printf("═══════════════════════════════════════════════════════\n");
     printf("SEQUENTIAL READ TEST (SPDK Native Polling Mode)\n");
@@ -333,21 +342,12 @@ int main(void)
     printf("\n");
     fflush(stdout);
 
-    // Sequential write test
-    printf("═══════════════════════════════════════════════════════\n");
-    printf("SEQUENTIAL WRITE TEST (SPDK Native Polling Mode)\n");
-    printf("═══════════════════════════════════════════════════════\n");
-    fflush(stdout);
-    write_throughput = run_test(nvme, 0);
-    printf("\n");
-    fflush(stdout);
-
     // Summary
     printf("═══════════════════════════════════════════════════════\n");
     printf("BENCHMARK SUMMARY\n");
     printf("═══════════════════════════════════════════════════════\n");
-    printf("Sequential Read:  %.2f GB/s\n", read_throughput);
     printf("Sequential Write: %.2f GB/s\n", write_throughput);
+    printf("Sequential Read:  %.2f GB/s\n", read_throughput);
     printf("═══════════════════════════════════════════════════════\n");
     printf("\n");
     fflush(stdout);
