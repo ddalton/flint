@@ -26,15 +26,18 @@ struct IoContext {
 }
 
 // Helper function to check if completion has error (replaces missing spdk_nvme_cpl_is_error macro)
+// From SPDK: spdk_nvme_cpl_is_error checks: status.sc != 0 || status.sct != 0
+// The status field is a union { uint16_t status_raw; struct spdk_nvme_status status; }
+// For simplicity, we check if status_raw != 0 (success is sc=0, sct=0, so status_raw=0)
 unsafe fn is_cpl_error(cpl: *const spdk_nvme_cpl) -> bool {
-    // The completion queue entry is 16 bytes. Status is in the last dword (DW3).
-    // Cast the completion to a u32 array and read the 4th dword (index 3)
-    let dwords = cpl as *const u32;
-    let dw3 = *dwords.add(3);
+    // Access status_raw via the anonymous union __bindgen_anon_1
+    // The union contains: { status_raw: u16, status: spdk_nvme_status }
+    let status_raw = (*cpl).__bindgen_anon_1.status_raw;
 
-    // Check if status code type (SCT) or status code (SC) are non-zero
-    // Bits 17-27 are SCT+SC. If any are set, it's an error.
-    (dw3 & 0x0FFE_0000) != 0
+    // Success is when both sc (bits 0-7) and sct (bits 8-10) are 0
+    // So any non-zero value in the lower 11 bits indicates an error
+    // Mask out phase bit (bit 15) and check if error bits are set
+    (status_raw & 0x7FF) != 0
 }
 
 extern "C" fn io_complete_cb(
