@@ -82,9 +82,14 @@ RUN echo "/usr/local/lib/spdk" > /etc/ld.so.conf.d/spdk.conf && \
 RUN printf '#!/bin/bash\n\
 set -e\n\
 echo "Setting up environment..."\n\
-mkdir -p /mnt/huge\n\
-mount -t hugetlbfs nodev /mnt/huge 2>/dev/null || echo "Hugepages already mounted"\n\
 echo "Hugepages: $(cat /proc/meminfo | grep HugePages_Total)"\n\
+if mountpoint -q /dev/hugepages; then\n\
+    echo "Hugepages already mounted at /dev/hugepages"\n\
+else\n\
+    echo "Mounting hugepages..."\n\
+    mkdir -p /dev/hugepages\n\
+    mount -t hugetlbfs nodev /dev/hugepages || echo "Warning: mount failed"\n\
+fi\n\
 echo ""\n\
 exec /usr/local/bin/spdk-benchmark "$@"\n' > /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh

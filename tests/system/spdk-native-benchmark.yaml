@@ -22,7 +22,7 @@ spec:
     - name: sys
       mountPath: /sys
     - name: hugepages
-      mountPath: /mnt/huge
+      mountPath: /dev/hugepages
     env:
     - name: SPDK_LOG_LEVEL
       value: "INFO"
@@ -36,7 +36,6 @@ spec:
       path: /sys
       type: Directory
   - name: hugepages
-    hostPath:
-      path: /mnt/huge
-      type: DirectoryOrCreate
+    emptyDir:
+      medium: HugePages
   restartPolicy: Never
