@@ -287,7 +287,7 @@ static double run_sequential_write(struct nvme_controller *nvme)
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     uint64_t last_progress = 0;
-    while (completed < NUM_BLOCKS) {
+    while (submitted < NUM_BLOCKS) {
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
             printf("  Progress: %lu%% (%lu/%u blocks)\n",
@@ -303,21 +303,37 @@ static double run_sequential_write(struct nvme_controller *nvme)
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;
                 completed++;
                 in_flight--;
             }
         }
 
-        // NOW submit new I/Os using freed contexts
+        // NOW submit new I/Os using free contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            uint32_t ctx_idx = submitted % QUEUE_DEPTH;
+            // Find a free context slot
+            int ctx_idx = -1;
+            for (int i = 0; i < QUEUE_DEPTH; i++) {
+                if (!contexts[i].in_use) {
+                    ctx_idx = i;
+                    break;
+                }
+            }
+
+            if (ctx_idx == -1) {
+                // No free contexts available, break and poll more
+                break;
+            }
+
+            // Mark context as in-use and reset completion state
+            contexts[ctx_idx].in_use = 1;
             contexts[ctx_idx].completed = 0;
             contexts[ctx_idx].success = 0;
 
@@ -327,6 +343,7 @@ static double run_sequential_write(struct nvme_controller *nvme)
                                         io_complete, &contexts[ctx_idx], 0);
             if (rc != 0) {
                 printf("Failed to submit write command: %d\n", rc);
+                contexts[ctx_idx].in_use = 0;
                 spdk_free(buffer);
                 return -1;
             }
@@ -425,7 +442,7 @@ static double run_random_read(struct nvme_controller *nvme)
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     uint64_t last_progress = 0;
-    while (completed < NUM_BLOCKS) {
+    while (submitted < NUM_BLOCKS) {
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
             printf("  Progress: %lu%% (%lu/%u blocks)\n",
@@ -441,21 +458,37 @@ static double run_random_read(struct nvme_controller *nvme)
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
+            if (contexts[i].in_use && contexts[i].completed) {
                 if (!contexts[i].success) {
                     printf("I/O failed\n");
                     spdk_free(buffer);
                     return -1;
                 }
                 contexts[i].completed = 0;
+                contexts[i].in_use = 0;
                 completed++;
                 in_flight--;
             }
         }
 
-        // NOW submit new I/Os using freed contexts
+        // NOW submit new I/Os using free contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            uint32_t ctx_idx = submitted % QUEUE_DEPTH;
+            // Find a free context slot
+            int ctx_idx = -1;
+            for (int i = 0; i < QUEUE_DEPTH; i++) {
+                if (!contexts[i].in_use) {
+                    ctx_idx = i;
+                    break;
+                }
+            }
+
+            if (ctx_idx == -1) {
+                // No free contexts available, break and poll more
+                break;
+            }
+
+            // Mark context as in-use and reset completion state
+            contexts[ctx_idx].in_use = 1;
             contexts[ctx_idx].completed = 0;
             contexts[ctx_idx].success = 0;
 
@@ -469,6 +502,7 @@ static double run_random_read(struct nvme_controller *nvme)
                                        io_complete, &contexts[ctx_idx], 0);
             if (rc != 0) {
                 printf("Failed to submit read command: %d\n", rc);
+                contexts[ctx_idx].in_use = 0;
                 spdk_free(buffer);
                 return -1;
             }
