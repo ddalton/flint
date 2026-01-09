@@ -179,6 +179,32 @@ static double run_sequential_read(struct nvme_controller *nvme)
         }
     }
 
+    // Drain remaining in-flight I/Os
+    printf("  Draining %u remaining I/Os...\n", in_flight);
+    fflush(stdout);
+    while (in_flight > 0) {
+        // Poll aggressively to drain all completions
+        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
+
+        // Check for completed I/Os
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed during drain\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+    }
+    printf("✓ All I/Os completed: %lu\n", completed);
+    fflush(stdout);
+
     clock_gettime(CLOCK_MONOTONIC, &end);
     elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     throughput = ((double)NUM_BLOCKS * BLOCK_SIZE / elapsed) / (1024.0 * 1024.0 * 1024.0);
@@ -280,6 +306,32 @@ static double run_sequential_write(struct nvme_controller *nvme)
             in_flight++;
         }
     }
+
+    // Drain remaining in-flight I/Os
+    printf("  Draining %u remaining I/Os...\n", in_flight);
+    fflush(stdout);
+    while (in_flight > 0) {
+        // Poll aggressively to drain all completions
+        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
+
+        // Check for completed I/Os
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed during drain\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+    }
+    printf("✓ All I/Os completed: %lu\n", completed);
+    fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
@@ -383,6 +435,32 @@ static double run_random_read(struct nvme_controller *nvme)
             in_flight++;
         }
     }
+
+    // Drain remaining in-flight I/Os
+    printf("  Draining %u remaining I/Os...\n", in_flight);
+    fflush(stdout);
+    while (in_flight > 0) {
+        // Poll aggressively to drain all completions
+        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
+
+        // Check for completed I/Os
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed during drain\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+    }
+    printf("✓ All I/Os completed: %lu\n", completed);
+    fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
