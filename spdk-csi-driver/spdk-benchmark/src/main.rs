@@ -27,10 +27,12 @@ struct IoContext {
 
 // Helper function to check if completion has error (replaces missing spdk_nvme_cpl_is_error macro)
 unsafe fn is_cpl_error(cpl: *const spdk_nvme_cpl) -> bool {
-    // Check status field - 0 means success
-    // The completion structure has a status field in an anonymous union
-    let status = (*cpl).__bindgen_anon_1.status;
-    (status & 0xFFFE) != 0  // Check status bits (bit 0 is phase, bits 1+ are status)
+    // The completion has a dword field that contains the raw status
+    // Read the raw dword value (contains status code, phase bit, etc.)
+    let dw3 = (*cpl).dw3;
+    // Check if status code type (SCT) or status code (SC) are non-zero
+    // Bits 17-27 are SCT+SC. If any are set, it's an error.
+    (dw3 & 0x0FFE_0000) != 0
 }
 
 extern "C" fn io_complete_cb(
@@ -47,7 +49,7 @@ extern "C" fn io_complete_cb(
 extern "C" fn probe_cb(
     _cb_ctx: *mut ::std::os::raw::c_void,
     trid: *const spdk_nvme_transport_id,
-    opts: *mut spdk_nvme_ctrlr_opts,
+    _opts: *mut spdk_nvme_ctrlr_opts,
 ) -> bool {
     unsafe {
         let addr = (*trid).traddr.as_ptr();
@@ -58,9 +60,9 @@ extern "C" fn probe_cb(
 
 extern "C" fn attach_cb(
     cb_ctx: *mut ::std::os::raw::c_void,
-    trid: *const spdk_nvme_transport_id,
+    _trid: *const spdk_nvme_transport_id,
     ctrlr: *mut spdk_nvme_ctrlr,
-    opts: *const spdk_nvme_ctrlr_opts,
+    _opts: *const spdk_nvme_ctrlr_opts,
 ) {
     let nvme_ctx = cb_ctx as *mut *mut NvmeController;
 
