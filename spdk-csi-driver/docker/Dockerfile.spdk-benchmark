@@ -39,7 +39,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
 #--------------------------------------------------------------------
 # Stage 2: Build Rust benchmark application
 #--------------------------------------------------------------------
-FROM rust:1.75-bookworm AS rust-builder
+FROM rust:1.83-bookworm AS rust-builder
 
 # Install dependencies for building
 RUN apt-get update && apt-get install -y \
