@@ -4,9 +4,12 @@ CC = gcc
 CFLAGS = -Wall -Werror -g -O2
 CFLAGS += -I$(SPDK_ROOT_DIR)/include
 LDFLAGS = -L$(SPDK_ROOT_DIR)/build/lib
+LDFLAGS += -L$(SPDK_ROOT_DIR)/dpdk/build/lib
+LDFLAGS += -Wl,--no-as-needed
 LDFLAGS += -lspdk_nvme -lspdk_env_dpdk -lspdk_log -lspdk_util -lspdk_vmd
 LDFLAGS += -lrte_eal -lrte_mempool -lrte_ring -lrte_mbuf -lrte_pci -lrte_bus_pci -lrte_kvargs -lrte_telemetry
 LDFLAGS += -lnuma -ldl -lpthread -lm
+LDFLAGS += -Wl,--as-needed
 
 APP = spdk-benchmark
 
