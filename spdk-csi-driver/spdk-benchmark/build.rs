@@ -38,9 +38,21 @@ fn main() {
         .allowlist_var("SPDK_.*")
         // Disable layout tests to avoid packed struct alignment issues
         .layout_tests(false)
-        // Use conservative derive strategy to avoid packed struct issues
+        // Disable all automatic derives to avoid packed struct issues
         .derive_copy(false)
         .derive_debug(false)
+        .derive_default(false)
+        .derive_hash(false)
+        .derive_eq(false)
+        .derive_partialeq(false)
+        .derive_ord(false)
+        .derive_partialord(false)
+        // Make problematic types opaque to avoid alignment errors
+        .opaque_type("spdk_nvme_ctrlr_data")
+        .opaque_type("spdk_nvmf_fabric_connect_rsp")
+        .opaque_type("spdk_nvmf_fabric_prop_get_rsp")
+        // Disable bitfield alignment that causes packed struct issues
+        .default_enum_style(bindgen::EnumVariation::Rust { non_exhaustive: false })
         .generate()
         .expect("Unable to generate bindings");
 

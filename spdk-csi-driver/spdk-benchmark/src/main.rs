@@ -28,8 +28,8 @@ struct IoContext {
 // Helper function to check if completion has error (replaces missing spdk_nvme_cpl_is_error macro)
 unsafe fn is_cpl_error(cpl: *const spdk_nvme_cpl) -> bool {
     // Check status field - 0 means success
-    // The completion structure has a status field that indicates errors
-    let status = (*cpl).status;
+    // The completion structure has a status field in an anonymous union
+    let status = (*cpl).__bindgen_anon_1.status;
     (status & 0xFFFE) != 0  // Check status bits (bit 0 is phase, bits 1+ are status)
 }
 
