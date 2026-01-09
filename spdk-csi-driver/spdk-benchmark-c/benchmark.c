@@ -182,13 +182,16 @@ static double run_sequential_read(struct nvme_controller *nvme)
     // Drain remaining in-flight I/Os
     printf("  Draining %u remaining I/Os...\n", in_flight);
     fflush(stdout);
+
+    uint64_t drain_loops = 0;
     while (in_flight > 0) {
-        // Poll aggressively to drain all completions
-        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
+        drain_loops++;
+
+        // Poll for completions
+        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
 
         // Check for completed I/Os
+        uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
             if (contexts[i].completed) {
                 if (!contexts[i].success) {
@@ -199,10 +202,18 @@ static double run_sequential_read(struct nvme_controller *nvme)
                 contexts[i].completed = 0;
                 completed++;
                 in_flight--;
+                newly_completed++;
             }
         }
+
+        // Debug output every 10M iterations
+        if (drain_loops % 10000000 == 0) {
+            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
+                   drain_loops, in_flight, completed, newly_completed, num_completions);
+            fflush(stdout);
+        }
     }
-    printf("✓ All I/Os completed: %lu\n", completed);
+    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
     fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -310,13 +321,16 @@ static double run_sequential_write(struct nvme_controller *nvme)
     // Drain remaining in-flight I/Os
     printf("  Draining %u remaining I/Os...\n", in_flight);
     fflush(stdout);
+
+    uint64_t drain_loops = 0;
     while (in_flight > 0) {
-        // Poll aggressively to drain all completions
-        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
+        drain_loops++;
+
+        // Poll for completions
+        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
 
         // Check for completed I/Os
+        uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
             if (contexts[i].completed) {
                 if (!contexts[i].success) {
@@ -327,10 +341,18 @@ static double run_sequential_write(struct nvme_controller *nvme)
                 contexts[i].completed = 0;
                 completed++;
                 in_flight--;
+                newly_completed++;
             }
         }
+
+        // Debug output every 10M iterations
+        if (drain_loops % 10000000 == 0) {
+            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
+                   drain_loops, in_flight, completed, newly_completed, num_completions);
+            fflush(stdout);
+        }
     }
-    printf("✓ All I/Os completed: %lu\n", completed);
+    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
     fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -439,13 +461,16 @@ static double run_random_read(struct nvme_controller *nvme)
     // Drain remaining in-flight I/Os
     printf("  Draining %u remaining I/Os...\n", in_flight);
     fflush(stdout);
+
+    uint64_t drain_loops = 0;
     while (in_flight > 0) {
-        // Poll aggressively to drain all completions
-        for (int poll_iter = 0; poll_iter < 16; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
+        drain_loops++;
+
+        // Poll for completions
+        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
 
         // Check for completed I/Os
+        uint32_t newly_completed = 0;
         for (int i = 0; i < QUEUE_DEPTH; i++) {
             if (contexts[i].completed) {
                 if (!contexts[i].success) {
@@ -456,10 +481,18 @@ static double run_random_read(struct nvme_controller *nvme)
                 contexts[i].completed = 0;
                 completed++;
                 in_flight--;
+                newly_completed++;
             }
         }
+
+        // Debug output every 10M iterations
+        if (drain_loops % 10000000 == 0) {
+            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
+                   drain_loops, in_flight, completed, newly_completed, num_completions);
+            fflush(stdout);
+        }
     }
-    printf("✓ All I/Os completed: %lu\n", completed);
+    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
     fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
