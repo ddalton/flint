@@ -16,6 +16,11 @@ spec:
     imagePullPolicy: Always
     securityContext:
       privileged: true
+    resources:
+      limits:
+        hugepages-2Mi: 1Gi
+      requests:
+        hugepages-2Mi: 1Gi
     volumeMounts:
     - name: dev
       mountPath: /dev
