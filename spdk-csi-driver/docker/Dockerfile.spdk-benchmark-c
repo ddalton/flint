@@ -69,6 +69,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy SPDK libraries
 COPY --from=spdk-builder /spdk/build/lib/*.so* /usr/local/lib/spdk/
 COPY --from=spdk-builder /spdk/dpdk/build/lib/*.so* /usr/local/lib/dpdk/
+COPY --from=spdk-builder /spdk/isa-l/.libs/*.so* /usr/local/lib/isal/
 
 # Copy benchmark binary
 COPY --from=benchmark-builder /app/spdk-benchmark /usr/local/bin/
@@ -76,6 +77,7 @@ COPY --from=benchmark-builder /app/spdk-benchmark /usr/local/bin/
 # Setup library path
 RUN echo "/usr/local/lib/spdk" > /etc/ld.so.conf.d/spdk.conf && \
     echo "/usr/local/lib/dpdk" >> /etc/ld.so.conf.d/spdk.conf && \
+    echo "/usr/local/lib/isal" >> /etc/ld.so.conf.d/spdk.conf && \
     ldconfig
 
 # Create entrypoint script that sets up hugepages and runs benchmark
