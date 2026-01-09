@@ -1,0 +1,87 @@
+#--------------------------------------------------------------------
+# Stage 1: Build SPDK
+#--------------------------------------------------------------------
+FROM ubuntu:24.04 AS spdk-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libncurses5-dev \
+    liburing-dev \
+    uuid-dev \
+    python3 \
+    python3-pyelftools \
+    git \
+    meson \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /spdk
+
+# Clone and build SPDK
+RUN git clone https://github.com/spdk/spdk.git . && \
+    git checkout v25.09.x && \
+    git submodule update --init --recursive && \
+    ./configure --without-nvme-cuse --disable-tests --disable-unit-tests && \
+    make -j$(nproc)
+
+#--------------------------------------------------------------------
+# Stage 2: Build C benchmark application
+#--------------------------------------------------------------------
+FROM spdk-builder AS benchmark-builder
+
+WORKDIR /app
+
+# Copy benchmark source
+COPY spdk-benchmark-c /app
+
+# Build benchmark
+RUN make SPDK_ROOT_DIR=/spdk
+
+#--------------------------------------------------------------------
+# Stage 3: Runtime image
+#--------------------------------------------------------------------
+FROM ubuntu:24.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libaio1t64 \
+    libnuma1 \
+    libssl3t64 \
+    libpciaccess0 \
+    liburing2 \
+    kmod \
+    pciutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy SPDK libraries
+COPY --from=spdk-builder /spdk/build/lib/*.so* /usr/local/lib/spdk/
+COPY --from=spdk-builder /spdk/dpdk/build/lib/*.so* /usr/local/lib/dpdk/
+
+# Copy benchmark binary
+COPY --from=benchmark-builder /app/spdk-benchmark /usr/local/bin/
+
+# Setup library path
+RUN echo "/usr/local/lib/spdk" > /etc/ld.so.conf.d/spdk.conf && \
+    echo "/usr/local/lib/dpdk" >> /etc/ld.so.conf.d/spdk.conf && \
+    ldconfig
+
+# Create hugepages setup script
+RUN printf '#!/bin/bash\n\
+echo "Setting up hugepages..."\n\
+echo 1024 > /proc/sys/vm/nr_hugepages\n\
+mkdir -p /mnt/huge\n\
+mount -t hugetlbfs nodev /mnt/huge\n\
+echo "Hugepages configured: $(cat /proc/meminfo | grep HugePages_Total)"\n' > /usr/local/bin/setup-hugepages.sh && \
+    chmod +x /usr/local/bin/setup-hugepages.sh
+
+ENTRYPOINT ["/usr/local/bin/spdk-benchmark"]
