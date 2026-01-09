@@ -214,7 +214,6 @@ static double run_test(struct nvme_controller *nvme, int is_read)
     }
 
     // Poll for completions until all I/Os are done
-    uint64_t last_progress = 0;
     uint64_t last_progress_completed = 0;
     while (ctx.io_completed < NUM_BLOCKS && ctx.status == 0) {
         // Poll for completions
@@ -257,7 +256,7 @@ int main(void)
     struct nvme_controller *nvme = NULL;
     struct spdk_env_opts opts;
     int rc;
-    double read_throughput, write_throughput, rand_read_throughput;
+    double read_throughput, write_throughput;
 
     printf("\n");
     printf("═══════════════════════════════════════════════════════\n");
