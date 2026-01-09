@@ -6,6 +6,17 @@ Successfully implemented device reservation system to prevent CSI from managing 
 - **CSI-managed storage** (3-4 GB/s) with PVC support
 - **Direct SPDK access** (6+ GB/s) via device plugin
 
+## Important Constraint
+
+**Only userspace-driver devices can be reserved.**
+
+Devices using kernel drivers (nvme, detected as "kernel" driver in SPDK) **cannot** be used for direct SPDK access and will be ignored if reserved:
+- ❌ **Kernel driver (io_uring)**: Cannot be reserved - SPDK device plugin requires direct PCI access
+- ✅ **SPDK userspace driver (vfio-pci)**: Can be reserved for 6+ GB/s direct access
+- ✅ **Unbound devices**: Can be bound to vfio-pci then reserved
+
+The driver checks this constraint during discovery and logs a warning if a kernel-driver device is reserved.
+
 ## Implementation Summary
 
 ### Files Modified
@@ -87,13 +98,24 @@ data:
 
 ### Log Output Example
 
-**With Reserved Device:**
+**With Reserved Userspace Device (Valid):**
 ```
 🔧 [MINIMAL_NODE_AGENT] Starting minimal state node agent: master
 ✅ [RESERVED_DEVICES] Loaded 1 reserved device(s)
 🔍 [MINIMAL_DISK] Starting disk discovery...
-⏭️ [DEVICE_FILTER] Skipping nvme0n1 (0000:02:00.0) - RESERVED for device plugin/direct SPDK access
+⏭️ [DEVICE_FILTER] Skipping nvme0n1 (0000:02:00.0, driver: SPDK userspace) - RESERVED for device plugin/direct SPDK access
 ✅ [MINIMAL_DISK] Discovered 2 local storage disks
+```
+
+**With Reserved Kernel Device (Invalid - Ignored):**
+```
+🔧 [MINIMAL_NODE_AGENT] Starting minimal state node agent: master
+✅ [RESERVED_DEVICES] Loaded 1 reserved device(s)
+🔍 [MINIMAL_DISK] Starting disk discovery...
+⚠️ [DEVICE_FILTER] Device nvme0n1 (0000:02:00.0) is reserved but uses kernel driver!
+⚠️ [DEVICE_FILTER] Reservation ignored - kernel driver devices cannot be used for direct SPDK access
+⚠️ [DEVICE_FILTER] To use this device with SPDK device plugin, bind it to vfio-pci first
+✅ [MINIMAL_DISK] Discovered 3 local storage disks (reservation ignored, device still CSI-managed)
 ```
 
 **Without ConfigMap:**
@@ -102,6 +124,46 @@ data:
 ℹ️ [RESERVED_DEVICES] No devices reserved (ConfigMap empty or not found)
 🔍 [MINIMAL_DISK] Starting disk discovery...
 ✅ [MINIMAL_DISK] Discovered 3 local storage disks
+```
+
+## Prerequisites
+
+Before reserving a device, it **must** be bound to a userspace driver (vfio-pci). Here's how:
+
+### 1. Check Current Driver Binding
+
+```bash
+# Check which driver a device is using
+ls -l /sys/bus/pci/devices/0000:02:00.0/driver
+
+# Output examples:
+# /sys/bus/pci/devices/0000:02:00.0/driver -> ../../../../bus/pci/drivers/nvme     (kernel - NOT reservable)
+# /sys/bus/pci/devices/0000:02:00.0/driver -> ../../../../bus/pci/drivers/vfio-pci (userspace - OK to reserve)
+```
+
+### 2. Bind to Userspace Driver (if needed)
+
+```bash
+# Unbind from kernel driver
+echo "0000:02:00.0" > /sys/bus/pci/devices/0000:02:00.0/driver/unbind
+
+# Bind to vfio-pci
+echo "vfio-pci" > /sys/bus/pci/devices/0000:02:00.0/driver_override
+echo "0000:02:00.0" > /sys/bus/pci/drivers/vfio-pci/bind
+
+# Verify
+ls -l /sys/bus/pci/devices/0000:02:00.0/driver
+# Should show: -> ../../../../bus/pci/drivers/vfio-pci
+```
+
+### 3. Configure Hugepages (required for SPDK)
+
+```bash
+# Allocate 2GB hugepages
+echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+
+# Verify
+grep HugePages /proc/meminfo
 ```
 
 ## Usage

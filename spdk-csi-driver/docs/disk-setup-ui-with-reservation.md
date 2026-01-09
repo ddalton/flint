@@ -95,6 +95,7 @@ When user clicks "Reserve for Plugin/Direct Use":
 │  │ ❌ Remove device from CSI-managed storage pool                  │  │
 │  │                                                                 │  │
 │  │ ✅ Enable direct SPDK API access for applications               │  │
+│  │ ✅ Device driver: vfio-pci (userspace) - OK for reservation    │  │
 │  │ ✅ Achieve maximum performance (6+ GB/s)                        │  │
 │  │ ✅ Zero-kernel I/O path (vfio-pci)                             │  │
 │  │ ✅ Perfect for databases, high-performance workloads            │  │
@@ -256,7 +257,57 @@ State Rules:
 - Cannot initialize LVS on reserved device
 - Must unreserve before initializing LVS
 - Must delete LVS before reserving
+- **CRITICAL: Can only reserve devices with userspace drivers (vfio-pci, uio_pci_generic)**
+- Kernel driver devices (nvme) cannot be reserved - no performance benefit
 ```
+
+## Kernel Driver Validation
+
+When attempting to reserve a kernel-driver device, the UI shows an error:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Cannot Reserve Device                                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ❌ ERROR: This device uses a kernel driver                           │
+│                                                                         │
+│  Device: nvme0n1 (0000:03:00.0)                                        │
+│  Current Driver: nvme (kernel)                                         │
+│                                                                         │
+│  ⚠️  Kernel driver devices CANNOT be used for direct SPDK access      │
+│                                                                         │
+│  Why? SPDK device plugin requires:                                     │
+│  • Direct PCI access (vfio-pci or uio_pci_generic)                    │
+│  • Userspace driver for zero-copy I/O                                  │
+│  • No kernel involvement in the I/O path                               │
+│                                                                         │
+│  Current kernel driver provides:                                       │
+│  • 3-4 GB/s throughput (via io_uring)                                  │
+│  • Already available through CSI-managed storage                       │
+│  • No benefit from reservation                                         │
+│                                                                         │
+│  Solution: Bind device to vfio-pci first                              │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │ # Bind to vfio-pci (requires node access)                       │  │
+│  │ echo "0000:03:00.0" > /sys/bus/pci/devices/0000:03:00.0/driver/unbind│
+│  │ echo "vfio-pci" > /sys/bus/pci/devices/0000:03:00.0/driver_override │
+│  │ echo "0000:03:00.0" > /sys/bus/pci/drivers/vfio-pci/bind        │  │
+│  │                                                                  │  │
+│  │ # Verify                                                         │  │
+│  │ ls -l /sys/bus/pci/devices/0000:03:00.0/driver                  │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  After binding to vfio-pci:                                            │
+│  • Refresh this page                                                   │
+│  • Device will show "Driver: vfio-pci"                                │
+│  • "Reserve" button will become enabled                                │
+│                                                                         │
+│  [Close]                                        [Copy Bind Commands]   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 
 ## API Endpoints
 

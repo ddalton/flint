@@ -122,9 +122,19 @@ impl MinimalDiskService {
                     // Check if device is reserved for direct SPDK access (device plugin use)
                     if let Some(ref reserved_config) = self.reserved_devices {
                         if reserved_config.is_reserved(&disk_info.pci_address) {
-                            println!("⏭️ [DEVICE_FILTER] Skipping {} ({}) - RESERVED for device plugin/direct SPDK access",
-                                     disk_info.device_name, disk_info.pci_address);
-                            continue;
+                            // CRITICAL: Only allow reservation of userspace-driver devices
+                            // Kernel-driver devices (io_uring) cannot be used by SPDK device plugin
+                            if disk_info.driver == "kernel" {
+                                println!("⚠️ [DEVICE_FILTER] Device {} ({}) is reserved but uses kernel driver!",
+                                         disk_info.device_name, disk_info.pci_address);
+                                println!("⚠️ [DEVICE_FILTER] Reservation ignored - kernel driver devices cannot be used for direct SPDK access");
+                                println!("⚠️ [DEVICE_FILTER] To use this device with SPDK device plugin, bind it to vfio-pci first");
+                                // Continue with CSI discovery for this device despite reservation
+                            } else {
+                                println!("⏭️ [DEVICE_FILTER] Skipping {} ({}, driver: {}) - RESERVED for device plugin/direct SPDK access",
+                                         disk_info.device_name, disk_info.pci_address, disk_info.driver);
+                                continue;
+                            }
                         }
                     }
 
