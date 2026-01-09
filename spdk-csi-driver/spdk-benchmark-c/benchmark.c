@@ -10,8 +10,8 @@
 #include "spdk/log.h"
 #include "spdk/string.h"
 
-#define BLOCK_SIZE 4096
-#define NUM_BLOCKS 262144  // 1GB
+#define BLOCK_SIZE 131072  // 128KB for maximum throughput
+#define NUM_BLOCKS 8192    // 1GB (8192 * 128KB = 1GB)
 #define QUEUE_DEPTH 128
 
 struct nvme_controller {
@@ -184,7 +184,8 @@ static double run_test(struct nvme_controller *nvme, int is_read)
     ctx.status = 0;
     ctx.is_read = is_read;
 
-    printf("Starting %s test (1 GB)...\n", is_read ? "sequential read" : "sequential write");
+    printf("Starting %s test (1 GB, %dKB blocks for max throughput)...\n",
+           is_read ? "sequential read" : "sequential write", BLOCK_SIZE / 1024);
     fflush(stdout);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -217,8 +218,8 @@ static double run_test(struct nvme_controller *nvme, int is_read)
         // Poll for completions
         spdk_nvme_qpair_process_completions(nvme->qpair, 0);
 
-        // Print progress every 10%
-        if (ctx.io_completed - last_progress_completed >= NUM_BLOCKS / 10) {
+        // Print progress every 20%
+        if (ctx.io_completed - last_progress_completed >= NUM_BLOCKS / 5) {
             printf("  Progress: %lu%% (%lu/%u blocks) - submitted=%lu, in_flight=%u\n",
                    (ctx.io_completed * 100) / NUM_BLOCKS, ctx.io_completed, (uint32_t)NUM_BLOCKS,
                    ctx.io_submitted, ctx.current_queue_depth);
