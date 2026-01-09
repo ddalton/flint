@@ -27,9 +27,11 @@ struct IoContext {
 
 // Helper function to check if completion has error (replaces missing spdk_nvme_cpl_is_error macro)
 unsafe fn is_cpl_error(cpl: *const spdk_nvme_cpl) -> bool {
-    // The completion has a dword field that contains the raw status
-    // Read the raw dword value (contains status code, phase bit, etc.)
-    let dw3 = (*cpl).dw3;
+    // The completion queue entry is 16 bytes. Status is in the last dword (DW3).
+    // Cast the completion to a u32 array and read the 4th dword (index 3)
+    let dwords = cpl as *const u32;
+    let dw3 = *dwords.add(3);
+
     // Check if status code type (SCT) or status code (SC) are non-zero
     // Bits 17-27 are SCT+SC. If any are set, it's an error.
     (dw3 & 0x0FFE_0000) != 0
