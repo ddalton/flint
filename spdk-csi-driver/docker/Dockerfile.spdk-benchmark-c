@@ -61,7 +61,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     liburing2 \
     kmod \
     pciutils \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/lib/ssl \
+    && ln -s /etc/ssl/openssl.cnf /usr/lib/ssl/openssl.cnf 2>/dev/null || true
 
 # Copy SPDK libraries
 COPY --from=spdk-builder /spdk/build/lib/*.so* /usr/local/lib/spdk/
