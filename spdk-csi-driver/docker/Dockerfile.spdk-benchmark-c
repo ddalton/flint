@@ -78,13 +78,15 @@ RUN echo "/usr/local/lib/spdk" > /etc/ld.so.conf.d/spdk.conf && \
     echo "/usr/local/lib/dpdk" >> /etc/ld.so.conf.d/spdk.conf && \
     ldconfig
 
-# Create hugepages setup script
+# Create entrypoint script that sets up hugepages and runs benchmark
 RUN printf '#!/bin/bash\n\
-echo "Setting up hugepages..."\n\
-echo 1024 > /proc/sys/vm/nr_hugepages\n\
+set -e\n\
+echo "Setting up environment..."\n\
 mkdir -p /mnt/huge\n\
-mount -t hugetlbfs nodev /mnt/huge\n\
-echo "Hugepages configured: $(cat /proc/meminfo | grep HugePages_Total)"\n' > /usr/local/bin/setup-hugepages.sh && \
-    chmod +x /usr/local/bin/setup-hugepages.sh
+mount -t hugetlbfs nodev /mnt/huge 2>/dev/null || echo "Hugepages already mounted"\n\
+echo "Hugepages: $(cat /proc/meminfo | grep HugePages_Total)"\n\
+echo ""\n\
+exec /usr/local/bin/spdk-benchmark "$@"\n' > /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/spdk-benchmark"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
