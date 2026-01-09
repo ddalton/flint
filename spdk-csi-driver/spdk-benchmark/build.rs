@@ -18,11 +18,17 @@ fn main() {
     println!("cargo:rustc-link-lib=rte_mempool");
     println!("cargo:rustc-link-lib=rte_ring");
     println!("cargo:rustc-link-lib=rte_mbuf");
+    println!("cargo:rustc-link-lib=rte_pci");
+    println!("cargo:rustc-link-lib=rte_bus_pci");
+    println!("cargo:rustc-link-lib=rte_kvargs");
+    println!("cargo:rustc-link-lib=rte_telemetry");
 
     // System libraries
     println!("cargo:rustc-link-lib=numa");
     println!("cargo:rustc-link-lib=dl");
     println!("cargo:rustc-link-lib=pthread");
+    println!("cargo:rustc-link-lib=ssl");
+    println!("cargo:rustc-link-lib=crypto");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
