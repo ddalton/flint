@@ -27,8 +27,13 @@ fn main() {
     println!("cargo:rustc-link-lib=numa");
     println!("cargo:rustc-link-lib=dl");
     println!("cargo:rustc-link-lib=pthread");
+
+    // Force link OpenSSL (SPDK has undefined references to these)
+    // Use whole-archive to ensure they're actually linked
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
     println!("cargo:rustc-link-lib=ssl");
     println!("cargo:rustc-link-lib=crypto");
+    println!("cargo:rustc-link-arg=-Wl,--as-needed");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
