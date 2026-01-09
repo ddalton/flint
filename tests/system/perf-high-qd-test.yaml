@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-high-qd-test
+  namespace: default
+spec:
+  containers:
+  - name: fio
+    image: ubuntu:22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        apt-get update -qq && apt-get install -y fio > /dev/null 2>&1
+
+        DEVICE=$(df /data | tail -1 | awk '{print $1}')
+        echo "Testing device: $DEVICE"
+        echo ""
+
+        echo "==================================================================="
+        echo "HIGH QUEUE DEPTH PERFORMANCE TEST"
+        echo "==================================================================="
+        echo "Testing with QD=128 and QD=256 to compare with rated specs"
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 1: Sequential Read - QD16 (baseline)"
+        echo "==================================================================="
+        fio --name=seq-read-qd16 --filename=$DEVICE --rw=read --bs=128k --size=1G \
+            --direct=1 --ioengine=libaio --iodepth=16 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 2: Sequential Read - QD128 (rated spec level)"
+        echo "==================================================================="
+        fio --name=seq-read-qd128 --filename=$DEVICE --rw=read --bs=128k --size=1G \
+            --direct=1 --ioengine=libaio --iodepth=128 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 3: Sequential Read - QD256 (maximum)"
+        echo "==================================================================="
+        fio --name=seq-read-qd256 --filename=$DEVICE --rw=read --bs=128k --size=1G \
+            --direct=1 --ioengine=libaio --iodepth=256 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 4: Sequential Write - QD128"
+        echo "==================================================================="
+        fio --name=seq-write-qd128 --filename=$DEVICE --rw=write --bs=128k --size=1G \
+            --direct=1 --ioengine=libaio --iodepth=128 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 5: Random Read - QD128 (4K)"
+        echo "==================================================================="
+        fio --name=rand-read-qd128 --filename=$DEVICE --rw=randread --bs=4k --size=512M \
+            --direct=1 --ioengine=libaio --iodepth=128 --runtime=30 --time_based
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 6: Random Write - QD128 (4K)"
+        echo "==================================================================="
+        fio --name=rand-write-qd128 --filename=$DEVICE --rw=randwrite --bs=4k --size=512M \
+            --direct=1 --ioengine=libaio --iodepth=128 --runtime=30 --time_based
+        echo ""
+
+        echo "==================================================================="
+        echo "HIGH QD TESTS COMPLETE"
+        echo "==================================================================="
+        sleep infinity
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: perf-test-pvc
+  restartPolicy: Never

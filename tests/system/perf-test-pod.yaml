@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-test-pod
+  namespace: default
+spec:
+  containers:
+  - name: perf-tester
+    image: ubuntu:22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        echo "==================================================================="
+        echo "Installing fio..."
+        echo "==================================================================="
+        apt-get update && apt-get install -y fio
+
+        echo ""
+        echo "==================================================================="
+        echo "PERFORMANCE TEST: NVMe over NVMe-oF (via SPDK)"
+        echo "==================================================================="
+        echo "Volume: /data"
+        echo "Size: 10GB"
+        echo "Backend: nvmeof"
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 1: DD Sequential Write (1GB, 1MB blocks)"
+        echo "==================================================================="
+        dd if=/dev/zero of=/data/testfile bs=1M count=1024 oflag=direct
+        sync
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 2: DD Sequential Read (1GB, 1MB blocks)"
+        echo "==================================================================="
+        dd if=/data/testfile of=/dev/null bs=1M iflag=direct
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 3: FIO Sequential Write (4MB, 4 jobs)"
+        echo "==================================================================="
+        fio --name=seq-write \
+            --directory=/data \
+            --rw=write \
+            --bs=4M \
+            --size=1G \
+            --numjobs=4 \
+            --group_reporting \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=16
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 4: FIO Sequential Read (4MB, 4 jobs)"
+        echo "==================================================================="
+        fio --name=seq-read \
+            --directory=/data \
+            --rw=read \
+            --bs=4M \
+            --size=1G \
+            --numjobs=4 \
+            --group_reporting \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=16
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 5: FIO Random Write (4K, IOPS test)"
+        echo "==================================================================="
+        fio --name=rand-write \
+            --directory=/data \
+            --rw=randwrite \
+            --bs=4K \
+            --size=512M \
+            --numjobs=4 \
+            --group_reporting \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=32 \
+            --runtime=30 \
+            --time_based
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 6: FIO Random Read (4K, IOPS test)"
+        echo "==================================================================="
+        fio --name=rand-read \
+            --directory=/data \
+            --rw=randread \
+            --bs=4K \
+            --size=512M \
+            --numjobs=4 \
+            --group_reporting \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=32 \
+            --runtime=30 \
+            --time_based
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 7: FIO Mixed Random Read/Write (70/30, 4K)"
+        echo "==================================================================="
+        fio --name=rand-rw \
+            --directory=/data \
+            --rw=randrw \
+            --rwmixread=70 \
+            --bs=4K \
+            --size=512M \
+            --numjobs=4 \
+            --group_reporting \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=32 \
+            --runtime=30 \
+            --time_based
+        echo ""
+
+        echo "==================================================================="
+        echo "PERFORMANCE TESTS COMPLETE"
+        echo "==================================================================="
+        sleep infinity
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: perf-test-pvc
+  restartPolicy: Never

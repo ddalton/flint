@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flint-reserved-devices
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: flint-csi-driver
+    component: reserved-devices
+data:
+  # List of devices reserved for direct SPDK access (device plugin)
+  # Format: PCI address per line, or JSON array
+  # These devices will be skipped by Flint CSI during discovery
+  #
+  # Example (line-separated):
+  # reserved-devices: |
+  #   0000:02:00.0
+  #   0000:03:00.0
+  #
+  # Example (JSON array):
+  # reserved-devices-json: '["0000:02:00.0", "0000:03:00.0"]'
+  #
+  # Devices listed here will:
+  # - NOT be initialized by Flint CSI
+  # - NOT be available for PVC provisioning
+  # - Be available for device plugin / direct SPDK access
+
+  reserved-devices: |
+{{ .Values.reservedDevices.list | default "" | indent 4 }}
+
+  # Optional: Human-readable annotations for each device
+  device-annotations: |
+{{ .Values.reservedDevices.annotations | default "" | indent 4 }}

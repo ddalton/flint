@@ -165,6 +165,10 @@ spec:
               value: "{{ .Values.blockDevice.discoveryMode | default "nvme" }}"
             - name: BLOCK_DEVICE_BACKEND
               value: "{{ .Values.blockDevice.backend | default "ublk" }}"
+            - name: UBLK_NUM_QUEUES
+              value: "{{ .Values.blockDevice.ublk.numQueues | default 4 }}"
+            - name: UBLK_QUEUE_DEPTH
+              value: "{{ .Values.blockDevice.ublk.queueDepth | default 256 }}"
           securityContext:
             privileged: true
             capabilities:

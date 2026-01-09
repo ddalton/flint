@@ -252,8 +252,40 @@ blockDevice:
   #   "scsi"  - Only discover SCSI/SATA devices (for testing)
   discoveryMode: "nvme"
 
+  # ublk performance tuning (only applies when backend=ublk)
+  # These settings control parallelism and throughput for high-speed NVMe disks
+  ublk:
+    # Number of I/O queues for parallel processing
+    # Recommended: Match number of CPU cores (e.g., 8 for 8-core systems)
+    # Higher values enable better parallelism across multiple cores
+    numQueues: 8
+
+    # Queue depth for outstanding I/O operations
+    # Higher values allow more I/O operations to be in flight simultaneously
+    # Recommended: 512-1024 for high-performance NVMe (7GB/s+)
+    queueDepth: 512
+
 # Node resources configuration (e.g., CPU core masks for SPDK target)
 nodeResources:
   spdkTarget:
     # CPU core mask for SPDK target (hex format, e.g., "0x2" for core 1)
     cpuCore: ""
+
+# Reserved devices configuration
+# Devices listed here will be excluded from Flint CSI discovery and management
+# These devices can be used for direct SPDK access via device plugins
+reservedDevices:
+  # List of PCI addresses to reserve (one per line)
+  # Example:
+  # list: |
+  #   0000:02:00.0
+  #   0000:03:00.0
+  list: ""
+
+  # Optional annotations for reserved devices (for UI display)
+  # Format: PCI_ADDRESS: description
+  # Example:
+  # annotations: |
+  #   0000:02:00.0: High-performance device for database workloads
+  #   0000:03:00.0: Reserved for ML training
+  annotations: ""

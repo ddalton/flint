@@ -1,0 +1,91 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flint-fio-test
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: flint
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: flint-fio-test
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: fio
+    image: ljishen/fio
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "═══════════════════════════════════════════════════════"
+        echo "Flint CSI (ublk backend) Throughput Test"
+        echo "═══════════════════════════════════════════════════════"
+        echo ""
+        echo "Device info:"
+        df -h /mnt/test
+        lsblk | grep -A5 ublk || true
+        echo ""
+
+        # Sequential Write Test (128KB blocks for max throughput)
+        echo "═══════════════════════════════════════════════════════"
+        echo "SEQUENTIAL WRITE TEST (128KB blocks)"
+        echo "═══════════════════════════════════════════════════════"
+        fio --name=seq-write \
+            --filename=/mnt/test/testfile \
+            --size=1G \
+            --bs=128k \
+            --iodepth=128 \
+            --rw=write \
+            --direct=1 \
+            --ioengine=libaio \
+            --runtime=60 \
+            --time_based=0 \
+            --group_reporting \
+            --numjobs=1
+
+        echo ""
+
+        # Sequential Read Test (128KB blocks for max throughput)
+        echo "═══════════════════════════════════════════════════════"
+        echo "SEQUENTIAL READ TEST (128KB blocks)"
+        echo "═══════════════════════════════════════════════════════"
+        fio --name=seq-read \
+            --filename=/mnt/test/testfile \
+            --size=1G \
+            --bs=128k \
+            --iodepth=128 \
+            --rw=read \
+            --direct=1 \
+            --ioengine=libaio \
+            --runtime=60 \
+            --time_based=0 \
+            --group_reporting \
+            --numjobs=1
+
+        echo ""
+        echo "═══════════════════════════════════════════════════════"
+        echo "Test completed!"
+        echo "═══════════════════════════════════════════════════════"
+    volumeMounts:
+    - name: test-volume
+      mountPath: /mnt/test
+    resources:
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: flint-fio-test

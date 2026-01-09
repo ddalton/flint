@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use reqwest::Client as HttpClient;
 
 use crate::minimal_models::{DiskInfo, MinimalStateError};
+use crate::reserved_devices::ReservedDevices;
 
 /// Device discovery strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub struct MinimalDiskService {
     pub node_name: String,
     pub spdk_socket_path: String,  // Unix socket path (e.g., "/tmp/spdk.sock")
     pub http_client: HttpClient,
+    pub reserved_devices: Option<ReservedDevices>,  // Devices reserved for direct SPDK access (cheap to clone)
 }
 
 impl MinimalDiskService {
@@ -47,6 +49,38 @@ impl MinimalDiskService {
             node_name,
             spdk_socket_path,
             http_client: HttpClient::new(),
+            reserved_devices: None,  // Will be loaded on startup
+        }
+    }
+
+    /// Create a new MinimalDiskService with reserved devices loaded
+    pub async fn new_with_reserved_devices(node_name: String, spdk_socket_path: String) -> Self {
+        let mut service = Self::new(node_name, spdk_socket_path);
+        let _ = service.load_reserved_devices().await;  // Ignore errors
+        service
+    }
+
+    /// Load reserved devices configuration from ConfigMap (returns new instance)
+    pub async fn load_reserved_devices(&mut self) -> Result<(), MinimalStateError> {
+        let namespace = std::env::var("POD_NAMESPACE")
+            .unwrap_or_else(|_| "flint-system".to_string());
+
+        match ReservedDevices::load(&namespace).await {
+            Ok(rd) => {
+                let count = rd.get_reserved_devices().len();
+                if count > 0 {
+                    println!("✅ [RESERVED_DEVICES] Loaded {} reserved device(s)", count);
+                } else {
+                    println!("ℹ️ [RESERVED_DEVICES] No devices reserved (ConfigMap empty or not found)");
+                }
+                self.reserved_devices = Some(rd);
+                Ok(())
+            }
+            Err(e) => {
+                println!("⚠️ [RESERVED_DEVICES] Failed to load: {} (CSI will manage all devices)", e);
+                self.reserved_devices = None;
+                Ok(())  // Not a fatal error - just means no devices are reserved
+            }
         }
     }
 
@@ -83,10 +117,17 @@ impl MinimalDiskService {
             println!("🔧 [DEBUG] Found {} bdevs in result array", bdev_list.len());
             for (i, bdev) in bdev_list.iter().enumerate() {
                 // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
-                
+
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers, &bdevs).await? {
-                    // Note: Per-disk details not logged (verbose). Summary logged at end.
-                    
+                    // Check if device is reserved for direct SPDK access (device plugin use)
+                    if let Some(ref reserved_config) = self.reserved_devices {
+                        if reserved_config.is_reserved(&disk_info.pci_address) {
+                            println!("⏭️ [DEVICE_FILTER] Skipping {} ({}) - RESERVED for device plugin/direct SPDK access",
+                                     disk_info.device_name, disk_info.pci_address);
+                            continue;
+                        }
+                    }
+
                     // Filter out system disks and non-storage devices
                     if self.is_storage_disk(&disk_info).await? {
                         disks.push(disk_info);

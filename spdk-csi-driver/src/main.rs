@@ -216,11 +216,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start node agent (if in node mode)
     if mode == "node" || mode == "all" {
-        let node_agent = Arc::new(NodeAgent::new(
+        let node_agent = Arc::new(NodeAgent::new_with_reserved_devices(
             node_id.clone(),
             spdk_socket_path.clone(),
             driver.clone(),
-        ));
+        ).await);
         
         println!("🔧 [NODE_AGENT] Starting node agent on port 8081");
         let node_agent_clone = node_agent.clone();

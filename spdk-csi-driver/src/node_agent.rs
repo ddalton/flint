@@ -28,7 +28,26 @@ impl NodeAgent {
         driver: Arc<SpdkCsiDriver>,
     ) -> Self {
         let disk_service = MinimalDiskService::new(node_name.clone(), spdk_socket_path.clone());
-        
+
+        Self {
+            node_name,
+            spdk_socket_path,
+            disk_service,
+            driver,
+        }
+    }
+
+    /// Create a new NodeAgent with reserved devices loaded
+    pub async fn new_with_reserved_devices(
+        node_name: String,
+        spdk_socket_path: String,
+        driver: Arc<SpdkCsiDriver>,
+    ) -> Self {
+        let disk_service = MinimalDiskService::new_with_reserved_devices(
+            node_name.clone(),
+            spdk_socket_path.clone()
+        ).await;
+
         Self {
             node_name,
             spdk_socket_path,

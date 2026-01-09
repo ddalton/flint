@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-sustained-test
+  namespace: default
+spec:
+  containers:
+  - name: fio
+    image: ubuntu:22.04
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        apt-get update -qq && apt-get install -y fio > /dev/null 2>&1
+
+        DEVICE=$(df /data | tail -1 | awk '{print $1}')
+        echo "Testing device: $DEVICE"
+        echo "Device size: $(lsblk $DEVICE | tail -1)"
+        echo ""
+
+        echo "==================================================================="
+        echo "SUSTAINED PERFORMANCE TEST (past SLC cache)"
+        echo "==================================================================="
+        echo "Testing with 8GB sequential I/O to exceed SLC cache"
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 1: Sustained Sequential Write - QD128 (8GB)"
+        echo "==================================================================="
+        fio --name=sustained-write --filename=$DEVICE --rw=write --bs=128k --size=8G \
+            --direct=1 --ioengine=libaio --iodepth=128 --numjobs=1
+        sync
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 2: Sustained Sequential Read - QD128 (8GB)"
+        echo "==================================================================="
+        fio --name=sustained-read --filename=$DEVICE --rw=read --bs=128k --size=8G \
+            --direct=1 --ioengine=libaio --iodepth=128 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "TEST 3: Compare QD16 vs QD128 Sequential Read (2GB)"
+        echo "==================================================================="
+        echo "--- QD16 (your original setting) ---"
+        fio --name=compare-qd16 --filename=$DEVICE --rw=read --bs=128k --size=2G \
+            --direct=1 --ioengine=libaio --iodepth=16 --numjobs=1
+        echo ""
+        echo "--- QD128 (rated spec level) ---"
+        fio --name=compare-qd128 --filename=$DEVICE --rw=read --bs=128k --size=2G \
+            --direct=1 --ioengine=libaio --iodepth=128 --numjobs=1
+        echo ""
+
+        echo "==================================================================="
+        echo "SUSTAINED TESTS COMPLETE"
+        echo "==================================================================="
+        sleep infinity
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: perf-test-pvc
+  restartPolicy: Never
