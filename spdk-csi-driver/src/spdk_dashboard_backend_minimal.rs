@@ -186,6 +186,16 @@ struct DashboardData {
     raw_volumes: Vec<serde_json::Value>,  // Unmanaged SPDK volumes
     disks: Vec<DashboardDisk>,
     nodes: Vec<String>,
+    node_info: HashMap<String, NodeInfo>,  // node_name -> node info with memory details
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct NodeInfo {
+    name: String,
+    memory_total_mb: u64,
+    memory_available_mb: u64,
+    memory_used_mb: u64,
+    memory_utilization_pct: f64,
 }
 
 #[derive(Clone)]
@@ -245,6 +255,88 @@ async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<H
     
     println!("✅ [NODE_DISCOVERY] Discovered {} node agents", node_agents.len());
     Ok(node_agents)
+}
+
+/// Read memory information from /proc/meminfo
+async fn read_node_memory_info(node_url: &str, node_name: &str) -> Result<NodeInfo, Box<dyn std::error::Error>> {
+    // Try to fetch memory info from node agent
+    let url = format!("{}/api/system/memory", node_url);
+
+    match HttpClient::new().get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            // If node agent provides memory endpoint, use it
+            let mem_data: serde_json::Value = response.json().await?;
+
+            let mem_total_mb = mem_data["total_mb"].as_u64().unwrap_or(0);
+            let mem_available_mb = mem_data["available_mb"].as_u64().unwrap_or(0);
+            let mem_used_mb = mem_total_mb.saturating_sub(mem_available_mb);
+            let mem_utilization_pct = if mem_total_mb > 0 {
+                (mem_used_mb as f64 / mem_total_mb as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(NodeInfo {
+                name: node_name.to_string(),
+                memory_total_mb: mem_total_mb,
+                memory_available_mb: mem_available_mb,
+                memory_used_mb: mem_used_mb,
+                memory_utilization_pct: mem_utilization_pct,
+            })
+        }
+        _ => {
+            // Fallback: If running locally or node agent doesn't have memory endpoint,
+            // try to read /proc/meminfo directly (only works if dashboard runs on same host)
+            match tokio::fs::read_to_string("/proc/meminfo").await {
+                Ok(meminfo) => {
+                    let mut mem_total_kb = 0u64;
+                    let mut mem_available_kb = 0u64;
+
+                    for line in meminfo.lines() {
+                        if line.starts_with("MemTotal:") {
+                            mem_total_kb = line.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                        } else if line.starts_with("MemAvailable:") {
+                            mem_available_kb = line.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                        }
+                    }
+
+                    let mem_total_mb = mem_total_kb / 1024;
+                    let mem_available_mb = mem_available_kb / 1024;
+                    let mem_used_mb = mem_total_mb.saturating_sub(mem_available_mb);
+                    let mem_utilization_pct = if mem_total_mb > 0 {
+                        (mem_used_mb as f64 / mem_total_mb as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    Ok(NodeInfo {
+                        name: node_name.to_string(),
+                        memory_total_mb: mem_total_mb,
+                        memory_available_mb: mem_available_mb,
+                        memory_used_mb: mem_used_mb,
+                        memory_utilization_pct: mem_utilization_pct,
+                    })
+                }
+                Err(_) => {
+                    // If we can't read memory info, return placeholder with 0 values
+                    // This prevents the dashboard from breaking
+                    Ok(NodeInfo {
+                        name: node_name.to_string(),
+                        memory_total_mb: 0,
+                        memory_available_mb: 0,
+                        memory_used_mb: 0,
+                        memory_utilization_pct: 0.0,
+                    })
+                }
+            }
+        }
+    }
 }
 
 /// Fetch all disks from all node agents in parallel
@@ -696,12 +788,40 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    
+
+    // Fetch memory info for each node in parallel
+    let node_agents = state.node_agents.read().await;
+    let memory_futures: Vec<_> = nodes.iter()
+        .filter_map(|node_name| {
+            node_agents.get(node_name).map(|node_url| {
+                let node_name = node_name.clone();
+                let node_url = node_url.clone();
+                async move {
+                    match read_node_memory_info(&node_url, &node_name).await {
+                        Ok(info) => Some((node_name.clone(), info)),
+                        Err(e) => {
+                            eprintln!("⚠️ [MEMORY_INFO] Failed to read memory for node {}: {}", node_name, e);
+                            None
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let memory_results = futures::future::join_all(memory_futures).await;
+    let node_info: HashMap<String, NodeInfo> = memory_results.into_iter()
+        .filter_map(|r| r)
+        .collect();
+
+    println!("📊 [MEMORY_INFO] Collected memory info for {} nodes", node_info.len());
+
     let dashboard_data = DashboardData {
         volumes: filtered_volumes,
         raw_volumes,
         disks: filtered_disks,
         nodes,
+        node_info,
     };
     
     println!("✅ [MINIMAL_DASHBOARD_FETCH] Fetch completed: {} volumes, {} disks, {} nodes", 

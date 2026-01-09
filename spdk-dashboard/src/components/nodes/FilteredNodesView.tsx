@@ -629,8 +629,8 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
       ) : (
         <div className="space-y-6">
           {paginatedNodes.map((nodeData) => (
-            <NodeDetailView 
-              key={nodeData.name} 
+            <NodeDetailView
+              key={nodeData.name}
               node={nodeData.name}
               nodeDisks={nodeData.nodeDisks}
               nodeVolumes={nodeData.nodeVolumes}
@@ -642,6 +642,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
               filteredVolumes={hasVolumeFilter ? nodeData.nodeFilteredVolumes : undefined}
               onDiskVolumeFilter={onDiskVolumeFilter}
               onShowMetrics={() => setActiveMetricsModal(nodeData.name)}
+              nodeInfo={data.node_info?.[nodeData.name]}
             />
           ))}
         </div>

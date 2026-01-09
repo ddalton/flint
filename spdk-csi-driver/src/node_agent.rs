@@ -287,6 +287,11 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_force_unstage);
 
+        // GET /api/system/memory - Get node memory information
+        let system_memory = warp::path!("api" / "system" / "memory")
+            .and(warp::get())
+            .and_then(Self::handle_system_memory);
+
         // ============= SNAPSHOT MODULE INTEGRATION =============
         // Register snapshot routes (isolated module - no changes to existing routes)
         use crate::snapshot::{SnapshotService, register_snapshot_routes};
@@ -319,6 +324,7 @@ impl NodeAgent {
             .or(blockdev_delete_nvmeof)
             .or(get_volume_info)
             .or(force_unstage)
+            .or(system_memory)
             .or(snapshot_routes)  // Add snapshot routes
             .with(warp::cors().allow_any_origin())
     }
@@ -728,6 +734,52 @@ impl NodeAgent {
                     "completed_at": chrono::Utc::now().to_rfc3339()
                 });
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle GET /api/system/memory - Get node memory information
+    async fn handle_system_memory() -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling system memory request");
+
+        match tokio::fs::read_to_string("/proc/meminfo").await {
+            Ok(meminfo) => {
+                let mut mem_total_kb = 0u64;
+                let mut mem_available_kb = 0u64;
+
+                for line in meminfo.lines() {
+                    if line.starts_with("MemTotal:") {
+                        mem_total_kb = line.split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                    } else if line.starts_with("MemAvailable:") {
+                        mem_available_kb = line.split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                    }
+                }
+
+                let mem_total_mb = mem_total_kb / 1024;
+                let mem_available_mb = mem_available_kb / 1024;
+
+                let response = json!({
+                    "total_mb": mem_total_mb,
+                    "available_mb": mem_available_mb,
+                    "total_kb": mem_total_kb,
+                    "available_kb": mem_available_kb
+                });
+
+                println!("✅ [HTTP_API] Memory info: {}MB total, {}MB available", mem_total_mb, mem_available_mb);
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                println!("❌ [HTTP_API] Failed to read /proc/meminfo: {}", e);
+                let error_response = json!({
+                    "error": format!("Failed to read memory info: {}", e)
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
     }

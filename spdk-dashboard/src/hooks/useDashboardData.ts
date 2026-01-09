@@ -202,11 +202,20 @@ export interface PvcInfo {
   created_at: string;
 }
 
+export interface NodeInfo {
+  name: string;
+  memory_total_mb: number;
+  memory_available_mb: number;
+  memory_used_mb: number;
+  memory_utilization_pct: number;
+}
+
 export interface DashboardData {
   volumes: Volume[];
   raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
+  node_info?: Record<string, NodeInfo>;  // Optional for backward compatibility
 }
 
 export interface DashboardStats {

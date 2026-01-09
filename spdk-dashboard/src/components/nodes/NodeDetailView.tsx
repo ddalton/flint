@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
-import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import { useDiskSetup } from '../../hooks/useDashboardData';
 
 interface NodeDetailViewProps {
@@ -15,6 +15,7 @@ interface NodeDetailViewProps {
   filteredVolumes?: Volume[];
   onDiskVolumeFilter?: (diskId: string) => void;
   onShowMetrics: () => void;
+  nodeInfo?: NodeInfo;  // Add node memory info
 }
 
 export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
@@ -29,11 +30,18 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   filteredVolumes,
   onDiskVolumeFilter,
   onShowMetrics,
+  nodeInfo,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
   const [showMemoryDiskModal, setShowMemoryDiskModal] = useState(false);
   const [memoryDiskName, setMemoryDiskName] = useState('');
-  const [memoryDiskSize, setMemoryDiskSize] = useState(1);
+
+  // Calculate max memory size based on available memory (convert MB to GB, leave 1GB headroom for system)
+  const maxMemorySizeGB = nodeInfo?.memory_available_mb
+    ? Math.max(1, Math.floor((nodeInfo.memory_available_mb - 1024) / 1024))  // Leave 1GB headroom
+    : 64;  // Fallback to 64GB if nodeInfo not available
+
+  const [memoryDiskSize, setMemoryDiskSize] = useState(Math.min(1, maxMemorySizeGB));
   const [isCreatingMemoryDisk, setIsCreatingMemoryDisk] = useState(false);
   const [memoryDiskError, setMemoryDiskError] = useState<string | null>(null);
 
@@ -55,8 +63,8 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       return;
     }
 
-    if (memoryDiskSize < 1 || memoryDiskSize > 64) {
-      setMemoryDiskError('Size must be between 1 and 64 GB');
+    if (memoryDiskSize < 1 || memoryDiskSize > maxMemorySizeGB) {
+      setMemoryDiskError(`Size must be between 1 and ${maxMemorySizeGB} GB`);
       return;
     }
 
@@ -558,7 +566,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                 <input
                   type="range"
                   min="1"
-                  max="64"
+                  max={maxMemorySizeGB}
                   value={memoryDiskSize}
                   onChange={(e) => setMemoryDiskSize(parseInt(e.target.value))}
                   className="w-full"
@@ -566,8 +574,20 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                 />
                 <div className="flex justify-between text-xs text-gray-500 mt-1">
                   <span>1 GB</span>
-                  <span>64 GB</span>
+                  <span>{maxMemorySizeGB} GB</span>
                 </div>
+                {nodeInfo && (
+                  <div className="bg-blue-50 border border-blue-200 px-3 py-2 rounded text-xs text-blue-700 mt-2">
+                    <div className="flex justify-between">
+                      <span>Available RAM:</span>
+                      <span className="font-medium">{(nodeInfo.memory_available_mb / 1024).toFixed(1)} GB</span>
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span>Total RAM:</span>
+                      <span className="font-medium">{(nodeInfo.memory_total_mb / 1024).toFixed(1)} GB</span>
+                    </div>
+                  </div>
+                )}
                 <p className="text-xs text-gray-500 mt-2">
                   Memory disks are volatile and data is lost on restart. Ideal for testing and caching.
                 </p>
