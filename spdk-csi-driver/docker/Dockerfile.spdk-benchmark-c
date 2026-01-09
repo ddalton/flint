@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=spdk-builder /spdk/build/lib/*.so* /usr/local/lib/spdk/
 COPY --from=spdk-builder /spdk/dpdk/build/lib/*.so* /usr/local/lib/dpdk/
 COPY --from=spdk-builder /spdk/isa-l/.libs/*.so* /usr/local/lib/isal/
+COPY --from=spdk-builder /spdk/isa-l-crypto/.libs/*.so* /usr/local/lib/isal/
 
 # Copy benchmark binary
 COPY --from=benchmark-builder /app/spdk-benchmark /usr/local/bin/
