@@ -101,10 +101,12 @@ static double run_sequential_read(struct nvme_controller *nvme)
     printf("\n═══════════════════════════════════════════════════════\n");
     printf("SEQUENTIAL READ TEST (SPDK Native Polling Mode)\n");
     printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
 
     buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
     if (!buffer) {
         printf("Failed to allocate DMA buffer\n");
+        fflush(stdout);
         return -1;
     }
 
@@ -113,9 +115,19 @@ static double run_sequential_read(struct nvme_controller *nvme)
         contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
     }
 
+    printf("Starting sequential read test (1 GB)...\n");
+    fflush(stdout);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    uint64_t last_progress = 0;
     while (completed < NUM_BLOCKS) {
+        // Print progress every 10%
+        if (completed - last_progress >= NUM_BLOCKS / 10) {
+            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            fflush(stdout);
+            last_progress = completed;
+        }
         // Submit I/Os up to queue depth
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
@@ -163,6 +175,7 @@ static double run_sequential_read(struct nvme_controller *nvme)
     printf("Completed: %lu blocks in %.2fs\n", completed, elapsed);
     printf("Throughput: %.2f GB/s\n", throughput);
     printf("IOPS: %.0f\n", iops);
+    fflush(stdout);
 
     spdk_free(buffer);
     return throughput;
@@ -184,10 +197,12 @@ static double run_sequential_write(struct nvme_controller *nvme)
     printf("\n═══════════════════════════════════════════════════════\n");
     printf("SEQUENTIAL WRITE TEST (SPDK Native Polling Mode)\n");
     printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
 
     buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
     if (!buffer) {
         printf("Failed to allocate DMA buffer\n");
+        fflush(stdout);
         return -1;
     }
 
@@ -199,9 +214,19 @@ static double run_sequential_write(struct nvme_controller *nvme)
         contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
     }
 
+    printf("Starting sequential write test (1 GB)...\n");
+    fflush(stdout);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    uint64_t last_progress = 0;
     while (completed < NUM_BLOCKS) {
+        // Print progress every 10%
+        if (completed - last_progress >= NUM_BLOCKS / 10) {
+            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            fflush(stdout);
+            last_progress = completed;
+        }
         // Submit I/Os up to queue depth
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
@@ -249,6 +274,7 @@ static double run_sequential_write(struct nvme_controller *nvme)
     printf("Completed: %lu blocks in %.2fs\n", completed, elapsed);
     printf("Throughput: %.2f GB/s\n", throughput);
     printf("IOPS: %.0f\n", iops);
+    fflush(stdout);
 
     spdk_free(buffer);
     return throughput;
@@ -271,10 +297,12 @@ static double run_random_read(struct nvme_controller *nvme)
     printf("\n═══════════════════════════════════════════════════════\n");
     printf("RANDOM READ TEST (4K blocks, SPDK Native Polling)\n");
     printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
 
     buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
     if (!buffer) {
         printf("Failed to allocate DMA buffer\n");
+        fflush(stdout);
         return -1;
     }
 
@@ -283,9 +311,19 @@ static double run_random_read(struct nvme_controller *nvme)
         contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
     }
 
+    printf("Starting random read test (1 GB, 4K blocks)...\n");
+    fflush(stdout);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    uint64_t last_progress = 0;
     while (completed < NUM_BLOCKS) {
+        // Print progress every 10%
+        if (completed - last_progress >= NUM_BLOCKS / 10) {
+            printf("  Progress: %lu%% (%lu/%lu blocks)\n",
+                   (completed * 100) / NUM_BLOCKS, completed, NUM_BLOCKS);
+            fflush(stdout);
+            last_progress = completed;
+        }
         // Submit I/Os up to queue depth
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
