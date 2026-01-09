@@ -121,7 +121,7 @@ static double run_sequential_read(struct nvme_controller *nvme)
 
     uint64_t last_progress = 0;
     uint64_t loop_count = 0;
-    while (completed < NUM_BLOCKS) {
+    while (submitted < NUM_BLOCKS) {
         loop_count++;
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
