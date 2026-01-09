@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spdk-native-benchmark
+  namespace: default
+  labels:
+    app: spdk-benchmark
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    kubernetes.io/hostname: ubuntu  # Node with NVMe device
+  containers:
+  - name: benchmark
+    image: dilipdalton/spdk-benchmark:latest
+    imagePullPolicy: Always
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: dev
+      mountPath: /dev
+    - name: sys
+      mountPath: /sys
+    - name: hugepages
+      mountPath: /mnt/huge
+    env:
+    - name: SPDK_LOG_LEVEL
+      value: "INFO"
+  volumes:
+  - name: dev
+    hostPath:
+      path: /dev
+      type: Directory
+  - name: sys
+    hostPath:
+      path: /sys
+      type: Directory
+  - name: hugepages
+    hostPath:
+      path: /mnt/huge
+      type: DirectoryOrCreate
+  restartPolicy: Never
