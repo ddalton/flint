@@ -34,7 +34,7 @@ spec:
       mountPath: /dev/hugepages
     env:
     - name: SPDK_LOG_LEVEL
-      value: "INFO"
+      value: "DEBUG"
   volumes:
   - name: dev
     hostPath:

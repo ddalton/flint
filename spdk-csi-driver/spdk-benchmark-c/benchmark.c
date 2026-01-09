@@ -356,16 +356,28 @@ int main(int argc, char **argv)
     opts.core_mask = "0x1";
 
     printf("Initializing SPDK environment...\n");
+    printf("  Core mask: %s\n", opts.core_mask);
+    printf("  Name: %s\n", opts.name);
+    printf("  Calling spdk_env_init()...\n");
+    fflush(stdout);
+
     if (spdk_env_init(&opts) < 0) {
         fprintf(stderr, "Failed to initialize SPDK environment\n");
         return 1;
     }
-    printf("✓ SPDK environment initialized\n");
+    printf("✓ SPDK environment initialized successfully\n");
+    fflush(stdout);
 
     printf("\nProbing for NVMe controllers...\n");
+    printf("  Calling spdk_nvme_probe()...\n");
+    fflush(stdout);
+
     rc = spdk_nvme_probe(NULL, &nvme, probe_cb, attach_cb, NULL);
+    printf("  spdk_nvme_probe() returned: %d\n", rc);
+    fflush(stdout);
+
     if (rc != 0) {
-        fprintf(stderr, "Failed to probe NVMe controllers\n");
+        fprintf(stderr, "Failed to probe NVMe controllers (rc=%d)\n", rc);
         return 1;
     }
 
@@ -373,6 +385,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "No NVMe controllers found\n");
         return 1;
     }
+    printf("✓ Successfully found and attached to NVMe controller\n");
+    fflush(stdout);
 
     printf("\n═══════════════════════════════════════════════════════\n");
     printf("Starting benchmark tests...\n");
