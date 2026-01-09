@@ -56,9 +56,8 @@ static void io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
     ctx->current_queue_depth--;
     ctx->io_completed++;
 
-    // If draining, free the task
+    // If draining, just free the task structure (not the buffer - it's part of a larger allocation)
     if (ctx->is_draining) {
-        spdk_free(task->buffer);
         free(task);
     } else {
         // Resubmit the task with next LBA
@@ -104,7 +103,6 @@ static void submit_io(struct io_task *task)
     if (rc != 0) {
         printf("Failed to submit %s command: %d\n", ctx->is_read ? "read" : "write", rc);
         ctx->status = 1;
-        spdk_free(task->buffer);
         free(task);
         return;
     }
