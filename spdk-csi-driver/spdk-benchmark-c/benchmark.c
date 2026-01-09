@@ -20,18 +20,103 @@ struct nvme_controller {
     struct spdk_nvme_qpair *qpair;
 };
 
-struct io_context {
+// Task structure (per I/O)
+struct io_task {
     void *buffer;
-    int completed;
-    int success;
-    int in_use;  // Track if this context is currently being used by an in-flight I/O
+    struct test_context *ctx;
+    int is_read;  // 1 for read, 0 for write
 };
+
+// Test context (shared state)
+struct test_context {
+    struct nvme_controller *nvme;
+    uint64_t offset_in_blocks;    // Current LBA offset
+    uint64_t io_submitted;         // Total I/Os submitted
+    uint64_t io_completed;         // Total I/Os completed
+    uint32_t current_queue_depth;  // Current in-flight I/Os
+    int is_draining;               // Stop submitting new I/Os
+    int status;                    // Error status
+    int is_read;                   // Test type
+};
+
+static void submit_io(struct io_task *task);
 
 static void io_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 {
-    struct io_context *ctx = arg;
-    ctx->completed = 1;
-    ctx->success = spdk_nvme_cpl_is_success(cpl);
+    struct io_task *task = arg;
+    struct test_context *ctx = task->ctx;
+
+    // Check for errors
+    if (!spdk_nvme_cpl_is_success(cpl)) {
+        printf("I/O error: %s\n", spdk_nvme_cpl_get_status_string(&cpl->status));
+        ctx->status = 1;
+    }
+
+    // Update counters
+    ctx->current_queue_depth--;
+    ctx->io_completed++;
+
+    // If draining, free the task
+    if (ctx->is_draining) {
+        spdk_free(task->buffer);
+        free(task);
+    } else {
+        // Resubmit the task with next LBA
+        submit_io(task);
+    }
+}
+
+static void submit_io(struct io_task *task)
+{
+    struct test_context *ctx = task->ctx;
+    struct nvme_controller *nvme = ctx->nvme;
+    uint64_t lba;
+    uint32_t blocks_per_io;
+    int rc;
+
+    // Don't submit if draining
+    if (ctx->is_draining) {
+        return;
+    }
+
+    // Calculate LBA
+    uint32_t sector_size = spdk_nvme_ns_get_sector_size(nvme->ns);
+    blocks_per_io = BLOCK_SIZE / sector_size;  // 4096 / 512 = 8 sectors
+    lba = ctx->offset_in_blocks * blocks_per_io;
+
+    // Increment offset for next I/O
+    ctx->offset_in_blocks++;
+    if (ctx->offset_in_blocks >= NUM_BLOCKS) {
+        ctx->offset_in_blocks = 0;  // Wrap around
+    }
+
+    // Submit the I/O
+    if (ctx->is_read) {
+        rc = spdk_nvme_ns_cmd_read(nvme->ns, nvme->qpair, task->buffer,
+                                   lba, blocks_per_io,
+                                   io_complete, task, 0);
+    } else {
+        rc = spdk_nvme_ns_cmd_write(nvme->ns, nvme->qpair, task->buffer,
+                                    lba, blocks_per_io,
+                                    io_complete, task, 0);
+    }
+
+    if (rc != 0) {
+        printf("Failed to submit %s command: %d\n", ctx->is_read ? "read" : "write", rc);
+        ctx->status = 1;
+        spdk_free(task->buffer);
+        free(task);
+        return;
+    }
+
+    // Update counters AFTER successful submission
+    ctx->current_queue_depth++;
+    ctx->io_submitted++;
+
+    // Check if we've submitted enough I/Os
+    if (ctx->io_submitted >= NUM_BLOCKS) {
+        ctx->is_draining = 1;
+    }
 }
 
 static bool probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
@@ -48,9 +133,8 @@ static void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
     struct nvme_controller **nvme_ctx = cb_ctx;
     struct spdk_nvme_ns *ns;
     uint32_t ns_id;
-    uint64_t num_sectors, size_gb;
-    uint32_t sector_size;
 
+    // Get first namespace
     ns_id = spdk_nvme_ctrlr_get_first_active_ns(ctrlr);
     if (ns_id == 0) {
         printf("No active namespaces found\n");
@@ -58,524 +142,135 @@ static void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
     }
 
     ns = spdk_nvme_ctrlr_get_ns(ctrlr, ns_id);
-    if (!ns) {
+    if (ns == NULL) {
         printf("Failed to get namespace\n");
         return;
     }
 
-    struct spdk_nvme_qpair *qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, NULL, 0);
-    if (!qpair) {
-        printf("Failed to allocate I/O queue pair\n");
+    // Create and populate controller structure
+    *nvme_ctx = malloc(sizeof(struct nvme_controller));
+    if (*nvme_ctx == NULL) {
+        printf("Failed to allocate nvme_controller\n");
         return;
     }
 
-    struct nvme_controller *nvme = malloc(sizeof(*nvme));
-    nvme->ctrlr = ctrlr;
-    nvme->ns = ns;
-    nvme->qpair = qpair;
-    *nvme_ctx = nvme;
-
-    num_sectors = spdk_nvme_ns_get_num_sectors(ns);
-    sector_size = spdk_nvme_ns_get_sector_size(ns);
-    size_gb = (num_sectors * sector_size) / (1024 * 1024 * 1024);
-
-    printf("✓ Attached NVMe controller\n");
-    printf("  Namespace ID: %u\n", ns_id);
-    printf("  Capacity: %lu GB\n", size_gb);
-    printf("  Sector size: %u bytes\n", sector_size);
-    printf("  Queue depth: %d\n", QUEUE_DEPTH);
+    (*nvme_ctx)->ctrlr = ctrlr;
+    (*nvme_ctx)->ns = ns;
+    (*nvme_ctx)->qpair = NULL;
 }
 
-static double run_sequential_read(struct nvme_controller *nvme)
+static double run_test(struct nvme_controller *nvme, int is_read)
 {
-    struct io_context contexts[QUEUE_DEPTH];
-    void *buffer;
-    uint64_t lba = 0;
-    uint64_t submitted = 0, completed = 0;
-    uint32_t in_flight = 0;
-    uint32_t sector_size = spdk_nvme_ns_get_sector_size(nvme->ns);
-    uint32_t blocks_per_io = BLOCK_SIZE / sector_size;
+    struct test_context ctx = {0};
+    struct io_task *task;
     struct timespec start, end;
     double elapsed, throughput, iops;
-    int rc;
+    void *all_buffer;
+    int i;
 
-    printf("\n═══════════════════════════════════════════════════════\n");
-    printf("SEQUENTIAL READ TEST (SPDK Native Polling Mode)\n");
-    printf("═══════════════════════════════════════════════════════\n");
-    fflush(stdout);
-
-    buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-    if (!buffer) {
-        printf("Failed to allocate DMA buffer\n");
-        fflush(stdout);
+    // Allocate one large buffer for all I/Os
+    all_buffer = spdk_zmalloc(QUEUE_DEPTH * BLOCK_SIZE, BLOCK_SIZE, NULL,
+                              SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+    if (all_buffer == NULL) {
+        printf("Failed to allocate I/O buffer\n");
         return -1;
     }
 
-    memset(contexts, 0, sizeof(contexts));
-    for (int i = 0; i < QUEUE_DEPTH; i++) {
-        contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
-    }
+    // Initialize test context
+    ctx.nvme = nvme;
+    ctx.offset_in_blocks = 0;
+    ctx.io_submitted = 0;
+    ctx.io_completed = 0;
+    ctx.current_queue_depth = 0;
+    ctx.is_draining = 0;
+    ctx.status = 0;
+    ctx.is_read = is_read;
 
-    printf("Starting sequential read test (1 GB)...\n");
+    printf("Starting %s test (1 GB)...\n", is_read ? "sequential read" : "sequential write");
     fflush(stdout);
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    // Submit initial queue depth of I/Os
+    for (i = 0; i < QUEUE_DEPTH; i++) {
+        task = malloc(sizeof(struct io_task));
+        if (task == NULL) {
+            printf("Failed to allocate task\n");
+            spdk_free(all_buffer);
+            return -1;
+        }
+
+        task->buffer = (char *)all_buffer + (i * BLOCK_SIZE);
+        task->ctx = &ctx;
+        task->is_read = is_read;
+
+        submit_io(task);
+
+        // Check for immediate submission failure
+        if (ctx.status != 0) {
+            printf("Initial submission failed\n");
+            spdk_free(all_buffer);
+            return -1;
+        }
+    }
+
+    // Poll for completions until all I/Os are done
     uint64_t last_progress = 0;
-    uint64_t loop_count = 0;
-    while (submitted < NUM_BLOCKS) {
-        loop_count++;
+    uint64_t last_progress_completed = 0;
+    while (ctx.io_completed < NUM_BLOCKS && ctx.status == 0) {
+        // Poll for completions
+        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+
         // Print progress every 10%
-        if (completed - last_progress >= NUM_BLOCKS / 10) {
+        if (ctx.io_completed - last_progress_completed >= NUM_BLOCKS / 10) {
             printf("  Progress: %lu%% (%lu/%u blocks) - submitted=%lu, in_flight=%u\n",
-                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS,
-                   submitted, in_flight);
+                   (ctx.io_completed * 100) / NUM_BLOCKS, ctx.io_completed, (uint32_t)NUM_BLOCKS,
+                   ctx.io_submitted, ctx.current_queue_depth);
             fflush(stdout);
-            last_progress = completed;
-        }
-        // Print detailed status if stuck (every 1B iterations near the end)
-        if (completed > NUM_BLOCKS * 85 / 100 && loop_count % 1000000000 == 0) {
-            printf("  [DEBUG] Loop: submitted=%lu, completed=%lu, in_flight=%u\n",
-                   submitted, completed, in_flight);
-            fflush(stdout);
-        }
-
-        // Poll for completions FIRST - poll multiple times to catch all completions
-        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
-
-        // Check for completed I/Os and mark contexts as free
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;  // Mark context as free
-                completed++;
-                in_flight--;
-            }
-        }
-
-        // NOW submit new I/Os using free contexts
-        while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            // Find a free context slot
-            int ctx_idx = -1;
-            for (int i = 0; i < QUEUE_DEPTH; i++) {
-                if (!contexts[i].in_use) {
-                    ctx_idx = i;
-                    break;
-                }
-            }
-
-            if (ctx_idx == -1) {
-                // No free contexts available, break and poll more
-                break;
-            }
-
-            // Mark context as in-use and reset completion state
-            contexts[ctx_idx].in_use = 1;
-            contexts[ctx_idx].completed = 0;
-            contexts[ctx_idx].success = 0;
-
-            rc = spdk_nvme_ns_cmd_read(nvme->ns, nvme->qpair,
-                                       contexts[ctx_idx].buffer,
-                                       lba, blocks_per_io,
-                                       io_complete, &contexts[ctx_idx], 0);
-            if (rc != 0) {
-                printf("Failed to submit read command: %d\n", rc);
-                contexts[ctx_idx].in_use = 0;  // Free the context on error
-                spdk_free(buffer);
-                return -1;
-            }
-
-            lba += blocks_per_io;
-            submitted++;
-            in_flight++;
+            last_progress_completed = ctx.io_completed;
         }
     }
-
-    // Drain remaining in-flight I/Os
-    printf("  Draining %u remaining I/Os...\n", in_flight);
-    fflush(stdout);
-
-    uint64_t drain_loops = 0;
-    while (in_flight > 0) {
-        drain_loops++;
-
-        // Poll for completions
-        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        uint32_t newly_completed = 0;
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed during drain\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;
-                completed++;
-                in_flight--;
-                newly_completed++;
-            }
-        }
-
-        // Debug output every 10M iterations
-        if (drain_loops % 10000000 == 0) {
-            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
-                   drain_loops, in_flight, completed, newly_completed, num_completions);
-            fflush(stdout);
-        }
-    }
-    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
-    fflush(stdout);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
-    elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    throughput = ((double)NUM_BLOCKS * BLOCK_SIZE / elapsed) / (1024.0 * 1024.0 * 1024.0);
-    iops = NUM_BLOCKS / elapsed;
 
-    printf("Completed: %lu blocks in %.2fs\n", completed, elapsed);
-    printf("Throughput: %.2f GB/s\n", throughput);
-    printf("IOPS: %.0f\n", iops);
-    fflush(stdout);
-
-    spdk_free(buffer);
-    return throughput;
-}
-
-static double run_sequential_write(struct nvme_controller *nvme)
-{
-    struct io_context contexts[QUEUE_DEPTH];
-    void *buffer;
-    uint64_t lba = 0;
-    uint64_t submitted = 0, completed = 0;
-    uint32_t in_flight = 0;
-    uint32_t sector_size = spdk_nvme_ns_get_sector_size(nvme->ns);
-    uint32_t blocks_per_io = BLOCK_SIZE / sector_size;
-    struct timespec start, end;
-    double elapsed, throughput, iops;
-    int rc;
-
-    printf("\n═══════════════════════════════════════════════════════\n");
-    printf("SEQUENTIAL WRITE TEST (SPDK Native Polling Mode)\n");
-    printf("═══════════════════════════════════════════════════════\n");
-    fflush(stdout);
-
-    buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-    if (!buffer) {
-        printf("Failed to allocate DMA buffer\n");
-        fflush(stdout);
+    // Check final status
+    if (ctx.status != 0) {
+        printf("Test failed with error\n");
+        spdk_free(all_buffer);
         return -1;
     }
 
-    // Fill buffer with test data
-    memset(buffer, 0xAA, BLOCK_SIZE * QUEUE_DEPTH);
-
-    memset(contexts, 0, sizeof(contexts));
-    for (int i = 0; i < QUEUE_DEPTH; i++) {
-        contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
-    }
-
-    printf("Starting sequential write test (1 GB)...\n");
-    fflush(stdout);
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    uint64_t last_progress = 0;
-    while (submitted < NUM_BLOCKS) {
-        // Print progress every 10%
-        if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%u blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
-            fflush(stdout);
-            last_progress = completed;
-        }
-
-        // Poll for completions FIRST - poll multiple times to catch all completions
-        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
-
-        // Check for completed I/Os and mark contexts as free
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;
-                completed++;
-                in_flight--;
-            }
-        }
-
-        // NOW submit new I/Os using free contexts
-        while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            // Find a free context slot
-            int ctx_idx = -1;
-            for (int i = 0; i < QUEUE_DEPTH; i++) {
-                if (!contexts[i].in_use) {
-                    ctx_idx = i;
-                    break;
-                }
-            }
-
-            if (ctx_idx == -1) {
-                // No free contexts available, break and poll more
-                break;
-            }
-
-            // Mark context as in-use and reset completion state
-            contexts[ctx_idx].in_use = 1;
-            contexts[ctx_idx].completed = 0;
-            contexts[ctx_idx].success = 0;
-
-            rc = spdk_nvme_ns_cmd_write(nvme->ns, nvme->qpair,
-                                        contexts[ctx_idx].buffer,
-                                        lba, blocks_per_io,
-                                        io_complete, &contexts[ctx_idx], 0);
-            if (rc != 0) {
-                printf("Failed to submit write command: %d\n", rc);
-                contexts[ctx_idx].in_use = 0;
-                spdk_free(buffer);
-                return -1;
-            }
-
-            lba += blocks_per_io;
-            submitted++;
-            in_flight++;
-        }
-    }
-
-    // Drain remaining in-flight I/Os
-    printf("  Draining %u remaining I/Os...\n", in_flight);
-    fflush(stdout);
-
-    uint64_t drain_loops = 0;
-    while (in_flight > 0) {
-        drain_loops++;
-
-        // Poll for completions
-        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        uint32_t newly_completed = 0;
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed during drain\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;
-                completed++;
-                in_flight--;
-                newly_completed++;
-            }
-        }
-
-        // Debug output every 10M iterations
-        if (drain_loops % 10000000 == 0) {
-            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
-                   drain_loops, in_flight, completed, newly_completed, num_completions);
-            fflush(stdout);
-        }
-    }
-    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
-    fflush(stdout);
-
-    clock_gettime(CLOCK_MONOTONIC, &end);
     elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     throughput = ((double)NUM_BLOCKS * BLOCK_SIZE / elapsed) / (1024.0 * 1024.0 * 1024.0);
     iops = NUM_BLOCKS / elapsed;
 
-    printf("Completed: %lu blocks in %.2fs\n", completed, elapsed);
-    printf("Throughput: %.2f GB/s\n", throughput);
-    printf("IOPS: %.0f\n", iops);
+    printf("✓ Completed: %lu blocks in %.2fs\n", ctx.io_completed, elapsed);
+    printf("  Throughput: %.2f GB/s\n", throughput);
+    printf("  IOPS: %.0f\n", iops);
     fflush(stdout);
 
-    spdk_free(buffer);
+    spdk_free(all_buffer);
     return throughput;
 }
 
-static double run_random_read(struct nvme_controller *nvme)
+int main(void)
 {
-    struct io_context contexts[QUEUE_DEPTH];
-    void *buffer;
-    uint64_t submitted = 0, completed = 0;
-    uint32_t in_flight = 0;
-    uint32_t sector_size = spdk_nvme_ns_get_sector_size(nvme->ns);
-    uint32_t blocks_per_io = BLOCK_SIZE / sector_size;
-    uint64_t max_lba = spdk_nvme_ns_get_num_sectors(nvme->ns) - blocks_per_io;
-    struct timespec start, end;
-    double elapsed, throughput, iops;
-    uint64_t rand_state = 0x12345678;
-    int rc;
-
-    printf("\n═══════════════════════════════════════════════════════\n");
-    printf("RANDOM READ TEST (4K blocks, SPDK Native Polling)\n");
-    printf("═══════════════════════════════════════════════════════\n");
-    fflush(stdout);
-
-    buffer = spdk_zmalloc(BLOCK_SIZE * QUEUE_DEPTH, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-    if (!buffer) {
-        printf("Failed to allocate DMA buffer\n");
-        fflush(stdout);
-        return -1;
-    }
-
-    memset(contexts, 0, sizeof(contexts));
-    for (int i = 0; i < QUEUE_DEPTH; i++) {
-        contexts[i].buffer = (char *)buffer + (i * BLOCK_SIZE);
-    }
-
-    printf("Starting random read test (1 GB, 4K blocks)...\n");
-    fflush(stdout);
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    uint64_t last_progress = 0;
-    while (submitted < NUM_BLOCKS) {
-        // Print progress every 10%
-        if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%u blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
-            fflush(stdout);
-            last_progress = completed;
-        }
-
-        // Poll for completions FIRST - poll multiple times to catch all completions
-        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
-            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-        }
-
-        // Check for completed I/Os and mark contexts as free
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;
-                completed++;
-                in_flight--;
-            }
-        }
-
-        // NOW submit new I/Os using free contexts
-        while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
-            // Find a free context slot
-            int ctx_idx = -1;
-            for (int i = 0; i < QUEUE_DEPTH; i++) {
-                if (!contexts[i].in_use) {
-                    ctx_idx = i;
-                    break;
-                }
-            }
-
-            if (ctx_idx == -1) {
-                // No free contexts available, break and poll more
-                break;
-            }
-
-            // Mark context as in-use and reset completion state
-            contexts[ctx_idx].in_use = 1;
-            contexts[ctx_idx].completed = 0;
-            contexts[ctx_idx].success = 0;
-
-            // Generate random LBA
-            rand_state = rand_state * 1103515245 + 12345;
-            uint64_t lba = (rand_state % max_lba) & ~((uint64_t)(blocks_per_io - 1));
-
-            rc = spdk_nvme_ns_cmd_read(nvme->ns, nvme->qpair,
-                                       contexts[ctx_idx].buffer,
-                                       lba, blocks_per_io,
-                                       io_complete, &contexts[ctx_idx], 0);
-            if (rc != 0) {
-                printf("Failed to submit read command: %d\n", rc);
-                contexts[ctx_idx].in_use = 0;
-                spdk_free(buffer);
-                return -1;
-            }
-
-            submitted++;
-            in_flight++;
-        }
-    }
-
-    // Drain remaining in-flight I/Os
-    printf("  Draining %u remaining I/Os...\n", in_flight);
-    fflush(stdout);
-
-    uint64_t drain_loops = 0;
-    while (in_flight > 0) {
-        drain_loops++;
-
-        // Poll for completions
-        int32_t num_completions = spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        uint32_t newly_completed = 0;
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].in_use && contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed during drain\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                contexts[i].in_use = 0;
-                completed++;
-                in_flight--;
-                newly_completed++;
-            }
-        }
-
-        // Debug output every 10M iterations
-        if (drain_loops % 10000000 == 0) {
-            printf("  [DRAIN] loops=%lu, in_flight=%u, completed=%lu, newly_completed=%u, poll_result=%d\n",
-                   drain_loops, in_flight, completed, newly_completed, num_completions);
-            fflush(stdout);
-        }
-    }
-    printf("✓ All I/Os completed: %lu (drain_loops=%lu)\n", completed, drain_loops);
-    fflush(stdout);
-
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    throughput = ((double)NUM_BLOCKS * BLOCK_SIZE / elapsed) / (1024.0 * 1024.0 * 1024.0);
-    iops = NUM_BLOCKS / elapsed;
-
-    printf("Completed: %lu blocks in %.2fs\n", completed, elapsed);
-    printf("Throughput: %.2f GB/s\n", throughput);
-    printf("IOPS: %.0f (4K random reads)\n", iops);
-
-    spdk_free(buffer);
-    return iops;
-}
-
-int main(int argc, char **argv)
-{
-    struct spdk_env_opts opts;
     struct nvme_controller *nvme = NULL;
+    struct spdk_env_opts opts;
     int rc;
+    double read_throughput, write_throughput, rand_read_throughput;
 
+    printf("\n");
     printf("═══════════════════════════════════════════════════════\n");
     printf("SPDK Native Benchmark (Polling Mode, No Kernel)\n");
-    printf("═══════════════════════════════════════════════════════\n\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("\n");
 
+    // Initialize SPDK environment
     spdk_env_opts_init(&opts);
     opts.name = "spdk_benchmark";
+    opts.shm_id = 0;
     opts.core_mask = "0x1";
+    opts.no_pci = false;
 
     printf("Initializing SPDK environment...\n");
     printf("  Core mask: %s\n", opts.core_mask);
@@ -583,14 +278,17 @@ int main(int argc, char **argv)
     printf("  Calling spdk_env_init()...\n");
     fflush(stdout);
 
-    if (spdk_env_init(&opts) < 0) {
-        fprintf(stderr, "Failed to initialize SPDK environment\n");
+    rc = spdk_env_init(&opts);
+    if (rc < 0) {
+        printf("Failed to initialize SPDK environment: %d\n", rc);
         return 1;
     }
     printf("✓ SPDK environment initialized successfully\n");
+    printf("\n");
     fflush(stdout);
 
-    printf("\nProbing for NVMe controllers...\n");
+    // Probe for NVMe controllers
+    printf("Probing for NVMe controllers...\n");
     printf("  Calling spdk_nvme_probe()...\n");
     fflush(stdout);
 
@@ -598,45 +296,70 @@ int main(int argc, char **argv)
     printf("  spdk_nvme_probe() returned: %d\n", rc);
     fflush(stdout);
 
-    if (rc != 0) {
-        fprintf(stderr, "Failed to probe NVMe controllers (rc=%d)\n", rc);
+    if (rc != 0 || nvme == NULL) {
+        printf("Failed to probe NVMe controllers\n");
+        spdk_env_fini();
         return 1;
     }
 
-    if (!nvme) {
-        fprintf(stderr, "No NVMe controllers found\n");
-        return 1;
-    }
+    // Print device info
     printf("✓ Successfully found and attached to NVMe controller\n");
+    printf("  Namespace ID: %u\n", spdk_nvme_ns_get_id(nvme->ns));
+    printf("  Capacity: %lu GB\n", spdk_nvme_ns_get_size(nvme->ns) / (1024 * 1024 * 1024));
+    printf("  Sector size: %u bytes\n", spdk_nvme_ns_get_sector_size(nvme->ns));
+    printf("  Queue depth: %d\n", QUEUE_DEPTH);
+    printf("\n");
     fflush(stdout);
 
-    printf("\n═══════════════════════════════════════════════════════\n");
+    // Allocate I/O queue pair
+    nvme->qpair = spdk_nvme_ctrlr_alloc_io_qpair(nvme->ctrlr, NULL, 0);
+    if (nvme->qpair == NULL) {
+        printf("Failed to allocate I/O queue pair\n");
+        free(nvme);
+        spdk_env_fini();
+        return 1;
+    }
+
+    // Run tests
+    printf("═══════════════════════════════════════════════════════\n");
     printf("Starting benchmark tests...\n");
     printf("═══════════════════════════════════════════════════════\n");
+    printf("\n");
+    fflush(stdout);
 
-    double seq_read = run_sequential_read(nvme);
-    double seq_write = run_sequential_write(nvme);
-    double rand_read = run_random_read(nvme);
+    // Sequential read test
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("SEQUENTIAL READ TEST (SPDK Native Polling Mode)\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
+    read_throughput = run_test(nvme, 1);
+    printf("\n");
+    fflush(stdout);
 
-    printf("\n═══════════════════════════════════════════════════════\n");
+    // Sequential write test
+    printf("═══════════════════════════════════════════════════════\n");
+    printf("SEQUENTIAL WRITE TEST (SPDK Native Polling Mode)\n");
+    printf("═══════════════════════════════════════════════════════\n");
+    fflush(stdout);
+    write_throughput = run_test(nvme, 0);
+    printf("\n");
+    fflush(stdout);
+
+    // Summary
+    printf("═══════════════════════════════════════════════════════\n");
     printf("BENCHMARK SUMMARY\n");
     printf("═══════════════════════════════════════════════════════\n");
-    printf("Sequential Read:  %.2f GB/s\n", seq_read);
-    printf("Sequential Write: %.2f GB/s\n", seq_write);
-    printf("Random Read (4K): %.0f IOPS\n", rand_read);
-
-    printf("\n═══════════════════════════════════════════════════════\n");
-    printf("SPDK Native Performance Characteristics:\n");
-    printf("• Polling mode (no interrupts)\n");
-    printf("• Zero-copy DMA transfers\n");
-    printf("• Direct PCIe access (no kernel)\n");
-    printf("• Lock-free I/O submission\n");
+    printf("Sequential Read:  %.2f GB/s\n", read_throughput);
+    printf("Sequential Write: %.2f GB/s\n", write_throughput);
     printf("═══════════════════════════════════════════════════════\n");
+    printf("\n");
+    fflush(stdout);
 
     // Cleanup
     spdk_nvme_ctrlr_free_io_qpair(nvme->qpair);
     spdk_nvme_detach(nvme->ctrlr);
     free(nvme);
+    spdk_env_fini();
 
     return 0;
 }
