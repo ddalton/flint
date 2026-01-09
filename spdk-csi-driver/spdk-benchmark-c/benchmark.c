@@ -138,8 +138,10 @@ static double run_sequential_read(struct nvme_controller *nvme)
             fflush(stdout);
         }
 
-        // Poll for completions FIRST
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        // Poll for completions FIRST - poll multiple times to catch all completions
+        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
@@ -238,8 +240,10 @@ static double run_sequential_write(struct nvme_controller *nvme)
             last_progress = completed;
         }
 
-        // Poll for completions FIRST
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        // Poll for completions FIRST - poll multiple times to catch all completions
+        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
@@ -336,8 +340,10 @@ static double run_random_read(struct nvme_controller *nvme)
             last_progress = completed;
         }
 
-        // Poll for completions FIRST
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        // Poll for completions FIRST - poll multiple times to catch all completions
+        for (int poll_iter = 0; poll_iter < 4; poll_iter++) {
+            spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+        }
 
         // Check for completed I/Os and mark contexts as free
         for (int i = 0; i < QUEUE_DEPTH; i++) {
