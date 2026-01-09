@@ -9,7 +9,7 @@ spec:
   hostNetwork: true
   hostPID: true
   nodeSelector:
-    kubernetes.io/hostname: ubuntu  # Node with NVMe device
+    kubernetes.io/hostname: master  # Node with NVMe device
   containers:
   - name: benchmark
     image: dilipdalton/spdk-benchmark:latest
