@@ -120,13 +120,22 @@ static double run_sequential_read(struct nvme_controller *nvme)
     clock_gettime(CLOCK_MONOTONIC, &start);
 
     uint64_t last_progress = 0;
+    uint64_t loop_count = 0;
     while (completed < NUM_BLOCKS) {
+        loop_count++;
         // Print progress every 10%
         if (completed - last_progress >= NUM_BLOCKS / 10) {
-            printf("  Progress: %lu%% (%lu/%u blocks)\n",
-                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS);
+            printf("  Progress: %lu%% (%lu/%u blocks) - submitted=%lu, in_flight=%u\n",
+                   (completed * 100) / NUM_BLOCKS, completed, (uint32_t)NUM_BLOCKS,
+                   submitted, in_flight);
             fflush(stdout);
             last_progress = completed;
+        }
+        // Print detailed status if stuck (every 1B iterations near the end)
+        if (completed > NUM_BLOCKS * 85 / 100 && loop_count % 1000000000 == 0) {
+            printf("  [DEBUG] Loop: submitted=%lu, completed=%lu, in_flight=%u\n",
+                   submitted, completed, in_flight);
+            fflush(stdout);
         }
         // Submit I/Os up to queue depth
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
