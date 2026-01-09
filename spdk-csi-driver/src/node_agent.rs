@@ -196,6 +196,20 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_reset_disks);
 
+        // POST /api/memory_disks/create - Create a memory (malloc) disk
+        let create_memory_disk = warp::path!("api" / "memory_disks" / "create")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_create_memory_disk);
+
+        // POST /api/memory_disks/delete - Delete a memory (malloc) disk
+        let delete_memory_disk = warp::path!("api" / "memory_disks" / "delete")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_delete_memory_disk);
+
         // POST /api/volumes/create_lvol - Create logical volume
         let create_lvol = warp::path!("api" / "volumes" / "create_lvol")
             .and(warp::post())
@@ -292,6 +306,8 @@ impl NodeAgent {
             .or(setup_disks)
             .or(initialize_disks)
             .or(reset_disks)
+            .or(create_memory_disk)
+            .or(delete_memory_disk)
             .or(create_lvol)
             .or(delete_lvol)
             .or(resize_lvol)
@@ -643,7 +659,7 @@ impl NodeAgent {
     ) -> Result<impl Reply, Rejection> {
         let disks = request.get_disks();
         println!("🌐 [HTTP_API] Handling reset disks request: {} disks", disks.len());
-        
+
         // TODO: Implement actual disk reset
         let response = json!({
             "success": false,
@@ -652,8 +668,68 @@ impl NodeAgent {
             "warnings": ["Disk reset not yet implemented in minimal state"],
             "completed_at": chrono::Utc::now().to_rfc3339()
         });
-        
+
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::NOT_IMPLEMENTED))
+    }
+
+    /// Handle POST /api/memory_disks/create - Create a memory (malloc) disk
+    async fn handle_create_memory_disk(
+        request: CreateMemoryDiskRequest,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling create memory disk request: name={}, size={}MB",
+            request.name, request.size_mb);
+
+        match node_agent.disk_service.create_memory_disk(
+            &request.name,
+            request.size_mb,
+            request.block_size
+        ).await {
+            Ok(bdev_name) => {
+                let response = json!({
+                    "success": true,
+                    "bdev_name": bdev_name,
+                    "message": format!("Memory disk '{}' created successfully ({}MB)", bdev_name, request.size_mb),
+                    "completed_at": chrono::Utc::now().to_rfc3339()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                let response = json!({
+                    "success": false,
+                    "error": format!("Failed to create memory disk: {}", e),
+                    "completed_at": chrono::Utc::now().to_rfc3339()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/memory_disks/delete - Delete a memory (malloc) disk
+    async fn handle_delete_memory_disk(
+        request: DeleteMemoryDiskRequest,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        println!("🌐 [HTTP_API] Handling delete memory disk request: name={}", request.name);
+
+        match node_agent.disk_service.delete_memory_disk(&request.name).await {
+            Ok(()) => {
+                let response = json!({
+                    "success": true,
+                    "message": format!("Memory disk '{}' deleted successfully", request.name),
+                    "completed_at": chrono::Utc::now().to_rfc3339()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                let response = json!({
+                    "success": false,
+                    "error": format!("Failed to delete memory disk: {}", e),
+                    "completed_at": chrono::Utc::now().to_rfc3339()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
     }
 
     /// Handle POST /api/spdk/rpc - Generic SPDK RPC proxy
@@ -1421,4 +1497,17 @@ pub struct DeleteLvolRequest {
 pub struct ResizeLvolRequest {
     pub lvol_uuid: String,
     pub new_size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateMemoryDiskRequest {
+    pub name: String,
+    pub size_mb: u64,
+    #[serde(default)]
+    pub block_size: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteMemoryDiskRequest {
+    pub name: String,
 }

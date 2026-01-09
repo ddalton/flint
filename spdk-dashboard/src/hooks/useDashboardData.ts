@@ -1565,6 +1565,60 @@ export const useDiskSetup = () => {
     }
   }, [refreshNodeDisks, setNodeData]);
 
+  const createMemoryDisk = useCallback(async (
+    nodeName: string,
+    name: string,
+    sizeMB: number,
+    blockSize?: number
+  ): Promise<{ success: boolean; error?: string; bdev_name?: string }> => {
+    try {
+      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, size_mb: sizeMB, block_size: blockSize })
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        // Refresh node disks after creating memory disk
+        setTimeout(() => refreshNodeDisks(nodeName), 1000);
+        return { success: true, bdev_name: result.bdev_name };
+      } else {
+        return { success: false, error: result.error || 'Failed to create memory disk' };
+      }
+    } catch (err) {
+      console.error('Error creating memory disk:', err);
+      return { success: false, error: String(err) };
+    }
+  }, [refreshNodeDisks]);
+
+  const deleteMemoryDisk = useCallback(async (
+    nodeName: string,
+    name: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        // Refresh node disks after deleting memory disk
+        setTimeout(() => refreshNodeDisks(nodeName), 1000);
+        return { success: true };
+      } else {
+        return { success: false, error: result.error || 'Failed to delete memory disk' };
+      }
+    } catch (err) {
+      console.error('Error deleting memory disk:', err);
+      return { success: false, error: String(err) };
+    }
+  }, [refreshNodeDisks]);
+
   return {
     nodeData,
     setNodeData,
@@ -1573,6 +1627,8 @@ export const useDiskSetup = () => {
     resetDisksOnNode,
     initializeBlobstoreOnNode,
     deleteDiskOnNode,
+    createMemoryDisk,
+    deleteMemoryDisk,
     refreshing: refreshing.size > 0
   };
 };

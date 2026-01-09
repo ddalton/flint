@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight } from 'lucide-react';
+import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter } from '../../hooks/useDashboardData';
+import { useDiskSetup } from '../../hooks/useDashboardData';
 
 interface NodeDetailViewProps {
   node: string;
@@ -16,13 +17,13 @@ interface NodeDetailViewProps {
   onShowMetrics: () => void;
 }
 
-export const NodeDetailView: React.FC<NodeDetailViewProps> = ({ 
-  node, 
-  nodeDisks, 
-  nodeVolumes, 
-  healthyDisks, 
-  totalCapacity, 
-  totalAllocated, 
+export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
+  node,
+  nodeDisks,
+  nodeVolumes,
+  healthyDisks,
+  totalCapacity,
+  totalAllocated,
   totalFree,
   volumeFilter,
   filteredVolumes,
@@ -30,6 +31,13 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   onShowMetrics,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
+  const [showMemoryDiskModal, setShowMemoryDiskModal] = useState(false);
+  const [memoryDiskName, setMemoryDiskName] = useState('');
+  const [memoryDiskSize, setMemoryDiskSize] = useState(1);
+  const [isCreatingMemoryDisk, setIsCreatingMemoryDisk] = useState(false);
+  const [memoryDiskError, setMemoryDiskError] = useState<string | null>(null);
+
+  const { createMemoryDisk } = useDiskSetup();
 
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
@@ -39,6 +47,38 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       newExpanded.add(diskId);
     }
     setExpandedDisks(newExpanded);
+  };
+
+  const handleCreateMemoryDisk = async () => {
+    if (!memoryDiskName.trim()) {
+      setMemoryDiskError('Please enter a name for the memory disk');
+      return;
+    }
+
+    if (memoryDiskSize < 1 || memoryDiskSize > 64) {
+      setMemoryDiskError('Size must be between 1 and 64 GB');
+      return;
+    }
+
+    setIsCreatingMemoryDisk(true);
+    setMemoryDiskError(null);
+
+    try {
+      const result = await createMemoryDisk(node, memoryDiskName, memoryDiskSize * 1024);
+
+      if (result.success) {
+        // Reset and close modal
+        setShowMemoryDiskModal(false);
+        setMemoryDiskName('');
+        setMemoryDiskSize(1);
+      } else {
+        setMemoryDiskError(result.error || 'Failed to create memory disk');
+      }
+    } catch (err) {
+      setMemoryDiskError(String(err));
+    } finally {
+      setIsCreatingMemoryDisk(false);
+    }
   };
 
   // Use filtered volumes if provided, otherwise use all node volumes
@@ -262,7 +302,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       )}
 
       <div className="bg-white rounded-lg overflow-hidden">
-        <div className="px-6 py-4 bg-gray-100 border-b">
+        <div className="px-6 py-4 bg-gray-100 border-b flex items-center justify-between">
           <h4 className="text-lg font-semibold flex items-center gap-2">
             <HardDrive className="w-5 h-5" />
             NVMe Disks & Logical Volume Stores on {node}
@@ -272,6 +312,13 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               </span>
             )}
           </h4>
+          <button
+            onClick={() => setShowMemoryDiskModal(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm"
+          >
+            <Plus className="w-4 h-4" />
+            Create Memory Disk
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
@@ -467,6 +514,104 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Memory Disk Creation Modal */}
+      {showMemoryDiskModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Create Memory Disk</h3>
+              <button
+                onClick={() => {
+                  setShowMemoryDiskModal(false);
+                  setMemoryDiskError(null);
+                }}
+                className="text-gray-400 hover:text-gray-600"
+                disabled={isCreatingMemoryDisk}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Disk Name
+                </label>
+                <input
+                  type="text"
+                  value={memoryDiskName}
+                  onChange={(e) => setMemoryDiskName(e.target.value)}
+                  placeholder="e.g., Malloc0, mem0"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  disabled={isCreatingMemoryDisk}
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Name for the memory disk (will be used as SPDK bdev name)
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Size (GB): {memoryDiskSize}
+                </label>
+                <input
+                  type="range"
+                  min="1"
+                  max="64"
+                  value={memoryDiskSize}
+                  onChange={(e) => setMemoryDiskSize(parseInt(e.target.value))}
+                  className="w-full"
+                  disabled={isCreatingMemoryDisk}
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>1 GB</span>
+                  <span>64 GB</span>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Memory disks are volatile and data is lost on restart. Ideal for testing and caching.
+                </p>
+              </div>
+
+              {memoryDiskError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">
+                  {memoryDiskError}
+                </div>
+              )}
+
+              <div className="flex gap-3 justify-end pt-4">
+                <button
+                  onClick={() => {
+                    setShowMemoryDiskModal(false);
+                    setMemoryDiskError(null);
+                  }}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                  disabled={isCreatingMemoryDisk}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateMemoryDisk}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                  disabled={isCreatingMemoryDisk}
+                >
+                  {isCreatingMemoryDisk ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-4 h-4" />
+                      Create
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

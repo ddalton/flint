@@ -1599,9 +1599,105 @@ impl MinimalDiskService {
     async fn get_spdk_nvme_controllers(&self) -> Result<Value, MinimalStateError> {
         self.call_spdk_rpc(&json!({
             "method": "bdev_nvme_get_controllers"
-        })).await.map_err(|e| MinimalStateError::SpdkRpcError { 
-            message: format!("Failed to get controllers: {}", e) 
+        })).await.map_err(|e| MinimalStateError::SpdkRpcError {
+            message: format!("Failed to get controllers: {}", e)
         })
+    }
+
+    /// Create a malloc (memory) bdev via SPDK
+    ///
+    /// # Arguments
+    /// * `name` - Name for the memory bdev (e.g., "Malloc0", "mem0")
+    /// * `size_mb` - Size in megabytes
+    /// * `block_size` - Block size in bytes (default: 4096, must be multiple of 512)
+    ///
+    /// # Returns
+    /// The name of the created bdev
+    pub async fn create_memory_disk(
+        &self,
+        name: &str,
+        size_mb: u64,
+        block_size: Option<u32>,
+    ) -> Result<String, MinimalStateError> {
+        let block_size = block_size.unwrap_or(4096);
+
+        // Validate block size (must be multiple of 512)
+        if block_size < 512 || block_size % 512 != 0 {
+            return Err(MinimalStateError::SpdkRpcError {
+                message: format!("Invalid block size: {}. Must be multiple of 512 and at least 512 bytes", block_size)
+            });
+        }
+
+        // Calculate number of blocks
+        let num_blocks = (size_mb * 1024 * 1024) / (block_size as u64);
+
+        println!("🔧 [MEMORY_DISK] Creating malloc bdev: name={}, size={}MB, blocks={}, block_size={}",
+            name, size_mb, num_blocks, block_size);
+
+        let create_params = json!({
+            "method": "bdev_malloc_create",
+            "params": {
+                "name": name,
+                "num_blocks": num_blocks,
+                "block_size": block_size
+            }
+        });
+
+        match self.call_spdk_rpc(&create_params).await {
+            Ok(response) => {
+                // bdev_malloc_create returns the bdev name as a string
+                if let Some(bdev_name) = response["result"].as_str() {
+                    println!("✅ [MEMORY_DISK] Created malloc bdev: {}", bdev_name);
+                    Ok(bdev_name.to_string())
+                } else {
+                    // Fallback to the requested name
+                    println!("✅ [MEMORY_DISK] Created malloc bdev (assumed): {}", name);
+                    Ok(name.to_string())
+                }
+            }
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("⚠️ [MEMORY_DISK] Malloc bdev already exists: {}", name);
+                Ok(name.to_string())
+            }
+            Err(e) => {
+                println!("❌ [MEMORY_DISK] Failed to create malloc bdev: {}", e);
+                Err(MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to create malloc bdev: {}", e)
+                })
+            }
+        }
+    }
+
+    /// Delete a malloc (memory) bdev via SPDK
+    ///
+    /// # Arguments
+    /// * `name` - Name of the memory bdev to delete
+    pub async fn delete_memory_disk(&self, name: &str) -> Result<(), MinimalStateError> {
+        println!("🔧 [MEMORY_DISK] Deleting malloc bdev: {}", name);
+
+        let delete_params = json!({
+            "method": "bdev_malloc_delete",
+            "params": {
+                "name": name
+            }
+        });
+
+        match self.call_spdk_rpc(&delete_params).await {
+            Ok(_) => {
+                println!("✅ [MEMORY_DISK] Deleted malloc bdev: {}", name);
+                Ok(())
+            }
+            Err(e) if e.to_string().contains("does not exist") || e.to_string().contains("not found") => {
+                println!("⚠️ [MEMORY_DISK] Malloc bdev does not exist: {}", name);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [MEMORY_DISK] Failed to delete malloc bdev: {}", e);
+                Err(MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to delete malloc bdev: {}", e)
+                })
+            }
+        }
     }
 
     /// Convert SPDK bdev JSON to our DiskInfo structure
@@ -1619,7 +1715,7 @@ impl MinimalDiskService {
         // Filter for storage devices (matches raid_over_lv pattern)
         // Use case-insensitive check for "uring" to match both "Uring" and "URING bdev"
         let product_upper = product_name.to_uppercase();
-        if !product_upper.contains("NVME") && !product_upper.contains("SSD") && !product_upper.contains("URING") {
+        if !product_upper.contains("NVME") && !product_upper.contains("SSD") && !product_upper.contains("URING") && !product_upper.contains("MALLOC") {
             // Note: Skipping non-storage bdevs (lvols) - not logged to reduce noise
             return Ok(None);
         }
@@ -1627,9 +1723,15 @@ impl MinimalDiskService {
         // Note: Storage bdev inclusion not logged per-bdev (too verbose). Summary logged at end.
 
         let size_bytes = block_size * num_blocks;
-        
+
+        // Check if this is a malloc (memory) bdev
+        let is_malloc = product_upper.contains("MALLOC");
+
         // Try to get device name from uring filename if available, otherwise use bdev name
-        let device_name = if let Some(filename) = bdev.get("driver_specific")
+        let device_name = if is_malloc {
+            // For malloc bdevs, use the bdev name directly as the device name
+            bdev_name.to_string()
+        } else if let Some(filename) = bdev.get("driver_specific")
             .and_then(|ds| ds.get("uring"))
             .and_then(|uring| uring.get("filename"))
             .and_then(|f| f.as_str()) {
@@ -1638,32 +1740,46 @@ impl MinimalDiskService {
         } else {
             bdev_name.trim_start_matches("uring_").to_string()
         };
-        
-        let pci_address = self.extract_pci_from_bdev_name(bdev_name);
+
+        // Malloc bdevs don't have PCI addresses - use a synthetic identifier
+        let pci_address = if is_malloc {
+            format!("memory:{}", bdev_name)
+        } else {
+            self.extract_pci_from_bdev_name(bdev_name)
+        };
         
         // Find LVS information for this bdev
         let (lvs_name, free_space, lvol_count) = self.find_lvs_for_bdev(bdev_name, lvstores, all_bdevs);
-        
+
         // Determine if this is a system disk:
         // Simple heuristic: If it has partitions, it's a system disk (formatted for OS use)
         // SPDK uses whole disks without partitions
-        let partitions = self.get_device_partitions(&device_name);
-        let is_system_disk = partitions.len() > 1; // More than just the device itself
-        let mounted_partitions: Vec<String> = if is_system_disk {
-            // If it has partitions, assume they're mounted (we can't reliably read host mounts from container)
-            vec!["(partitioned)".to_string()]
+        // Malloc (memory) bdevs are never system disks and don't have partitions
+        let (is_system_disk, mounted_partitions) = if is_malloc {
+            (false, Vec::new())
         } else {
-            Vec::new()
+            let partitions = self.get_device_partitions(&device_name);
+            let is_sys = partitions.len() > 1; // More than just the device itself
+            let mounts = if is_sys {
+                // If it has partitions, assume they're mounted (we can't reliably read host mounts from container)
+                vec!["(partitioned)".to_string()]
+            } else {
+                Vec::new()
+            };
+
+            if is_sys {
+                println!("🔍 [DISK_DETECT] {} has {} partitions: {:?} -> marking as system disk",
+                    device_name, partitions.len() - 1, partitions);
+            }
+            (is_sys, mounts)
         };
-        
-        if is_system_disk {
-            println!("🔍 [DISK_DETECT] {} has {} partitions: {:?} -> marking as system disk", 
-                device_name, partitions.len() - 1, partitions);
-        }
         
         // Detect driver type from bdev information
         // Simple categorization: kernel-managed vs SPDK userspace-managed vs bdev type
-        let driver = if bdev.get("driver_specific")
+        let driver = if is_malloc {
+            // Malloc bdevs are memory-based
+            "Memory (RAM)".to_string()
+        } else if bdev.get("driver_specific")
             .and_then(|ds| ds.get("uring"))
             .is_some() || product_upper.contains("URING") {
             // This is a uring bdev - kernel manages the device, SPDK uses io_uring
@@ -1674,11 +1790,15 @@ impl MinimalDiskService {
             // This is an SPDK userspace NVMe bdev - SPDK directly manages the device
             "SPDK userspace".to_string()
         } else {
-            // For other types, show the product name (e.g., "Logical Volume", "RAID Volume", "Malloc disk")
+            // For other types, show the product name (e.g., "Logical Volume", "RAID Volume")
             product_name.to_string()
         };
         
-        let device_type = Self::get_device_type(&device_name);
+        let device_type = if is_malloc {
+            "Memory".to_string()
+        } else {
+            Self::get_device_type(&device_name)
+        };
 
         Ok(Some(DiskInfo {
             node_name: self.node_name.clone(),
