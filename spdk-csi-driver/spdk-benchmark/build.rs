@@ -32,10 +32,15 @@ fn main() {
         .header("wrapper.h")
         .clang_arg("-I/usr/local/include/spdk")
         .clang_arg("-I/usr/local/include/spdk/build")
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_function("spdk_.*")
         .allowlist_type("spdk_.*")
         .allowlist_var("SPDK_.*")
+        // Disable layout tests to avoid packed struct alignment issues
+        .layout_tests(false)
+        // Use conservative derive strategy to avoid packed struct issues
+        .derive_copy(false)
+        .derive_debug(false)
         .generate()
         .expect("Unable to generate bindings");
 

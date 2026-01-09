@@ -7,7 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const BLOCK_SIZE: u64 = 4096; // 4KB blocks
 const NUM_BLOCKS: u64 = 262144; // 1GB of 4KB blocks
