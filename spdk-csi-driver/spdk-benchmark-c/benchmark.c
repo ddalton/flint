@@ -137,7 +137,25 @@ static double run_sequential_read(struct nvme_controller *nvme)
                    submitted, completed, in_flight);
             fflush(stdout);
         }
-        // Submit I/Os up to queue depth
+
+        // Poll for completions FIRST
+        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+
+        // Check for completed I/Os and mark contexts as free
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+
+        // NOW submit new I/Os using freed contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
             contexts[ctx_idx].completed = 0;
@@ -156,23 +174,6 @@ static double run_sequential_read(struct nvme_controller *nvme)
             lba += blocks_per_io;
             submitted++;
             in_flight++;
-        }
-
-        // Poll for completions
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                completed++;
-                in_flight--;
-            }
         }
     }
 
@@ -236,7 +237,25 @@ static double run_sequential_write(struct nvme_controller *nvme)
             fflush(stdout);
             last_progress = completed;
         }
-        // Submit I/Os up to queue depth
+
+        // Poll for completions FIRST
+        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+
+        // Check for completed I/Os and mark contexts as free
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+
+        // NOW submit new I/Os using freed contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
             contexts[ctx_idx].completed = 0;
@@ -255,23 +274,6 @@ static double run_sequential_write(struct nvme_controller *nvme)
             lba += blocks_per_io;
             submitted++;
             in_flight++;
-        }
-
-        // Poll for completions
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                completed++;
-                in_flight--;
-            }
         }
     }
 
@@ -333,7 +335,25 @@ static double run_random_read(struct nvme_controller *nvme)
             fflush(stdout);
             last_progress = completed;
         }
-        // Submit I/Os up to queue depth
+
+        // Poll for completions FIRST
+        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
+
+        // Check for completed I/Os and mark contexts as free
+        for (int i = 0; i < QUEUE_DEPTH; i++) {
+            if (contexts[i].completed) {
+                if (!contexts[i].success) {
+                    printf("I/O failed\n");
+                    spdk_free(buffer);
+                    return -1;
+                }
+                contexts[i].completed = 0;
+                completed++;
+                in_flight--;
+            }
+        }
+
+        // NOW submit new I/Os using freed contexts
         while (in_flight < QUEUE_DEPTH && submitted < NUM_BLOCKS) {
             uint32_t ctx_idx = submitted % QUEUE_DEPTH;
             contexts[ctx_idx].completed = 0;
@@ -355,23 +375,6 @@ static double run_random_read(struct nvme_controller *nvme)
 
             submitted++;
             in_flight++;
-        }
-
-        // Poll for completions
-        spdk_nvme_qpair_process_completions(nvme->qpair, 0);
-
-        // Check for completed I/Os
-        for (int i = 0; i < QUEUE_DEPTH; i++) {
-            if (contexts[i].completed) {
-                if (!contexts[i].success) {
-                    printf("I/O failed\n");
-                    spdk_free(buffer);
-                    return -1;
-                }
-                contexts[i].completed = 0;
-                completed++;
-                in_flight--;
-            }
         }
     }
 
