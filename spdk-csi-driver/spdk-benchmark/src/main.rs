@@ -25,6 +25,14 @@ struct IoContext {
     success: bool,
 }
 
+// Helper function to check if completion has error (replaces missing spdk_nvme_cpl_is_error macro)
+unsafe fn is_cpl_error(cpl: *const spdk_nvme_cpl) -> bool {
+    // Check status field - 0 means success
+    // The completion structure has a status field that indicates errors
+    let status = (*cpl).status;
+    (status & 0xFFFE) != 0  // Check status bits (bit 0 is phase, bits 1+ are status)
+}
+
 extern "C" fn io_complete_cb(
     _arg: *mut ::std::os::raw::c_void,
     cpl: *const spdk_nvme_cpl,
@@ -32,7 +40,7 @@ extern "C" fn io_complete_cb(
     let ctx = _arg as *mut IoContext;
     unsafe {
         (*ctx).completed = true;
-        (*ctx).success = spdk_nvme_cpl_is_error(cpl) == 0;
+        (*ctx).success = !is_cpl_error(cpl);
     }
 }
 
@@ -438,7 +446,7 @@ fn main() {
             nvme_ctx_ptr,
             Some(probe_cb),
             Some(attach_cb),
-            ptr::null(),
+            None,  // remove_cb - not needed for benchmark
         ) != 0 {
             eprintln!("Failed to probe NVMe controllers");
             std::process::exit(1);
