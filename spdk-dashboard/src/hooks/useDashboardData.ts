@@ -867,7 +867,8 @@ const transformBackendData = (backendData: any): DashboardData => {
       // Ensure compatibility with existing frontend code
       blobstore_initialized: disk.blobstore_initialized
     })) || [],
-    nodes: backendData.nodes || []
+    nodes: backendData.nodes || [],
+    node_info: backendData.node_info || {}
   };
 };
 
