@@ -124,10 +124,10 @@ spec:
                     '
           resources:
             limits:
-              hugepages-2Mi: "1Gi"
+              hugepages-2Mi: "8Gi"
               memory: "2Gi"
             requests:
-              hugepages-2Mi: "1Gi" 
+              hugepages-2Mi: "8Gi" 
               memory: "1Gi"
           volumeMounts:
             - name: hugepages
@@ -233,10 +233,10 @@ spec:
             failureThreshold: 60
           resources:
             limits:
-              hugepages-2Mi: "1Gi"
+              hugepages-2Mi: "8Gi"
               memory: "2Gi"
             requests:
-              hugepages-2Mi: "1Gi" 
+              hugepages-2Mi: "8Gi" 
               memory: "1Gi"
           volumeMounts:
             - name: hugepages
