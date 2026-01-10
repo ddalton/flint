@@ -772,6 +772,7 @@ impl NodeAgent {
                 });
 
                 println!("✅ [HTTP_API] Memory info: {}MB total, {}MB available", mem_total_mb, mem_available_mb);
+                println!("   Full response JSON: {:?}", response);
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {

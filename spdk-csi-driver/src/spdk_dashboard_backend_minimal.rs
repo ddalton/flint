@@ -261,11 +261,13 @@ async fn discover_node_agents(kube_client: &Client, namespace: &str) -> Result<H
 async fn read_node_memory_info(node_url: &str, node_name: &str) -> Result<NodeInfo, Box<dyn std::error::Error>> {
     // Try to fetch memory info from node agent
     let url = format!("{}/api/system/memory", node_url);
+    println!("🔍 [MEMORY_INFO] Fetching memory info for node {} from: {}", node_name, url);
 
     match HttpClient::new().get(&url).send().await {
         Ok(response) if response.status().is_success() => {
             // If node agent provides memory endpoint, use it
             let mem_data: serde_json::Value = response.json().await?;
+            println!("   Raw memory data from node agent: {:?}", mem_data);
 
             let mem_total_mb = mem_data["total_mb"].as_u64().unwrap_or(0);
             let mem_available_mb = mem_data["available_mb"].as_u64().unwrap_or(0);
@@ -276,13 +278,18 @@ async fn read_node_memory_info(node_url: &str, node_name: &str) -> Result<NodeIn
                 0.0
             };
 
-            Ok(NodeInfo {
+            println!("   Parsed: total={}MB, available={}MB, used={}MB, util={:.1}%",
+                mem_total_mb, mem_available_mb, mem_used_mb, mem_utilization_pct);
+
+            let node_info = NodeInfo {
                 name: node_name.to_string(),
                 memory_total_mb: mem_total_mb,
                 memory_available_mb: mem_available_mb,
                 memory_used_mb: mem_used_mb,
                 memory_utilization_pct: mem_utilization_pct,
-            })
+            };
+            println!("   ✅ Returning NodeInfo: {:?}", node_info);
+            Ok(node_info)
         }
         _ => {
             // Fallback: If running locally or node agent doesn't have memory endpoint,
@@ -815,6 +822,10 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
         .collect();
 
     println!("📊 [MEMORY_INFO] Collected memory info for {} nodes", node_info.len());
+    for (node_name, info) in &node_info {
+        println!("   Node {}: total={}MB, available={}MB, used={}MB",
+            node_name, info.memory_total_mb, info.memory_available_mb, info.memory_used_mb);
+    }
 
     let dashboard_data = DashboardData {
         volumes: filtered_volumes,
@@ -893,7 +904,8 @@ async fn proxy_node_agent_endpoint(
     state: AppState
 ) -> Result<impl warp::Reply, warp::Rejection> {
     println!("🌐 [PROXY] Proxying {} {} for node: {}", method, endpoint, node);
-    
+    println!("   Request body: {:?}", body);
+
     let node_agents = state.node_agents.read().await;
     if let Some(agent_url) = node_agents.get(&node) {
         let http_client = HttpClient::builder()
@@ -901,6 +913,7 @@ async fn proxy_node_agent_endpoint(
             .build()
             .map_err(|_| warp::reject::reject())?;
         let full_url = format!("{}{}", agent_url, endpoint);
+        println!("   Full URL: {}", full_url);
         
         let result = match method.as_str() {
             "GET" => {
@@ -922,28 +935,38 @@ async fn proxy_node_agent_endpoint(
                 ));
             }
         };
-        
+
         match result {
             Ok(response) => {
-                if response.status().is_success() {
+                let status = response.status();
+                println!("   Response status: {}", status);
+                if status.is_success() {
                     match response.json::<serde_json::Value>().await {
-                        Ok(data) => Ok(warp::reply::with_status(
-                            warp::reply::json(&data),
-                            warp::http::StatusCode::OK
-                        )),
-                        Err(_) => Ok(warp::reply::with_status(
-                            warp::reply::json(&json!({"success": false, "error": "Failed to parse response"})),
-                            warp::http::StatusCode::BAD_GATEWAY
-                        ))
+                        Ok(data) => {
+                            println!("   Response data: {:?}", data);
+                            Ok(warp::reply::with_status(
+                                warp::reply::json(&data),
+                                warp::http::StatusCode::OK
+                            ))
+                        }
+                        Err(e) => {
+                            println!("   ❌ Failed to parse response: {}", e);
+                            Ok(warp::reply::with_status(
+                                warp::reply::json(&json!({"success": false, "error": "Failed to parse response"})),
+                                warp::http::StatusCode::BAD_GATEWAY
+                            ))
+                        }
                     }
                 } else {
+                    println!("   ❌ Node agent returned error status: {}", status);
                     Ok(warp::reply::with_status(
-                        warp::reply::json(&json!({"success": false, "error": format!("Node agent returned: {}", response.status())})),
+                        warp::reply::json(&json!({"success": false, "error": format!("Node agent returned: {}", status)})),
                         warp::http::StatusCode::BAD_GATEWAY
                     ))
                 }
             }
             Err(e) => {
+                println!("   ❌ Failed to connect to node agent: {}", e);
                 Ok(warp::reply::with_status(
                     warp::reply::json(&json!({"success": false, "error": format!("Failed to connect: {}", e)})),
                     warp::http::StatusCode::SERVICE_UNAVAILABLE
@@ -951,6 +974,7 @@ async fn proxy_node_agent_endpoint(
             }
         }
     } else {
+        println!("   ❌ Node agent not found: {}", node);
         Ok(warp::reply::with_status(
             warp::reply::json(&json!({"success": false, "error": "Node agent not found"})),
             warp::http::StatusCode::NOT_FOUND
@@ -1376,6 +1400,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            println!("🎯 [PROXY_ROUTE] Memory disk create route matched! Node: {}, Body: {:?}", node, body);
             proxy_node_agent_endpoint(node, "/api/memory_disks/create".to_string(), "POST".to_string(), Some(body), state)
         });
 
@@ -1388,6 +1413,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            println!("🎯 [PROXY_ROUTE] Memory disk delete route matched! Node: {}, Body: {:?}", node, body);
             proxy_node_agent_endpoint(node, "/api/memory_disks/delete".to_string(), "POST".to_string(), Some(body), state)
         });
 
