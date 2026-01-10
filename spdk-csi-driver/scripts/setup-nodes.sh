@@ -290,35 +290,24 @@ setup_iommu_if_needed() {
     echo "   💡 After reboot, IOMMU groups should be available for vfio-pci"
 }
 
-# Calculate SPDK-optimized hugepage allocation (2GB minimum, up to 4GB for large systems)
+# Setup hugepages for SPDK
+# Usage: setup_hugepages [size_in_gb]
+# Default: 2GB if no argument provided
 setup_hugepages() {
+    local hugepage_gb=${1:-2}  # Default to 2GB if not provided
+
     echo "🔧 Setting up hugepages for SPDK..."
-    
-    # Get total memory in GB
+
+    # Get total memory in GB for informational purposes
     local total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local total_mem_gb=$((total_mem_kb / 1024 / 1024))
-    
-    if [ $total_mem_gb -ge 128 ]; then
-        # Large production systems (≥128GB): allocate 4GB for optimal SPDK performance
-        hugepage_gb=4
-    elif [ $total_mem_gb -ge 64 ]; then
-        # Medium-large systems: allocate 3GB
-        hugepage_gb=3
-    elif [ $total_mem_gb -ge 32 ]; then
-        # Medium systems: allocate 2GB (SPDK minimum recommended)
-        hugepage_gb=2
-    else
-        # Smaller systems: allocate 1GB (may impact performance)
-        hugepage_gb=1
-        echo "   ⚠️  Warning: Only ${total_mem_gb}GB RAM detected. 2GB hugepages recommended for SPDK."
-    fi
-    
+
     echo "   📊 System RAM: ${total_mem_gb}GB"
-    echo "   🎯 Allocating: ${hugepage_gb}GB hugepages (~$(( hugepage_gb * 100 / total_mem_gb ))% of RAM)"
-    
-    # Calculate 2MB hugepages needed
-    local hugepages_needed=$((hugepage_gb * 1024 / 2))
-    
+    echo "   🎯 Allocating: ${hugepage_gb}GB hugepages"
+
+    # Calculate number of 2MB hugepages needed (size_in_gb * 1024 / 2)
+    local hugepages_needed=$((hugepage_gb * 512))
+
     # Set hugepages
     echo $hugepages_needed > /proc/sys/vm/nr_hugepages
     
@@ -374,29 +363,61 @@ EOF
     fi
 }
 
+# Print usage information
+print_usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS] [HUGEPAGE_SIZE_GB]
+
+Setup SPDK CSI node with userspace drivers, IOMMU, and hugepages.
+
+Options:
+  --help, -h          Show this help message
+  HUGEPAGE_SIZE_GB    Size of hugepages to allocate in GB (default: 2)
+
+Examples:
+  $0                  # Setup with default 2GB hugepages
+  $0 8                # Setup with 8GB hugepages
+  $0 --help           # Show this help message
+
+Note: This script must be run as root.
+
+Hugepage Calculation:
+  - Each hugepage is 2MB
+  - Number of hugepages = SIZE_GB * 512
+  - Example: 8GB = 8 * 512 = 4096 hugepages
+
+EOF
+}
+
 # Main setup flow
 main() {
+    # Handle help option
+    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+        print_usage
+        exit 0
+    fi
+
     echo ""
     echo "🚀 SPDK CSI Node Setup"
     echo "======================"
     echo ""
-    
+
     # Check if running as root
     if [ "$EUID" -ne 0 ]; then
         echo "❌ This script must be run as root"
         exit 1
     fi
-    
+
     # Setup userspace drivers based on environment
     setup_userspace_drivers
     echo ""
-    
+
     # Setup IOMMU if needed (mainly for bare metal)
     setup_iommu_if_needed
     echo ""
-    
-    # Setup hugepages
-    setup_hugepages
+
+    # Setup hugepages with optional size argument
+    setup_hugepages "$1"
     echo ""
     
     echo "✅ SPDK CSI node setup completed!"
