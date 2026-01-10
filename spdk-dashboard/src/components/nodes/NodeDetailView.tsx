@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import { useDiskSetup } from '../../hooks/useDashboardData';
+import { useOperations } from '../../contexts/OperationsContext';
 
 interface NodeDetailViewProps {
   node: string;
@@ -39,13 +40,19 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   // Calculate max memory size based on available memory (convert MB to GB, leave 1GB headroom for system)
   const maxMemorySizeGB = nodeInfo?.memory_available_mb
     ? Math.max(1, Math.floor((nodeInfo.memory_available_mb - 1024) / 1024))  // Leave 1GB headroom
-    : 64;  // Fallback to 64GB if nodeInfo not available
+    : 16;  // Conservative fallback to 16GB if nodeInfo not available
 
   const [memoryDiskSize, setMemoryDiskSize] = useState(Math.min(1, maxMemorySizeGB));
   const [isCreatingMemoryDisk, setIsCreatingMemoryDisk] = useState(false);
   const [memoryDiskError, setMemoryDiskError] = useState<string | null>(null);
 
   const { createMemoryDisk } = useDiskSetup();
+  const { setDialogVisible } = useOperations();
+
+  // Track memory disk modal state for refresh pause
+  useEffect(() => {
+    setDialogVisible(showMemoryDiskModal);
+  }, [showMemoryDiskModal, setDialogVisible]);
 
   const toggleDiskExpansion = (diskId: string) => {
     const newExpanded = new Set(expandedDisks);
@@ -576,7 +583,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                   <span>1 GB</span>
                   <span>{maxMemorySizeGB} GB</span>
                 </div>
-                {nodeInfo && (
+                {nodeInfo ? (
                   <div className="bg-blue-50 border border-blue-200 px-3 py-2 rounded text-xs text-blue-700 mt-2">
                     <div className="flex justify-between">
                       <span>Available RAM:</span>
@@ -586,6 +593,10 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       <span>Total RAM:</span>
                       <span className="font-medium">{(nodeInfo.memory_total_mb / 1024).toFixed(1)} GB</span>
                     </div>
+                  </div>
+                ) : (
+                  <div className="bg-yellow-50 border border-yellow-200 px-3 py-2 rounded text-xs text-yellow-700 mt-2">
+                    Node memory information not available. Maximum size limited to {maxMemorySizeGB} GB.
                   </div>
                 )}
                 <p className="text-xs text-gray-500 mt-2">
