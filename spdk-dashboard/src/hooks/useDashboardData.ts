@@ -1581,7 +1581,7 @@ export const useDiskSetup = () => {
     blockSize?: number
   ): Promise<{ success: boolean; error?: string; bdev_name?: string }> => {
     try {
-      const response = await fetch(`/api/memory_disks/create`, {
+      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, size_mb: sizeMB, block_size: blockSize })
@@ -1607,7 +1607,7 @@ export const useDiskSetup = () => {
     name: string
   ): Promise<{ success: boolean; error?: string }> => {
     try {
-      const response = await fetch(`/api/memory_disks/delete`, {
+      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name })

@@ -1367,6 +1367,30 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
             proxy_node_agent_endpoint_long(node, "/api/disks/delete".to_string(), "POST".to_string(), Some(body), state)
         });
 
+    let proxy_create_memory_disk = warp::path("api")
+        .and(warp::path("nodes"))
+        .and(warp::path::param::<String>())
+        .and(warp::path("memory_disks"))
+        .and(warp::path("create"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            proxy_node_agent_endpoint(node, "/api/memory_disks/create".to_string(), "POST".to_string(), Some(body), state)
+        });
+
+    let proxy_delete_memory_disk = warp::path("api")
+        .and(warp::path("nodes"))
+        .and(warp::path::param::<String>())
+        .and(warp::path("memory_disks"))
+        .and(warp::path("delete"))
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(state_filter.clone())
+        .and_then(|node: String, body: serde_json::Value, state: AppState| {
+            proxy_node_agent_endpoint(node, "/api/memory_disks/delete".to_string(), "POST".to_string(), Some(body), state)
+        });
+
     let refresh_route = warp::path("api")
         .and(warp::path("refresh"))
         .and(warp::post())
@@ -1410,6 +1434,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .or(proxy_status)
         .or(proxy_reset)
         .or(proxy_delete)
+        .or(proxy_create_memory_disk)
+        .or(proxy_delete_memory_disk)
         .or(refresh_route)
         .or(snapshots_list)
         .or(snapshots_tree)
