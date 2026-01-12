@@ -26,6 +26,9 @@ struct DashboardQuery {
     disk_node: Option<String>,     // Filter disks by node
     disk_initialized: Option<bool>, // Filter by blobstore initialization status
     
+    // Node filters
+    nodes_with_disks_only: Option<bool>, // Show only nodes that have disks (default: false)
+    
     // Global filters
     node: Option<String>,          // Apply to both volumes and disks
 }
@@ -782,19 +785,29 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
     let raw_volumes = Vec::new();
     
     // Apply filters if provided
-    let (filtered_volumes, filtered_disks) = if let Some(query) = query {
-        let vols = filter_volumes(dashboard_volumes, &query);
-        let disks = filter_disks(dashboard_disks, &query);
+    let (filtered_volumes, filtered_disks) = if let Some(ref q) = query {
+        let vols = filter_volumes(dashboard_volumes, q);
+        let disks = filter_disks(dashboard_disks, q);
         (vols, disks)
     } else {
         (dashboard_volumes, dashboard_disks)
     };
     
-    // Get all discovered node agents (not just nodes with disks)
+    // Get node list - either all node agents or only nodes with disks
     let node_agents = state.node_agents.read().await;
-    let nodes: Vec<String> = node_agents.keys()
-        .cloned()
-        .collect();
+    let nodes: Vec<String> = if query.as_ref().and_then(|q| q.nodes_with_disks_only) == Some(true) {
+        // Filter to only nodes that have disks
+        filtered_disks.iter()
+            .map(|d| d.node.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        // Show all discovered node agents (default)
+        node_agents.keys()
+            .cloned()
+            .collect()
+    };
     let memory_futures: Vec<_> = nodes.iter()
         .filter_map(|node_name| {
             node_agents.get(node_name).map(|node_url| {
@@ -844,6 +857,7 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
 /// - volume_node: filter volumes by node name (partial match)
 /// - disk_node: filter disks by node name (partial match)
 /// - disk_initialized: filter disks by blobstore initialization (true/false)
+/// - nodes_with_disks_only: show only nodes that have disks (true/false, default: false)
 /// - node: global filter for both volumes and disks
 async fn get_dashboard_data_minimal(
     query: Option<DashboardQuery>,
@@ -1724,6 +1738,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1746,6 +1761,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1767,6 +1783,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1788,6 +1805,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1810,6 +1828,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1831,6 +1850,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1852,6 +1872,7 @@ mod tests {
             volume_node: Some("node-1".to_string()), // Partial match
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1874,6 +1895,7 @@ mod tests {
             volume_node: Some("node-1".to_string()),
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1894,6 +1916,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1913,6 +1936,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1935,6 +1959,7 @@ mod tests {
             volume_node: None,
             disk_node: Some("node-1".to_string()),
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1956,6 +1981,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: Some(true),
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1977,6 +2003,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: Some(false),
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -1999,6 +2026,7 @@ mod tests {
             volume_node: None,
             disk_node: Some("node-1".to_string()),
             disk_initialized: Some(true),
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -2020,6 +2048,7 @@ mod tests {
             volume_node: None,
             disk_node: None,
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: Some("node-2".to_string()), // Global node filter
         };
 
@@ -2039,6 +2068,7 @@ mod tests {
             volume_node: None,
             disk_node: Some("nonexistent".to_string()),
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
@@ -2058,6 +2088,7 @@ mod tests {
             volume_node: None,
             disk_node: Some("WORKER-NODE-1".to_string()), // Different case
             disk_initialized: None,
+            nodes_with_disks_only: None,
             node: None,
         };
 
