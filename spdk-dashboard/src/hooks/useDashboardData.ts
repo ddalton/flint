@@ -866,11 +866,27 @@ const transformBackendData = (backendData: any): DashboardData => {
       nvmeof_targets: vol.nvmeof_targets || [],
     })) || [],
     raw_volumes: backendData.raw_volumes || [],
-    disks: backendData.disks?.map((disk: any) => ({
-      ...disk,
-      // Ensure compatibility with existing frontend code
-      blobstore_initialized: disk.blobstore_initialized
-    })) || [],
+    disks: backendData.disks?.map((disk: any) => {
+      const sizeGB = Math.round((disk.size_bytes || 0) / (1024 * 1024 * 1024));
+      const freeGB = Math.round((disk.free_space || 0) / (1024 * 1024 * 1024));
+      const allocatedGB = sizeGB - freeGB;
+      
+      return {
+        ...disk,
+        // Convert bytes to GB for frontend display
+        capacity_gb: sizeGB,
+        allocated_space: allocatedGB,
+        free_space: freeGB,
+        free_space_display: `${freeGB}GB`,
+        // Ensure compatibility with existing frontend code
+        blobstore_initialized: disk.blobstore_initialized,
+        // Map backend fields to frontend expected names
+        id: disk.device_name || disk.bdev_name,
+        node: disk.node_name,
+        pci_addr: disk.pci_address,
+        capacity: disk.size_bytes
+      };
+    }) || [],
     nodes: backendData.nodes || [],
     node_info: backendData.node_info || {}
   };
