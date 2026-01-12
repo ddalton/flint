@@ -276,7 +276,7 @@ int main(int argc, char **argv)
     opts.json_config_file = NULL;
     
     // Add malloc bdev configuration
-    char config[256];
+    char config[512];
     snprintf(config, sizeof(config),
              "{"
              "  \"subsystems\": ["
