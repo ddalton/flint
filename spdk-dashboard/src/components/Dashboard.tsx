@@ -35,6 +35,8 @@ interface DashboardProps {
   onRefresh: () => void;
   onLogout: () => void;
   usingMockData?: boolean;
+  showNodesWithDisksOnly?: boolean;
+  onShowNodesWithDisksOnlyChange?: (enabled: boolean) => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -45,7 +47,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAutoRefreshChange,
   onRefresh,
   onLogout,
-  usingMockData = false
+  usingMockData = false,
+  showNodesWithDisksOnly = false,
+  onShowNodesWithDisksOnlyChange
 }) => {
   const [activeTab, setActiveTab] = useState('overview');
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
@@ -253,6 +257,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
             activeFilter={volumeFilter}
             onClearFilter={handleClearFilter}
             onDiskVolumeFilter={handleDiskClick}
+            showNodesWithDisksOnly={showNodesWithDisksOnly}
+            onShowNodesWithDisksOnlyChange={onShowNodesWithDisksOnlyChange}
           />
         );
 

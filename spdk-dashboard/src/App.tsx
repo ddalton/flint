@@ -94,9 +94,13 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
 const App: React.FC = () => {
   const { isAuthenticated, login, logout } = useAuth();
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [showNodesWithDisksOnly, setShowNodesWithDisksOnly] = useState(false);
   
   // Only initialize dashboard data hook when authenticated
-  const dashboardHook = useDashboardData(isAuthenticated ? autoRefresh : false);
+  const dashboardHook = useDashboardData(
+    isAuthenticated ? autoRefresh : false,
+    { nodesWithDisksOnly: showNodesWithDisksOnly }
+  );
   
   const handleLogin = async (username: string, password: string) => {
     await login(username, password);
@@ -130,6 +134,8 @@ const App: React.FC = () => {
         onRefresh={handleRefresh}
         onLogout={handleLogout}
         usingMockData={dashboardHook.usingMockData}
+        showNodesWithDisksOnly={showNodesWithDisksOnly}
+        onShowNodesWithDisksOnlyChange={setShowNodesWithDisksOnly}
       />
     </OperationsProvider>
   );

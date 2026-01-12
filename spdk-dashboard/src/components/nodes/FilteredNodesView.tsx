@@ -10,6 +10,8 @@ interface FilteredNodesViewProps {
   activeFilter?: VolumeFilter;
   onClearFilter?: () => void;
   onDiskVolumeFilter?: (diskId: string) => void;
+  showNodesWithDisksOnly?: boolean;
+  onShowNodesWithDisksOnlyChange?: (enabled: boolean) => void;
 }
 
 export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({ 
@@ -17,6 +19,8 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   activeFilter, 
   onClearFilter,
   onDiskVolumeFilter,
+  showNodesWithDisksOnly = false,
+  onShowNodesWithDisksOnlyChange,
 }) => {
   // Search and filter state
   const [searchTerm, setSearchTerm] = useState('');
@@ -343,8 +347,22 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
             ))}
           </div>
           
-          {/* Page Size Selector */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-4">
+            {/* Toggle for showing only nodes with disks */}
+            {onShowNodesWithDisksOnlyChange && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showNodesWithDisksOnly}
+                  onChange={(e) => onShowNodesWithDisksOnlyChange(e.target.checked)}
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="text-sm text-gray-700">Only nodes with disks</span>
+              </label>
+            )}
+          
+            {/* Page Size Selector */}
+            <div className="flex items-center gap-2">
             <span className="text-sm text-gray-700">Show:</span>
             <select
               value={pageSize}
@@ -360,6 +378,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
               <option value={50}>50</option>
             </select>
             <span className="text-sm text-gray-700">per page</span>
+            </div>
           </div>
         </div>
       </div>
