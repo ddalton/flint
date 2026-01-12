@@ -540,7 +540,8 @@ impl NodeAgent {
                         "filesystem_type": null,
                         "is_system_disk": d.is_system_disk,
                         "spdk_ready": d.blobstore_initialized,  // LVS initialized = ready
-                        "driver_ready": d.blobstore_initialized,
+                        // Memory disks (malloc) are always driver_ready, physical disks need LVS
+                        "driver_ready": d.pci_address.starts_with("memory:") || d.blobstore_initialized,
                         "blobstore_initialized": d.blobstore_initialized,
                         "discovered_at": chrono::Utc::now().to_rfc3339()
                     }))
@@ -595,7 +596,8 @@ impl NodeAgent {
                         "filesystem_type": null,
                         "is_system_disk": d.is_system_disk,
                         "spdk_ready": d.blobstore_initialized,
-                        "driver_ready": d.blobstore_initialized,
+                        // Memory disks (malloc) are always driver_ready, physical disks need LVS
+                        "driver_ready": d.pci_address.starts_with("memory:") || d.blobstore_initialized,
                         "blobstore_initialized": d.blobstore_initialized,
                         "discovered_at": chrono::Utc::now().to_rfc3339(),
                         "free_space": d.free_space,
