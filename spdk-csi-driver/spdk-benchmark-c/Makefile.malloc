@@ -1,0 +1,36 @@
+SPDK_ROOT_DIR ?= /spdk
+
+CC = gcc
+CFLAGS = -Wall -Werror -g -O2
+CFLAGS += -I$(SPDK_ROOT_DIR)/include
+LDFLAGS = -L$(SPDK_ROOT_DIR)/build/lib
+LDFLAGS += -L$(SPDK_ROOT_DIR)/dpdk/build/lib
+LDFLAGS += -L$(SPDK_ROOT_DIR)/isa-l/.libs
+LDFLAGS += -L$(SPDK_ROOT_DIR)/isa-l-crypto/.libs
+LDFLAGS += -Wl,--whole-archive,--no-as-needed
+LDFLAGS += -lspdk_bdev_malloc -lspdk_bdev -lspdk_event_bdev
+LDFLAGS += -lspdk_event -lspdk_thread -lspdk_util -lspdk_log
+LDFLAGS += -lspdk_env_dpdk -lspdk_dma -lspdk_trace -lspdk_sock
+LDFLAGS += -lspdk_json -lspdk_jsonrpc -lspdk_rpc -lspdk_accel
+LDFLAGS += -lspdk_keyring -lspdk_vmd
+LDFLAGS += -Wl,--no-whole-archive
+LDFLAGS += -lrte_eal -lrte_mempool -lrte_ring -lrte_mbuf -lrte_pci -lrte_bus_pci
+LDFLAGS += -lrte_kvargs -lrte_telemetry -lrte_log
+LDFLAGS += -lisal -lisal_crypto
+LDFLAGS += -lssl -lcrypto -luuid
+LDFLAGS += -lnuma -ldl -lpthread -lm
+
+APP = spdk-malloc-benchmark
+
+all: $(APP)
+
+$(APP): benchmark_malloc.o
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+benchmark_malloc.o: benchmark_malloc.c
+	$(CC) $(CFLAGS) -c $<
+
+clean:
+	rm -f $(APP) *.o
+
+.PHONY: all clean
