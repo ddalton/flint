@@ -119,8 +119,9 @@ healthCheck:
   csiDriverPort: 9809
   # Port for controller health server (runs in separate pod)
   controllerPort: 9809
-  # Port for node-agent health server (currently uses 8081 for API server)
-  nodeAgentPort: 8082
+  # Port for node-agent API server (integrated into flint-csi-driver in three-container mode)
+  # Changed from 8081 to 9081 to avoid conflicts with nginx ingress controllers
+  nodeAgentPort: 9081
 
 # SPDK Controller Operator configuration
 # The operator manages SPDK custom resources (SpdkVolume, SpdkDisk, etc.)

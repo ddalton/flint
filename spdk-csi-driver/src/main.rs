@@ -222,7 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             driver.clone(),
         ).await);
         
-        println!("🔧 [NODE_AGENT] Starting node agent on port 8081");
+        let node_agent_port = std::env::var("NODE_AGENT_PORT").unwrap_or("9081".to_string());
+        println!("🔧 [NODE_AGENT] Starting node agent on port {}", node_agent_port);
         let node_agent_clone = node_agent.clone();
         tokio::spawn(async move {
             if let Err(e) = node_agent_clone.start().await {

@@ -524,7 +524,8 @@ impl SpdkCsiDriver {
 
         // Find the node agent pod IP
         let pod_ip = self.get_node_agent_pod_ip(node_name).await?;
-        let node_agent_url = format!("http://{}:8081", pod_ip);
+        let node_agent_port = std::env::var("NODE_AGENT_PORT").unwrap_or("9081".to_string());
+        let node_agent_url = format!("http://{}:{}", pod_ip, node_agent_port);
         
         // Cache it
         {

@@ -152,7 +152,7 @@ spec:
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
       containers:
-        # CSI Driver Container (Node Mode) - Includes integrated node agent on port 8081
+        # CSI Driver Container (Node Mode) - Includes integrated node agent on port {{ .Values.healthCheck.nodeAgentPort | default 9081 }}
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
@@ -181,6 +181,8 @@ spec:
               value: "{{ .Values.blockDevice.ublk.numQueues | default 4 }}"
             - name: UBLK_QUEUE_DEPTH
               value: "{{ .Values.blockDevice.ublk.queueDepth | default 256 }}"
+            - name: NODE_AGENT_PORT
+              value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
           securityContext:
             privileged: true
             capabilities:
@@ -191,7 +193,7 @@ spec:
               containerPort: {{ .Values.healthCheck.csiDriverPort | default 9809 }}
               protocol: TCP
             - name: node-api
-              containerPort: 8081
+              containerPort: {{ .Values.healthCheck.nodeAgentPort | default 9081 }}
               protocol: TCP
           livenessProbe:
             httpGet:

@@ -38,6 +38,8 @@ spec:
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.controllerPort | default 9809 }}"
+            - name: NODE_AGENT_PORT
+              value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
             {{- if .Values.dashboard.enabled }}
             - name: ENABLE_DASHBOARD
               value: "true"

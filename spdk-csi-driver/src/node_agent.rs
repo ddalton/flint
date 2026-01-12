@@ -122,11 +122,18 @@ impl NodeAgent {
         // Setup HTTP API routes
         let routes = self.setup_routes();
 
-        println!("✅ [MINIMAL_NODE_AGENT] Starting HTTP server on port 8081");
+        // Read node agent port from environment variable (default: 9081)
+        // Changed from 8081 to 9081 to avoid conflicts with nginx ingress controllers
+        let node_agent_port: u16 = std::env::var("NODE_AGENT_PORT")
+            .unwrap_or("9081".to_string())
+            .parse()
+            .unwrap_or(9081);
+
+        println!("✅ [MINIMAL_NODE_AGENT] Starting HTTP server on port {}", node_agent_port);
         
         // Start both the HTTP server and discovery loop
         tokio::select! {
-            _ = warp::serve(routes).run(([0, 0, 0, 0], 8081)) => {
+            _ = warp::serve(routes).run(([0, 0, 0, 0], node_agent_port)) => {
                 println!("🌐 [MINIMAL_NODE_AGENT] HTTP server stopped");
             }
             _ = discovery_task => {
