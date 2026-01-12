@@ -22,14 +22,25 @@ spec:
       hostNetwork: true
       terminationGracePeriodSeconds: 30
       securityContext: {}
-      containers:
-        {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
-        # SPDK Target Container (v25.05.x)
-        # Marked as sidecar - must start and be ready before flint-csi-driver
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
+      # SPDK sidecar container - starts before main containers and keeps running
+      initContainers:
         - name: spdk-tgt
+          restartPolicy: Always  # Native sidecar: starts first, stays running
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
-          restartPolicy: Always  # Sidecar ordering: start before other containers
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -140,6 +151,7 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
+      containers:
         # CSI Driver Container (Node Mode) - Includes integrated node agent on port 8081
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
@@ -205,13 +217,13 @@ spec:
               mountPath: /var/tmp
           # Note: Node agent functionality is integrated into flint-csi-driver container above
           # The separate node-agent container has been removed to prevent port conflicts
-        {{- else if .Values.deployment.nodeMode | eq "two-container" }}
-        # SPDK Target Container (v25.05.x)
-        # Marked as sidecar - must start and be ready before node-agent
+      {{- else if .Values.deployment.nodeMode | eq "two-container" }}
+      # SPDK sidecar container - starts before main containers and keeps running
+      initContainers:
         - name: spdk-tgt
+          restartPolicy: Always  # Native sidecar: starts first, stays running
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
-          restartPolicy: Always  # Sidecar ordering: start before other containers
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -249,6 +261,7 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
+      containers:
         # CSI Node Agent Container (Legacy - both CSI + Disk Management)
         - name: node-agent
           image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
@@ -280,7 +293,9 @@ spec:
               mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
-        {{- else }}
+      {{- else }}
+      # Legacy Embedded Mode (no separate SPDK sidecar)
+      containers:
         # Legacy Embedded Mode Container (Single container with both SPDK + CSI)
         - name: flint-csi-driver
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
@@ -330,7 +345,7 @@ spec:
               mountPropagation: "HostToContainer"
             - name: spdk-socket
               mountPath: /var/tmp
-        {{- end }}
+      {{- end }}
         - name: node-driver-registrar
           image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
           imagePullPolicy: Always
@@ -348,6 +363,7 @@ spec:
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
+            - "--health-port=9898"
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi

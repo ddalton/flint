@@ -12,19 +12,64 @@ This Helm chart deploys the Flint CSI driver for Kubernetes, providing high-perf
 - **Topology Awareness**: Intelligent scheduling based on storage locality
 - **Custom Resource Management**: All storage resources managed in the same namespace as the CSI driver
 
+== Prerequisites
+
+=== Volume Snapshot CRDs
+
+The Flint CSI driver requires Kubernetes Volume Snapshot CRDs to be installed before deployment. Install them with:
+
+[source,bash]
+----
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+----
+
+**Note**: Some Kubernetes distributions (RKE2, EKS, GKE) may already have these CRDs installed.
+
+=== Hugepages Configuration
+
+Each node running Flint CSI requires hugepages for SPDK. Configure on each node:
+
+[source,bash]
+----
+# Allocate 4096 2MB hugepages (8GB total)
+echo 4096 | sudo tee /proc/sys/vm/nr_hugepages
+
+# Make persistent across reboots
+echo "vm.nr_hugepages=4096" | sudo tee -a /etc/sysctl.conf
+
+# Restart kubelet to detect hugepages
+sudo systemctl restart kubelet
+----
+
+=== Control Plane Scheduling
+
+To run Flint CSI on control-plane nodes, add tolerations during installation:
+
+[source,bash]
+----
+helm install flint-csi ./flint-csi-driver-chart \
+  --namespace flint-system \
+  --create-namespace \
+  --set-json 'tolerations=[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]'
+----
+
 == Quick Start
 
 [source,bash]
 ----
-# Add the Flint repository (replace with your actual repository)
-helm repo add flint https://your-helm-repo.com/flint
+# Install prerequisites (Volume Snapshot CRDs - see Prerequisites section)
 
 # Install Flint CSI driver in the flint-system namespace
-helm install flint-csi flint/flint-csi-driver --create-namespace --namespace flint-system
+helm install flint-csi ./flint-csi-driver-chart \
+  --namespace flint-system \
+  --create-namespace
 
 # Verify installation
 kubectl get pods -n flint-system
 kubectl get storageclass flint
+kubectl get csidriver flint.csi.storage.io
 ----
 
 == Configuration
