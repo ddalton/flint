@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Database } from 'lucide-react';
 import { Dashboard } from './components/Dashboard';
 import { useAuth, useDashboardData } from './hooks/useDashboardData';
@@ -96,10 +96,15 @@ const App: React.FC = () => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [showNodesWithDisksOnly, setShowNodesWithDisksOnly] = useState(false);
   
+  // Memoize filters to prevent infinite loop
+  const filters = useMemo(() => ({
+    nodesWithDisksOnly: showNodesWithDisksOnly
+  }), [showNodesWithDisksOnly]);
+  
   // Only initialize dashboard data hook when authenticated
   const dashboardHook = useDashboardData(
     isAuthenticated ? autoRefresh : false,
-    { nodesWithDisksOnly: showNodesWithDisksOnly }
+    filters
   );
   
   const handleLogin = async (username: string, password: string) => {
