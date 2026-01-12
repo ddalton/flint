@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memory-disk-fio-benchmark
+  namespace: default
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: flnt-4-46-m1  # Same node as memory disk
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  containers:
+  - name: fio-benchmark
+    image: ubuntu:22.04
+    securityContext:
+      privileged: true
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        set -e
+        echo "=============================================================="
+        echo "SPDK Memory Disk Benchmark (LOCAL NODE)"
+        echo "=============================================================="
+        echo "Node: $(hostname)"
+        echo "Volume: /data (LOCAL to this node)"
+        echo "Backend: SPDK memory disk (NO network overhead)"
+        echo ""
+        
+        # Install fio
+        echo "Installing fio..."
+        apt-get update -qq && apt-get install -y -qq fio
+        
+        # Clean up
+        rm -f /data/fio_*
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 1: Sequential Write (Direct I/O)"
+        echo "=============================================================="
+        fio --name=seq-write-direct \
+            --filename=/data/fio_seqwrite \
+            --rw=write \
+            --bs=4M \
+            --size=256M \
+            --numjobs=1 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=64 \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 2: Sequential Read (Direct I/O)"
+        echo "=============================================================="
+        fio --name=seq-read-direct \
+            --filename=/data/fio_seqwrite \
+            --rw=read \
+            --bs=4M \
+            --size=256M \
+            --numjobs=1 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=64 \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 3: Random Write IOPS (4K)"
+        echo "=============================================================="
+        fio --name=rand-write-iops \
+            --filename=/data/fio_randwrite \
+            --rw=randwrite \
+            --bs=4K \
+            --size=128M \
+            --numjobs=4 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=128 \
+            --runtime=15 \
+            --time_based \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 4: Random Read IOPS (4K)"
+        echo "=============================================================="
+        fio --name=rand-read-iops \
+            --filename=/data/fio_randwrite \
+            --rw=randread \
+            --bs=4K \
+            --size=128M \
+            --numjobs=4 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=128 \
+            --runtime=15 \
+            --time_based \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 5: High Queue Depth Write (Memory Stress)"
+        echo "=============================================================="
+        fio --name=high-qd-write \
+            --filename=/data/fio_highqd \
+            --rw=write \
+            --bs=128K \
+            --size=200M \
+            --numjobs=8 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=256 \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "TEST 6: High Queue Depth Read (Memory Stress)"
+        echo "=============================================================="
+        fio --name=high-qd-read \
+            --filename=/data/fio_highqd \
+            --rw=read \
+            --bs=128K \
+            --size=200M \
+            --numjobs=8 \
+            --direct=1 \
+            --ioengine=libaio \
+            --iodepth=256 \
+            --group_reporting
+        
+        echo ""
+        echo "=============================================================="
+        echo "BENCHMARK COMPLETE"
+        echo "=============================================================="
+        echo ""
+        echo "Summary:"
+        echo "  - This is LOCAL storage (same node as memory disk)"
+        echo "  - NO NVMe-oF network overhead"
+        echo "  - Direct access to SPDK memory bdev via kernel NVMe driver"
+        echo ""
+        echo "Expected performance for SPDK memory disk:"
+        echo "  - Sequential: 5-15 GB/s"
+        echo "  - Random IOPS: 500k-2M IOPS"
+        echo "  - Latency: < 10μs"
+        echo ""
+        
+        df -h /data
+        ls -lh /data
+        
+        echo ""
+        echo "Keeping pod alive for inspection..."
+        sleep 3600
+    volumeMounts:
+    - name: test-volume
+      mountPath: /data
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: test-rwo-spdk-volume-local
+  restartPolicy: Never

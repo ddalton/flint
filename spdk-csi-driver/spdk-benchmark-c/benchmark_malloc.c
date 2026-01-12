@@ -15,7 +15,7 @@
 #define BLOCK_SIZE 131072  // 128KB for maximum throughput
 #define NUM_BLOCKS 8192    // 1GB (8192 * 128KB = 1GB)
 #define QUEUE_DEPTH 128
-#define MALLOC_BDEV_SIZE_MB 2048  // 2GB malloc bdev
+#define MALLOC_BDEV_SIZE_MB 1024  // 1GB malloc bdev
 
 struct test_context {
     struct spdk_bdev *bdev;

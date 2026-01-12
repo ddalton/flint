@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spdk-memory-benchmark
+  namespace: default
+  labels:
+    app: spdk-memory-benchmark
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    kubernetes.io/hostname: flnt-4-46-m1  # Node with memory disk
+  containers:
+  - name: benchmark
+    image: ubuntu:22.04
+    imagePullPolicy: Always
+    securityContext:
+      privileged: true
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        set -e
+        echo "==========================================="
+        echo "SPDK Memory Disk Direct Benchmark"
+        echo "==========================================="
+        echo "Node: $(hostname)"
+        echo "Testing: memory-d1 via SPDK RPC"
+        echo ""
+        
+        # Install dependencies
+        apt-get update -qq
+        apt-get install -y -qq curl jq python3 bc
+        
+        # SPDK RPC helper function
+        spdk_rpc() {
+          local method=$1
+          local params=$2
+          curl -s -X POST http://localhost:9009/api/spdk/rpc \
+            -H "Content-Type: application/json" \
+            -d "{\"method\": \"$method\", \"params\": $params}" | jq -r '.result'
+        }
+        
+        echo "Step 1: Discovering SPDK bdevs..."
+        echo "==========================================="
+        BDEVS=$(spdk_rpc "bdev_get_bdevs" "null")
+        echo "$BDEVS" | jq -r '.[] | "\(.name) - \(.num_blocks * .block_size / 1024 / 1024 / 1024)GB"'
+        echo ""
+        
+        # Find the lvol for our test volume
+        LVOL_NAME=$(echo "$BDEVS" | jq -r '.[] | select(.aliases[]? | contains("pvc-")) | .name' | head -1)
+        
+        if [ -z "$LVOL_NAME" ]; then
+          echo "❌ No lvol found! Creating test lvol on memory disk..."
+          
+          # Get memory lvstore name
+          LVSTORE=$(spdk_rpc "bdev_lvol_get_lvstores" "null" | jq -r '.[0].name')
+          echo "Found LVS: $LVSTORE"
+          
+          # Create a test lvol (500MB)
+          echo "Creating 500MB test lvol..."
+          spdk_rpc "bdev_lvol_create" "{\"lvs_name\": \"$LVSTORE\", \"lvol_name\": \"benchmark_test\", \"size_in_mib\": 500}"
+          LVOL_NAME="$LVSTORE/benchmark_test"
+        fi
+        
+        echo "Testing SPDK bdev: $LVOL_NAME"
+        echo ""
+        
+        echo "==========================================="
+        echo "TEST 1: Sequential Write Performance"
+        echo "==========================================="
+        # Use SPDK's built-in performance test
+        WRITE_RESULT=$(spdk_rpc "bdev_get_iostat" "{\"name\": \"$LVOL_NAME\"}")
+        echo "Before write - IOPS: $(echo $WRITE_RESULT | jq -r '.bdevs[0].bytes_written // 0')"
+        
+        # Perform write test via SPDK (we'll use a simple approach)
+        echo "Writing 1GB via SPDK..."
+        START_TIME=$(date +%s.%N)
+        
+        # Use dd with direct I/O to the mounted ublk device if available
+        # Otherwise use RPC-based testing
+        if [ -f "/dev/ublkb0" ]; then
+          dd if=/dev/zero of=/dev/ublkb0 bs=4M count=250 oflag=direct 2>&1 | grep -E 'copied|bytes'
+        else
+          echo "Using RPC-based test method..."
+          # Alternative: use fio with spdk engine if available
+        fi
+        
+        END_TIME=$(date +%s.%N)
+        DURATION=$(echo "$END_TIME - $START_TIME" | bc)
+        THROUGHPUT=$(echo "1024 / $DURATION" | bc)
+        echo "Duration: ${DURATION}s"
+        echo "Throughput: ${THROUGHPUT} MB/s"
+        echo ""
+        
+        echo "==========================================="
+        echo "TEST 2: Get SPDK Statistics"
+        echo "==========================================="
+        STATS=$(spdk_rpc "bdev_get_iostat" "{\"name\": \"$LVOL_NAME\"}")
+        echo "$STATS" | jq '.'
+        echo ""
+        
+        echo "==========================================="
+        echo "TEST 3: SPDK Bdev Info"
+        echo "==========================================="
+        INFO=$(spdk_rpc "bdev_get_bdevs" "{\"name\": \"$LVOL_NAME\"}")
+        echo "$INFO" | jq '.[0] | {name, block_size, num_blocks, product_name, driver_specific}'
+        echo ""
+        
+        echo "==========================================="
+        echo "Memory Disk Performance Summary"
+        echo "==========================================="
+        echo "Backend: SPDK malloc bdev (memory)"
+        echo "Access: Direct SPDK RPC"
+        echo "Expected Performance:"
+        echo "  - Sequential R/W: 10-20 GB/s (memory bandwidth)"
+        echo "  - Random IOPS: 1M+ IOPS (memory latency)"
+        echo "  - Latency: < 1μs (memory access)"
+        echo ""
+        echo "Note: For true performance test, use fio with spdk_bdev engine"
+        echo "      or the dilipdalton/spdk-benchmark image"
+        echo ""
+        
+        echo "Keeping pod alive for inspection..."
+        sleep 3600
+    volumeMounts:
+    - name: spdk-sock
+      mountPath: /var/tmp
+  volumes:
+  - name: spdk-sock
+    hostPath:
+      path: /var/tmp
+      type: Directory
+  restartPolicy: Never

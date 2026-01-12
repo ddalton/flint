@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-rwo-spdk-volume-local
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: flint
+  resources:
+    requests:
+      storage: 512Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-rwo-pod-local
+  namespace: default
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: flnt-4-46-m1
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  containers:
+  - name: test-container
+    image: busybox
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        echo "=== Testing LOCAL SPDK Volume ==="
+        echo "Node: $(cat /etc/hostname 2>/dev/null || hostname)"
+        echo ""
+        echo "=== Test 1: Write 500MB ==="
+        dd if=/dev/zero of=/data/test1 bs=1M count=500 2>&1 | tail -2
+        echo ""
+        echo "=== Test 2: Read back ==="
+        dd if=/data/test1 of=/dev/null bs=1M 2>&1 | tail -2
+        echo ""
+        echo "=== Test 3: Large write 1GB ==="
+        dd if=/dev/zero of=/data/test2 bs=1M count=1000 2>&1 | tail -2
+        echo ""
+        echo "=== Test 4: Large read ==="
+        dd if=/data/test2 of=/dev/null bs=1M 2>&1 | tail -2
+        echo ""
+        echo "=== Disk usage ==="
+        df -h /data
+        echo ""
+        echo "=== Sleeping to keep pod running ==="
+        sleep 3600
+    volumeMounts:
+    - name: test-volume
+      mountPath: /data
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: test-rwo-spdk-volume-local
