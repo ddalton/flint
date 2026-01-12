@@ -790,15 +790,11 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
         (dashboard_volumes, dashboard_disks)
     };
     
-    // Get unique node names from filtered disks
-    let nodes: Vec<String> = filtered_disks.iter()
-        .map(|d| d.node.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    // Fetch memory info for each node in parallel
+    // Get all discovered node agents (not just nodes with disks)
     let node_agents = state.node_agents.read().await;
+    let nodes: Vec<String> = node_agents.keys()
+        .cloned()
+        .collect();
     let memory_futures: Vec<_> = nodes.iter()
         .filter_map(|node_name| {
             node_agents.get(node_name).map(|node_url| {
