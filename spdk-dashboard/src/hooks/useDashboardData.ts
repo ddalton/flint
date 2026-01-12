@@ -694,6 +694,7 @@ export interface DashboardFilters {
   volumeNode?: string;
   diskNode?: string;
   diskInitialized?: boolean;
+  nodesWithDisksOnly?: boolean; // Show only nodes that have disks
   node?: string; // Global node filter
 }
 
@@ -714,6 +715,9 @@ const buildQueryString = (filters?: DashboardFilters): string => {
   }
   if (filters.diskInitialized !== undefined) {
     params.append('disk_initialized', filters.diskInitialized.toString());
+  }
+  if (filters.nodesWithDisksOnly !== undefined) {
+    params.append('nodes_with_disks_only', filters.nodesWithDisksOnly.toString());
   }
   if (filters.node) {
     params.append('node', filters.node);
