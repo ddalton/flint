@@ -66,63 +66,12 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
     }
   };
 
-  // Get nodes that match search criteria and have the filtered volumes
+  // Get nodes that match search criteria
+  // NOTE: We always show ALL nodes in the nodes view, regardless of volume filters
+  // This allows users to create memory disks on any node, even if it has no volumes
   const getFilteredAndSearchedNodes = () => {
-    const filteredVolumes = getFilteredVolumes();
-    
-    // First, get nodes based on volume filter
-    let relevantNodes = new Set<string>();
-    
-    if (filteredVolumes.length === 0 && activeFilter && activeFilter !== 'all') {
-      // No volumes match the filter, return empty
-      return [];
-    }
-
-    if (activeFilter && activeFilter !== 'all') {
-      filteredVolumes.forEach(volume => {
-        switch (activeFilter) {
-          case 'healthy':
-          case 'degraded':
-          case 'failed':
-          case 'faulted':
-            // Include all nodes that have replicas of volumes in these states
-            volume.replica_statuses.forEach(replica => {
-              relevantNodes.add(replica.node);
-            });
-            break;
-            
-          case 'rebuilding':
-            // Only include nodes that actually have rebuilding replicas
-            volume.replica_statuses.forEach(replica => {
-              if (replica.status === 'rebuilding' || 
-                  replica.rebuild_progress !== null ||
-                  replica.is_new_replica) {
-                relevantNodes.add(replica.node);
-              }
-            });
-            break;
-            
-          case 'local-nvme':
-            // Only include nodes that have local NVMe replicas for this volume
-            volume.replica_statuses.forEach(replica => {
-              if (replica.is_local) {
-                relevantNodes.add(replica.node);
-              }
-            });
-            break;
-            
-          default:
-            // For 'all' or unknown filters, include all nodes with any replica
-            volume.nodes.forEach(node => {
-              relevantNodes.add(node);
-            });
-            break;
-        }
-      });
-    } else {
-      // No volume filter, include all nodes
-      relevantNodes = new Set(data.nodes);
-    }
+    // Always include all nodes - volume filters don't apply to nodes view
+    let relevantNodes = new Set(data.nodes);
 
     // Apply search filter to nodes
     let searchedNodes = Array.from(relevantNodes);
