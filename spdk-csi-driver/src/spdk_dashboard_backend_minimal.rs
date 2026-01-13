@@ -637,6 +637,157 @@ async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<se
     }
 }
 
+/// Fetch managed volumes from Kubernetes PVs
+async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>, Box<dyn std::error::Error + Send + Sync>> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    
+    println!("🔍 [DASHBOARD] Fetching managed volumes from PVs...");
+    
+    let pvs_api: Api<PersistentVolume> = Api::all(state.kube_client.clone());
+    let pvs = pvs_api.list(&ListParams::default()).await?;
+    
+    let mut volumes = Vec::new();
+    let node_agents = state.node_agents.read().await;
+    
+    for pv in pvs.items {
+        if let Some(spec) = &pv.spec {
+            if let Some(csi) = &spec.csi {
+                if csi.driver == "flint.csi.storage.io" {
+                    let pv_name = pv.metadata.name.as_deref().unwrap_or("unknown");
+                    
+                    if let Some(attrs) = &csi.volume_attributes {
+                        let lvol_uuid = attrs.get("flint.csi.storage.io/lvol-uuid")
+                            .map(|s| s.as_str()).unwrap_or("");
+                        let node_name = attrs.get("flint.csi.storage.io/node-name")
+                            .map(|s| s.as_str()).unwrap_or("");
+                        let lvs_name = attrs.get("flint.csi.storage.io/lvs-name")
+                            .map(|s| s.as_str()).unwrap_or("");
+                        let replica_count = attrs.get("flint.csi.storage.io/replica-count")
+                            .and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+                        let size_str = attrs.get("size")
+                            .map(|s| s.as_str()).unwrap_or("0");
+                        
+                        // Get PVC info from claimRef
+                        let pvc_info = spec.claim_ref.as_ref()
+                            .map(|claim| PvcInfo {
+                                name: claim.name.clone().unwrap_or_default(),
+                                namespace: claim.namespace.clone().unwrap_or_default(),
+                                storage_class: spec.storage_class_name.clone().unwrap_or_default(),
+                                creation_timestamp: pv.metadata.creation_timestamp.as_ref()
+                                    .map(|t| t.0.to_rfc3339()).unwrap_or_default(),
+                            });
+                        
+                        // Check if the lvol still exists on the node
+                        let (state_str, validation_status) = if node_name.is_empty() {
+                            ("Unknown".to_string(), SpdkValidationStatus {
+                                has_spdk_backing: false,
+                                validation_message: Some("No node information".to_string()),
+                                validation_severity: "error".to_string(),
+                            })
+                        } else if let Some(node_url) = node_agents.get(node_name) {
+                            match verify_lvol_exists(node_url, lvol_uuid).await {
+                                Ok(true) => ("Healthy".to_string(), SpdkValidationStatus {
+                                    has_spdk_backing: true,
+                                    validation_message: None,
+                                    validation_severity: "info".to_string(),
+                                }),
+                                Ok(false) => ("Failed".to_string(), SpdkValidationStatus {
+                                    has_spdk_backing: false,
+                                    validation_message: Some("SPDK lvol not found on node".to_string()),
+                                    validation_severity: "error".to_string(),
+                                }),
+                                Err(e) => ("Unknown".to_string(), SpdkValidationStatus {
+                                    has_spdk_backing: false,
+                                    validation_message: Some(format!("Cannot verify: {}", e)),
+                                    validation_severity: "warning".to_string(),
+                                }),
+                            }
+                        } else {
+                            ("Unknown".to_string(), SpdkValidationStatus {
+                                has_spdk_backing: false,
+                                validation_message: Some("Node agent not available".to_string()),
+                                validation_severity: "warning".to_string(),
+                            })
+                        };
+                        
+                        volumes.push(DashboardVolume {
+                            id: pv_name.to_string(),
+                            name: pvc_info.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pv_name.to_string()),
+                            size: size_str.to_string(),
+                            state: state_str.clone(),
+                            replicas: replica_count,
+                            active_replicas: if validation_status.has_spdk_backing { replica_count } else { 0 },
+                            local_nvme: true, // Flint volumes are always local
+                            access_method: "Direct".to_string(),
+                            rebuild_progress: None,
+                            nodes: vec![node_name.to_string()],
+                            replica_statuses: vec![DashboardReplicaStatus {
+                                node: node_name.to_string(),
+                                status: if validation_status.has_spdk_backing { "active" } else { "failed" }.to_string(),
+                                is_local: true,
+                                last_io_timestamp: None,
+                                rebuild_progress: None,
+                                rebuild_target: None,
+                                is_new_replica: Some(false),
+                                nvmf_target: None,
+                                access_method: "Direct".to_string(),
+                                raid_member_slot: None,
+                                raid_member_state: "none".to_string(),
+                            }],
+                            nvmeof_targets: Vec::new(),
+                            nvmeof_enabled: false,
+                            transport_type: "Local".to_string(),
+                            target_port: 0,
+                            raid_status: None,
+                            ublk_device: None,
+                            spdk_validation_status: validation_status,
+                            pvc_info,
+                        });
+                        
+                        println!("   Found volume: {} ({})", pv_name, state_str);
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("✅ [DASHBOARD] Found {} managed volumes", volumes.len());
+    Ok(volumes)
+}
+
+/// Verify if an lvol exists on a node by its UUID
+async fn verify_lvol_exists(node_url: &str, lvol_uuid: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    
+    let url = format!("{}/api/spdk/rpc", node_url);
+    let payload = json!({
+        "method": "bdev_get_bdevs"
+    });
+    
+    let response = client.post(&url)
+        .json(&payload)
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Failed to query SPDK: {}", response.status()).into());
+    }
+    
+    let data: serde_json::Value = response.json().await?;
+    
+    if let Some(bdevs) = data["result"].as_array() {
+        for bdev in bdevs {
+            if bdev["uuid"].as_str() == Some(lvol_uuid) {
+                return Ok(true);
+            }
+        }
+    }
+    
+    Ok(false)
+}
+
 /// Detect orphaned lvols across all nodes
 async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<OrphanedVolumeInfo>>, Box<dyn std::error::Error + Send + Sync>> {
     println!("🔍 [DASHBOARD] Detecting orphaned lvols...");
@@ -780,8 +931,10 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
         }
     }
     
-    // TODO: Fetch volumes from node agents (when volume management is added)
-    let dashboard_volumes = Vec::new();
+    // Fetch managed volumes from Kubernetes PVs
+    let dashboard_volumes = fetch_volumes_from_pvs(state).await?;
+    
+    // raw_volumes are shown as orphaned volumes attached to disks, not separately
     let raw_volumes = Vec::new();
     
     // Apply filters if provided
