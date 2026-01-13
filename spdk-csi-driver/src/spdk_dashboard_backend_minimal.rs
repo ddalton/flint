@@ -1268,29 +1268,139 @@ async fn get_all_snapshots(state: AppState) -> Result<impl Reply, warp::Rejectio
     Ok(warp::reply::json(&all_snapshots))
 }
 
-/// Build snapshot tree/hierarchy from all nodes with storage analytics
+/// Query SPDK data from a single node (snapshots + bdevs + lvol stores)
+async fn query_node_spdk_data(
+    node_name: String,
+    node_url: String,
+) -> Result<(String, serde_json::Value), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::time::timeout;
+    use std::time::Duration;
+    
+    // Timeout for entire node query: 5 seconds
+    let result = timeout(Duration::from_secs(5), async {
+        let client = HttpClient::builder()
+            .timeout(Duration::from_secs(3))
+            .build()?;
+        
+        // Query 1: Get snapshots list
+        let snapshots_url = format!("{}/api/snapshots/list", node_url);
+        let snapshots_resp = client.get(&snapshots_url).send().await?;
+        let snapshots_data: serde_json::Value = snapshots_resp.json().await?;
+        let snapshots = snapshots_data["snapshots"].as_array()
+            .map(|arr| arr.clone())
+            .unwrap_or_default();
+        
+        // Query 2: Get lvol stores (for cluster size)
+        let rpc_url = format!("{}/api/spdk/rpc", node_url);
+        let lvs_payload = json!({"method": "bdev_lvol_get_lvstores"});
+        let lvs_resp = client.post(&rpc_url)
+            .json(&lvs_payload)
+            .send()
+            .await?;
+        let lvs_data: serde_json::Value = lvs_resp.json().await?;
+        let lvol_stores = lvs_data.get("result")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.clone())
+            .unwrap_or_default();
+        
+        // Query 3: Get bdevs (for allocated clusters)
+        let bdevs_payload = json!({"method": "bdev_get_bdevs"});
+        let bdevs_resp = client.post(&rpc_url)
+            .json(&bdevs_payload)
+            .send()
+            .await?;
+        let bdevs_data: serde_json::Value = bdevs_resp.json().await?;
+        let bdevs = bdevs_data.get("result")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.clone())
+            .unwrap_or_default();
+        
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
+            "node": node_name,
+            "snapshots": snapshots,
+            "lvol_stores": lvol_stores,
+            "bdevs": bdevs
+        }))
+    }).await;
+    
+    match result {
+        Ok(Ok(data)) => Ok((node_name, data)),
+        Ok(Err(e)) => {
+            println!("   ⚠️ Failed to query {}: {}", node_name, e);
+            Err(e)
+        }
+        Err(_) => {
+            println!("   ⚠️ Timeout querying {} (5s)", node_name);
+            Err("Timeout".into())
+        }
+    }
+}
+
+/// Build snapshot tree/hierarchy from all nodes with accurate SPDK storage analytics
 async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejection> {
-    println!("🌳 [DASHBOARD] Building snapshot tree from all nodes");
+    println!("🌳 [DASHBOARD] Building snapshot tree with SPDK data from all nodes (parallel)");
     
     let node_agents = state.node_agents.read().await;
-    let mut all_snapshots = Vec::new();
     
-    // Collect all snapshots
-    for (node_name, node_url) in node_agents.iter() {
-        let client = HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|_| warp::reject())?;
-        
-        let url = format!("{}/api/snapshots/list", node_url);
-        
-        if let Ok(response) = client.get(&url).send().await {
-            if let Ok(data) = response.json::<serde_json::Value>().await {
-                if let Some(snapshots) = data["snapshots"].as_array() {
-                    for snapshot in snapshots {
-                        let mut s = snapshot.clone();
-                        s["node"] = json!(node_name);
-                        all_snapshots.push(s);
+    // Launch parallel queries to all nodes
+    let query_tasks: Vec<_> = node_agents.iter()
+        .map(|(node_name, node_url)| {
+            let name = node_name.clone();
+            let url = node_url.clone();
+            tokio::spawn(async move {
+                query_node_spdk_data(name, url).await
+            })
+        })
+        .collect();
+    
+    // Wait for all queries to complete
+    let results = futures::future::join_all(query_tasks).await;
+    
+    // Process results
+    use std::collections::HashMap;
+    let mut all_snapshots = Vec::new();
+    let mut cluster_size_map: HashMap<String, u64> = HashMap::new();
+    let mut bdev_consumption_map: HashMap<String, u64> = HashMap::new();
+    
+    for task_result in results {
+        if let Ok(Ok((node_name, data))) = task_result {
+            println!("   ✓ Got data from node: {}", node_name);
+            
+            // Extract snapshots
+            if let Some(snapshots) = data["snapshots"].as_array() {
+                for snapshot in snapshots {
+                    let mut s = snapshot.clone();
+                    s["node"] = json!(node_name);
+                    all_snapshots.push(s);
+                }
+            }
+            
+            // Build cluster size map from lvol stores
+            if let Some(lvol_stores) = data["lvol_stores"].as_array() {
+                for lvs in lvol_stores {
+                    if let (Some(uuid), Some(cluster_size)) = (
+                        lvs["uuid"].as_str(),
+                        lvs["cluster_size"].as_u64()
+                    ) {
+                        cluster_size_map.insert(uuid.to_string(), cluster_size);
+                    }
+                }
+            }
+            
+            // Build bdev consumption map (UUID -> consumed bytes)
+            if let Some(bdevs) = data["bdevs"].as_array() {
+                for bdev in bdevs {
+                    let uuid = bdev["uuid"].as_str().unwrap_or("");
+                    let lvol_info = &bdev["driver_specific"]["lvol"];
+                    
+                    if let (Some(lvs_uuid), Some(allocated_clusters)) = (
+                        lvol_info["lvol_store_uuid"].as_str(),
+                        lvol_info["num_allocated_clusters"].as_u64()
+                    ) {
+                        if let Some(&cluster_size) = cluster_size_map.get(lvs_uuid) {
+                            let consumed_bytes = allocated_clusters * cluster_size;
+                            bdev_consumption_map.insert(uuid.to_string(), consumed_bytes);
+                        }
                     }
                 }
             }
@@ -1298,9 +1408,10 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
     }
     
     println!("   Found {} total snapshots across all nodes", all_snapshots.len());
+    println!("   Got cluster size info for {} lvol stores", cluster_size_map.len());
+    println!("   Got consumption data for {} bdevs", bdev_consumption_map.len());
     
     // Group snapshots by source_volume_id
-    use std::collections::HashMap;
     let mut volumes: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     
     for snapshot in &all_snapshots {
@@ -1308,32 +1419,50 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         volumes.entry(volume_id).or_insert_with(Vec::new).push(snapshot.clone());
     }
     
-    // Build tree structure with storage analytics for each volume
+    // Build tree structure with accurate storage analytics for each volume
     let mut tree_map: HashMap<String, serde_json::Value> = HashMap::new();
     
     for (volume_id, volume_snapshots) in volumes {
-        // Get volume size from first snapshot (all snapshots of same volume have same size)
+        // Get volume size from first snapshot
         let volume_size = volume_snapshots.first()
             .and_then(|s| s["size_bytes"].as_u64())
             .unwrap_or(0);
         
-        // Calculate storage consumption
-        // Sum up the consumed space from all snapshots for this volume
-        let total_snapshot_overhead: u64 = volume_snapshots.iter()
-            .filter_map(|s| s["size_bytes"].as_u64())
-            .sum();
+        // Calculate ACTUAL storage consumption from SPDK
+        let mut total_snapshot_consumed: u64 = 0;
+        let mut snapshot_count_with_data = 0;
         
-        // For now, estimate actual data size as logical size (will be enhanced with SPDK query)
+        for snapshot in &volume_snapshots {
+            if let Some(snapshot_uuid) = snapshot["snapshot_uuid"].as_str() {
+                if let Some(&consumed_bytes) = bdev_consumption_map.get(snapshot_uuid) {
+                    total_snapshot_consumed += consumed_bytes;
+                    snapshot_count_with_data += 1;
+                } else {
+                    // Fallback: use logical size if SPDK data not available
+                    total_snapshot_consumed += snapshot["size_bytes"].as_u64().unwrap_or(0);
+                }
+            }
+        }
+        
+        // Estimate actual data size (in real scenario, query active volume bdev)
         let actual_data_size = volume_size;
         
         let snapshot_efficiency_ratio = if volume_size > 0 {
-            total_snapshot_overhead as f64 / volume_size as f64
+            total_snapshot_consumed as f64 / volume_size as f64
         } else {
             0.0
         };
         
-        // Build recommendations based on efficiency
+        // Build recommendations based on actual consumption
         let mut recommendations = Vec::new();
+        if snapshot_count_with_data < volume_snapshots.len() {
+            recommendations.push(format!(
+                "Warning: Only {}/{} snapshots have SPDK data",
+                snapshot_count_with_data,
+                volume_snapshots.len()
+            ));
+        }
+        
         if snapshot_efficiency_ratio > 0.5 {
             recommendations.push("HIGH PRIORITY: >50% snapshot overhead detected".to_string());
             recommendations.push("Consider deleting old snapshots".to_string());
@@ -1347,18 +1476,18 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         let storage_analytics = json!({
             "total_volume_size": volume_size,
             "actual_data_size": actual_data_size,
-            "total_snapshot_overhead": total_snapshot_overhead,
+            "total_snapshot_overhead": total_snapshot_consumed,
             "snapshot_efficiency_ratio": snapshot_efficiency_ratio,
             "storage_breakdown": {
                 "active_volume_consumption": actual_data_size,
-                "snapshot_consumption": total_snapshot_overhead,
+                "snapshot_consumption": total_snapshot_consumed,
                 "metadata_overhead": 0,
                 "free_space_in_volume": 0
             },
             "recommendations": recommendations
         });
         
-        // Build snapshot chain (simplified for now)
+        // Build snapshot chain
         let snapshot_chain = json!({
             "active_lvol": format!("vol_{}", volume_id),
             "chain_depth": volume_snapshots.len(),
@@ -1375,7 +1504,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         }));
     }
     
-    println!("✅ [DASHBOARD] Built snapshot tree for {} volumes", tree_map.len());
+    println!("✅ [DASHBOARD] Built snapshot tree for {} volumes with SPDK data", tree_map.len());
     Ok(warp::reply::json(&tree_map))
 }
 
