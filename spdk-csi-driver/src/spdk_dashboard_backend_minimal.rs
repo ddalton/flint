@@ -1361,6 +1361,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
     let mut all_snapshots = Vec::new();
     let mut cluster_size_map: HashMap<String, u64> = HashMap::new();
     let mut bdev_consumption_map: HashMap<String, u64> = HashMap::new();
+    let mut active_volume_consumption_map: HashMap<String, u64> = HashMap::new();
     
     for task_result in results {
         if let Ok(Ok((node_name, data))) = task_result {
@@ -1387,11 +1388,12 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
                 }
             }
             
-            // Build bdev consumption map (UUID -> consumed bytes)
+            // Build bdev consumption maps (both snapshots and active volumes)
             if let Some(bdevs) = data["bdevs"].as_array() {
                 for bdev in bdevs {
                     let uuid = bdev["uuid"].as_str().unwrap_or("");
                     let lvol_info = &bdev["driver_specific"]["lvol"];
+                    let is_snapshot = lvol_info["snapshot"].as_bool().unwrap_or(false);
                     
                     if let (Some(lvs_uuid), Some(allocated_clusters)) = (
                         lvol_info["lvol_store_uuid"].as_str(),
@@ -1399,7 +1401,28 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
                     ) {
                         if let Some(&cluster_size) = cluster_size_map.get(lvs_uuid) {
                             let consumed_bytes = allocated_clusters * cluster_size;
-                            bdev_consumption_map.insert(uuid.to_string(), consumed_bytes);
+                            
+                            if is_snapshot {
+                                // This is a snapshot bdev
+                                bdev_consumption_map.insert(uuid.to_string(), consumed_bytes);
+                            } else {
+                                // This is an active volume - extract volume_id from alias
+                                if let Some(aliases) = bdev["aliases"].as_array() {
+                                    if let Some(alias) = aliases.first().and_then(|a| a.as_str()) {
+                                        // Alias format: "lvs_node_disk/vol_pvc-xxxxx"
+                                        // Extract "pvc-xxxxx" from "vol_pvc-xxxxx"
+                                        if let Some(vol_part) = alias.split('/').last() {
+                                            if let Some(volume_id) = vol_part.strip_prefix("vol_") {
+                                                active_volume_consumption_map.insert(
+                                                    volume_id.to_string(), 
+                                                    consumed_bytes
+                                                );
+                                                println!("   → Active volume {}: {} bytes", volume_id, consumed_bytes);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1409,7 +1432,8 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
     
     println!("   Found {} total snapshots across all nodes", all_snapshots.len());
     println!("   Got cluster size info for {} lvol stores", cluster_size_map.len());
-    println!("   Got consumption data for {} bdevs", bdev_consumption_map.len());
+    println!("   Got consumption data for {} snapshot bdevs", bdev_consumption_map.len());
+    println!("   Got consumption data for {} active volumes", active_volume_consumption_map.len());
     
     // Group snapshots by source_volume_id
     let mut volumes: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -1444,8 +1468,10 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
             }
         }
         
-        // Estimate actual data size (in real scenario, query active volume bdev)
-        let actual_data_size = volume_size;
+        // Get ACTUAL data size from active volume bdev (not estimated!)
+        let actual_data_size = active_volume_consumption_map.get(&volume_id)
+            .copied()
+            .unwrap_or(volume_size); // Fallback to volume_size if active volume not found
         
         let snapshot_efficiency_ratio = if volume_size > 0 {
             total_snapshot_consumed as f64 / volume_size as f64
@@ -1455,6 +1481,13 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         
         // Build recommendations based on actual consumption
         let mut recommendations = Vec::new();
+        
+        // Check if we have actual volume data
+        let has_actual_volume_data = active_volume_consumption_map.contains_key(&volume_id);
+        if !has_actual_volume_data {
+            recommendations.push("Note: Using estimated volume size (actual consumption unavailable)".to_string());
+        }
+        
         if snapshot_count_with_data < volume_snapshots.len() {
             recommendations.push(format!(
                 "Warning: Only {}/{} snapshots have SPDK data",
