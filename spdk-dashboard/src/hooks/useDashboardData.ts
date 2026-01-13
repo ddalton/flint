@@ -887,7 +887,10 @@ const transformBackendData = (backendData: any): DashboardData => {
         id: disk.id,
         node: disk.node,
         pci_addr: disk.pci_addr,
-        capacity: disk.capacity
+        capacity: disk.capacity,
+        // Ensure arrays exist to prevent crashes
+        provisioned_volumes: disk.provisioned_volumes || [],
+        orphaned_spdk_volumes: disk.orphaned_spdk_volumes || []
       };
     }) || [],
     nodes: backendData.nodes || [],
