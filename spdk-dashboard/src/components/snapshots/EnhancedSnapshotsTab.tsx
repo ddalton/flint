@@ -468,37 +468,46 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     
     // Build relationship map from clone_source_snapshot_id
     backendSnapshots.forEach(snap => {
-      if (!relationships.has(snap.snapshot_id)) {
-        relationships.set(snap.snapshot_id, { children: [] });
+      // Backend returns snapshot_uuid, frontend expects snapshot_id
+      const snapshotId = snap.snapshot_id || snap.snapshot_uuid;
+      if (!relationships.has(snapshotId)) {
+        relationships.set(snapshotId, { children: [] });
       }
       
       if (snap.clone_source_snapshot_id) {
         // This snapshot has a parent
-        relationships.get(snap.snapshot_id)!.parent = snap.clone_source_snapshot_id;
+        relationships.get(snapshotId)!.parent = snap.clone_source_snapshot_id;
         
         // Add this as a child to the parent
         if (!relationships.has(snap.clone_source_snapshot_id)) {
           relationships.set(snap.clone_source_snapshot_id, { children: [] });
         }
-        relationships.get(snap.clone_source_snapshot_id)!.children.push(snap.snapshot_id);
+        relationships.get(snap.clone_source_snapshot_id)!.children.push(snapshotId);
       }
     });
 
-    // Enhance snapshots with relationship data
-    return backendSnapshots.map(snap => ({
-      ...snap,
-      parent_snapshot_id: relationships.get(snap.snapshot_id)?.parent,
-      child_snapshot_ids: relationships.get(snap.snapshot_id)?.children || [],
-      // Add mock storage consumption if not provided by backend
-      storage_consumption: snap.storage_consumption || {
-        consumed_bytes: snap.size_bytes * 0.3, // Mock 30% consumption
-        cluster_size: 4194304,
-        allocated_clusters: Math.ceil(snap.size_bytes * 0.3 / 4194304),
-        actual_storage_overhead: snap.size_bytes * 0.1
-      },
-      // Ensure replica_bdev_details is always an array
-      replica_bdev_details: snap.replica_bdev_details || []
-    }));
+    // Enhance snapshots with relationship data and map backend fields to frontend interface
+    return backendSnapshots.map(snap => {
+      // Backend returns snapshot_uuid, frontend expects snapshot_id
+      const snapshotId = snap.snapshot_id || snap.snapshot_uuid;
+      
+      return {
+        ...snap,
+        snapshot_id: snapshotId, // Ensure snapshot_id exists
+        snapshot_type: snap.snapshot_type || 'Bdev', // Default type if not provided
+        parent_snapshot_id: relationships.get(snapshotId)?.parent,
+        child_snapshot_ids: relationships.get(snapshotId)?.children || [],
+        // Add mock storage consumption if not provided by backend
+        storage_consumption: snap.storage_consumption || {
+          consumed_bytes: snap.size_bytes * 0.3, // Mock 30% consumption
+          cluster_size: 4194304,
+          allocated_clusters: Math.ceil(snap.size_bytes * 0.3 / 4194304),
+          actual_storage_overhead: snap.size_bytes * 0.1
+        },
+        // Ensure replica_bdev_details is always an array
+        replica_bdev_details: snap.replica_bdev_details || []
+      };
+    });
   };
 
   // Transform tree data to include storage analytics
