@@ -1720,6 +1720,13 @@ impl MinimalDiskService {
             return Ok(None);
         }
         
+        // Filter out NVMe-oF client devices (remote volumes being consumed, not local storage)
+        // These are volumes connected from other nodes via NVMe-oF initiator
+        if bdev_name.starts_with("nvme_nqn_2024-11_com_flint_volume_") {
+            // Note: Skipping NVMe-oF connected volume (not a local storage disk)
+            return Ok(None);
+        }
+        
         // Note: Storage bdev inclusion not logged per-bdev (too verbose). Summary logged at end.
 
         let size_bytes = block_size * num_blocks;
