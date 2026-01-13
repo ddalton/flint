@@ -558,9 +558,14 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         pci_addr: disk_info.pci_address.clone(),
         capacity: disk_info.size_bytes as i64,
         capacity_gb: (disk_info.size_bytes / (1024 * 1024 * 1024)) as i64,
-        allocated_space: ((disk_info.size_bytes - disk_info.free_space) / (1024 * 1024 * 1024)) as i64,
-        free_space: (disk_info.free_space / (1024 * 1024 * 1024)) as i64,
-        free_space_display: format!("{}GB", disk_info.free_space / (1024 * 1024 * 1024)),
+        // Use proper rounding to avoid showing 1GB allocated when it's just metadata
+        free_space: ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64,
+        allocated_space: {
+            let cap_gb = (disk_info.size_bytes / (1024 * 1024 * 1024)) as i64;
+            let free_gb = ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64;
+            cap_gb - free_gb
+        },
+        free_space_display: format!("{}GB", ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64),
         healthy: disk_info.healthy,
         blobstore_initialized: disk_info.blobstore_initialized,
         lvol_count: disk_info.lvol_count,
