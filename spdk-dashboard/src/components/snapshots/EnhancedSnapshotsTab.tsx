@@ -495,7 +495,9 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         cluster_size: 4194304,
         allocated_clusters: Math.ceil(snap.size_bytes * 0.3 / 4194304),
         actual_storage_overhead: snap.size_bytes * 0.1
-      }
+      },
+      // Ensure replica_bdev_details is always an array
+      replica_bdev_details: snap.replica_bdev_details || []
     }));
   };
 
@@ -544,7 +546,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       result = result.filter(snap => 
         snap.snapshot_id.toLowerCase().includes(searchLower) ||
         snap.source_volume_id.toLowerCase().includes(searchLower) ||
-        snap.replica_bdev_details.some(replica => 
+        (snap.replica_bdev_details || []).some(replica => 
           replica.node.toLowerCase().includes(searchLower) ||
           replica.name.toLowerCase().includes(searchLower)
         )
@@ -713,7 +715,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           <div className="bg-purple-50 rounded-lg p-4 text-center">
             <Layers className="w-6 h-6 text-purple-600 mx-auto mb-2" />
             <p className="text-xl font-bold text-purple-600">
-              {snapshots.reduce((sum, s) => sum + s.replica_bdev_details.length, 0)}
+              {snapshots.reduce((sum, s) => sum + (s.replica_bdev_details || []).length, 0)}
             </p>
             <p className="text-sm text-gray-600">Replica Snapshots</p>
           </div>
