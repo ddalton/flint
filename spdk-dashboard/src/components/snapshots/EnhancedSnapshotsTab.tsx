@@ -580,7 +580,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   // Calculate storage insights
   const storageInsights = useMemo(() => {
     const totalLogicalSize = Object.values(snapshotTree).reduce((sum, tree) => 
-      sum + tree.volume_size, 0
+      sum + (tree.volume_size || 0), 0
     );
     const totalSnapshotOverhead = Object.values(snapshotTree).reduce((sum, tree) => 
       sum + (tree.storage_analytics?.total_snapshot_overhead || 0), 0

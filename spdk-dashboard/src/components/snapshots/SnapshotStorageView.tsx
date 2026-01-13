@@ -40,13 +40,13 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       
       const card: StorageAnalysisCard = {
         volumeId,
-        volumeName: volumeData.volume_name,
-        logicalSize: volumeData.volume_size,
-        actualDataSize: analytics.actual_data_size,
-        snapshotOverhead: analytics.total_snapshot_overhead,
-        efficiency: analytics.snapshot_efficiency_ratio,
+        volumeName: volumeData.volume_name || volumeId,
+        logicalSize: volumeData.volume_size || 0,
+        actualDataSize: analytics.actual_data_size || 0,
+        snapshotOverhead: analytics.total_snapshot_overhead || 0,
+        efficiency: analytics.snapshot_efficiency_ratio || 0,
         snapshotCount: volumeSnapshots.length,
-        recommendations: analytics.recommendations
+        recommendations: analytics.recommendations || []
       };
 
       volumeMap.set(volumeId, card);
@@ -97,10 +97,10 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
 
   // Calculate aggregate statistics
   const aggregateStats = useMemo(() => {
-    const totalLogical = storageAnalysis.reduce((sum, card) => sum + card.logicalSize, 0);
-    const totalActual = storageAnalysis.reduce((sum, card) => sum + card.actualDataSize, 0);
-    const totalOverhead = storageAnalysis.reduce((sum, card) => sum + card.snapshotOverhead, 0);
-    const totalSnapshots = storageAnalysis.reduce((sum, card) => sum + card.snapshotCount, 0);
+    const totalLogical = storageAnalysis.reduce((sum, card) => sum + (card.logicalSize || 0), 0);
+    const totalActual = storageAnalysis.reduce((sum, card) => sum + (card.actualDataSize || 0), 0);
+    const totalOverhead = storageAnalysis.reduce((sum, card) => sum + (card.snapshotOverhead || 0), 0);
+    const totalSnapshots = storageAnalysis.reduce((sum, card) => sum + (card.snapshotCount || 0), 0);
     
     return {
       totalLogical,
@@ -108,20 +108,20 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       totalOverhead,
       totalSnapshots,
       avgEfficiency: storageAnalysis.length > 0 
-        ? storageAnalysis.reduce((sum, card) => sum + card.efficiency, 0) / storageAnalysis.length 
+        ? storageAnalysis.reduce((sum, card) => sum + (card.efficiency || 0), 0) / storageAnalysis.length 
         : 0,
-      inefficientVolumes: storageAnalysis.filter(card => card.efficiency > 0.3).length,
-      storageWasted: totalOverhead - (totalLogical - totalActual) // Overhead beyond data compression
+      inefficientVolumes: storageAnalysis.filter(card => (card.efficiency || 0) > 0.3).length,
+      storageWasted: Math.max(0, totalOverhead - (totalLogical - totalActual)) // Overhead beyond data compression, never negative
     };
   }, [storageAnalysis]);
 
   // Prepare chart data
   const chartData = filteredAnalysis.map(card => ({
     name: card.volumeName,
-    'Logical Size': Math.round(card.logicalSize / (1024 * 1024 * 1024)),
-    'Actual Data': Math.round(card.actualDataSize / (1024 * 1024 * 1024)),
-    'Snapshot Overhead': Math.round(card.snapshotOverhead / (1024 * 1024 * 1024)),
-    'Efficiency %': Math.round(card.efficiency * 100),
+    'Logical Size': Math.round((card.logicalSize || 0) / (1024 * 1024 * 1024)),
+    'Actual Data': Math.round((card.actualDataSize || 0) / (1024 * 1024 * 1024)),
+    'Snapshot Overhead': Math.round((card.snapshotOverhead || 0) / (1024 * 1024 * 1024)),
+    'Efficiency %': Math.round((card.efficiency || 0) * 100),
     volumeId: card.volumeId
   }));
 
@@ -174,7 +174,9 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
               <p className="text-sm font-medium text-gray-600">Snapshot Overhead</p>
               <p className="text-2xl font-bold text-gray-900">{formatSize(aggregateStats.totalOverhead)}</p>
               <p className="text-xs text-gray-500">
-                {((aggregateStats.totalOverhead / aggregateStats.totalLogical) * 100).toFixed(1)}% of logical
+                {aggregateStats.totalLogical > 0 
+                  ? ((aggregateStats.totalOverhead / aggregateStats.totalLogical) * 100).toFixed(1)
+                  : '0.0'}% of logical
               </p>
             </div>
           </div>
