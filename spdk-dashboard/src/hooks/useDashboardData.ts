@@ -860,10 +860,12 @@ const transformBackendData = (backendData: any): DashboardData => {
   return {
     volumes: backendData.volumes?.map((vol: any) => ({
       ...vol,
-      // Ensure all fields are properly mapped
+      // Ensure all fields are properly mapped with safe defaults
       raid_level: vol.raid_status?.raid_level ? `RAID-${vol.raid_status.raid_level}` : undefined,
       primary_replica_uuid: vol.primary_lvol_uuid,
       nvmeof_targets: vol.nvmeof_targets || [],
+      replica_statuses: vol.replica_statuses || [],  // Ensure array exists
+      nodes: vol.nodes || [],  // Ensure array exists
     })) || [],
     raw_volumes: backendData.raw_volumes || [],
     disks: backendData.disks?.map((disk: any) => {
