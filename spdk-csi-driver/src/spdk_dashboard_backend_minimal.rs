@@ -1268,7 +1268,7 @@ async fn get_all_snapshots(state: AppState) -> Result<impl Reply, warp::Rejectio
     Ok(warp::reply::json(&all_snapshots))
 }
 
-/// Build snapshot tree/hierarchy from all nodes
+/// Build snapshot tree/hierarchy from all nodes with storage analytics
 async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejection> {
     println!("🌳 [DASHBOARD] Building snapshot tree from all nodes");
     
@@ -1297,58 +1297,86 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         }
     }
     
-    // Build tree structure
-    // Group snapshots by parent-child relationships
-    let mut tree_nodes = Vec::new();
-    let mut root_snapshots = Vec::new();
+    println!("   Found {} total snapshots across all nodes", all_snapshots.len());
+    
+    // Group snapshots by source_volume_id
+    use std::collections::HashMap;
+    let mut volumes: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     
     for snapshot in &all_snapshots {
-        let snapshot_id = snapshot["snapshot_uuid"].as_str().unwrap_or("");
-        let parent_id = snapshot["parent_id"].as_str();
+        let volume_id = snapshot["source_volume_id"].as_str().unwrap_or("unknown").to_string();
+        volumes.entry(volume_id).or_insert_with(Vec::new).push(snapshot.clone());
+    }
+    
+    // Build tree structure with storage analytics for each volume
+    let mut tree_map: HashMap<String, serde_json::Value> = HashMap::new();
+    
+    for (volume_id, volume_snapshots) in volumes {
+        // Get volume size from first snapshot (all snapshots of same volume have same size)
+        let volume_size = volume_snapshots.first()
+            .and_then(|s| s["size_bytes"].as_u64())
+            .unwrap_or(0);
         
-        if parent_id.is_none() || parent_id.unwrap().is_empty() {
-            // Root level snapshot (no parent)
-            root_snapshots.push(snapshot.clone());
+        // Calculate storage consumption
+        // Sum up the consumed space from all snapshots for this volume
+        let total_snapshot_overhead: u64 = volume_snapshots.iter()
+            .filter_map(|s| s["size_bytes"].as_u64())
+            .sum();
+        
+        // For now, estimate actual data size as logical size (will be enhanced with SPDK query)
+        let actual_data_size = volume_size;
+        
+        let snapshot_efficiency_ratio = if volume_size > 0 {
+            total_snapshot_overhead as f64 / volume_size as f64
         } else {
-            // Child snapshot
-            tree_nodes.push(snapshot.clone());
+            0.0
+        };
+        
+        // Build recommendations based on efficiency
+        let mut recommendations = Vec::new();
+        if snapshot_efficiency_ratio > 0.5 {
+            recommendations.push("HIGH PRIORITY: >50% snapshot overhead detected".to_string());
+            recommendations.push("Consider deleting old snapshots".to_string());
+        } else if snapshot_efficiency_ratio > 0.3 {
+            recommendations.push("Moderate snapshot overhead detected".to_string());
+            recommendations.push("Review snapshot retention policy".to_string());
+        } else {
+            recommendations.push("Storage efficiency is good".to_string());
         }
+        
+        let storage_analytics = json!({
+            "total_volume_size": volume_size,
+            "actual_data_size": actual_data_size,
+            "total_snapshot_overhead": total_snapshot_overhead,
+            "snapshot_efficiency_ratio": snapshot_efficiency_ratio,
+            "storage_breakdown": {
+                "active_volume_consumption": actual_data_size,
+                "snapshot_consumption": total_snapshot_overhead,
+                "metadata_overhead": 0,
+                "free_space_in_volume": 0
+            },
+            "recommendations": recommendations
+        });
+        
+        // Build snapshot chain (simplified for now)
+        let snapshot_chain = json!({
+            "active_lvol": format!("vol_{}", volume_id),
+            "chain_depth": volume_snapshots.len(),
+            "snapshots": volume_snapshots,
+            "error": null
+        });
+        
+        tree_map.insert(volume_id.clone(), json!({
+            "volume_name": format!("volume-{}", volume_id),
+            "volume_id": volume_id,
+            "volume_size": volume_size,
+            "snapshot_chain": snapshot_chain,
+            "storage_analytics": storage_analytics
+        }));
     }
     
-    // Build hierarchical tree
-    fn build_children(parent_id: &str, snapshots: &[serde_json::Value]) -> Vec<serde_json::Value> {
-        snapshots.iter()
-            .filter(|s| s["parent_id"].as_str().unwrap_or("") == parent_id)
-            .map(|s| {
-                let mut node = s.clone();
-                let children = build_children(
-                    s["snapshot_uuid"].as_str().unwrap_or(""),
-                    snapshots
-                );
-                if !children.is_empty() {
-                    node["children"] = json!(children);
-                }
-                node
-            })
-            .collect()
-    }
-    
-    let tree: Vec<_> = root_snapshots.iter()
-        .map(|root| {
-            let mut node = root.clone();
-            let children = build_children(
-                root["snapshot_uuid"].as_str().unwrap_or(""),
-                &tree_nodes
-            );
-            if !children.is_empty() {
-                node["children"] = json!(children);
-            }
-            node
-        })
-        .collect();
-    
-    println!("✅ [DASHBOARD] Built snapshot tree with {} roots", tree.len());
-    Ok(warp::reply::json(&tree))
+    println!("✅ [DASHBOARD] Built snapshot tree for {} volumes", tree_map.len());
+    Ok(warp::reply::json(&tree_map))
 }
 
 /// Delete an orphaned lvol by UUID
