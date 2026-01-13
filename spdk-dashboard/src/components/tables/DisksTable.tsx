@@ -738,8 +738,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         <span>{disk.model}</span>
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb}GB</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space}GB</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb.toFixed(2)}GB</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space.toFixed(2)}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         <div className="w-20 bg-gray-200 rounded-full h-2">

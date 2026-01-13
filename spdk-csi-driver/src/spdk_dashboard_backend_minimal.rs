@@ -63,9 +63,9 @@ struct DashboardDisk {
     node: String,
     pci_addr: String,
     capacity: i64,
-    capacity_gb: i64,
-    allocated_space: i64,
-    free_space: i64,
+    capacity_gb: f64,  // Changed to f64 for decimal precision
+    allocated_space: f64,  // Changed to f64 for decimal precision (shows metadata overhead)
+    free_space: f64,  // Changed to f64 for decimal precision
     free_space_display: String,
     healthy: bool,
     blobstore_initialized: bool,
@@ -557,15 +557,15 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         node: disk_info.node_name.clone(),
         pci_addr: disk_info.pci_address.clone(),
         capacity: disk_info.size_bytes as i64,
-        capacity_gb: (disk_info.size_bytes / (1024 * 1024 * 1024)) as i64,
-        // Use proper rounding to avoid showing 1GB allocated when it's just metadata
-        free_space: ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64,
+        // Use f64 for decimal precision (shows actual capacity like 3.98GB instead of 3GB)
+        capacity_gb: (disk_info.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0,
+        free_space: (disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0,
         allocated_space: {
-            let cap_gb = (disk_info.size_bytes / (1024 * 1024 * 1024)) as i64;
-            let free_gb = ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64;
-            cap_gb - free_gb
+            let cap_gb = (disk_info.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
+            let free_gb = (disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
+            ((cap_gb - free_gb) * 100.0).round() / 100.0  // Shows metadata overhead like 0.02GB
         },
-        free_space_display: format!("{}GB", ((disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)).round()) as i64),
+        free_space_display: format!("{:.2}GB", disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)),
         healthy: disk_info.healthy,
         blobstore_initialized: disk_info.blobstore_initialized,
         lvol_count: disk_info.lvol_count,
