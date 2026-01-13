@@ -867,24 +867,25 @@ const transformBackendData = (backendData: any): DashboardData => {
     })) || [],
     raw_volumes: backendData.raw_volumes || [],
     disks: backendData.disks?.map((disk: any) => {
-      const sizeGB = Math.round((disk.size_bytes || 0) / (1024 * 1024 * 1024));
-      const freeGB = Math.round((disk.free_space || 0) / (1024 * 1024 * 1024));
-      const allocatedGB = sizeGB - freeGB;
+      // Backend already returns capacity_gb and free_space in GB (not bytes!)
+      const sizeGB = disk.capacity_gb || Math.round((disk.capacity || 0) / (1024 * 1024 * 1024));
+      const freeGB = disk.free_space || 0;  // Already in GB from backend
+      const allocatedGB = disk.allocated_space || (sizeGB - freeGB);
       
       return {
         ...disk,
-        // Convert bytes to GB for frontend display
+        // Backend fields are already in correct format
         capacity_gb: sizeGB,
         allocated_space: allocatedGB,
         free_space: freeGB,
-        free_space_display: `${freeGB}GB`,
-        // Ensure compatibility with existing frontend code
+        free_space_display: disk.free_space_display || `${freeGB}GB`,
+        // Already correct from backend
         blobstore_initialized: disk.blobstore_initialized,
-        // Map backend fields to frontend expected names
-        id: disk.device_name || disk.bdev_name,
-        node: disk.node_name,
-        pci_addr: disk.pci_address,
-        capacity: disk.size_bytes
+        // Use backend fields (no mapping needed)
+        id: disk.id,
+        node: disk.node,
+        pci_addr: disk.pci_addr,
+        capacity: disk.capacity
       };
     }) || [],
     nodes: backendData.nodes || [],
