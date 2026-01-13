@@ -202,7 +202,10 @@ dashboard:
 
 # Global scheduling settings (applied to all components including dashboard)
 nodeSelector: {}
-tolerations: []
+# Best practice: CSI node drivers should run on ALL nodes, including control-plane
+# This matches the behavior of standard CSI drivers (Cinder, EBS, etc.)
+tolerations:
+  - operator: Exists  # Tolerate all taints, including control-plane/master taints
 affinity: {}
 
 # ReadWriteMany (RWX) support via NFS server
