@@ -1548,6 +1548,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
                 "lvs_name": lvs_name,
                 "source_volume_id": snap["source_volume_id"],
                 "ready_to_use": snap["ready_to_use"],
+                "snapshot_type": "Bdev",
                 "details": snap,
                 "children": [],
                 "creation_order": idx,
@@ -1556,7 +1557,19 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
                     "consumed_bytes": consumed,
                     "cluster_size": cluster_size,
                     "allocated_clusters": allocated_clusters
-                }
+                },
+                "replica_bdev_details": [{
+                    "node": snap["node"].as_str().unwrap_or("unknown"),
+                    "name": snap["snapshot_name"].as_str().unwrap_or(""),
+                    "aliases": [snap["snapshot_name"].as_str().unwrap_or("")],
+                    "driver": "lvol",
+                    "snapshot_source_bdev": format!("vol_{}", snap["source_volume_id"].as_str().unwrap_or("")),
+                    "storage_info": {
+                        "consumed_bytes": consumed,
+                        "cluster_size": cluster_size,
+                        "allocated_clusters": allocated_clusters
+                    }
+                }]
             })
         }).collect();
         
