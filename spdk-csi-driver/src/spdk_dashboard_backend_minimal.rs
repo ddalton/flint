@@ -1520,11 +1520,51 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
             "recommendations": recommendations
         });
         
+        // Transform snapshots into UI-compatible format with storage_info
+        let formatted_snapshots: Vec<serde_json::Value> = volume_snapshots.iter().enumerate().map(|(idx, snap)| {
+            let snapshot_uuid = snap["snapshot_uuid"].as_str().unwrap_or("");
+            let consumed = bdev_consumption_map.get(snapshot_uuid).copied().unwrap_or(0);
+            
+            // Try to get cluster size from lvs_name (e.g., "lvs_flnt-4-46-m1_memory-m1")
+            let lvs_name = snap["lvs_name"].as_str().unwrap_or("");
+            let cluster_size = cluster_size_map.iter()
+                .find(|(uuid, _)| {
+                    // Match by lvs name if we can extract it
+                    // For now, use default 4MB if not found
+                    false
+                })
+                .map(|(_, size)| *size)
+                .unwrap_or(4194304); // Default 4MB cluster size
+            
+            let allocated_clusters = if cluster_size > 0 { consumed / cluster_size } else { 0 };
+            
+            json!({
+                "bdev_name": snap["snapshot_name"].as_str().unwrap_or(""),
+                "snapshot_id": snapshot_uuid,
+                "snapshot_uuid": snapshot_uuid,
+                "creation_time": snap["creation_time"],
+                "size_bytes": snap["size_bytes"],
+                "node": snap["node"],
+                "lvs_name": lvs_name,
+                "source_volume_id": snap["source_volume_id"],
+                "ready_to_use": snap["ready_to_use"],
+                "details": snap,
+                "children": [],
+                "creation_order": idx,
+                "is_active_volume": false,
+                "storage_info": {
+                    "consumed_bytes": consumed,
+                    "cluster_size": cluster_size,
+                    "allocated_clusters": allocated_clusters
+                }
+            })
+        }).collect();
+        
         // Build snapshot chain
         let snapshot_chain = json!({
             "active_lvol": format!("vol_{}", volume_id),
             "chain_depth": volume_snapshots.len(),
-            "snapshots": volume_snapshots,
+            "snapshots": formatted_snapshots,
             "error": null
         });
         

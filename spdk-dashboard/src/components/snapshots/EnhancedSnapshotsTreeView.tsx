@@ -398,7 +398,7 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                   <div className="bg-gray-50 rounded-lg p-4">
                     {volumeData.snapshot_chain.snapshots.map((snapshot, index) => (
                       <SnapshotChainItem
-                        key={snapshot.bdev_name}
+                        key={snapshot.snapshot_id || snapshot.bdev_name || index}
                         item={snapshot}
                         depth={0}
                         formatSize={formatSize}

@@ -1,9 +1,9 @@
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
 metadata:
-  name: test-memory-snapshot
+  name: snapshot-baseline
   namespace: default
 spec:
   volumeSnapshotClassName: csi-snapclass
   source:
-    persistentVolumeClaimName: test-memory-512m
+    persistentVolumeClaimName: snapshot-overhead-test
