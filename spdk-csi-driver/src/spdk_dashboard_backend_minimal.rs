@@ -679,7 +679,7 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                                 namespace: claim.namespace.clone().unwrap_or_default(),
                                 storage_class: spec.storage_class_name.clone().unwrap_or_default(),
                                 creation_timestamp: pv.metadata.creation_timestamp.as_ref()
-                                    .map(|t| t.0.to_rfc3339()).unwrap_or_default(),
+                                    .map(|t| t.0.to_string()).unwrap_or_default(),
                             });
                         
                         // Check if the lvol still exists on the node

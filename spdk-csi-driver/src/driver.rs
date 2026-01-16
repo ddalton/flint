@@ -627,6 +627,88 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
+    /// Check if backing storage exists on a node (for graceful deletion)
+    /// Returns Ok(true) if storage exists, Ok(false) if not found or node unreachable
+    /// This is used during volume deletion to handle cases where:
+    /// - Memory disk was destroyed (SPDK pod restart)
+    /// - NVMe disk failed or was removed
+    /// - Node is offline
+    pub async fn check_backing_storage_exists(&self, node_name: &str, lvol_uuid: &str) -> Result<bool, MinimalStateError> {
+        println!("🔍 [CONTROLLER] Checking if backing storage exists on node: {} UUID: {}", node_name, lvol_uuid);
+
+        let payload = json!({
+            "lvol_uuid": lvol_uuid
+        });
+
+        match self.call_node_agent(node_name, "/api/volumes/check_exists", &payload).await {
+            Ok(response) => {
+                // Parse the response
+                let exists = response["exists"].as_bool().unwrap_or(false);
+
+                if let Some(warning) = response["warning"].as_str() {
+                    println!("⚠️ [CONTROLLER] Storage check warning: {}", warning);
+                }
+
+                println!("{} [CONTROLLER] Backing storage {} on node {}: {}",
+                    if exists { "✅" } else { "ℹ️" },
+                    lvol_uuid,
+                    node_name,
+                    if exists { "exists" } else { "not found" });
+
+                Ok(exists)
+            }
+            Err(e) => {
+                // Node agent unreachable - treat as storage gone
+                // This handles the case where:
+                // - Node is offline
+                // - Node agent pod is down
+                // - Network partition
+                println!("⚠️ [CONTROLLER] Could not reach node {} to check storage: {}", node_name, e);
+                println!("ℹ️ [CONTROLLER] Treating as storage unavailable (node unreachable)");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Check health of backing storage on a node
+    /// Returns detailed health information for volume monitoring
+    pub async fn check_backing_storage_health(&self, node_name: &str, lvol_uuid: &str) -> Result<BackingStorageHealth, MinimalStateError> {
+        println!("🏥 [CONTROLLER] Checking backing storage health on node: {} UUID: {}", node_name, lvol_uuid);
+
+        let payload = json!({
+            "lvol_uuid": lvol_uuid
+        });
+
+        match self.call_node_agent(node_name, "/api/volumes/check_health", &payload).await {
+            Ok(response) => {
+                let health = BackingStorageHealth {
+                    exists: response["exists"].as_bool().unwrap_or(false),
+                    healthy: response["healthy"].as_bool().unwrap_or(false),
+                    message: response["message"].as_str().unwrap_or("Unknown").to_string(),
+                    node_reachable: true,
+                };
+
+                println!("{} [CONTROLLER] Storage health: exists={}, healthy={}, message={}",
+                    if health.healthy { "✅" } else { "⚠️" },
+                    health.exists,
+                    health.healthy,
+                    health.message);
+
+                Ok(health)
+            }
+            Err(e) => {
+                // Node agent unreachable
+                println!("❌ [CONTROLLER] Could not reach node {} for health check: {}", node_name, e);
+                Ok(BackingStorageHealth {
+                    exists: false,
+                    healthy: false,
+                    message: format!("Node unreachable: {}", e),
+                    node_reachable: false,
+                })
+            }
+        }
+    }
+
     /// Force unstage volume if it's still staged (defensive cleanup for when NodeUnstageVolume wasn't called)
     pub async fn force_unstage_volume_if_needed(&self, node_name: &str, volume_id: &str, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🔍 [DEFENSIVE] Checking if volume {} is still staged on node: {}", volume_id, node_name);
@@ -1808,4 +1890,18 @@ pub struct NvmeofConnectionInfo {
     pub target_ip: String,
     pub target_port: u16,
     pub transport: String,
+}
+
+/// Health status of backing storage
+/// Used for volume health monitoring and graceful deletion
+#[derive(Debug, Clone)]
+pub struct BackingStorageHealth {
+    /// Whether the storage exists
+    pub exists: bool,
+    /// Whether the storage is healthy
+    pub healthy: bool,
+    /// Human-readable status message
+    pub message: String,
+    /// Whether the node was reachable for the health check
+    pub node_reachable: bool,
 }

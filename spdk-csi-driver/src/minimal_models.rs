@@ -66,6 +66,22 @@ pub struct VolumeCreationResult {
     pub replicas: Vec<ReplicaInfo>,
 }
 
+/// Health status of a logical volume
+/// Used for volume health monitoring and graceful deletion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LvolHealthStatus {
+    /// Whether the lvol exists in SPDK
+    pub exists: bool,
+    /// Overall health status
+    pub healthy: bool,
+    /// Human-readable status message
+    pub message: String,
+    /// Health of the underlying LVS (logical volume store)
+    pub lvs_healthy: Option<bool>,
+    /// Health of the underlying physical disk
+    pub disk_healthy: Option<bool>,
+}
+
 /// Node information for cluster discovery
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {

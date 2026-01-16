@@ -294,6 +294,20 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_force_unstage);
 
+        // POST /api/volumes/check_health - Check if volume backing storage exists and is healthy
+        let check_volume_health = warp::path!("api" / "volumes" / "check_health")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_check_volume_health);
+
+        // POST /api/volumes/check_exists - Check if lvol exists (lightweight existence check)
+        let check_volume_exists = warp::path!("api" / "volumes" / "check_exists")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_check_volume_exists);
+
         // GET /api/system/memory - Get node memory information
         let system_memory = warp::path!("api" / "system" / "memory")
             .and(warp::get())
@@ -331,6 +345,8 @@ impl NodeAgent {
             .or(blockdev_delete_nvmeof)
             .or(get_volume_info)
             .or(force_unstage)
+            .or(check_volume_health)
+            .or(check_volume_exists)
             .or(system_memory)
             .or(snapshot_routes)  // Add snapshot routes
             .with(warp::cors().allow_any_origin())
@@ -1503,6 +1519,107 @@ impl NodeAgent {
 
         println!("✅ [FORCE_UNSTAGE] Completed for volume: {} (was_staged: {})", volume_id, was_staged);
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+    }
+
+    /// Handle POST /api/volumes/check_health - Check volume health status
+    /// Returns detailed health information about a volume's backing storage
+    async fn handle_check_volume_health(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        let lvol_uuid = match request["lvol_uuid"].as_str() {
+            Some(uuid) => uuid,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing lvol_uuid in request"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+
+        println!("🏥 [HTTP_API] Checking health for lvol: {}", lvol_uuid);
+
+        match node_agent.disk_service.get_lvol_health(lvol_uuid).await {
+            Ok(health_status) => {
+                let response = json!({
+                    "success": true,
+                    "exists": health_status.exists,
+                    "healthy": health_status.healthy,
+                    "message": health_status.message,
+                    "lvs_healthy": health_status.lvs_healthy,
+                    "disk_healthy": health_status.disk_healthy
+                });
+
+                println!("{} [HTTP_API] Health check result: exists={}, healthy={}",
+                    if health_status.healthy { "✅" } else { "⚠️" },
+                    health_status.exists,
+                    health_status.healthy);
+
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                // SPDK query failed entirely - node agent unreachable or SPDK down
+                println!("❌ [HTTP_API] Health check failed: {}", e);
+                let error_response = json!({
+                    "success": false,
+                    "exists": false,
+                    "healthy": false,
+                    "message": format!("Health check failed: {}", e),
+                    "error": e.to_string()
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        }
+    }
+
+    /// Handle POST /api/volumes/check_exists - Lightweight check if lvol exists
+    /// Used for graceful deletion when backing storage may be missing
+    async fn handle_check_volume_exists(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        let lvol_uuid = match request["lvol_uuid"].as_str() {
+            Some(uuid) => uuid,
+            None => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Missing lvol_uuid in request"
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::BAD_REQUEST));
+            }
+        };
+
+        println!("🔍 [HTTP_API] Checking existence for lvol: {}", lvol_uuid);
+
+        match node_agent.disk_service.check_lvol_exists(lvol_uuid).await {
+            Ok(exists) => {
+                let response = json!({
+                    "success": true,
+                    "exists": exists,
+                    "lvol_uuid": lvol_uuid
+                });
+
+                println!("{} [HTTP_API] Lvol {} {}",
+                    if exists { "✅" } else { "ℹ️" },
+                    lvol_uuid,
+                    if exists { "exists" } else { "does not exist" });
+
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                // SPDK query failed - this is different from "lvol doesn't exist"
+                // Return exists: false but also indicate the error
+                println!("⚠️ [HTTP_API] Existence check failed (treating as not exists): {}", e);
+                let response = json!({
+                    "success": true,  // Operation succeeded (we got an answer)
+                    "exists": false,  // Treat unreachable as "storage gone"
+                    "lvol_uuid": lvol_uuid,
+                    "warning": format!("Could not verify - assuming storage unavailable: {}", e)
+                });
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+        }
     }
 }
 

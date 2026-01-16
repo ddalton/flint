@@ -887,15 +887,32 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             Ok(Some(replicas)) => {
                 // MULTI-REPLICA: Delete all replicas
                 println!("📊 [CONTROLLER] Deleting multi-replica volume ({} replicas)", replicas.len());
-                
+
                 // Delete each replica lvol
                 for (i, replica) in replicas.iter().enumerate() {
-                    println!("🗑️ [CONTROLLER] Deleting replica {} on node {}", 
+                    println!("🗑️ [CONTROLLER] Deleting replica {} on node {}",
                              i + 1, replica.node_name);
-                    
-                    match self.driver.delete_lvol(&replica.node_name, &replica.lvol_uuid).await {
-                        Ok(()) => println!("✅ Deleted replica {} (UUID: {})", i + 1, replica.lvol_uuid),
-                        Err(e) => println!("⚠️ Failed to delete replica {}: {}", i + 1, e),
+
+                    // GRACEFUL DELETION: Check if backing storage exists before attempting delete
+                    // This handles: memory disk destroyed, NVMe failed, node offline
+                    match self.driver.check_backing_storage_exists(&replica.node_name, &replica.lvol_uuid).await {
+                        Ok(true) => {
+                            // Storage exists - proceed with normal deletion
+                            match self.driver.delete_lvol(&replica.node_name, &replica.lvol_uuid).await {
+                                Ok(()) => println!("✅ Deleted replica {} (UUID: {})", i + 1, replica.lvol_uuid),
+                                Err(e) => println!("⚠️ Failed to delete replica {}: {}", i + 1, e),
+                            }
+                        }
+                        Ok(false) => {
+                            // Storage already gone (memory disk destroyed, NVMe failed, etc.)
+                            println!("ℹ️ [CONTROLLER] Replica {} backing storage already gone (UUID: {})", i + 1, replica.lvol_uuid);
+                            println!("   This can happen when: memory disk destroyed, NVMe failed, or node offline");
+                            // Continue - this is fine, storage is already cleaned up
+                        }
+                        Err(e) => {
+                            // Could not determine storage status - log and continue
+                            println!("⚠️ [CONTROLLER] Could not check replica {} storage status: {}", i + 1, e);
+                        }
                     }
 
                     // Cleanup NVMe-oF target if it exists
@@ -929,12 +946,40 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         println!("📊 [CONTROLLER] Deleting volume on node: {}", volume_info.node_name);
 
+        // GRACEFUL DELETION: Check if backing storage exists before attempting delete
+        // This handles: memory disk destroyed, NVMe failed, node offline
+        let storage_exists = match self.driver.check_backing_storage_exists(&volume_info.node_name, &volume_info.lvol_uuid).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                println!("⚠️ [CONTROLLER] Could not check storage status (assuming exists): {}", e);
+                true // Assume exists on error - let normal deletion flow handle it
+            }
+        };
+
+        if !storage_exists {
+            // Storage already gone (memory disk destroyed, NVMe failed, node offline, etc.)
+            println!("ℹ️ [CONTROLLER] Backing storage already gone for volume: {}", volume_id);
+            println!("   This can happen when:");
+            println!("   - Memory disk was destroyed (SPDK pod restart)");
+            println!("   - NVMe disk failed or was removed");
+            println!("   - Node is offline or unreachable");
+            println!("✅ [CONTROLLER] Treating as successful deletion (storage already cleaned up)");
+
+            // Still clean up any NVMe-oF targets that might exist on other nodes
+            let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+            let _ = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await;
+
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+        }
+
+        // Storage exists - proceed with normal deletion flow
+
         // DEFENSIVE CLEANUP: Check if volume is still staged (NodeUnstageVolume may not have been called)
         // This happens when PVC is deleted before VolumeAttachment, causing kubelet to skip NodeUnstageVolume
         println!("🔍 [CONTROLLER] Checking if volume is still staged on node (defensive cleanup)...");
-        
+
         let ublk_id = self.driver.generate_ublk_id(&volume_id);
-        
+
         if let Err(e) = self.driver.force_unstage_volume_if_needed(&volume_info.node_name, &volume_id, ublk_id).await {
             println!("⚠️ [CONTROLLER] Force unstaging failed (may not be staged): {}", e);
             // Continue - this is best-effort cleanup
@@ -955,13 +1000,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     println!("   2. ublk device still exists and has active I/O");
                     println!("   3. NodeUnstageVolume was not called by kubelet");
                     println!("⚠️ [CONTROLLER] Retrying with more aggressive cleanup...");
-                    
+
                     // Try one more time with explicit cleanup
                     if let Err(cleanup_err) = self.driver.force_cleanup_volume(&volume_info.node_name, &volume_id, ublk_id).await {
                         println!("❌ [CONTROLLER] Aggressive cleanup also failed: {}", cleanup_err);
                         return Err(tonic::Status::internal(format!("Failed to delete volume (still in use): {}", e)));
                     }
-                    
+
                     // Retry lvol deletion after cleanup
                     match self.driver.delete_lvol(&volume_info.node_name, &volume_info.lvol_uuid).await {
                         Ok(_) => println!("✅ [CONTROLLER] Lvol deleted after aggressive cleanup"),
@@ -970,6 +1015,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                             return Err(tonic::Status::internal(format!("Failed to delete volume: {}", retry_err)));
                         }
                     }
+                } else if error_msg.contains("No such device") || error_msg.contains("not found") || error_msg.contains("does not exist") {
+                    // Storage disappeared between our check and deletion attempt
+                    // This is fine - treat as successful deletion
+                    println!("ℹ️ [CONTROLLER] Storage disappeared during deletion (race condition) - treating as success");
                 } else {
                     println!("❌ [CONTROLLER] Failed to delete logical volume: {}", e);
                     return Err(tonic::Status::internal(format!("Failed to delete volume: {}", e)));
@@ -2725,10 +2774,111 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
     async fn node_get_volume_stats(
         &self,
-        _request: tonic::Request<spdk_csi_driver::csi::NodeGetVolumeStatsRequest>,
+        request: tonic::Request<spdk_csi_driver::csi::NodeGetVolumeStatsRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetVolumeStatsResponse>, tonic::Status> {
-        println!("🔵 [GRPC] Node.NodeGetVolumeStats called");
-        Err(tonic::Status::unimplemented("Node get volume stats not implemented"))
+        let req = request.into_inner();
+        println!("🔵 [GRPC] Node.NodeGetVolumeStats called for volume: {}", req.volume_id);
+        println!("   Volume path: {}", req.volume_path);
+
+        use spdk_csi_driver::csi::{VolumeUsage, VolumeCondition, volume_usage::Unit};
+
+        // Get volume info to find the lvol UUID and node
+        let volume_info = match self.driver.get_volume_info(&req.volume_id).await {
+            Ok(info) => info,
+            Err(e) => {
+                println!("⚠️ [NODE] Could not get volume info: {}", e);
+                // Volume not found - report as abnormal
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetVolumeStatsResponse {
+                    usage: vec![],
+                    volume_condition: Some(VolumeCondition {
+                        abnormal: true,
+                        message: format!("Volume not found: {}", e),
+                    }),
+                }));
+            }
+        };
+
+        // Check if backing storage exists and is healthy
+        let health = self.driver.check_backing_storage_health(&volume_info.node_name, &volume_info.lvol_uuid).await;
+
+        let (abnormal, message) = match health {
+            Ok(h) if h.exists && h.healthy => {
+                (false, "Volume is healthy".to_string())
+            }
+            Ok(h) if h.exists && !h.healthy => {
+                (true, format!("Volume degraded: {}", h.message))
+            }
+            Ok(h) if !h.exists => {
+                (true, format!("Backing storage not found: {}", h.message))
+            }
+            Ok(h) if !h.node_reachable => {
+                (true, format!("Storage node unreachable: {}", h.message))
+            }
+            Ok(h) => {
+                (true, h.message)
+            }
+            Err(e) => {
+                (true, format!("Health check failed: {}", e))
+            }
+        };
+
+        println!("{} [NODE] Volume health: abnormal={}, message={}",
+            if abnormal { "⚠️" } else { "✅" },
+            abnormal,
+            message);
+
+        // Try to get filesystem stats if the volume is mounted
+        let mut usage = Vec::new();
+
+        if !req.volume_path.is_empty() && std::path::Path::new(&req.volume_path).exists() {
+            // Use statvfs to get filesystem stats
+            match nix::sys::statvfs::statvfs(req.volume_path.as_str()) {
+                Ok(stats) => {
+                    let block_size = stats.block_size() as i64;
+                    let total_blocks = stats.blocks() as i64;
+                    let free_blocks = stats.blocks_free() as i64;
+                    let avail_blocks = stats.blocks_available() as i64;
+
+                    let total_bytes = total_blocks * block_size;
+                    let available_bytes = avail_blocks * block_size;
+                    let used_bytes = (total_blocks - free_blocks) * block_size;
+
+                    usage.push(VolumeUsage {
+                        unit: Unit::Bytes as i32,
+                        total: total_bytes,
+                        available: available_bytes,
+                        used: used_bytes,
+                    });
+
+                    // Also report inode stats
+                    let total_inodes = stats.files() as i64;
+                    let free_inodes = stats.files_free() as i64;
+                    let used_inodes = total_inodes - free_inodes;
+
+                    usage.push(VolumeUsage {
+                        unit: Unit::Inodes as i32,
+                        total: total_inodes,
+                        available: free_inodes,
+                        used: used_inodes,
+                    });
+
+                    println!("📊 [NODE] Volume stats: {} bytes total, {} bytes used, {} bytes available",
+                        total_bytes, used_bytes, available_bytes);
+                }
+                Err(e) => {
+                    println!("⚠️ [NODE] Could not get filesystem stats: {}", e);
+                    // Continue - we can still report health condition without usage stats
+                }
+            }
+        }
+
+        Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetVolumeStatsResponse {
+            usage,
+            volume_condition: Some(VolumeCondition {
+                abnormal,
+                message,
+            }),
+        }))
     }
 
     async fn node_expand_volume(
@@ -2817,7 +2967,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetCapabilitiesResponse>, tonic::Status> {
         println!("🔵 [GRPC] Node.NodeGetCapabilities called");
         use spdk_csi_driver::csi::{node_service_capability::rpc::Type as RpcType, NodeServiceCapability, node_service_capability::Rpc};
-        
+
         let capabilities = vec![
             NodeServiceCapability {
                 r#type: Some(spdk_csi_driver::csi::node_service_capability::Type::Rpc(Rpc {
@@ -2834,9 +2984,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     r#type: RpcType::VolumeMountGroup as i32,
                 })),
             },
+            // Volume health monitoring capabilities
+            NodeServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::node_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::GetVolumeStats as i32,
+                })),
+            },
+            NodeServiceCapability {
+                r#type: Some(spdk_csi_driver::csi::node_service_capability::Type::Rpc(Rpc {
+                    r#type: RpcType::VolumeCondition as i32,
+                })),
+            },
         ];
-        
-        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup capabilities");
+
+        println!("✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition");
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetCapabilitiesResponse { capabilities }))
     }
 

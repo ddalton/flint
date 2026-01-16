@@ -281,7 +281,7 @@ pub async fn create_nfs_server_pod(
         },
         spec: Some(PersistentVolumeClaimSpec {
             access_modes: Some(vec!["ReadWriteOnce".to_string()]),
-            resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+            resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
                 requests: Some([
                     ("storage".to_string(), Quantity(format!("{}", capacity_bytes))),
                 ].into_iter().collect()),

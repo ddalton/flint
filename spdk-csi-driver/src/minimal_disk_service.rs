@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 use reqwest::Client as HttpClient;
 
-use crate::minimal_models::{DiskInfo, MinimalStateError};
+use crate::minimal_models::{DiskInfo, MinimalStateError, LvolHealthStatus};
 use crate::reserved_devices::ReservedDevices;
 
 /// Device discovery strategy
@@ -316,6 +316,142 @@ impl MinimalDiskService {
 
         println!("✅ [MINIMAL_DISK] Successfully resized lvol {} to {} MiB", lvol_uuid, size_mib);
         Ok(())
+    }
+
+    /// Check if a logical volume exists by UUID
+    /// Returns Ok(true) if lvol exists, Ok(false) if not found, Err if SPDK query fails
+    pub async fn check_lvol_exists(&self, lvol_uuid: &str) -> Result<bool, MinimalStateError> {
+        println!("🔍 [MINIMAL_DISK] Checking if lvol exists: {}", lvol_uuid);
+
+        // Query SPDK for bdevs with this name
+        let get_bdevs_params = json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": lvol_uuid
+            }
+        });
+
+        match self.call_spdk_rpc(&get_bdevs_params).await {
+            Ok(response) => {
+                // If we get a result array with items, the lvol exists
+                if let Some(result) = response.get("result") {
+                    if let Some(bdevs) = result.as_array() {
+                        let exists = !bdevs.is_empty();
+                        println!("{} [MINIMAL_DISK] Lvol {} {}",
+                            if exists { "✅" } else { "ℹ️" },
+                            lvol_uuid,
+                            if exists { "exists" } else { "does not exist" });
+                        return Ok(exists);
+                    }
+                }
+                // Empty or missing result means lvol doesn't exist
+                println!("ℹ️ [MINIMAL_DISK] Lvol {} does not exist (empty result)", lvol_uuid);
+                Ok(false)
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+                // "No such device" or similar errors mean the lvol doesn't exist
+                if error_str.contains("No such device") ||
+                   error_str.contains("not found") ||
+                   error_str.contains("does not exist") {
+                    println!("ℹ️ [MINIMAL_DISK] Lvol {} does not exist (SPDK error: {})", lvol_uuid, error_str);
+                    return Ok(false);
+                }
+                // Other errors indicate a real problem (SPDK unreachable, etc.)
+                println!("❌ [MINIMAL_DISK] Failed to check lvol existence: {}", e);
+                Err(MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to check lvol existence: {}", e)
+                })
+            }
+        }
+    }
+
+    /// Get health status of a logical volume
+    /// Returns detailed health information including underlying disk status
+    pub async fn get_lvol_health(&self, lvol_uuid: &str) -> Result<LvolHealthStatus, MinimalStateError> {
+        println!("🏥 [MINIMAL_DISK] Checking health for lvol: {}", lvol_uuid);
+
+        // First check if lvol exists
+        let exists = self.check_lvol_exists(lvol_uuid).await?;
+        if !exists {
+            return Ok(LvolHealthStatus {
+                exists: false,
+                healthy: false,
+                message: "Backing storage not found".to_string(),
+                lvs_healthy: None,
+                disk_healthy: None,
+            });
+        }
+
+        // Get bdev details to find the LVS
+        let get_bdevs_params = json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": lvol_uuid
+            }
+        });
+
+        let response = self.call_spdk_rpc(&get_bdevs_params).await
+            .map_err(|e| MinimalStateError::SpdkRpcError {
+                message: format!("Failed to get bdev details: {}", e)
+            })?;
+
+        // Extract LVS name from the lvol's driver_specific data
+        let mut lvs_name: Option<String> = None;
+        if let Some(result) = response.get("result") {
+            if let Some(bdevs) = result.as_array() {
+                if let Some(bdev) = bdevs.first() {
+                    if let Some(driver_specific) = bdev.get("driver_specific") {
+                        if let Some(lvol_info) = driver_specific.get("lvol") {
+                            lvs_name = lvol_info.get("lvol_store_uuid")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check LVS health if we found the LVS
+        let mut lvs_healthy = true;
+        if let Some(ref lvs_uuid) = lvs_name {
+            let lvstores_params = json!({
+                "method": "bdev_lvol_get_lvstores",
+                "params": {
+                    "uuid": lvs_uuid
+                }
+            });
+
+            if let Ok(lvs_response) = self.call_spdk_rpc(&lvstores_params).await {
+                if let Some(result) = lvs_response.get("result") {
+                    if let Some(lvstores) = result.as_array() {
+                        lvs_healthy = !lvstores.is_empty();
+                    }
+                }
+            } else {
+                lvs_healthy = false;
+            }
+        }
+
+        let health_status = LvolHealthStatus {
+            exists: true,
+            healthy: lvs_healthy,
+            message: if lvs_healthy {
+                "Volume healthy".to_string()
+            } else {
+                "Volume store unhealthy or missing".to_string()
+            },
+            lvs_healthy: Some(lvs_healthy),
+            disk_healthy: Some(lvs_healthy), // For now, assume disk health == LVS health
+        };
+
+        println!("{} [MINIMAL_DISK] Health check result: exists={}, healthy={}, message={}",
+            if health_status.healthy { "✅" } else { "⚠️" },
+            health_status.exists,
+            health_status.healthy,
+            health_status.message);
+
+        Ok(health_status)
     }
 
     // === PRIVATE HELPER METHODS ===
