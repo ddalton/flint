@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use warp::Filter;
 use warp::{Rejection, Reply};
 use warp::http::StatusCode;
+use tracing::{debug, info, warn, error};
 
 use crate::minimal_disk_service::MinimalDiskService;
 use crate::driver::SpdkCsiDriver;
@@ -67,54 +68,57 @@ impl NodeAgent {
 
     /// Start the minimal node agent with HTTP API
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 [MINIMAL_NODE_AGENT] Starting minimal state node agent: {}", self.node_name);
+        info!(node_name = %self.node_name, "[NODE_AGENT] Starting minimal state node agent");
 
         // Fetch node UID from Kubernetes API for replica discovery
-        println!("🔍 [MINIMAL_NODE_AGENT] Fetching node UID from Kubernetes API...");
+        debug!("[NODE_AGENT] Fetching node UID from Kubernetes API");
         match self.driver.get_node_uid(&self.node_name).await {
             Ok(uid) => {
                 *self.node_uid.write().await = uid.clone();
-                println!("✅ [MINIMAL_NODE_AGENT] Node UID: {}", uid);
+                info!(node_uid = %uid, "[NODE_AGENT] Node UID fetched");
             }
             Err(e) => {
-                println!("⚠️ [MINIMAL_NODE_AGENT] Failed to fetch node UID: {}", e);
-                println!("   Replica reconciliation will be disabled");
+                warn!(error = %e, "[NODE_AGENT] Failed to fetch node UID - replica reconciliation will be disabled");
             }
         }
 
         // Initialize ublk subsystem on startup
-        println!("🔧 [MINIMAL_NODE_AGENT] Initializing ublk subsystem...");
+        debug!("[NODE_AGENT] Initializing ublk subsystem");
         match self.disk_service.call_spdk_rpc(&json!({
             "method": "ublk_create_target",
             "params": {}
         })).await {
-            Ok(_) => println!("✅ [MINIMAL_NODE_AGENT] ublk subsystem initialized"),
+            Ok(_) => info!("[NODE_AGENT] ublk subsystem initialized"),
             Err(e) if e.to_string().contains("Method not found") => {
-                println!("ℹ️ [MINIMAL_NODE_AGENT] SPDK doesn't support ublk - skipping initialization");
+                info!("[NODE_AGENT] SPDK doesn't support ublk - skipping initialization");
             }
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [MINIMAL_NODE_AGENT] ublk subsystem already initialized");
+                debug!("[NODE_AGENT] ublk subsystem already initialized");
             }
             Err(e) => {
-                println!("⚠️ [MINIMAL_NODE_AGENT] ublk initialization failed (continuing anyway): {}", e);
+                warn!(error = %e, "[NODE_AGENT] ublk initialization failed (continuing anyway)");
             }
         }
 
         // Run initial disk discovery with auto-recovery at startup
         // This creates bdevs and loads existing LVS stores
-        println!("🔍 [MINIMAL_NODE_AGENT] Running initial disk discovery with auto-recovery...");
+        debug!("[NODE_AGENT] Running initial disk discovery with auto-recovery");
         match self.disk_service.discover_local_disks().await {
             Ok(disks) => {
-                println!("✅ [MINIMAL_NODE_AGENT] Initial discovery found {} disks", disks.len());
+                info!(disk_count = disks.len(), "[NODE_AGENT] Initial discovery completed");
                 for disk in &disks {
                     if disk.blobstore_initialized {
-                        println!("   ✅ {} ({}): LVS initialized - {}", 
-                            disk.device_name, disk.pci_address, disk.lvs_name.as_ref().unwrap_or(&"unknown".to_string()));
+                        debug!(
+                            device = %disk.device_name,
+                            pci = %disk.pci_address,
+                            lvs = disk.lvs_name.as_ref().unwrap_or(&"unknown".to_string()),
+                            "[NODE_AGENT] LVS initialized"
+                        );
                     }
                 }
             }
             Err(e) => {
-                println!("⚠️ [MINIMAL_NODE_AGENT] Initial discovery failed (continuing anyway): {}", e);
+                warn!(error = %e, "[NODE_AGENT] Initial discovery failed (continuing anyway)");
             }
         }
 
@@ -122,12 +126,12 @@ impl NodeAgent {
         // This sets up NVMe-oF targets for any local replicas so remote RAID members can reconnect
         let node_uid = self.node_uid.read().await.clone();
         if !node_uid.is_empty() {
-            println!("🔄 [MINIMAL_NODE_AGENT] Running replica target reconciliation...");
+            debug!("[NODE_AGENT] Running replica target reconciliation");
             if let Err(e) = self.reconcile_replica_targets().await {
-                println!("⚠️ [MINIMAL_NODE_AGENT] Replica reconciliation failed (non-fatal): {}", e);
+                warn!(error = %e, "[NODE_AGENT] Replica reconciliation failed (non-fatal)");
             }
         } else {
-            println!("⏭️ [MINIMAL_NODE_AGENT] Skipping replica reconciliation (no node UID)");
+            debug!("[NODE_AGENT] Skipping replica reconciliation (no node UID)");
         }
 
         // Start disk discovery loop (use FAST mode to avoid expensive auto-recovery every 30s)
@@ -141,14 +145,19 @@ impl NodeAgent {
                 // Auto-recovery is expensive (400+ RPC calls) and only needed at startup
                 match disk_service.discover_local_disks_fast().await {
                     Ok(disks) => {
-                        println!("🔍 [DISK_DISCOVERY] Found {} disks on node", disks.len());
+                        debug!(disk_count = disks.len(), "[DISK_DISCOVERY] Found disks on node");
                         for disk in &disks {
-                            println!("  - {} ({}): {} bytes, healthy: {}, initialized: {}", 
-                                disk.device_name, disk.pci_address, disk.size_bytes, 
-                                disk.healthy, disk.blobstore_initialized);
+                            debug!(
+                                device = %disk.device_name,
+                                pci = %disk.pci_address,
+                                size_bytes = disk.size_bytes,
+                                healthy = disk.healthy,
+                                initialized = disk.blobstore_initialized,
+                                "[DISK_DISCOVERY] Disk status"
+                            );
                         }
                     }
-                    Err(e) => println!("❌ [DISK_DISCOVERY] Error: {}", e),
+                    Err(e) => error!(error = %e, "[DISK_DISCOVERY] Error"),
                 }
             }
         });
@@ -163,15 +172,15 @@ impl NodeAgent {
             .parse()
             .unwrap_or(9081);
 
-        println!("✅ [MINIMAL_NODE_AGENT] Starting HTTP server on port {}", node_agent_port);
-        
+        info!(port = node_agent_port, "[NODE_AGENT] Starting HTTP server");
+
         // Start both the HTTP server and discovery loop
         tokio::select! {
             _ = warp::serve(routes).run(([0, 0, 0, 0], node_agent_port)) => {
-                println!("🌐 [MINIMAL_NODE_AGENT] HTTP server stopped");
+                info!("[NODE_AGENT] HTTP server stopped");
             }
             _ = discovery_task => {
-                println!("🔍 [MINIMAL_NODE_AGENT] Discovery task stopped");
+                info!("[NODE_AGENT] Discovery task stopped");
             }
         }
 
@@ -392,7 +401,7 @@ impl NodeAgent {
 
     /// Handle GET /api/disks
     async fn handle_list_disks(node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling list disks request");
+        debug!("[HTTP_API] Handling list disks request");
         
         match node_agent.disk_service.discover_local_disks().await {
             Ok(disks) => {
@@ -424,35 +433,28 @@ impl NodeAgent {
             .unwrap()
             .as_micros() as u32);
         
-        println!("🌐 [HTTP_API:{}] ========== NEW REQUEST: POST /api/disks ==========", request_id);
-        println!("🌐 [HTTP_API:{}] Starting FAST disk discovery (no auto-recovery)...", request_id);
+        debug!(request_id, "[HTTP_API] POST /api/disks - Starting FAST disk discovery");
         
         match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 let elapsed = start.elapsed();
-                println!("✅ [HTTP_API:{}] Discovery completed in {:?}", request_id, elapsed);
-                println!("✅ [HTTP_API:{}] Found {} disks", request_id, disks.len());
-                
+                debug!(request_id, ?elapsed, disk_count = disks.len(), "[HTTP_API] Discovery completed");
+
                 let response = json!({
                     "disks": disks
                 });
-                
-                let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-                println!("✅ [HTTP_API:{}] Response size: {} bytes", request_id, response_json.len());
-                println!("✅ [HTTP_API:{}] Sending response with status OK", request_id);
-                
+
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
                 let elapsed = start.elapsed();
-                println!("❌ [HTTP_API:{}] Discovery FAILED after {:?}: {}", request_id, elapsed, e);
-                
+                error!(request_id, ?elapsed, error = %e, "[HTTP_API] Discovery failed");
+
                 let error_response = json!({
                     "success": false,
                     "error": e.to_string()
                 });
-                
-                println!("❌ [HTTP_API:{}] Sending error response", request_id);
+
                 Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
@@ -460,10 +462,10 @@ impl NodeAgent {
 
     /// Handle POST /api/disks/initialize_blobstore
     async fn handle_initialize_blobstore(
-        request: InitializeBlobstoreRequest, 
+        request: InitializeBlobstoreRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling initialize blobstore request: {}", request.pci_address);
+        debug!(pci_address = %request.pci_address, "[HTTP_API] Handling initialize blobstore request");
         
         match node_agent.disk_service.initialize_blobstore(&request.pci_address).await {
             Ok(lvs_name) => {
@@ -488,8 +490,7 @@ impl NodeAgent {
         request: CreateLvolRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling create lvol request: {} (thin: {})", 
-                 request.volume_id, request.thin_provision);
+        debug!(volume_id = %request.volume_id, thin_provision = request.thin_provision, "[HTTP_API] Handling create lvol request");
         
         match node_agent.disk_service.create_lvol(&request.lvs_name, &request.volume_id, request.size_bytes, request.thin_provision).await {
             Ok(lvol_uuid) => {
@@ -514,7 +515,7 @@ impl NodeAgent {
         request: DeleteLvolRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling delete lvol request: {}", request.lvol_uuid);
+        debug!(lvol_uuid = %request.lvol_uuid, "[HTTP_API] Handling delete lvol request");
         
         match node_agent.disk_service.delete_lvol(&request.lvol_uuid).await {
             Ok(_) => {
@@ -538,8 +539,7 @@ impl NodeAgent {
         request: ResizeLvolRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling resize lvol request: {} to {} bytes", 
-                 request.lvol_uuid, request.new_size_bytes);
+        debug!(lvol_uuid = %request.lvol_uuid, new_size_bytes = request.new_size_bytes, "[HTTP_API] Handling resize lvol request");
         
         match node_agent.disk_service.resize_lvol(&request.lvol_uuid, request.new_size_bytes).await {
             Ok(_) => {
@@ -562,7 +562,7 @@ impl NodeAgent {
 
     /// Handle POST /api/disks/uninitialized - List uninitialized disks (RPC-style)
     async fn handle_get_uninitialized_disks(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling get uninitialized disks request (fast mode)");
+        debug!("[HTTP_API] Handling get uninitialized disks request (fast mode)");
         
         // Use fast discovery to avoid timeout - no LVS auto-recovery
         match node_agent.disk_service.discover_local_disks_fast().await {
@@ -618,7 +618,7 @@ impl NodeAgent {
     /// Handle POST /api/disks/status - Get disk status (RPC-style)
     /// Returns ALL disks with complete fields for Disk Setup tab
     async fn handle_get_disk_status(_request: Value, node_agent: Arc<NodeAgent>) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling get disk status request (fast mode)");
+        debug!("[HTTP_API] Handling get disk status request (fast mode)");
         
         // Use fast discovery to avoid timeout - no LVS auto-recovery
         match node_agent.disk_service.discover_local_disks_fast().await {
@@ -680,7 +680,7 @@ impl NodeAgent {
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
         let disks = request.get_disks();
-        println!("🌐 [HTTP_API] Handling setup disks request: {} disks", disks.len());
+        debug!(disk_count = disks.len(), "[HTTP_API] Handling setup disks request");
         
         let mut setup_disks = Vec::new();
         let mut failed_disks = Vec::new();
@@ -723,7 +723,7 @@ impl NodeAgent {
         _node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
         let disks = request.get_disks();
-        println!("🌐 [HTTP_API] Handling reset disks request: {} disks", disks.len());
+        debug!(disk_count = disks.len(), "[HTTP_API] Handling reset disks request");
 
         // TODO: Implement actual disk reset
         let response = json!({
@@ -742,8 +742,7 @@ impl NodeAgent {
         request: CreateMemoryDiskRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling create memory disk request: name={}, size={}MB",
-            request.name, request.size_mb);
+        debug!(name = %request.name, size_mb = request.size_mb, "[HTTP_API] Handling create memory disk request");
 
         match node_agent.disk_service.create_memory_disk(
             &request.name,
@@ -775,7 +774,7 @@ impl NodeAgent {
         request: DeleteMemoryDiskRequest,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling delete memory disk request: name={}", request.name);
+        debug!(name = %request.name, "[HTTP_API] Handling delete memory disk request");
 
         match node_agent.disk_service.delete_memory_disk(&request.name).await {
             Ok(()) => {
@@ -799,7 +798,7 @@ impl NodeAgent {
 
     /// Handle GET /api/system/memory - Get node memory information
     async fn handle_system_memory() -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling system memory request");
+        debug!("[HTTP_API] Handling system memory request");
 
         match tokio::fs::read_to_string("/proc/meminfo").await {
             Ok(meminfo) => {
@@ -830,12 +829,11 @@ impl NodeAgent {
                     "available_kb": mem_available_kb
                 });
 
-                println!("✅ [HTTP_API] Memory info: {}MB total, {}MB available", mem_total_mb, mem_available_mb);
-                println!("   Full response JSON: {:?}", response);
+                debug!(total_mb = mem_total_mb, available_mb = mem_available_mb, "[HTTP_API] Memory info");
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                println!("❌ [HTTP_API] Failed to read /proc/meminfo: {}", e);
+                error!(error = %e, "[HTTP_API] Failed to read /proc/meminfo");
                 let error_response = json!({
                     "error": format!("Failed to read memory info: {}", e)
                 });
@@ -850,16 +848,16 @@ impl NodeAgent {
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
         let method = rpc_request["method"].as_str().unwrap_or("unknown");
-        println!("🌐 [HTTP_API] Handling SPDK RPC request: {}", method);
-        
+        debug!(method, "[HTTP_API] Handling SPDK RPC request");
+
         // Proxy the RPC request directly to SPDK
         match node_agent.disk_service.call_spdk_rpc(&rpc_request).await {
             Ok(response) => {
-                println!("✅ [HTTP_API] SPDK RPC '{}' succeeded", method);
+                debug!(method, "[HTTP_API] SPDK RPC succeeded");
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                println!("❌ [HTTP_API] SPDK RPC '{}' failed: {}", method, e);
+                error!(method, error = %e, "[HTTP_API] SPDK RPC failed");
                 let error_response = json!({
                     "success": false,
                     "error": e.to_string()
@@ -874,16 +872,16 @@ impl NodeAgent {
         _request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling ublk target creation");
-        
+        debug!("[HTTP_API] Handling ublk target creation");
+
         let ublk_target_rpc = json!({
             "method": "ublk_create_target",
             "params": {}
         });
-        
+
         match node_agent.disk_service.call_spdk_rpc(&ublk_target_rpc).await {
             Ok(response) => {
-                println!("✅ [HTTP_API] ublk target created successfully");
+                info!("[HTTP_API] ublk target created successfully");
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) if e.to_string().contains("Method not found") => {
@@ -892,11 +890,11 @@ impl NodeAgent {
                     "success": true,
                     "message": "SPDK doesn't support ublk - skipping"
                 });
-                println!("ℹ️ [HTTP_API] SPDK doesn't support ublk - returning success");
+                info!("[HTTP_API] SPDK doesn't support ublk - returning success");
                 Ok(warp::reply::with_status(warp::reply::json(&warning_response), StatusCode::OK))
             }
             Err(e) => {
-                println!("❌ [HTTP_API] ublk target creation failed: {}", e);
+                error!(error = %e, "[HTTP_API] ublk target creation failed");
                 let error_response = json!({
                     "success": false,
                     "error": e.to_string()
@@ -906,22 +904,22 @@ impl NodeAgent {
         }
     }
 
-    /// Handle POST /api/ublk/create - Create ublk device  
+    /// Handle POST /api/ublk/create - Create ublk device
     async fn handle_ublk_create(
         request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling ublk device creation");
-        
+        debug!("[HTTP_API] Handling ublk device creation");
+
         // Extract method and params from request
         let method = request["method"].as_str().unwrap_or("ublk_start_disk");
         let params = &request["params"];
-        
+
         // Check if ublk device already exists (idempotency for ROX/RWX)
         if let Some(ublk_id) = params["ublk_id"].as_u64() {
             let device_path = format!("/dev/ublkb{}", ublk_id);
             if std::path::Path::new(&device_path).exists() {
-                println!("✅ [HTTP_API] ublk device already exists: {} (idempotent)", device_path);
+                debug!(device_path, "[HTTP_API] ublk device already exists (idempotent)");
                 let success_response = json!({
                     "result": device_path
                 });
@@ -936,11 +934,11 @@ impl NodeAgent {
         
         match node_agent.disk_service.call_spdk_rpc(&ublk_rpc).await {
             Ok(response) => {
-                println!("✅ [HTTP_API] ublk device created successfully");
+                debug!("[HTTP_API] ublk device created successfully");
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                println!("❌ [HTTP_API] ublk device creation failed: {}", e);
+                error!(error = %e, "[HTTP_API] ublk device creation failed");
                 let error_response = json!({
                     "success": false,
                     "error": e.to_string()
@@ -955,24 +953,24 @@ impl NodeAgent {
         request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling ublk device deletion");
-        
+        debug!("[HTTP_API] Handling ublk device deletion");
+
         // Extract method and params from request
         let method = request["method"].as_str().unwrap_or("ublk_stop_disk");
         let params = &request["params"];
-        
+
         let ublk_rpc = json!({
             "method": method,
             "params": params
         });
-        
+
         match node_agent.disk_service.call_spdk_rpc(&ublk_rpc).await {
             Ok(response) => {
-                println!("✅ [HTTP_API] ublk device deleted successfully");
+                debug!("[HTTP_API] ublk device deleted successfully");
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                println!("⚠️ [HTTP_API] ublk device deletion failed (may not exist): {}", e);
+                warn!(error = %e, "[HTTP_API] ublk device deletion failed (may not exist)");
                 // For deletion, we return success even if it fails (cleanup is best effort)
                 let success_response = json!({
                     "success": true,
@@ -988,7 +986,7 @@ impl NodeAgent {
         request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling NVMe-oF block device creation");
+        debug!("[HTTP_API] Handling NVMe-oF block device creation");
 
         let bdev_name = match request["bdev_name"].as_str() {
             Some(name) => name,
@@ -1015,7 +1013,7 @@ impl NodeAgent {
 
         // 1. Check if already connected (idempotency)
         if let Ok(existing_device) = Self::find_nvme_device_by_nqn(nqn).await {
-            println!("✅ [HTTP_API] NVMe device already exists: {} (idempotent)", existing_device);
+            debug!(device = %existing_device, "[HTTP_API] NVMe device already exists (idempotent)");
             let response = json!({
                 "device_path": existing_device,
                 "nvme_device": Self::extract_nvme_controller(&existing_device),
@@ -1026,9 +1024,9 @@ impl NodeAgent {
 
         // 2. Create NVMe-oF target on SPDK
         match Self::create_nvmeof_target_local(&node_agent, bdev_name, nqn, target_ip, target_port).await {
-            Ok(_) => println!("✅ [HTTP_API] NVMe-oF target created"),
+            Ok(_) => debug!("[HTTP_API] NVMe-oF target created"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [HTTP_API] NVMe-oF target already exists");
+                debug!("[HTTP_API] NVMe-oF target already exists");
             }
             Err(e) => {
                 let error_response = json!({
@@ -1056,7 +1054,7 @@ impl NodeAgent {
                 break;
             }
             if attempt % 10 == 0 {
-                println!("🔧 [HTTP_API] Waiting for NVMe device... ({}/30)", attempt);
+                debug!(attempt, "[HTTP_API] Waiting for NVMe device");
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
@@ -1070,7 +1068,7 @@ impl NodeAgent {
         }
 
         let nvme_device = Self::extract_nvme_controller(&device_path);
-        println!("✅ [HTTP_API] NVMe-oF block device created: {}", device_path);
+        debug!(device_path, "[HTTP_API] NVMe-oF block device created");
 
         let response = json!({
             "device_path": device_path,
@@ -1085,7 +1083,7 @@ impl NodeAgent {
         request: serde_json::Value,
         node_agent: Arc<NodeAgent>
     ) -> Result<impl Reply, Rejection> {
-        println!("🌐 [HTTP_API] Handling NVMe-oF block device deletion");
+        debug!("[HTTP_API] Handling NVMe-oF block device deletion");
 
         let nqn = match request["nqn"].as_str() {
             Some(n) => n,
@@ -1100,7 +1098,7 @@ impl NodeAgent {
 
         // 1. Execute nvme disconnect
         if let Err(e) = Self::kernel_nvme_disconnect(nqn).await {
-            println!("⚠️ [HTTP_API] Failed to disconnect NVMe (may not exist): {}", e);
+            warn!(error = %e, "[HTTP_API] Failed to disconnect NVMe (may not exist)");
             // Don't fail - continue to cleanup target
         }
 
@@ -1113,8 +1111,8 @@ impl NodeAgent {
         });
 
         match node_agent.disk_service.call_spdk_rpc(&delete_params).await {
-            Ok(_) => println!("✅ [HTTP_API] NVMe-oF subsystem deleted"),
-            Err(e) => println!("⚠️ [HTTP_API] Failed to delete subsystem (may not exist): {}", e),
+            Ok(_) => debug!("[HTTP_API] NVMe-oF subsystem deleted"),
+            Err(e) => warn!(error = %e, "[HTTP_API] Failed to delete subsystem (may not exist)"),
         }
 
         let response = json!({
@@ -1151,7 +1149,7 @@ impl NodeAgent {
 
                             if namespace_count == 0 {
                                 // Stale subsystem with no active connections - safe to cleanup
-                                println!("🔄 [NVMEOF] Subsystem exists with 0 namespaces (stale), cleaning up: {}", nqn);
+                                debug!(nqn, "[NVMEOF] Subsystem exists with 0 namespaces (stale), cleaning up");
                                 let delete_params = json!({
                                     "method": "nvmf_delete_subsystem",
                                     "params": {
@@ -1163,7 +1161,7 @@ impl NodeAgent {
                             } else {
                                 // Active subsystem with connections - DO NOT DELETE
                                 // This handles RWX/ROX or concurrent pod scenarios
-                                println!("✅ [NVMEOF] Subsystem exists with {} active namespace(s), reusing (RWX/ROX or concurrent attach): {}", namespace_count, nqn);
+                                debug!(namespace_count, nqn, "[NVMEOF] Subsystem exists with active namespaces, reusing");
                                 // Skip creation steps - subsystem is already properly configured
                                 return Ok(());
                             }
@@ -1315,7 +1313,7 @@ impl NodeAgent {
             }
         };
 
-        println!("🌐 [HTTP_API] Getting info for volume: {}", volume_id);
+        debug!(volume_id, "[HTTP_API] Getting info for volume");
 
         // Query all lvstores to find the volume
         let lvstores_response = match node_agent.disk_service.call_spdk_rpc(&json!({
@@ -1345,7 +1343,7 @@ impl NodeAgent {
                 })).await {
                     Ok(resp) => resp,
                     Err(e) => {
-                        println!("⚠️ [HTTP_API] Failed to get lvols for LVS {}: {}", lvs_name, e);
+                        warn!(lvs_name, error = %e, "[HTTP_API] Failed to get lvols for LVS");
                         continue;
                     }
                 };
@@ -1368,7 +1366,7 @@ impl NodeAgent {
                                 "size_bytes": size_bytes
                             });
                             
-                            println!("✅ [HTTP_API] Found volume: {} (lvol: {}, UUID: {})", volume_id, lvol_name, lvol_uuid);
+                            debug!(volume_id, lvol_name, lvol_uuid, "[HTTP_API] Found volume");
                             return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
                         }
                     }
@@ -1381,7 +1379,7 @@ impl NodeAgent {
             "success": false,
             "error": format!("Volume {} not found", volume_id)
         });
-        println!("❌ [HTTP_API] Volume not found: {}", volume_id);
+        warn!(volume_id, "[HTTP_API] Volume not found");
         Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::NOT_FOUND))
     }
 
@@ -1405,7 +1403,7 @@ impl NodeAgent {
         let ublk_id = request["ublk_id"].as_u64().unwrap_or(0) as u32;
         let force = request["force"].as_bool().unwrap_or(false);
 
-        println!("🔧 [HTTP_API] Force unstage request for volume: {} (ublk_id: {}, force: {})", volume_id, ublk_id, force);
+        debug!(volume_id, ublk_id, force, "[HTTP_API] Force unstage request");
 
         let mut was_staged = false;
         let mut operations_performed = Vec::new();
@@ -1429,40 +1427,40 @@ impl NodeAgent {
                             .unwrap_or(false);
                         
                         if is_mounted {
-                            println!("📍 [FORCE_UNSTAGE] Found mounted staging path: {}", globalmount.display());
+                            debug!(path = %globalmount.display(), "[FORCE_UNSTAGE] Found mounted staging path");
                             was_staged = true;
-                            
+
                             // Unmount with retry
-                            println!("🔧 [FORCE_UNSTAGE] Attempting to unmount...");
+                            debug!("[FORCE_UNSTAGE] Attempting to unmount");
                             let mut unmounted = false;
-                            
+
                             for attempt in 1..=3 {
                                 let result = std::process::Command::new("umount")
                                     .arg(&globalmount)
                                     .status();
-                                
+
                                 if result.map(|s| s.success()).unwrap_or(false) {
-                                    println!("✅ [FORCE_UNSTAGE] Unmounted on attempt {}", attempt);
+                                    debug!(attempt, "[FORCE_UNSTAGE] Unmounted");
                                     unmounted = true;
                                     operations_performed.push(format!("Unmounted {}", globalmount.display()));
                                     break;
                                 }
-                                
+
                                 if attempt < 3 {
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
                             }
-                            
+
                             // If normal unmount failed, try lazy unmount
                             if !unmounted {
-                                println!("⚠️ [FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount...");
+                                warn!("[FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount");
                                 let result = std::process::Command::new("umount")
                                     .arg("-l")
                                     .arg(&globalmount)
                                     .status();
-                                
+
                                 if result.map(|s| s.success()).unwrap_or(false) {
-                                    println!("✅ [FORCE_UNSTAGE] Lazy unmount succeeded");
+                                    debug!("[FORCE_UNSTAGE] Lazy unmount succeeded");
                                     operations_performed.push(format!("Lazy unmounted {}", globalmount.display()));
                                     unmounted = true;
                                 }
@@ -1486,9 +1484,9 @@ impl NodeAgent {
         // Step 2: Delete ublk device if it exists
         let device_path = format!("/dev/ublkb{}", ublk_id);
         if std::path::Path::new(&device_path).exists() {
-            println!("📍 [FORCE_UNSTAGE] Found ublk device: {}", device_path);
+            debug!(device_path, "[FORCE_UNSTAGE] Found ublk device");
             was_staged = true;
-            
+
             // Stop the ublk device via SPDK
             let result = node_agent.disk_service.call_spdk_rpc(&json!({
                 "method": "ublk_stop_disk",
@@ -1496,14 +1494,14 @@ impl NodeAgent {
                     "ublk_id": ublk_id
                 }
             })).await;
-            
+
             match result {
                 Ok(_) => {
-                    println!("✅ [FORCE_UNSTAGE] ublk device stopped");
+                    debug!("[FORCE_UNSTAGE] ublk device stopped");
                     operations_performed.push(format!("Stopped ublk device {}", ublk_id));
                 }
                 Err(e) => {
-                    println!("⚠️ [FORCE_UNSTAGE] Failed to stop ublk device: {}", e);
+                    warn!(error = %e, "[FORCE_UNSTAGE] Failed to stop ublk device");
                     if !force {
                         let error_response = json!({
                             "success": false,
@@ -1530,12 +1528,12 @@ impl NodeAgent {
         
         match result {
             Ok(_) => {
-                println!("✅ [FORCE_UNSTAGE] Disconnected from NVMe-oF: {}", nqn);
+                debug!(nqn, "[FORCE_UNSTAGE] Disconnected from NVMe-oF");
                 operations_performed.push("Disconnected NVMe-oF".to_string());
             }
             Err(_) => {
                 // Ignore - volume may not be remote
-                println!("ℹ️ [FORCE_UNSTAGE] No NVMe-oF connection to disconnect (volume may be local)");
+                debug!("[FORCE_UNSTAGE] No NVMe-oF connection to disconnect (volume may be local)");
             }
         }
 
@@ -1551,7 +1549,7 @@ impl NodeAgent {
             }
         });
 
-        println!("✅ [FORCE_UNSTAGE] Completed for volume: {} (was_staged: {})", volume_id, was_staged);
+        debug!(volume_id, was_staged, "[FORCE_UNSTAGE] Completed");
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
     }
 
@@ -1572,7 +1570,7 @@ impl NodeAgent {
             }
         };
 
-        println!("🏥 [HTTP_API] Checking health for lvol: {}", lvol_uuid);
+        debug!(lvol_uuid, "[HTTP_API] Checking health for lvol");
 
         match node_agent.disk_service.get_lvol_health(lvol_uuid).await {
             Ok(health_status) => {
@@ -1585,16 +1583,13 @@ impl NodeAgent {
                     "disk_healthy": health_status.disk_healthy
                 });
 
-                println!("{} [HTTP_API] Health check result: exists={}, healthy={}",
-                    if health_status.healthy { "✅" } else { "⚠️" },
-                    health_status.exists,
-                    health_status.healthy);
+                debug!(exists = health_status.exists, healthy = health_status.healthy, "[HTTP_API] Health check result");
 
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
                 // SPDK query failed entirely - node agent unreachable or SPDK down
-                println!("❌ [HTTP_API] Health check failed: {}", e);
+                error!(error = %e, "[HTTP_API] Health check failed");
                 let error_response = json!({
                     "success": false,
                     "exists": false,
@@ -1624,7 +1619,7 @@ impl NodeAgent {
             }
         };
 
-        println!("🔍 [HTTP_API] Checking existence for lvol: {}", lvol_uuid);
+        debug!(lvol_uuid, "[HTTP_API] Checking existence for lvol");
 
         match node_agent.disk_service.check_lvol_exists(lvol_uuid).await {
             Ok(exists) => {
@@ -1634,17 +1629,14 @@ impl NodeAgent {
                     "lvol_uuid": lvol_uuid
                 });
 
-                println!("{} [HTTP_API] Lvol {} {}",
-                    if exists { "✅" } else { "ℹ️" },
-                    lvol_uuid,
-                    if exists { "exists" } else { "does not exist" });
+                debug!(lvol_uuid, exists, "[HTTP_API] Lvol existence check");
 
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
                 // SPDK query failed - this is different from "lvol doesn't exist"
                 // Return exists: false but also indicate the error
-                println!("⚠️ [HTTP_API] Existence check failed (treating as not exists): {}", e);
+                warn!(error = %e, "[HTTP_API] Existence check failed (treating as not exists)");
                 let response = json!({
                     "success": true,  // Operation succeeded (we got an answer)
                     "exists": false,  // Treat unreachable as "storage gone"
@@ -1665,8 +1657,7 @@ impl NodeAgent {
     /// for any local replicas, enabling RAID bdevs on other nodes to reconnect.
     async fn reconcile_replica_targets(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let node_uid = self.node_uid.read().await.clone();
-        println!("🔄 [RECONCILE] Starting replica target reconciliation for node: {} (UID: {})",
-                 self.node_name, node_uid);
+        debug!(node_name = %self.node_name, node_uid, "[RECONCILE] Starting replica target reconciliation");
 
         // Query PVs with label selector: flint.csi.storage.io/replica-{node_uid}=true
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
@@ -1676,12 +1667,12 @@ impl NodeAgent {
         let pv_list = match pvs.list(&lp).await {
             Ok(list) => list,
             Err(e) => {
-                println!("❌ [RECONCILE] Failed to query PVs: {}", e);
+                error!(error = %e, "[RECONCILE] Failed to query PVs");
                 return Err(format!("Failed to query PVs: {}", e).into());
             }
         };
 
-        println!("📋 [RECONCILE] Found {} PVs with local replicas", pv_list.items.len());
+        debug!(pv_count = pv_list.items.len(), "[RECONCILE] Found PVs with local replicas");
 
         let mut success_count = 0;
         let mut skip_count = 0;
@@ -1691,24 +1682,24 @@ impl NodeAgent {
             let volume_id = match &pv.metadata.name {
                 Some(name) => name.clone(),
                 None => {
-                    println!("⚠️ [RECONCILE] PV has no name, skipping");
+                    warn!("[RECONCILE] PV has no name, skipping");
                     skip_count += 1;
                     continue;
                 }
             };
 
-            println!("🔍 [RECONCILE] Processing volume: {}", volume_id);
+            debug!(volume_id, "[RECONCILE] Processing volume");
 
             // Extract replica info from PV volumeAttributes
             let replicas = match self.get_replicas_from_pv(&pv) {
                 Ok(Some(r)) => r,
                 Ok(None) => {
-                    println!("   ⏭️ Volume {} has no replica info (single replica?), skipping", volume_id);
+                    debug!(volume_id, "[RECONCILE] Volume has no replica info (single replica?), skipping");
                     skip_count += 1;
                     continue;
                 }
                 Err(e) => {
-                    println!("   ⚠️ Failed to parse replicas for {}: {}", volume_id, e);
+                    warn!(volume_id, error = %e, "[RECONCILE] Failed to parse replicas");
                     error_count += 1;
                     continue;
                 }
@@ -1719,21 +1710,21 @@ impl NodeAgent {
                 .find(|(_, r)| r.node_uid == node_uid || r.node_name == self.node_name) {
                 Some((i, r)) => (i, r),
                 None => {
-                    println!("   ⚠️ No local replica found for volume {} (label mismatch?)", volume_id);
+                    warn!(volume_id, "[RECONCILE] No local replica found (label mismatch?)");
                     skip_count += 1;
                     continue;
                 }
             };
 
-            println!("   Found local replica {} (lvol: {})", replica_index, local_replica.lvol_uuid);
+            debug!(replica_index, lvol_uuid = %local_replica.lvol_uuid, "[RECONCILE] Found local replica");
 
             // Verify the lvol exists locally
             match self.verify_local_lvol(&local_replica.lvol_uuid).await {
                 Ok(bdev_name) => {
-                    println!("   ✓ Local lvol verified: {}", bdev_name);
+                    debug!(bdev_name, "[RECONCILE] Local lvol verified");
                 }
                 Err(e) => {
-                    println!("   ⚠️ Local lvol {} not found: {}", local_replica.lvol_uuid, e);
+                    warn!(lvol_uuid = %local_replica.lvol_uuid, error = %e, "[RECONCILE] Local lvol not found");
                     skip_count += 1;
                     continue;
                 }
@@ -1742,18 +1733,17 @@ impl NodeAgent {
             // Setup NVMe-oF target for this replica (idempotent)
             match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica).await {
                 Ok(_) => {
-                    println!("   ✅ NVMe-oF target set up for replica {}", replica_index);
+                    debug!(replica_index, "[RECONCILE] NVMe-oF target set up");
                     success_count += 1;
                 }
                 Err(e) => {
-                    println!("   ❌ Failed to setup NVMe-oF target: {}", e);
+                    error!(error = %e, "[RECONCILE] Failed to setup NVMe-oF target");
                     error_count += 1;
                 }
             }
         }
 
-        println!("✅ [RECONCILE] Reconciliation complete: {} targets set up, {} skipped, {} errors",
-                 success_count, skip_count, error_count);
+        info!(success_count, skip_count, error_count, "[RECONCILE] Reconciliation complete");
 
         Ok(())
     }
@@ -1824,7 +1814,7 @@ impl NodeAgent {
         // Generate NQN using same format as driver
         let nqn = format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index);
 
-        println!("      Setting up NVMe-oF target: {}", nqn);
+        debug!(nqn, "[RECONCILE] Setting up NVMe-oF target");
 
         // Get node IP for listener
         let node_ip = self.driver.get_node_ip(&self.node_name).await
@@ -1857,7 +1847,7 @@ impl NodeAgent {
         };
 
         if subsystem_exists {
-            println!("      ℹ️ Subsystem already exists (idempotent): {}", nqn);
+            debug!(nqn, "[RECONCILE] Subsystem already exists (idempotent)");
             return Ok(());
         }
 
@@ -1875,9 +1865,9 @@ impl NodeAgent {
         });
 
         match self.disk_service.call_spdk_rpc(&create_subsystem_rpc).await {
-            Ok(_) => println!("      ✓ Subsystem created"),
+            Ok(_) => debug!("[RECONCILE] Subsystem created"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("      ℹ️ Subsystem already exists (race condition)");
+                debug!("[RECONCILE] Subsystem already exists (race condition)");
             }
             Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
         }
@@ -1895,9 +1885,9 @@ impl NodeAgent {
         });
 
         match self.disk_service.call_spdk_rpc(&add_namespace_rpc).await {
-            Ok(_) => println!("      ✓ Namespace added"),
+            Ok(_) => debug!("[RECONCILE] Namespace added"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("      ℹ️ Namespace already exists");
+                debug!("[RECONCILE] Namespace already exists");
             }
             Err(e) => return Err(format!("Failed to add namespace: {}", e).into()),
         }
@@ -1917,14 +1907,14 @@ impl NodeAgent {
         });
 
         match self.disk_service.call_spdk_rpc(&add_listener_rpc).await {
-            Ok(_) => println!("      ✓ Listener added on {}:{}", node_ip, target_port),
+            Ok(_) => debug!(node_ip, target_port, "[RECONCILE] Listener added"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("      ℹ️ Listener already exists");
+                debug!("[RECONCILE] Listener already exists");
             }
             Err(e) => return Err(format!("Failed to add listener: {}", e).into()),
         }
 
-        println!("      🎉 NVMe-oF target ready: {}", nqn);
+        debug!(nqn, "[RECONCILE] NVMe-oF target ready");
         Ok(())
     }
 }

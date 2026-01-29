@@ -1,11 +1,12 @@
 //! NVMe-oF utilities and centralized logging
-//! 
+//!
 //! This module provides common utilities, error handling, and structured logging
 //! for NVMe-oF operations to reduce code duplication and improve observability.
 
 use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
+use tracing::{debug, info, warn, error};
 
 /// Structured context for NVMe-oF operations
 #[derive(Debug, Clone)]
@@ -85,31 +86,16 @@ pub struct NvmfMetrics {
 
 impl NvmfMetrics {
     pub fn log_summary(&self, ctx: &NvmfContext) {
-        println!("{} 📊 Performance Summary:", ctx.log_prefix());
-        
-        if let Some(total) = self.total_time_ms {
-            println!("{}   Total Operation Time: {}ms", ctx.log_prefix(), total);
-        }
-        
-        if let Some(conn) = self.connection_time_ms {
-            println!("{}   Connection Time: {}ms", ctx.log_prefix(), conn);
-        }
-        
-        if let Some(verify) = self.verification_time_ms {
-            println!("{}   Verification Time: {}ms", ctx.log_prefix(), verify);
-        }
-        
-        if let Some(network) = self.network_test_time_ms {
-            println!("{}   Network Test Time: {}ms", ctx.log_prefix(), network);
-        }
-        
-        if let Some(rpc) = self.rpc_call_time_ms {
-            println!("{}   RPC Call Time: {}ms", ctx.log_prefix(), rpc);
-        }
-        
-        if self.retry_count > 0 {
-            println!("{}   Retry Count: {}", ctx.log_prefix(), self.retry_count);
-        }
+        info!(
+            prefix = ctx.log_prefix(),
+            total_time_ms = ?self.total_time_ms,
+            connection_time_ms = ?self.connection_time_ms,
+            verification_time_ms = ?self.verification_time_ms,
+            network_test_time_ms = ?self.network_test_time_ms,
+            rpc_call_time_ms = ?self.rpc_call_time_ms,
+            retry_count = self.retry_count,
+            "Performance Summary"
+        );
     }
 }
 
@@ -185,40 +171,44 @@ impl NvmfError {
 
     /// Log detailed error information with troubleshooting context
     pub fn log_detailed(&self, ctx: &NvmfContext) {
+        let prefix = ctx.log_prefix();
         match self {
             NvmfError::NetworkUnreachable { target, details } => {
-                println!("{}❌ Network Unreachable:", ctx.log_prefix());
-                println!("{}   Target: {}", ctx.log_prefix(), target);
-                println!("{}   Details: {}", ctx.log_prefix(), details);
-                println!("{}   💡 Troubleshooting:", ctx.log_prefix());
-                println!("{}     - Check if target node is running", ctx.log_prefix());
-                println!("{}     - Verify firewall allows port access", ctx.log_prefix());
-                println!("{}     - Test with: telnet {} <port>", ctx.log_prefix(), target);
+                error!(
+                    prefix,
+                    target,
+                    details,
+                    hint = "Check if target node is running, verify firewall allows port access",
+                    "Network Unreachable"
+                );
             }
             NvmfError::TargetNotConfigured { nqn, details } => {
-                println!("{}❌ Target Not Configured:", ctx.log_prefix());
-                println!("{}   NQN: {}", ctx.log_prefix(), nqn);
-                println!("{}   Details: {}", ctx.log_prefix(), details);
-                println!("{}   💡 Troubleshooting:", ctx.log_prefix());
-                println!("{}     - Check if subsystem {} exists", ctx.log_prefix(), nqn);
-                println!("{}     - Verify listener is configured on correct port", ctx.log_prefix());
-                println!("{}     - Run: spdk_rpc nvmf_get_subsystems", ctx.log_prefix());
+                error!(
+                    prefix,
+                    nqn,
+                    details,
+                    hint = "Check if subsystem exists, verify listener is configured on correct port",
+                    "Target Not Configured"
+                );
             }
             NvmfError::BdevNotFound { bdev_name, details } => {
-                println!("{}❌ Block Device Not Found:", ctx.log_prefix());
-                println!("{}   Bdev: {}", ctx.log_prefix(), bdev_name);
-                println!("{}   Details: {}", ctx.log_prefix(), details);
-                println!("{}   💡 Troubleshooting:", ctx.log_prefix());
-                println!("{}     - Run: spdk_rpc bdev_get_bdevs", ctx.log_prefix());
-                println!("{}     - Check if logical volume exists", ctx.log_prefix());
+                error!(
+                    prefix,
+                    bdev_name,
+                    details,
+                    hint = "Run spdk_rpc bdev_get_bdevs, check if logical volume exists",
+                    "Block Device Not Found"
+                );
             }
             NvmfError::ConnectionExists { nqn } => {
-                println!("{}ℹ️ Connection Already Exists:", ctx.log_prefix());
-                println!("{}   NQN: {}", ctx.log_prefix(), nqn);
-                println!("{}   This is usually not an error - connection reuse is normal", ctx.log_prefix());
+                info!(
+                    prefix,
+                    nqn,
+                    "Connection Already Exists (this is usually not an error)"
+                );
             }
             _ => {
-                println!("{}❌ Error: {}", ctx.log_prefix(), self.user_message());
+                error!(prefix, message = self.user_message(), "Error");
             }
         }
     }
@@ -230,25 +220,25 @@ pub async fn handle_spdk_response(
     operation: &str,
     ctx: &NvmfContext,
 ) -> Result<Value, NvmfError> {
+    let prefix = ctx.log_prefix();
+
     // Check for SPDK RPC errors
     if let Some(error) = response.get("error") {
         let error_text = error.to_string();
-        println!("{}❌ SPDK RPC Error in {}:", ctx.log_prefix(), operation);
-        println!("{}   Raw Error: {}", ctx.log_prefix(), error_text);
-        
+        error!(prefix, operation, error_text, "SPDK RPC Error");
+
         let structured_error = NvmfError::from_spdk_error(&error_text, operation);
         structured_error.log_detailed(ctx);
-        
+
         return Err(structured_error);
     }
 
     // Extract result
     if let Some(result) = response.get("result") {
-        println!("{}✅ SPDK RPC Success: {}", ctx.log_prefix(), operation);
+        debug!(prefix, operation, "SPDK RPC Success");
         Ok(result.clone())
     } else {
-        println!("{}⚠️ SPDK RPC Response Missing Result Field:", ctx.log_prefix());
-        println!("{}   Response: {}", ctx.log_prefix(), response);
+        warn!(prefix, ?response, "SPDK RPC Response Missing Result Field");
         Err(NvmfError::ValidationFailed {
             resource: format!("SPDK RPC {}", operation),
             details: "Response missing 'result' field".to_string(),
@@ -262,26 +252,24 @@ pub async fn test_network_connectivity(
     target_port: &str,
     ctx: &NvmfContext,
 ) -> Result<Duration, NvmfError> {
-    println!("{}🔍 Testing network connectivity...", ctx.log_prefix());
-    println!("{}   Target: {}:{}", ctx.log_prefix(), target_ip, target_port);
-    
+    let prefix = ctx.log_prefix();
+    debug!(prefix, target_ip, target_port, "Testing network connectivity");
+
     let start = Instant::now();
-    
+
     match timeout(
         Duration::from_secs(10),
         tokio::net::TcpStream::connect(format!("{}:{}", target_ip, target_port))
     ).await {
         Ok(Ok(_stream)) => {
             let duration = start.elapsed();
-            println!("{}✅ Network connectivity test passed in {:?}", ctx.log_prefix(), duration);
-            println!("{}   Connection established successfully", ctx.log_prefix());
+            debug!(prefix, ?duration, "Network connectivity test passed");
             Ok(duration)
         }
         Ok(Err(e)) => {
             let duration = start.elapsed();
-            println!("{}❌ Network connectivity test failed after {:?}", ctx.log_prefix(), duration);
-            println!("{}   Error: {}", ctx.log_prefix(), e);
-            
+            error!(prefix, ?duration, error = %e, "Network connectivity test failed");
+
             Err(NvmfError::NetworkUnreachable {
                 target: format!("{}:{}", target_ip, target_port),
                 details: e.to_string(),
@@ -289,8 +277,8 @@ pub async fn test_network_connectivity(
         }
         Err(_) => {
             let duration = start.elapsed();
-            println!("{}❌ Network connectivity test timed out after {:?}", ctx.log_prefix(), duration);
-            
+            error!(prefix, ?duration, "Network connectivity test timed out");
+
             Err(NvmfError::RpcTimeout {
                 operation: "network_test".to_string(),
                 timeout_ms: 10000,
@@ -311,36 +299,35 @@ where
     F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, E>> + Send>>,
     E: std::fmt::Display,
 {
+    let prefix = ctx.log_prefix();
     let mut delay = initial_delay;
-    
+
     for attempt in 1..=max_retries {
-        println!("{}🔄 {} - Attempt {}/{}", ctx.log_prefix(), operation_name, attempt, max_retries);
-        
+        debug!(prefix, operation_name, attempt, max_retries, "Attempting operation");
+
         let start = Instant::now();
         match operation().await {
             Ok(result) => {
                 let duration = start.elapsed();
-                println!("{}✅ {} succeeded on attempt {} after {:?}", 
-                         ctx.log_prefix(), operation_name, attempt, duration);
+                debug!(prefix, operation_name, attempt, ?duration, "Operation succeeded");
                 return Ok(result);
             }
             Err(e) => {
                 let duration = start.elapsed();
-                println!("{}❌ {} failed on attempt {} after {:?}: {}", 
-                         ctx.log_prefix(), operation_name, attempt, duration, e);
-                
+                warn!(prefix, operation_name, attempt, ?duration, error = %e, "Operation failed");
+
                 if attempt < max_retries {
-                    println!("{}⏳ Retrying in {:?}...", ctx.log_prefix(), delay);
+                    debug!(prefix, ?delay, "Retrying after delay");
                     tokio::time::sleep(delay).await;
                     delay = Duration::from_millis((delay.as_millis() as u64 * 2).min(30000)); // Cap at 30s
                 } else {
-                    println!("{}💥 {} failed after {} attempts", ctx.log_prefix(), operation_name, max_retries);
+                    error!(prefix, operation_name, max_retries, "Operation failed after all attempts");
                     return Err(e);
                 }
             }
         }
     }
-    
+
     unreachable!()
 }
 
@@ -349,34 +336,12 @@ pub async fn log_connection_health(
     ctx: &NvmfContext,
     _spdk_rpc_url: &str,
 ) {
-    println!("{}📊 Connection Health Check:", ctx.log_prefix());
-    
-    // Get NVMe controllers status - Note: call_spdk_rpc would need to be imported
-    // This is a placeholder for connection health logging
-    println!("{}   Health check would query NVMe controllers here", ctx.log_prefix());
-    
-    // TODO: Import and use call_spdk_rpc when available
-    /*
-    if let Ok(controllers) = call_spdk_rpc(spdk_rpc_url, &json!({
-        "method": "bdev_nvme_get_controllers"
-    })).await {
-        if let Some(controller_list) = controllers["result"].as_array() {
-            println!("{}   Active NVMe Controllers: {}", ctx.log_prefix(), controller_list.len());
-            
-            for controller in controller_list {
-                if let Some(name) = controller.get("name").and_then(|v| v.as_str()) {
-                    let state = controller.get("state").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    println!("{}     {}: {}", ctx.log_prefix(), name, state);
-                }
-            }
-        }
-    }
-    */
-    
-    // Get bdev status - placeholder
-    println!("{}   Health check would query bdev status here", ctx.log_prefix());
-    
-    // TODO: Implement actual health checks when call_spdk_rpc is available
+    let prefix = ctx.log_prefix();
+    debug!(prefix, "Connection Health Check (placeholder - actual health checks not yet implemented)");
+
+    // TODO: Import and use call_spdk_rpc when available to query:
+    // - NVMe controllers status via bdev_nvme_get_controllers
+    // - bdev status
 }
 
 #[cfg(test)]

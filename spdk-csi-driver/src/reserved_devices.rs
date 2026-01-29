@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use kube::{Api, Client};
 use k8s_openapi::api::core::v1::ConfigMap;
+use tracing::{debug, info, warn};
 
 /// Reserved devices configuration manager
 /// Reads the flint-reserved-devices ConfigMap to determine which devices
@@ -27,7 +28,7 @@ impl ReservedDevices {
                         for line in devices_str.lines() {
                             let pci_addr = line.trim();
                             if !pci_addr.is_empty() && !pci_addr.starts_with('#') {
-                                println!("🔒 [RESERVED_DEVICES] Loaded reserved device: {}", pci_addr);
+                                debug!(pci_addr, "[RESERVED_DEVICES] Loaded reserved device");
                                 reserved_pci_addresses.insert(pci_addr.to_string());
                             }
                         }
@@ -37,17 +38,17 @@ impl ReservedDevices {
                     if let Some(devices_json) = data.get("reserved-devices-json") {
                         if let Ok(devices) = serde_json::from_str::<Vec<String>>(devices_json) {
                             for pci_addr in devices {
-                                println!("🔒 [RESERVED_DEVICES] Loaded reserved device (JSON): {}", pci_addr);
+                                debug!(pci_addr, "[RESERVED_DEVICES] Loaded reserved device (JSON)");
                                 reserved_pci_addresses.insert(pci_addr);
                             }
                         }
                     }
                 }
 
-                println!("✅ [RESERVED_DEVICES] Loaded {} reserved device(s)", reserved_pci_addresses.len());
+                info!(count = reserved_pci_addresses.len(), "[RESERVED_DEVICES] Loaded reserved devices");
             }
             Err(e) => {
-                println!("ℹ️ [RESERVED_DEVICES] ConfigMap not found (no devices reserved): {}", e);
+                info!(error = %e, "[RESERVED_DEVICES] ConfigMap not found (no devices reserved)");
                 // Not an error - just means no devices are reserved
             }
         }

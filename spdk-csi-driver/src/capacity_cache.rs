@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::{debug, info, warn, error};
 use crate::driver::SpdkCsiDriver;
 use crate::minimal_models::MinimalStateError;
 
@@ -27,7 +28,7 @@ pub struct CapacityCache {
 impl CapacityCache {
     /// Create a new capacity cache with specified TTL in seconds
     pub fn new(ttl_seconds: u64) -> Self {
-        println!("📦 [CACHE] Creating capacity cache with TTL: {}s", ttl_seconds);
+        info!(ttl_seconds, "[CACHE] Creating capacity cache");
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             ttl: Duration::from_secs(ttl_seconds),
@@ -46,17 +47,13 @@ impl CapacityCache {
             if let Some(capacity) = cache.get(node_name) {
                 let age = capacity.last_updated.elapsed();
                 if age < self.ttl {
-                    println!("✅ [CACHE] Hit for node: {} (age: {:?}, free: {}GB)",
-                             node_name,
-                             age,
-                             capacity.free_capacity / (1024 * 1024 * 1024));
+                    debug!(node_name, ?age, free_gb = capacity.free_capacity / (1024 * 1024 * 1024), "[CACHE] Hit");
                     return Ok(capacity.clone());
                 } else {
-                    println!("⏰ [CACHE] Stale for node: {} (age: {:?}, TTL: {:?})",
-                             node_name, age, self.ttl);
+                    debug!(node_name, ?age, ?self.ttl, "[CACHE] Stale entry");
                 }
             } else {
-                println!("❌ [CACHE] Miss for node: {}", node_name);
+                debug!(node_name, "[CACHE] Miss");
             }
         }
 
@@ -67,9 +64,7 @@ impl CapacityCache {
         {
             let mut cache = self.cache.write().await;
             cache.insert(node_name.to_string(), capacity.clone());
-            println!("🔄 [CACHE] Updated cache for node: {} (free: {}GB)",
-                     node_name,
-                     capacity.free_capacity / (1024 * 1024 * 1024));
+            debug!(node_name, free_gb = capacity.free_capacity / (1024 * 1024 * 1024), "[CACHE] Updated");
         }
 
         Ok(capacity)
@@ -81,7 +76,7 @@ impl CapacityCache {
         node_name: &str,
         driver: &SpdkCsiDriver,
     ) -> Result<NodeCapacity, MinimalStateError> {
-        println!("🔍 [CACHE] Refreshing capacity for node: {}", node_name);
+        debug!(node_name, "[CACHE] Refreshing capacity");
 
         // Query node for disk information
         let disks = driver.get_initialized_disks_from_node(node_name).await?;
@@ -90,11 +85,13 @@ impl CapacityCache {
         let free_capacity: u64 = disks.iter().map(|d| d.free_space).sum();
         let disk_count = disks.len() as u32;
 
-        println!("✅ [CACHE] Refreshed node: {} - {} disks, {}GB free / {}GB total",
-                 node_name,
-                 disk_count,
-                 free_capacity / (1024 * 1024 * 1024),
-                 total_capacity / (1024 * 1024 * 1024));
+        debug!(
+            node_name,
+            disk_count,
+            free_gb = free_capacity / (1024 * 1024 * 1024),
+            total_gb = total_capacity / (1024 * 1024 * 1024),
+            "[CACHE] Refreshed"
+        );
 
         Ok(NodeCapacity {
             node_name: node_name.to_string(),
@@ -117,16 +114,20 @@ impl CapacityCache {
         if let Some(capacity) = cache.get_mut(node_name) {
             if capacity.free_capacity >= size_bytes {
                 capacity.free_capacity -= size_bytes;
-                println!("✅ [CACHE] Reserved {}GB on node: {} (remaining: {}GB)",
-                         size_bytes / (1024 * 1024 * 1024),
-                         node_name,
-                         capacity.free_capacity / (1024 * 1024 * 1024));
+                debug!(
+                    node_name,
+                    reserved_gb = size_bytes / (1024 * 1024 * 1024),
+                    remaining_gb = capacity.free_capacity / (1024 * 1024 * 1024),
+                    "[CACHE] Reserved capacity"
+                );
                 return Ok(());
             } else {
-                println!("⚠️ [CACHE] Insufficient capacity on node: {} (need: {}GB, available: {}GB)",
-                         node_name,
-                         size_bytes / (1024 * 1024 * 1024),
-                         capacity.free_capacity / (1024 * 1024 * 1024));
+                warn!(
+                    node_name,
+                    need_gb = size_bytes / (1024 * 1024 * 1024),
+                    available_gb = capacity.free_capacity / (1024 * 1024 * 1024),
+                    "[CACHE] Insufficient capacity"
+                );
                 return Err(MinimalStateError::InsufficientCapacity {
                     required: size_bytes,
                     available: capacity.free_capacity,
@@ -134,7 +135,7 @@ impl CapacityCache {
             }
         }
 
-        println!("⚠️ [CACHE] Node {} not in cache for reservation", node_name);
+        warn!(node_name, "[CACHE] Node not in cache for reservation");
         Err(MinimalStateError::InternalError {
             message: format!("Node {} not in capacity cache", node_name),
         })
@@ -146,12 +147,14 @@ impl CapacityCache {
 
         if let Some(capacity) = cache.get_mut(node_name) {
             capacity.free_capacity += size_bytes;
-            println!("⚠️ [CACHE] Released {}GB on node: {} (new free: {}GB)",
-                     size_bytes / (1024 * 1024 * 1024),
-                     node_name,
-                     capacity.free_capacity / (1024 * 1024 * 1024));
+            debug!(
+                node_name,
+                released_gb = size_bytes / (1024 * 1024 * 1024),
+                new_free_gb = capacity.free_capacity / (1024 * 1024 * 1024),
+                "[CACHE] Released capacity"
+            );
         } else {
-            println!("⚠️ [CACHE] Could not release capacity - node {} not in cache", node_name);
+            warn!(node_name, "[CACHE] Could not release capacity - node not in cache");
         }
     }
 
@@ -159,7 +162,7 @@ impl CapacityCache {
     pub async fn invalidate(&self, node_name: &str) {
         let mut cache = self.cache.write().await;
         cache.remove(node_name);
-        println!("🔄 [CACHE] Invalidated cache for node: {}", node_name);
+        debug!(node_name, "[CACHE] Invalidated");
     }
 
     /// Invalidate all entries (force full refresh)
@@ -167,7 +170,7 @@ impl CapacityCache {
         let mut cache = self.cache.write().await;
         let count = cache.len();
         cache.clear();
-        println!("🔄 [CACHE] Invalidated all {} cache entries", count);
+        debug!(count, "[CACHE] Invalidated all entries");
     }
 
     /// Warm up cache on startup - parallel refresh of all nodes
@@ -175,14 +178,14 @@ impl CapacityCache {
         &self,
         driver: &SpdkCsiDriver,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔥 [CACHE] Warming up capacity cache...");
+        info!("[CACHE] Warming up capacity cache");
 
         // Get all nodes in cluster
         let all_nodes = driver.get_all_nodes().await?;
-        println!("🔥 [CACHE] Found {} nodes to warm up", all_nodes.len());
+        info!(node_count = all_nodes.len(), "[CACHE] Found nodes to warm up");
 
         if all_nodes.is_empty() {
-            println!("⚠️ [CACHE] No nodes found in cluster");
+            warn!("[CACHE] No nodes found in cluster");
             return Ok(());
         }
 
@@ -197,7 +200,7 @@ impl CapacityCache {
                 match cache.refresh_node_capacity(&node, &driver).await {
                     Ok(capacity) => Some(capacity),
                     Err(e) => {
-                        println!("⚠️ [CACHE] Failed to warm up node {}: {}", node, e);
+                        warn!(node, error = %e, "[CACHE] Failed to warm up node");
                         None
                     }
                 }
@@ -215,14 +218,12 @@ impl CapacityCache {
                 }
                 Ok(None) => {} // Already logged error
                 Err(e) => {
-                    println!("⚠️ [CACHE] Task join error: {}", e);
+                    warn!(error = %e, "[CACHE] Task join error");
                 }
             }
         }
 
-        println!("✅ [CACHE] Warm up complete: {}/{} nodes cached",
-                 success_count,
-                 success_count); // We only count successful ones
+        info!(success_count, "[CACHE] Warm up complete");
 
         Ok(())
     }
@@ -234,7 +235,7 @@ impl CapacityCache {
         driver: Arc<SpdkCsiDriver>,
         interval_secs: u64,
     ) {
-        println!("🔄 [CACHE] Starting background refresh (interval: {}s)", interval_secs);
+        info!(interval_secs, "[CACHE] Starting background refresh");
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -242,24 +243,24 @@ impl CapacityCache {
             loop {
                 interval.tick().await;
 
-                println!("🔄 [CACHE] Background refresh starting...");
+                debug!("[CACHE] Background refresh starting");
 
                 // Get all nodes in the cluster (not just cached ones)
                 // This ensures nodes that failed during warm_up still get refreshed
                 let nodes = match driver.get_all_nodes().await {
                     Ok(nodes) => nodes,
                     Err(e) => {
-                        println!("⚠️ [CACHE] Failed to get cluster nodes: {}", e);
+                        warn!(error = %e, "[CACHE] Failed to get cluster nodes");
                         continue;
                     }
                 };
 
                 if nodes.is_empty() {
-                    println!("⚠️ [CACHE] No nodes in cluster to refresh");
+                    warn!("[CACHE] No nodes in cluster to refresh");
                     continue;
                 }
 
-                println!("🔄 [CACHE] Refreshing {} nodes...", nodes.len());
+                debug!(node_count = nodes.len(), "[CACHE] Refreshing nodes");
 
                 // Refresh all nodes in parallel
                 let mut tasks = Vec::new();
@@ -272,11 +273,11 @@ impl CapacityCache {
                             Ok(capacity) => {
                                 let mut cache_lock = cache_clone.cache.write().await;
                                 cache_lock.insert(node_name.clone(), capacity);
-                                println!("✅ [CACHE] Background refreshed: {}", node_name);
+                                debug!(node_name, "[CACHE] Background refreshed");
                                 true
                             }
                             Err(e) => {
-                                println!("⚠️ [CACHE] Failed to refresh {}: {}", node_name, e);
+                                warn!(node_name, error = %e, "[CACHE] Failed to refresh");
                                 false
                             }
                         }
@@ -291,14 +292,13 @@ impl CapacityCache {
                         Ok(true) => success += 1,
                         Ok(false) => failed += 1,
                         Err(e) => {
-                            println!("⚠️ [CACHE] Task error: {}", e);
+                            warn!(error = %e, "[CACHE] Task error");
                             failed += 1;
                         }
                     }
                 }
 
-                println!("✅ [CACHE] Background refresh complete: {} succeeded, {} failed",
-                         success, failed);
+                debug!(success, failed, "[CACHE] Background refresh complete");
             }
         });
     }

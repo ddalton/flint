@@ -1,4 +1,4 @@
-// driver_minimal.rs - Clean minimal state SPDK CSI Driver  
+// driver_minimal.rs - Clean minimal state SPDK CSI Driver
 // CONTROLLER implementation - talks to Node Agents via HTTP (NOT directly to SPDK)
 
 use std::collections::HashMap;
@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use serde_json::{json, Value};
 use reqwest::Client as HttpClient;
 use tonic::Status;
+use tracing::{debug, info, warn, error};
 
 // Kubernetes API imports
 use kube::{Api, Client};
@@ -84,36 +85,36 @@ impl SpdkCsiDriver {
     
     /// Initialize driver (warm up cache, start background tasks)
     pub async fn initialize(&self, mode: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 [DRIVER] Initializing CSI driver in {} mode...", mode);
+        info!(mode, "[DRIVER] Initializing CSI driver");
 
         // Capacity cache is only needed for controller mode (volume placement decisions)
         // Node mode only handles local operations (mount/unmount/stage/unstage)
         if mode == "controller" || mode == "all" {
             // Warm up capacity cache
-            println!("🔥 [DRIVER] Warming up capacity cache...");
+            info!("[DRIVER] Warming up capacity cache");
             self.capacity_cache.warm_up(self).await?;
 
             // Start background cache refresh (every 60 seconds)
             // Note: Cache is also invalidated after every volume creation, so this is mainly
             // to catch external changes (manual SPDK operations, disk failures, etc.)
-            println!("🔄 [DRIVER] Starting background capacity refresh (every 60s)...");
+            debug!("[DRIVER] Starting background capacity refresh (every 60s)");
             CapacityCache::start_background_refresh(
                 Arc::new(self.capacity_cache.clone()),
                 Arc::new(self.clone()),
                 60,
             );
         } else {
-            println!("⏭️  [DRIVER] Skipping capacity cache initialization in node mode");
+            debug!("[DRIVER] Skipping capacity cache initialization in node mode");
         }
 
-        println!("✅ [DRIVER] Initialization complete");
+        info!("[DRIVER] Initialization complete");
         Ok(())
     }
 
     /// Select a node for single-replica volume using capacity cache
     async fn select_node_for_single_replica(&self, size_bytes: u64) -> Result<String, MinimalStateError> {
-        println!("🔍 [DRIVER] Selecting node for single-replica volume (size: {}GB)",
-                 size_bytes / (1024 * 1024 * 1024));
+        let size_gb = size_bytes / (1024 * 1024 * 1024);
+        debug!(size_gb, "[DRIVER] Selecting node for single-replica volume");
 
         // Get all nodes in cluster
         let all_nodes = self.get_all_nodes().await
@@ -127,7 +128,8 @@ impl SpdkCsiDriver {
             });
         }
 
-        println!("📊 [DRIVER] Found {} nodes in cluster", all_nodes.len());
+        let node_count = all_nodes.len();
+        debug!(node_count, "[DRIVER] Found nodes in cluster");
 
         // Get cached capacities for all nodes in parallel
         let mut tasks = Vec::new();
@@ -151,7 +153,7 @@ impl SpdkCsiDriver {
         }
 
         if candidates.is_empty() {
-            println!("❌ [DRIVER] No nodes with sufficient capacity found");
+            error!("[DRIVER] No nodes with sufficient capacity found");
             return Err(MinimalStateError::InsufficientCapacity {
                 required: size_bytes,
                 available: 0,
@@ -167,10 +169,10 @@ impl SpdkCsiDriver {
         // Reserve capacity (optimistic locking)
         self.capacity_cache.reserve_capacity(&selected.node_name, size_bytes).await?;
 
-        println!("✅ [DRIVER] Selected node: {} (free: {}GB / {}GB)",
-                 selected.node_name,
-                 selected.free_capacity / (1024 * 1024 * 1024),
-                 selected.total_capacity / (1024 * 1024 * 1024));
+        let node_name = &selected.node_name;
+        let free_gb = selected.free_capacity / (1024 * 1024 * 1024);
+        let total_gb = selected.total_capacity / (1024 * 1024 * 1024);
+        info!(node_name, free_gb, total_gb, "[DRIVER] Selected node");
 
         Ok(selected.node_name.clone())
     }
@@ -181,8 +183,8 @@ impl SpdkCsiDriver {
         replica_count: u32,
         size_bytes: u64,
     ) -> Result<Vec<crate::raid::NodeDiskSelection>, MinimalStateError> {
-        println!("🔍 [DRIVER] Finding {} nodes for replicas (size: {}GB)",
-                 replica_count, size_bytes / (1024 * 1024 * 1024));
+        let size_gb = size_bytes / (1024 * 1024 * 1024);
+        debug!(replica_count, size_gb, "[DRIVER] Finding nodes for replicas");
 
         // Get all nodes in cluster
         let all_nodes = self.get_all_nodes().await
@@ -190,7 +192,8 @@ impl SpdkCsiDriver {
                 message: format!("Failed to list nodes: {}", e)
             })?;
 
-        println!("📊 [DRIVER] Found {} nodes in cluster", all_nodes.len());
+        let node_count = all_nodes.len();
+        debug!(node_count, "[DRIVER] Found nodes in cluster");
 
         let mut selected = Vec::new();
 
@@ -208,12 +211,14 @@ impl SpdkCsiDriver {
                             node_name: node_name.clone(),
                             disk: disk.clone(),
                         });
-                        println!("   ✓ Selected node: {} (disk: {}, free: {}GB)",
-                                 node_name, disk.device_name, disk.free_space / (1024 * 1024 * 1024));
+                        let device_name = &disk.device_name;
+                        let free_gb = disk.free_space / (1024 * 1024 * 1024);
+                        debug!(node_name, device_name, free_gb, "[DRIVER] Selected node for replica");
                     }
                 }
                 Err(e) => {
-                    println!("   ⚠️ Skipping node {} (query failed: {})", node_name, e);
+                    let err = e.to_string();
+                    warn!(node_name, err, "[DRIVER] Skipping node, query failed");
                     continue;
                 }
             }
@@ -243,19 +248,19 @@ impl SpdkCsiDriver {
         replica_count: u32,
         thin_provision: bool,
     ) -> Result<VolumeCreationResult, MinimalStateError> {
-        println!("🎯 [DRIVER] Creating distributed multi-replica volume: {} ({} replicas)",
-                 volume_id, replica_count);
+        debug!(volume_id, replica_count, "[DRIVER] Creating distributed multi-replica volume");
 
         // Step 1: Find N nodes with available space (each on different node)
         let selected_nodes = self.select_nodes_for_replicas(replica_count, size_bytes).await?;
 
-        println!("✅ [DRIVER] Selected {} nodes for replicas:", selected_nodes.len());
+        let count = selected_nodes.len();
+        info!(count, "[DRIVER] Selected nodes for replicas");
         for (i, node_info) in selected_nodes.iter().enumerate() {
-            println!("   Replica {}: node={}, disk={}, free={}GB",
-                     i + 1,
-                     node_info.node_name,
-                     node_info.disk.device_name,
-                     node_info.disk.free_space / (1024 * 1024 * 1024));
+            let replica_num = i + 1;
+            let node_name = &node_info.node_name;
+            let device_name = &node_info.disk.device_name;
+            let free_gb = node_info.disk.free_space / (1024 * 1024 * 1024);
+            debug!(replica_num, node_name, device_name, free_gb, "[DRIVER] Replica placement");
         }
 
         // Step 2: Create lvol on each selected node
@@ -273,7 +278,9 @@ impl SpdkCsiDriver {
             let node_uid = match self.get_node_uid(&node_info.node_name).await {
                 Ok(uid) => uid,
                 Err(e) => {
-                    println!("⚠️ [DRIVER] Failed to get node UID for {}: {}, using empty", node_info.node_name, e);
+                    let node_name = &node_info.node_name;
+                    let err = e.to_string();
+                    warn!(node_name, err, "[DRIVER] Failed to get node UID, using empty");
                     String::new()
                 }
             };
@@ -286,8 +293,9 @@ impl SpdkCsiDriver {
                 thin_provision,
             ).await {
                 Ok(lvol_uuid) => {
-                    println!("✅ [DRIVER] Created replica {} on node {}: UUID={}",
-                             i + 1, node_info.node_name, lvol_uuid);
+                    let replica_num = i + 1;
+                    let node_name = &node_info.node_name;
+                    info!(replica_num, node_name, lvol_uuid, "[DRIVER] Created replica");
 
                     let replica = ReplicaInfo {
                         node_name: node_info.node_name.clone(),
@@ -310,10 +318,12 @@ impl SpdkCsiDriver {
                 }
                 Err(e) => {
                     // Cleanup: Delete all previously created replicas
-                    println!("❌ [DRIVER] Failed to create replica {} on node {}: {}",
-                             i + 1, node_info.node_name, e);
-                    println!("🧹 [DRIVER] Cleaning up {} previously created replicas...",
-                             created_replicas.len());
+                    let replica_num = i + 1;
+                    let node_name = &node_info.node_name;
+                    let err = e.to_string();
+                    error!(replica_num, node_name, err, "[DRIVER] Failed to create replica");
+                    let cleanup_count = created_replicas.len();
+                    debug!(cleanup_count, "[DRIVER] Cleaning up previously created replicas");
 
                     for (node, uuid) in created_replicas {
                         let _ = self.delete_lvol(&node, &uuid).await;
@@ -326,7 +336,8 @@ impl SpdkCsiDriver {
             }
         }
 
-        println!("✅ [DRIVER] Created {} replicas for volume {}", replicas.len(), volume_id);
+        let replica_count = replicas.len();
+        info!(replica_count, volume_id, "[DRIVER] Created replicas for volume");
 
         // Step 3: Return result with replica metadata
         // This will be stored in PV annotations by CSI controller
@@ -348,7 +359,8 @@ impl SpdkCsiDriver {
         let node_name = match self.select_node_for_single_replica(size_bytes).await {
             Ok(node) => node,
             Err(e) => {
-                println!("❌ [DRIVER] Failed to select node: {}", e);
+                let err = e.to_string();
+                error!(err, "[DRIVER] Failed to select node");
                 return Err(e);
             }
         };
@@ -386,11 +398,9 @@ impl SpdkCsiDriver {
                 message: "Selected disk has no LVS name".to_string() 
             })?;
         
-        println!("✅ [DRIVER] Selected disk: {} with LVS: {} (free: {}GB) on node: {}", 
-                 selected_disk.device_name, 
-                 lvs_name,
-                 selected_disk.free_space / (1024*1024*1024), 
-                 node_name);
+        let device_name = &selected_disk.device_name;
+        let free_gb = selected_disk.free_space / (1024*1024*1024);
+        info!(device_name, lvs_name, free_gb, node_name, "[DRIVER] Selected disk");
         
         // Create logical volume on existing LVS
         let lvol_uuid = match self.create_lvol(&node_name, lvs_name, volume_id, size_bytes, thin_provision).await {
@@ -413,12 +423,13 @@ impl SpdkCsiDriver {
         let node_uid = match self.get_node_uid(&node_name).await {
             Ok(uid) => uid,
             Err(e) => {
-                println!("⚠️ [DRIVER] Failed to get node UID for {}: {}, using empty", node_name, e);
+                let err = e.to_string();
+                warn!(node_name, err, "[DRIVER] Failed to get node UID, using empty");
                 String::new()
             }
         };
 
-        println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
+        info!(volume_id, lvol_uuid, "[DRIVER] Volume created successfully");
 
         // Return full volume creation result with metadata
         Ok(VolumeCreationResult {
@@ -441,8 +452,7 @@ impl SpdkCsiDriver {
 
     /// Create volume using minimal state architecture (routing to single or multi-replica)
     pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<VolumeCreationResult, MinimalStateError> {
-        println!("🎯 [DRIVER] Creating volume: {} ({} bytes, {} replicas, thin: {})",
-                 volume_id, size_bytes, replica_count, thin_provision);
+        debug!(volume_id, size_bytes, replica_count, thin_provision, "[DRIVER] Creating volume");
 
         // Route based on replica count
         if replica_count == 1 {
@@ -469,7 +479,8 @@ impl SpdkCsiDriver {
         // This enables nodes to find which volumes have local replicas when they come back online
         if let Err(e) = self.add_replica_node_labels(volume_id, &result.replicas).await {
             // Log but don't fail - labels are for optimization, not critical path
-            println!("⚠️ [DRIVER] Failed to add replica node labels (non-fatal): {}", e);
+            let err = e.to_string();
+            warn!(err, "[DRIVER] Failed to add replica node labels (non-fatal)");
         }
 
         Ok(result)
@@ -533,7 +544,7 @@ impl SpdkCsiDriver {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::api::{Patch, PatchParams};
 
-        println!("🏷️ [DRIVER] Adding replica node labels to PV: {}", volume_id);
+        debug!(volume_id, "[DRIVER] Adding replica node labels to PV");
 
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
 
@@ -543,12 +554,14 @@ impl SpdkCsiDriver {
             if !replica.node_uid.is_empty() {
                 let label_key = format!("flint.csi.storage.io/replica-{}", replica.node_uid);
                 labels.insert(label_key, serde_json::json!("true"));
-                println!("   Adding label for node {} (UID: {})", replica.node_name, replica.node_uid);
+                let node_name = &replica.node_name;
+                let node_uid = &replica.node_uid;
+                debug!(node_name, node_uid, "[DRIVER] Adding label for node");
             }
         }
 
         if labels.is_empty() {
-            println!("⚠️ [DRIVER] No valid node UIDs found, skipping label patching");
+            warn!("[DRIVER] No valid node UIDs found, skipping label patching");
             return Ok(());
         }
 
@@ -562,15 +575,18 @@ impl SpdkCsiDriver {
         for attempt in 1..=3 {
             match pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await {
                 Ok(_) => {
-                    println!("✅ [DRIVER] Replica node labels added to PV: {} ({} labels)", volume_id, labels.len());
+                    let label_count = labels.len();
+                    info!(volume_id, label_count, "[DRIVER] Replica node labels added to PV");
                     return Ok(());
                 }
                 Err(e) if attempt < 3 => {
-                    println!("⚠️ [DRIVER] Failed to patch PV (attempt {}): {}, retrying...", attempt, e);
+                    let err = e.to_string();
+                    warn!(attempt, err, "[DRIVER] Failed to patch PV, retrying");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Err(e) => {
-                    println!("❌ [DRIVER] Failed to add replica labels after {} attempts: {}", attempt, e);
+                    let err = e.to_string();
+                    error!(attempt, err, "[DRIVER] Failed to add replica labels after retries");
                     return Err(format!("Failed to add replica labels: {}", e).into());
                 }
             }
@@ -581,14 +597,15 @@ impl SpdkCsiDriver {
 
     /// Get current node IP (cached)
     pub async fn get_current_node_ip(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [MINIMAL_DRIVER] Getting IP for node: {}", self.node_id);
+        let node_id = &self.node_id;
+        debug!(node_id, "[MINIMAL_DRIVER] Getting IP for node");
         Ok(self.get_node_ip(&self.node_id).await
             .map_err(|e| format!("Failed to get node IP: {}", e))?)
     }
 
     /// Call Node Agent HTTP API (CONTROLLER pattern - not direct SPDK)
     pub async fn call_node_agent(&self, node_name: &str, endpoint: &str, payload: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🌐 [CONTROLLER_HTTP] Calling node agent: {} endpoint: {}", node_name, endpoint);
+        debug!(node_name, endpoint, "[CONTROLLER_HTTP] Calling node agent");
         
         // Get the node agent URL (HTTP, not direct SPDK socket)
         let node_agent_url = self.get_node_agent_url(node_name).await?;
@@ -647,7 +664,7 @@ impl SpdkCsiDriver {
         for pod in pods.items {
             if let Some(status) = pod.status {
                 if let Some(pod_ip) = status.pod_ip {
-                    println!("✅ [CONTROLLER_HTTP] Found node agent for {}: {}", node_name, pod_ip);
+                    debug!(node_name, pod_ip, "[CONTROLLER_HTTP] Found node agent");
                     return Ok(pod_ip);
                 }
             }
@@ -658,7 +675,7 @@ impl SpdkCsiDriver {
 
     /// Initialize blobstore on a disk (CONTROLLER calls Node Agent via HTTP)
     pub async fn initialize_blobstore(&self, node_name: &str, disk_pci_address: &str) -> Result<String, MinimalStateError> {
-        println!("🔧 [CONTROLLER] Requesting blobstore initialization on node: {} disk: {}", node_name, disk_pci_address);
+        debug!(node_name, disk_pci_address, "[CONTROLLER] Requesting blobstore initialization");
 
         let payload = json!({
             "pci_address": disk_pci_address
@@ -675,14 +692,13 @@ impl SpdkCsiDriver {
             })?
             .to_string();
 
-        println!("✅ [CONTROLLER] Blobstore initialized via node agent: {}", lvs_name);
+        info!(lvs_name, "[CONTROLLER] Blobstore initialized via node agent");
         Ok(lvs_name)
     }
 
     /// Create logical volume (CONTROLLER calls Node Agent via HTTP)  
     pub async fn create_lvol(&self, node_name: &str, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
-        println!("🔧 [CONTROLLER] Requesting lvol creation on node: {} LVS: {} volume: {} (thin: {})", 
-                 node_name, lvs_name, volume_id, thin_provision);
+        debug!(node_name, lvs_name, volume_id, thin_provision, "[CONTROLLER] Requesting lvol creation");
         
         let payload = json!({
             "lvs_name": lvs_name,
@@ -702,13 +718,13 @@ impl SpdkCsiDriver {
             })?
             .to_string();
 
-        println!("✅ [CONTROLLER] Lvol created via node agent: {}", lvol_uuid);
+        info!(lvol_uuid, "[CONTROLLER] Lvol created via node agent");
         Ok(lvol_uuid)
     }
 
     /// Delete logical volume (CONTROLLER calls Node Agent via HTTP)
     pub async fn delete_lvol(&self, node_name: &str, lvol_uuid: &str) -> Result<(), MinimalStateError> {
-        println!("🗑️ [CONTROLLER] Requesting lvol deletion on node: {} UUID: {}", node_name, lvol_uuid);
+        debug!(node_name, lvol_uuid, "[CONTROLLER] Requesting lvol deletion");
 
         let payload = json!({
             "lvol_uuid": lvol_uuid
@@ -719,7 +735,7 @@ impl SpdkCsiDriver {
                 message: format!("Failed to delete lvol via node agent: {}", e) 
             })?;
 
-        println!("✅ [CONTROLLER] Lvol deleted via node agent: {}", lvol_uuid);
+        info!(lvol_uuid, "[CONTROLLER] Lvol deleted via node agent");
         Ok(())
     }
 
@@ -730,7 +746,7 @@ impl SpdkCsiDriver {
     /// - NVMe disk failed or was removed
     /// - Node is offline
     pub async fn check_backing_storage_exists(&self, node_name: &str, lvol_uuid: &str) -> Result<bool, MinimalStateError> {
-        println!("🔍 [CONTROLLER] Checking if backing storage exists on node: {} UUID: {}", node_name, lvol_uuid);
+        debug!(node_name, lvol_uuid, "[CONTROLLER] Checking if backing storage exists");
 
         let payload = json!({
             "lvol_uuid": lvol_uuid
@@ -742,14 +758,11 @@ impl SpdkCsiDriver {
                 let exists = response["exists"].as_bool().unwrap_or(false);
 
                 if let Some(warning) = response["warning"].as_str() {
-                    println!("⚠️ [CONTROLLER] Storage check warning: {}", warning);
+                    warn!(warning, "[CONTROLLER] Storage check warning");
                 }
 
-                println!("{} [CONTROLLER] Backing storage {} on node {}: {}",
-                    if exists { "✅" } else { "ℹ️" },
-                    lvol_uuid,
-                    node_name,
-                    if exists { "exists" } else { "not found" });
+                let status = if exists { "exists" } else { "not found" };
+                debug!(lvol_uuid, node_name, status, "[CONTROLLER] Backing storage check result");
 
                 Ok(exists)
             }
@@ -759,8 +772,9 @@ impl SpdkCsiDriver {
                 // - Node is offline
                 // - Node agent pod is down
                 // - Network partition
-                println!("⚠️ [CONTROLLER] Could not reach node {} to check storage: {}", node_name, e);
-                println!("ℹ️ [CONTROLLER] Treating as storage unavailable (node unreachable)");
+                let err = e.to_string();
+                warn!(node_name, err, "[CONTROLLER] Could not reach node to check storage");
+                debug!("[CONTROLLER] Treating as storage unavailable (node unreachable)");
                 Ok(false)
             }
         }
@@ -769,7 +783,7 @@ impl SpdkCsiDriver {
     /// Check health of backing storage on a node
     /// Returns detailed health information for volume monitoring
     pub async fn check_backing_storage_health(&self, node_name: &str, lvol_uuid: &str) -> Result<BackingStorageHealth, MinimalStateError> {
-        println!("🏥 [CONTROLLER] Checking backing storage health on node: {} UUID: {}", node_name, lvol_uuid);
+        debug!(node_name, lvol_uuid, "[CONTROLLER] Checking backing storage health");
 
         let payload = json!({
             "lvol_uuid": lvol_uuid
@@ -784,17 +798,21 @@ impl SpdkCsiDriver {
                     node_reachable: true,
                 };
 
-                println!("{} [CONTROLLER] Storage health: exists={}, healthy={}, message={}",
-                    if health.healthy { "✅" } else { "⚠️" },
-                    health.exists,
-                    health.healthy,
-                    health.message);
+                let exists = health.exists;
+                let healthy = health.healthy;
+                let message = &health.message;
+                if healthy {
+                    debug!(exists, healthy, message, "[CONTROLLER] Storage health check result");
+                } else {
+                    warn!(exists, healthy, message, "[CONTROLLER] Storage health check result");
+                }
 
                 Ok(health)
             }
             Err(e) => {
                 // Node agent unreachable
-                println!("❌ [CONTROLLER] Could not reach node {} for health check: {}", node_name, e);
+                let err = e.to_string();
+                error!(node_name, err, "[CONTROLLER] Could not reach node for health check");
                 Ok(BackingStorageHealth {
                     exists: false,
                     healthy: false,
@@ -807,7 +825,7 @@ impl SpdkCsiDriver {
 
     /// Force unstage volume if it's still staged (defensive cleanup for when NodeUnstageVolume wasn't called)
     pub async fn force_unstage_volume_if_needed(&self, node_name: &str, volume_id: &str, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔍 [DEFENSIVE] Checking if volume {} is still staged on node: {}", volume_id, node_name);
+        debug!(volume_id, node_name, "[DEFENSIVE] Checking if volume is still staged");
         
         // Request node agent to check and unstage if needed
         let payload = json!({
@@ -820,15 +838,16 @@ impl SpdkCsiDriver {
             Ok(response) => {
                 if let Some(was_staged) = response["was_staged"].as_bool() {
                     if was_staged {
-                        println!("✅ [DEFENSIVE] Volume was staged - successfully unstaged");
+                        info!("[DEFENSIVE] Volume was staged - successfully unstaged");
                     } else {
-                        println!("ℹ️ [DEFENSIVE] Volume was not staged - no action needed");
+                        debug!("[DEFENSIVE] Volume was not staged - no action needed");
                     }
                 }
                 Ok(())
             }
             Err(e) => {
-                println!("⚠️ [DEFENSIVE] Force unstage check failed: {}", e);
+                let err = e.to_string();
+                warn!(err, "[DEFENSIVE] Force unstage check failed");
                 // Don't fail - this is best effort
                 Ok(())
             }
@@ -837,7 +856,7 @@ impl SpdkCsiDriver {
 
     /// Aggressive cleanup for stuck volumes (last resort)
     pub async fn force_cleanup_volume(&self, node_name: &str, volume_id: &str, ublk_id: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔧 [AGGRESSIVE] Force cleaning up volume {} on node: {}", volume_id, node_name);
+        debug!(volume_id, node_name, "[AGGRESSIVE] Force cleaning up volume");
         
         let payload = json!({
             "volume_id": volume_id,
@@ -847,13 +866,13 @@ impl SpdkCsiDriver {
         
         self.call_node_agent(node_name, "/api/volumes/force_unstage", &payload).await?;
         
-        println!("✅ [AGGRESSIVE] Force cleanup completed");
+        info!("[AGGRESSIVE] Force cleanup completed");
         Ok(())
     }
 
     /// Create NVMe-oF target (minimal implementation - will be enhanced later)
     pub async fn create_nvmeof_target(&self, bdev_name: &str, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚧 [MINIMAL_NVMEOF] Creating NVMe-oF target for bdev: {}, nqn: {}", bdev_name, nqn);
+        debug!(bdev_name, nqn, "[MINIMAL_NVMEOF] Creating NVMe-oF target");
         
         // For now, we'll implement a basic version
         // TODO: Enhance with full functionality later
@@ -875,9 +894,9 @@ impl SpdkCsiDriver {
         // NOTE: For NVMe-oF, the controller should delegate to the target node
         // This is a placeholder - in real implementation, use call_node_agent
         match self.call_node_agent(&self.node_id, "/api/nvmeof/create_subsystem", &subsystem_params).await {
-            Ok(_) => println!("✅ [MINIMAL_NVMEOF] Subsystem created: {}", nqn),
+            Ok(_) => info!(nqn, "[MINIMAL_NVMEOF] Subsystem created"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [MINIMAL_NVMEOF] Subsystem already exists: {}", nqn);
+                debug!(nqn, "[MINIMAL_NVMEOF] Subsystem already exists");
             }
             Err(e) => return Err(e),
         }
@@ -895,9 +914,9 @@ impl SpdkCsiDriver {
         });
 
         match self.call_node_agent(&self.node_id, "/api/nvmeof/add_namespace", &namespace_params).await {
-            Ok(_) => println!("✅ [MINIMAL_NVMEOF] Namespace added for bdev: {}", bdev_name),
+            Ok(_) => info!(bdev_name, "[MINIMAL_NVMEOF] Namespace added for bdev"),
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [MINIMAL_NVMEOF] Namespace already exists for bdev: {}", bdev_name);
+                debug!(bdev_name, "[MINIMAL_NVMEOF] Namespace already exists for bdev");
             }
             Err(e) => return Err(e),
         }
@@ -918,20 +937,24 @@ impl SpdkCsiDriver {
         });
 
         match self.call_node_agent(&self.node_id, "/api/nvmeof/add_listener", &listener_params).await {
-            Ok(_) => println!("✅ [MINIMAL_NVMEOF] Listener added: {}:{}", node_ip, self.nvmeof_target_port),
+            Ok(_) => {
+                let port = self.nvmeof_target_port;
+                info!(node_ip, port, "[MINIMAL_NVMEOF] Listener added");
+            }
             Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [MINIMAL_NVMEOF] Listener already exists: {}:{}", node_ip, self.nvmeof_target_port);
+                let port = self.nvmeof_target_port;
+                debug!(node_ip, port, "[MINIMAL_NVMEOF] Listener already exists");
             }
             Err(e) => return Err(e),
         }
 
-        println!("🎉 [MINIMAL_NVMEOF] NVMe-oF target setup completed: {}", nqn);
+        info!(nqn, "[MINIMAL_NVMEOF] NVMe-oF target setup completed");
         Ok(())
     }
 
     /// Cleanup NVMe-oF target (minimal implementation)
     pub async fn cleanup_nvmeof_target(&self, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🧹 [MINIMAL_NVMEOF] Cleaning up NVMe-oF target: {}", nqn);
+        debug!(nqn, "[MINIMAL_NVMEOF] Cleaning up NVMe-oF target");
 
         let delete_params = json!({
             "method": "nvmf_delete_subsystem",
@@ -941,9 +964,10 @@ impl SpdkCsiDriver {
         });
 
         match self.call_node_agent(&self.node_id, "/api/nvmeof/delete_subsystem", &delete_params).await {
-            Ok(_) => println!("✅ [MINIMAL_NVMEOF] Successfully deleted subsystem: {}", nqn),
+            Ok(_) => info!(nqn, "[MINIMAL_NVMEOF] Successfully deleted subsystem"),
             Err(e) => {
-                println!("⚠️ [MINIMAL_NVMEOF] Failed to delete subsystem (may not exist): {}", e);
+                let err = e.to_string();
+                warn!(nqn, err, "[MINIMAL_NVMEOF] Failed to delete subsystem (may not exist)");
                 // Don't fail - cleanup is best effort
             }
         }
@@ -961,7 +985,7 @@ impl SpdkCsiDriver {
 
     /// Create ublk block device (internal implementation)
     async fn create_ublk_block_device(&self, bdev_name: &str, _volume_id: &str, ublk_id: u32) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🔧 [MINIMAL_UBLK] Creating ublk device for bdev: {} with ID: {}", bdev_name, ublk_id);
+        debug!(bdev_name, ublk_id, "[MINIMAL_UBLK] Creating ublk device");
 
         // Note: ublk target is initialized by node agent on startup
         // No need to call ensure_ublk_target() here

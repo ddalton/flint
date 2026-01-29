@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 use reqwest::Client as HttpClient;
+use tracing::{debug, info, warn, error};
 
 use crate::minimal_models::{DiskInfo, MinimalStateError, LvolHealthStatus};
 use crate::reserved_devices::ReservedDevices;
@@ -69,15 +70,15 @@ impl MinimalDiskService {
             Ok(rd) => {
                 let count = rd.get_reserved_devices().len();
                 if count > 0 {
-                    println!("✅ [RESERVED_DEVICES] Loaded {} reserved device(s)", count);
+                    info!(count, "[RESERVED_DEVICES] Loaded reserved device(s)");
                 } else {
-                    println!("ℹ️ [RESERVED_DEVICES] No devices reserved (ConfigMap empty or not found)");
+                    info!("[RESERVED_DEVICES] No devices reserved (ConfigMap empty or not found)");
                 }
                 self.reserved_devices = Some(rd);
                 Ok(())
             }
             Err(e) => {
-                println!("⚠️ [RESERVED_DEVICES] Failed to load: {} (CSI will manage all devices)", e);
+                warn!(error = %e, "[RESERVED_DEVICES] Failed to load (CSI will manage all devices)");
                 self.reserved_devices = None;
                 Ok(())  // Not a fatal error - just means no devices are reserved
             }
@@ -96,12 +97,12 @@ impl MinimalDiskService {
 
     /// Internal disk discovery with optional auto-recovery
     async fn discover_local_disks_internal(&self, with_auto_recovery: bool) -> Result<Vec<DiskInfo>, MinimalStateError> {
-        println!("🔍 [MINIMAL_DISK] Starting disk discovery (auto-recovery: {}) on node: {}", with_auto_recovery, self.node_name);
+        debug!(with_auto_recovery, node = %self.node_name, "[MINIMAL_DISK] Starting disk discovery");
 
         // Step 1: Auto-recover SPDK state for physical devices (only on startup/periodic)
         if with_auto_recovery {
             if let Err(e) = self.auto_recover_spdk_state().await {
-                println!("⚠️ [MINIMAL_DISK] Auto-recovery failed (continuing anyway): {}", e);
+                warn!(error = %e, "[MINIMAL_DISK] Auto-recovery failed (continuing anyway)");
             }
         }
 
@@ -114,7 +115,7 @@ impl MinimalDiskService {
         // Note: Full bdevs JSON not logged (too verbose). Count logged below.
         
         if let Some(bdev_list) = bdevs["result"].as_array() {
-            println!("🔧 [DEBUG] Found {} bdevs in result array", bdev_list.len());
+            debug!(count = bdev_list.len(), "[DEBUG] Found bdevs in result array");
             for (i, bdev) in bdev_list.iter().enumerate() {
                 // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
 
@@ -125,14 +126,12 @@ impl MinimalDiskService {
                             // CRITICAL: Only allow reservation of userspace-driver devices
                             // Kernel-driver devices (io_uring) cannot be used by SPDK device plugin
                             if disk_info.driver == "kernel" {
-                                println!("⚠️ [DEVICE_FILTER] Device {} ({}) is reserved but uses kernel driver!",
-                                         disk_info.device_name, disk_info.pci_address);
-                                println!("⚠️ [DEVICE_FILTER] Reservation ignored - kernel driver devices cannot be used for direct SPDK access");
-                                println!("⚠️ [DEVICE_FILTER] To use this device with SPDK device plugin, bind it to vfio-pci first");
+                                warn!(device_name = %disk_info.device_name, pci_address = %disk_info.pci_address, "[DEVICE_FILTER] Device is reserved but uses kernel driver!");
+                                warn!("[DEVICE_FILTER] Reservation ignored - kernel driver devices cannot be used for direct SPDK access");
+                                warn!("[DEVICE_FILTER] To use this device with SPDK device plugin, bind it to vfio-pci first");
                                 // Continue with CSI discovery for this device despite reservation
                             } else {
-                                println!("⏭️ [DEVICE_FILTER] Skipping {} ({}, driver: {}) - RESERVED for device plugin/direct SPDK access",
-                                         disk_info.device_name, disk_info.pci_address, disk_info.driver);
+                                info!(device_name = %disk_info.device_name, pci_address = %disk_info.pci_address, driver = %disk_info.driver, "[DEVICE_FILTER] Skipping - RESERVED for device plugin/direct SPDK access");
                                 continue;
                             }
                         }
@@ -148,17 +147,17 @@ impl MinimalDiskService {
                 }
             }
         } else {
-            println!("❌ [DEBUG] No bdev array found in result!");
-            println!("🔧 [DEBUG] bdevs keys: {:?}", bdevs.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            error!("[DEBUG] No bdev array found in result!");
+            debug!(bdevs_keys = ?bdevs.as_object().map(|o| o.keys().collect::<Vec<_>>()), "[DEBUG] bdevs keys");
         }
 
-        println!("✅ [MINIMAL_DISK] Discovered {} local storage disks", disks.len());
+        info!(count = disks.len(), "[MINIMAL_DISK] Discovered local storage disks");
         Ok(disks)
     }
 
     /// Initialize blobstore (LVS) on a disk by PCI address
     pub async fn initialize_blobstore(&self, pci_address: &str) -> Result<String, MinimalStateError> {
-        println!("🔧 [MINIMAL_DISK] Initializing blobstore on disk with PCI: {}", pci_address);
+        debug!(pci_address, "[MINIMAL_DISK] Initializing blobstore on disk");
 
         // Find the disk first - use fast discovery to avoid timeout
         let disk_found = self.discover_local_disks_fast().await?
@@ -171,7 +170,7 @@ impl MinimalDiskService {
 
         // Check if LVS already exists
         if disk_found.blobstore_initialized {
-            println!("✅ [MINIMAL_DISK] LVS already exists: {:?}", disk_found.lvs_name);
+            info!(lvs_name = ?disk_found.lvs_name, "[MINIMAL_DISK] LVS already exists");
             return Ok(disk_found.lvs_name.unwrap_or_else(|| "unknown".to_string()));
         }
 
@@ -199,23 +198,22 @@ impl MinimalDiskService {
             });
         }
 
-        println!("✅ [MINIMAL_DISK] Successfully created LVS: {}", lvs_name);
+        info!(lvs_name = %lvs_name, "[MINIMAL_DISK] Successfully created LVS");
         Ok(lvs_name)
     }
 
     /// Create logical volume on a disk
     pub async fn create_lvol(&self, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
-        println!("🔧 [MINIMAL_DISK] Creating lvol: {} in LVS: {} (size: {} bytes, thin: {})", 
-                 volume_id, lvs_name, size_bytes, thin_provision);
-        
+        debug!(volume_id, lvs_name, size_bytes, thin_provision, "[MINIMAL_DISK] Creating lvol");
+
         let lvol_name = format!("vol_{}", volume_id);
         let size_mib = (size_bytes + 1048575) / 1048576; // Round up to MiB
 
-        println!("🔍 [LVOL_CREATE_DEBUG] Lvol name will be: {}", lvol_name);
-        println!("🔍 [LVOL_CREATE_DEBUG] Size in MiB: {}", size_mib);
-        
+        debug!(lvol_name = %lvol_name, "[LVOL_CREATE_DEBUG] Lvol name will be");
+        debug!(size_mib, "[LVOL_CREATE_DEBUG] Size in MiB");
+
         // Check if lvol already exists before attempting to create
-        println!("🔍 [LVOL_CREATE_DEBUG] Checking if lvol already exists...");
+        debug!("[LVOL_CREATE_DEBUG] Checking if lvol already exists...");
         let check_bdevs = self.call_spdk_rpc(&json!({"method": "bdev_get_bdevs"})).await
             .map_err(|e| MinimalStateError::SpdkRpcError {
                 message: format!("Failed to check existing bdevs: {}", e)
@@ -228,10 +226,7 @@ impl MinimalDiskService {
                         if let Some(alias_str) = alias.as_str() {
                             // Check if alias contains our lvol name
                             if alias_str.ends_with(&lvol_name) {
-                                println!("⚠️ [LVOL_CREATE_DEBUG] Found existing bdev with matching name:");
-                                println!("   Alias: {}", alias_str);
-                                println!("   UUID: {}", bdev["name"].as_str().unwrap_or("unknown"));
-                                println!("   Product: {}", bdev.get("product_name").and_then(|p| p.as_str()).unwrap_or("unknown"));
+                                warn!(alias = alias_str, uuid = bdev["name"].as_str().unwrap_or("unknown"), product = bdev.get("product_name").and_then(|p| p.as_str()).unwrap_or("unknown"), "[LVOL_CREATE_DEBUG] Found existing bdev with matching name");
                             }
                         }
                     }
@@ -239,7 +234,7 @@ impl MinimalDiskService {
                 // Also check the bdev name itself
                 if let Some(name) = bdev["name"].as_str() {
                     if name.contains(&lvol_name) {
-                        println!("⚠️ [LVOL_CREATE_DEBUG] Found bdev with name containing '{}': {}", lvol_name, name);
+                        warn!(lvol_name = %lvol_name, bdev_name = name, "[LVOL_CREATE_DEBUG] Found bdev with name containing lvol_name");
                     }
                 }
             }
@@ -259,9 +254,9 @@ impl MinimalDiskService {
 
         let response = self.call_spdk_rpc(&create_params).await
             .map_err(|e| {
-                println!("❌ [LVOL_CREATE_DEBUG] SPDK returned error: {}", e);
-                MinimalStateError::SpdkRpcError { 
-                    message: format!("Failed to create lvol: {}", e) 
+                error!(error = %e, "[LVOL_CREATE_DEBUG] SPDK returned error");
+                MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to create lvol: {}", e)
                 }
             })?;
 
@@ -271,13 +266,13 @@ impl MinimalDiskService {
             })?
             .to_string();
 
-        println!("✅ [MINIMAL_DISK] Created lvol {} with UUID: {}", lvol_name, lvol_uuid);
+        info!(lvol_name = %lvol_name, lvol_uuid = %lvol_uuid, "[MINIMAL_DISK] Created lvol");
         Ok(lvol_uuid)
     }
 
-    /// Delete logical volume 
+    /// Delete logical volume
     pub async fn delete_lvol(&self, lvol_uuid: &str) -> Result<(), MinimalStateError> {
-        println!("🗑️ [MINIMAL_DISK] Deleting lvol with UUID: {}", lvol_uuid);
+        debug!(lvol_uuid, "[MINIMAL_DISK] Deleting lvol");
 
         let delete_params = json!({
             "method": "bdev_lvol_delete",
@@ -291,13 +286,13 @@ impl MinimalDiskService {
                 message: format!("Failed to delete lvol: {}", e) 
             })?;
 
-        println!("✅ [MINIMAL_DISK] Successfully deleted lvol: {}", lvol_uuid);  
+        info!(lvol_uuid, "[MINIMAL_DISK] Successfully deleted lvol");
         Ok(())
     }
 
     /// Resize logical volume (expand only)
     pub async fn resize_lvol(&self, lvol_uuid: &str, new_size_bytes: u64) -> Result<(), MinimalStateError> {
-        println!("📏 [MINIMAL_DISK] Resizing lvol {} to {} bytes", lvol_uuid, new_size_bytes);
+        info!(lvol_uuid, new_size_bytes, "[MINIMAL_DISK] Resizing lvol");
         
         let size_mib = (new_size_bytes + 1048575) / 1048576; // Round up to MiB
 
@@ -314,14 +309,14 @@ impl MinimalDiskService {
                 message: format!("Failed to resize lvol: {}", e) 
             })?;
 
-        println!("✅ [MINIMAL_DISK] Successfully resized lvol {} to {} MiB", lvol_uuid, size_mib);
+        info!(lvol_uuid, size_mib, "[MINIMAL_DISK] Successfully resized lvol");
         Ok(())
     }
 
     /// Check if a logical volume exists by UUID
     /// Returns Ok(true) if lvol exists, Ok(false) if not found, Err if SPDK query fails
     pub async fn check_lvol_exists(&self, lvol_uuid: &str) -> Result<bool, MinimalStateError> {
-        println!("🔍 [MINIMAL_DISK] Checking if lvol exists: {}", lvol_uuid);
+        debug!(lvol_uuid, "[MINIMAL_DISK] Checking if lvol exists");
 
         // Query SPDK for bdevs with this name
         let get_bdevs_params = json!({
@@ -337,15 +332,16 @@ impl MinimalDiskService {
                 if let Some(result) = response.get("result") {
                     if let Some(bdevs) = result.as_array() {
                         let exists = !bdevs.is_empty();
-                        println!("{} [MINIMAL_DISK] Lvol {} {}",
-                            if exists { "✅" } else { "ℹ️" },
-                            lvol_uuid,
-                            if exists { "exists" } else { "does not exist" });
+                        if exists {
+                            info!(lvol_uuid, "[MINIMAL_DISK] Lvol exists");
+                        } else {
+                            info!(lvol_uuid, "[MINIMAL_DISK] Lvol does not exist");
+                        }
                         return Ok(exists);
                     }
                 }
                 // Empty or missing result means lvol doesn't exist
-                println!("ℹ️ [MINIMAL_DISK] Lvol {} does not exist (empty result)", lvol_uuid);
+                info!(lvol_uuid, "[MINIMAL_DISK] Lvol does not exist (empty result)");
                 Ok(false)
             }
             Err(e) => {
@@ -354,11 +350,11 @@ impl MinimalDiskService {
                 if error_str.contains("No such device") ||
                    error_str.contains("not found") ||
                    error_str.contains("does not exist") {
-                    println!("ℹ️ [MINIMAL_DISK] Lvol {} does not exist (SPDK error: {})", lvol_uuid, error_str);
+                    info!(lvol_uuid, error = %error_str, "[MINIMAL_DISK] Lvol does not exist (SPDK error)");
                     return Ok(false);
                 }
                 // Other errors indicate a real problem (SPDK unreachable, etc.)
-                println!("❌ [MINIMAL_DISK] Failed to check lvol existence: {}", e);
+                error!(error = %e, "[MINIMAL_DISK] Failed to check lvol existence");
                 Err(MinimalStateError::SpdkRpcError {
                     message: format!("Failed to check lvol existence: {}", e)
                 })
@@ -369,7 +365,7 @@ impl MinimalDiskService {
     /// Get health status of a logical volume
     /// Returns detailed health information including underlying disk status
     pub async fn get_lvol_health(&self, lvol_uuid: &str) -> Result<LvolHealthStatus, MinimalStateError> {
-        println!("🏥 [MINIMAL_DISK] Checking health for lvol: {}", lvol_uuid);
+        debug!(lvol_uuid, "[MINIMAL_DISK] Checking health for lvol");
 
         // First check if lvol exists
         let exists = self.check_lvol_exists(lvol_uuid).await?;
@@ -445,11 +441,11 @@ impl MinimalDiskService {
             disk_healthy: Some(lvs_healthy), // For now, assume disk health == LVS health
         };
 
-        println!("{} [MINIMAL_DISK] Health check result: exists={}, healthy={}, message={}",
-            if health_status.healthy { "✅" } else { "⚠️" },
-            health_status.exists,
-            health_status.healthy,
-            health_status.message);
+        if health_status.healthy {
+            info!(exists = health_status.exists, healthy = health_status.healthy, message = %health_status.message, "[MINIMAL_DISK] Health check result");
+        } else {
+            warn!(exists = health_status.exists, healthy = health_status.healthy, message = %health_status.message, "[MINIMAL_DISK] Health check result");
+        }
 
         Ok(health_status)
     }
@@ -459,7 +455,7 @@ impl MinimalDiskService {
     /// Auto-recover SPDK state for physical devices
     async fn auto_recover_spdk_state(&self) -> Result<(), MinimalStateError> {
         let mode = DiscoveryMode::from_env();
-        println!("🔄 [AUTO_RECOVERY] Starting SPDK state recovery for node: {} (mode: {:?})", self.node_name, mode);
+        info!(node = %self.node_name, mode = ?mode, "[AUTO_RECOVERY] Starting SPDK state recovery");
 
         // Discover devices based on mode
         let devices = match mode {
@@ -477,43 +473,40 @@ impl MinimalDiskService {
             }
         };
 
-        println!("🔄 [AUTO_RECOVERY] Found {} physical devices", devices.len());
+        info!(count = devices.len(), "[AUTO_RECOVERY] Found physical devices");
 
         for device in devices {
-            println!("🔄 [AUTO_RECOVERY] Processing device: {} ({}, type: {})",
-                     device.device_name, device.pci_address,
-                     Self::get_device_type(&device.device_name));
-            
+            debug!(device_name = %device.device_name, pci_address = %device.pci_address, device_type = %Self::get_device_type(&device.device_name), "[AUTO_RECOVERY] Processing device");
+
             // Skip system disks
             if self.is_system_disk_physical(&device).await {
-                println!("⏭️ [AUTO_RECOVERY] Skipping system disk: {}", device.device_name);
+                info!(device_name = %device.device_name, "[AUTO_RECOVERY] Skipping system disk");
                 continue;
             }
 
             // Auto-create bdev if device should have SPDK access
             match self.ensure_device_bdev_exists(&device).await {
                 Ok(bdev_name) => {
-                    println!("🔍 [AUTO_RECOVERY] Bdev ready: {}, now checking for existing LVS...", bdev_name);
-                    println!("🔍 [AUTO_RECOVERY] Device details: {} ({}), Size: {}GB", 
-                             device.device_name, device.pci_address, device.size_bytes / (1024*1024*1024));
-                    
+                    debug!(bdev_name = %bdev_name, "[AUTO_RECOVERY] Bdev ready, now checking for existing LVS...");
+                    debug!(device_name = %device.device_name, pci_address = %device.pci_address, size_gb = device.size_bytes / (1024*1024*1024), "[AUTO_RECOVERY] Device details");
+
                     // CRITICAL: Wait for SPDK to auto-discover existing LVS from this bdev
                     // In modern SPDK, the lvol module asynchronously examines new bdevs for LVS
                     // This is IDEMPOTENT - if auto-discovery fails, we explicitly load the LVS
                     // Timeout is 10 seconds to handle slow disks or examination delays
                     if let Some(lvs_name) = self.wait_for_lvs_discovery(&bdev_name, 10).await {
-                        println!("✅ [AUTO_RECOVERY] Auto-discovered existing LVS: {} on {}", lvs_name, bdev_name);
+                        info!(lvs_name = %lvs_name, bdev_name = %bdev_name, "[AUTO_RECOVERY] Auto-discovered existing LVS");
                     } else {
-                        println!("ℹ️ [AUTO_RECOVERY] No LVS found on bdev: {} (disk is clean)", bdev_name);
+                        info!(bdev_name = %bdev_name, "[AUTO_RECOVERY] No LVS found on bdev (disk is clean)");
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ [AUTO_RECOVERY] Failed to ensure bdev for {}: {}", device.device_name, e);
+                    warn!(device_name = %device.device_name, error = %e, "[AUTO_RECOVERY] Failed to ensure bdev");
                 }
             }
         }
 
-        println!("✅ [AUTO_RECOVERY] SPDK state recovery completed");
+        info!("[AUTO_RECOVERY] SPDK state recovery completed");
         Ok(())
     }
 
@@ -521,7 +514,7 @@ impl MinimalDiskService {
     async fn discover_physical_nvme_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
         use std::process::Command;
 
-        println!("🔍 [PHYSICAL_DISCOVERY] Scanning for NVMe devices via lspci...");
+        debug!("[PHYSICAL_DISCOVERY] Scanning for NVMe devices via lspci...");
 
         let output = Command::new("lspci")
             .args(["-D", "-d", "::0108"]) // NVMe class code
@@ -538,7 +531,7 @@ impl MinimalDiskService {
         let mut devices = Vec::new();
         for line in stdout.lines() {
             if let Some(pci_addr) = line.split_whitespace().next() {
-                println!("🔍 [PHYSICAL_DISCOVERY] Found NVMe device: {}", pci_addr);
+                debug!(pci_addr, "[PHYSICAL_DISCOVERY] Found NVMe device");
 
                 // Get device info
                 if let Ok(device_info) = self.get_physical_device_info(pci_addr).await {
@@ -547,22 +540,22 @@ impl MinimalDiskService {
             }
         }
 
-        println!("✅ [PHYSICAL_DISCOVERY] Found {} NVMe devices", devices.len());
+        info!(count = devices.len(), "[PHYSICAL_DISCOVERY] Found NVMe devices");
         Ok(devices)
     }
 
     /// Discover all block devices with fallback to NVMe-only on failure
     async fn discover_all_block_devices_safe(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
-        println!("🔍 [UNIFIED_DISCOVERY] Attempting to discover all block devices...");
+        debug!("[UNIFIED_DISCOVERY] Attempting to discover all block devices...");
 
         match self.discover_all_block_devices().await {
             Ok(devices) => {
-                println!("✅ [UNIFIED_DISCOVERY] Successfully discovered {} devices", devices.len());
+                info!(count = devices.len(), "[UNIFIED_DISCOVERY] Successfully discovered devices");
                 Ok(devices)
             }
             Err(e) => {
-                println!("⚠️ [UNIFIED_DISCOVERY] Failed: {}", e);
-                println!("🔄 [UNIFIED_DISCOVERY] Falling back to NVMe-only discovery");
+                warn!(error = %e, "[UNIFIED_DISCOVERY] Failed");
+                info!("[UNIFIED_DISCOVERY] Falling back to NVMe-only discovery");
 
                 // Fallback to existing NVMe-only path
                 self.discover_physical_nvme_devices().await
@@ -574,7 +567,7 @@ impl MinimalDiskService {
     async fn discover_all_block_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
         use std::fs;
 
-        println!("🔍 [UNIFIED_DISCOVERY] Scanning /sys/block for all block devices...");
+        debug!("[UNIFIED_DISCOVERY] Scanning /sys/block for all block devices...");
 
         let mut devices = Vec::new();
         let mut nvme_count = 0;
@@ -616,29 +609,24 @@ impl MinimalDiskService {
                 other_count += 1;
                 "IDE"
             } else {
-                println!("⏭️ [UNIFIED_DISCOVERY] Skipping unknown device type: {}", device_name);
+                debug!(device_name = %device_name, "[UNIFIED_DISCOVERY] Skipping unknown device type");
                 continue;
             };
 
-            println!("🔍 [UNIFIED_DISCOVERY] Found {} device: {}", device_type, device_name);
+            debug!(device_type, device_name = %device_name, "[UNIFIED_DISCOVERY] Found device");
 
             match self.get_block_device_info(&device_name).await {
                 Ok(device_info) => {
-                    println!("✅ [UNIFIED_DISCOVERY]   {} - {} ({} GB, driver: {})",
-                             device_name, device_info.model,
-                             device_info.size_bytes / (1024*1024*1024),
-                             device_info.driver);
+                    info!(device_name = %device_name, model = %device_info.model, size_gb = device_info.size_bytes / (1024*1024*1024), driver = %device_info.driver, "[UNIFIED_DISCOVERY] Device info");
                     devices.push(device_info);
                 }
                 Err(e) => {
-                    println!("⚠️ [UNIFIED_DISCOVERY]   Failed to get info for {}: {}",
-                             device_name, e);
+                    warn!(device_name = %device_name, error = %e, "[UNIFIED_DISCOVERY] Failed to get info");
                 }
             }
         }
 
-        println!("✅ [UNIFIED_DISCOVERY] Summary: {} NVMe, {} SCSI/SATA, {} other = {} total",
-                 nvme_count, scsi_count, other_count, devices.len());
+        info!(nvme_count, scsi_count, other_count, total = devices.len(), "[UNIFIED_DISCOVERY] Summary");
 
         Ok(devices)
     }
@@ -647,7 +635,7 @@ impl MinimalDiskService {
     async fn discover_scsi_devices(&self) -> Result<Vec<PhysicalDevice>, MinimalStateError> {
         use std::fs;
 
-        println!("🔍 [SCSI_DISCOVERY] Scanning for SCSI/SATA devices...");
+        debug!("[SCSI_DISCOVERY] Scanning for SCSI/SATA devices...");
 
         let mut devices = Vec::new();
 
@@ -668,22 +656,20 @@ impl MinimalDiskService {
                 continue;
             }
 
-            println!("🔍 [SCSI_DISCOVERY] Found SCSI/SATA device: {}", device_name);
+            debug!(device_name = %device_name, "[SCSI_DISCOVERY] Found SCSI/SATA device");
 
             match self.get_block_device_info(&device_name).await {
                 Ok(device_info) => {
-                    println!("✅ [SCSI_DISCOVERY]   {} - {} ({} GB)",
-                             device_name, device_info.model,
-                             device_info.size_bytes / (1024*1024*1024));
+                    info!(device_name = %device_name, model = %device_info.model, size_gb = device_info.size_bytes / (1024*1024*1024), "[SCSI_DISCOVERY] Device info");
                     devices.push(device_info);
                 }
                 Err(e) => {
-                    println!("⚠️ [SCSI_DISCOVERY]   Failed to get info: {}", e);
+                    warn!(error = %e, "[SCSI_DISCOVERY] Failed to get info");
                 }
             }
         }
 
-        println!("✅ [SCSI_DISCOVERY] Found {} SCSI/SATA devices", devices.len());
+        info!(count = devices.len(), "[SCSI_DISCOVERY] Found SCSI/SATA devices");
         Ok(devices)
     }
 
@@ -801,8 +787,7 @@ impl MinimalDiskService {
     /// Strategy for SATA devices:
     /// - Always use io_uring (SPDK userspace only supports NVMe)
     async fn ensure_device_bdev_exists(&self, device: &PhysicalDevice) -> Result<String, MinimalStateError> {
-        println!("🔄 [BDEV_RECOVERY] Ensuring bdev exists for device: {} (driver: {})",
-                 device.device_name, device.driver);
+        debug!(device_name = %device.device_name, driver = %device.driver, "[BDEV_RECOVERY] Ensuring bdev exists for device");
 
         let correlation_id = format!("{:08x}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -814,7 +799,7 @@ impl MinimalDiskService {
 
         // For NVMe devices: try SPDK userspace driver first for maximum performance
         if is_nvme_device {
-            println!("🚀 [BDEV_RECOVERY:{}] NVMe device detected, attempting SPDK userspace driver first", correlation_id);
+            debug!(correlation_id = %correlation_id, "[BDEV_RECOVERY] NVMe device detected, attempting SPDK userspace driver first");
 
             // Check if device is already bound to userspace driver (vfio-pci or uio)
             if device.driver == "vfio-pci" || device.driver == "uio_pci_generic" || device.driver == "igb_uio" {
@@ -822,7 +807,7 @@ impl MinimalDiskService {
                 match self.try_spdk_nvme_attach(device, &correlation_id).await {
                     Ok(bdev_name) => return Ok(bdev_name),
                     Err(e) => {
-                        println!("⚠️ [BDEV_RECOVERY:{}] SPDK NVMe attach failed: {}", correlation_id, e);
+                        warn!(correlation_id = %correlation_id, error = %e, "[BDEV_RECOVERY] SPDK NVMe attach failed");
                         // Can't fall back to io_uring since device is unbound from kernel
                         return Err(e);
                     }
@@ -831,14 +816,14 @@ impl MinimalDiskService {
 
             // Device is unbound, try to bind to userspace driver
             if device.driver == "unbound" || device.driver == "unknown" {
-                println!("🔧 [BDEV_RECOVERY:{}] Device is unbound, attempting to bind to userspace driver", correlation_id);
+                debug!(correlation_id = %correlation_id, "[BDEV_RECOVERY] Device is unbound, attempting to bind to userspace driver");
                 match self.try_unbind_and_attach_nvme(device, &correlation_id).await {
                     Ok(bdev_name) => {
-                        println!("✅ [BDEV_RECOVERY:{}] Successfully bound and attached unbound device: {}", correlation_id, bdev_name);
+                        info!(correlation_id = %correlation_id, bdev_name = %bdev_name, "[BDEV_RECOVERY] Successfully bound and attached unbound device");
                         return Ok(bdev_name);
                     }
                     Err(e) => {
-                        println!("⚠️ [BDEV_RECOVERY:{}] Failed to bind unbound device: {}, skipping", correlation_id, e);
+                        warn!(correlation_id = %correlation_id, error = %e, "[BDEV_RECOVERY] Failed to bind unbound device, skipping");
                         return Err(e);
                     }
                 }
@@ -853,7 +838,7 @@ impl MinimalDiskService {
                     for bdev in bdev_list {
                         if let Some(name) = bdev["name"].as_str() {
                             if name.starts_with(&spdk_bdev_name) || name.contains(&device.pci_address.replace(":", "_")) {
-                                println!("✅ [BDEV_RECOVERY:{}] SPDK NVMe bdev already exists: {}", correlation_id, name);
+                                info!(correlation_id = %correlation_id, bdev_name = name, "[BDEV_RECOVERY] SPDK NVMe bdev already exists");
                                 return Ok(name.to_string());
                             }
                         }
@@ -863,21 +848,21 @@ impl MinimalDiskService {
                 // Try to unbind from kernel and bind to userspace driver
                 match self.try_unbind_and_attach_nvme(device, &correlation_id).await {
                     Ok(bdev_name) => {
-                        println!("✅ [BDEV_RECOVERY:{}] Successfully using SPDK userspace NVMe driver: {}", correlation_id, bdev_name);
+                        info!(correlation_id = %correlation_id, bdev_name = %bdev_name, "[BDEV_RECOVERY] Successfully using SPDK userspace NVMe driver");
                         return Ok(bdev_name);
                     }
                     Err(e) => {
-                        println!("⚠️ [BDEV_RECOVERY:{}] SPDK userspace driver failed: {}, falling back to io_uring", correlation_id, e);
+                        warn!(correlation_id = %correlation_id, error = %e, "[BDEV_RECOVERY] SPDK userspace driver failed, falling back to io_uring");
 
                         // Rebind to kernel nvme driver for io_uring fallback
                         // After userspace SPDK fails, device is bound to uio_pci_generic which doesn't create /dev/nvmeX
                         // We need to rebind to kernel nvme driver so /dev/nvmeXnY exists for io_uring
-                        println!("🔄 [BDEV_RECOVERY:{}] Rebinding device to kernel nvme driver for io_uring fallback", correlation_id);
+                        info!(correlation_id = %correlation_id, "[BDEV_RECOVERY] Rebinding device to kernel nvme driver for io_uring fallback");
 
                         if let Err(rebind_err) = self.rebind_to_kernel_driver(&device.pci_address, "nvme", &correlation_id).await {
-                            println!("❌ [BDEV_RECOVERY:{}] Failed to rebind to kernel driver: {}, io_uring fallback may fail", correlation_id, rebind_err);
+                            error!(correlation_id = %correlation_id, error = %rebind_err, "[BDEV_RECOVERY] Failed to rebind to kernel driver, io_uring fallback may fail");
                         } else {
-                            println!("✅ [BDEV_RECOVERY:{}] Successfully rebound to kernel nvme driver", correlation_id);
+                            info!(correlation_id = %correlation_id, "[BDEV_RECOVERY] Successfully rebound to kernel nvme driver");
                         }
                         // Fall through to io_uring fallback
                     }
@@ -896,15 +881,15 @@ impl MinimalDiskService {
                 for bdev in bdev_list {
                     if let Some(name) = bdev["name"].as_str() {
                         if name == uring_bdev_name {
-                            println!("✅ [BDEV_RECOVERY:{}] uring bdev already exists: {}", correlation_id, uring_bdev_name);
+                            info!(correlation_id = %correlation_id, uring_bdev_name = %uring_bdev_name, "[BDEV_RECOVERY] uring bdev already exists");
                             return Ok(uring_bdev_name);
                         }
                     }
                 }
             }
 
-            println!("🔧 [BDEV_RECOVERY:{}] Creating io_uring bdev: {} (fallback path)", correlation_id, uring_bdev_name);
-            println!("🔧 [BDEV_RECOVERY:{}] Device: /dev/{}, PCI: {}", correlation_id, device.device_name, device.pci_address);
+            debug!(correlation_id = %correlation_id, uring_bdev_name = %uring_bdev_name, "[BDEV_RECOVERY] Creating io_uring bdev (fallback path)");
+            debug!(correlation_id = %correlation_id, device_path = format!("/dev/{}", device.device_name), pci_address = %device.pci_address, "[BDEV_RECOVERY] Device details");
 
             let device_path = format!("/dev/{}", device.device_name);
 
@@ -919,15 +904,15 @@ impl MinimalDiskService {
 
             match self.call_spdk_rpc(&uring_params).await {
                 Ok(_) => {
-                    println!("✅ [BDEV_RECOVERY:{}] Successfully created uring bdev: {}", correlation_id, uring_bdev_name);
+                    info!(correlation_id = %correlation_id, uring_bdev_name = %uring_bdev_name, "[BDEV_RECOVERY] Successfully created uring bdev");
                     return Ok(uring_bdev_name);
                 }
                 Err(e) if e.to_string().contains("File exists") => {
-                    println!("✅ [BDEV_RECOVERY:{}] uring bdev already exists: {}", correlation_id, uring_bdev_name);
+                    info!(correlation_id = %correlation_id, uring_bdev_name = %uring_bdev_name, "[BDEV_RECOVERY] uring bdev already exists");
                     return Ok(uring_bdev_name);
                 }
                 Err(e) => {
-                    println!("❌ [BDEV_RECOVERY:{}] Failed to create uring bdev: {}", correlation_id, e);
+                    error!(correlation_id = %correlation_id, error = %e, "[BDEV_RECOVERY] Failed to create uring bdev");
                     return Err(MinimalStateError::SpdkRpcError {
                         message: format!("Failed to create uring bdev: {}", e)
                     });
@@ -936,8 +921,7 @@ impl MinimalDiskService {
         }
 
         // Device has unknown/unbound driver and is not suitable for io_uring
-        println!("⏭️ [BDEV_RECOVERY:{}] Skipping device with unsupported driver: {} (driver: {})",
-                 correlation_id, device.device_name, device.driver);
+        info!(correlation_id = %correlation_id, device_name = %device.device_name, driver = %device.driver, "[BDEV_RECOVERY] Skipping device with unsupported driver");
         Err(MinimalStateError::InternalError {
             message: format!("Device {} has unsupported driver: {}", device.device_name, device.driver)
         })
