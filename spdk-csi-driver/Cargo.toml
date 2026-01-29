@@ -72,7 +72,6 @@ cbc = { version = "0.1", features = ["alloc"] }  # CBC mode
 hmac = "0.12"  # HMAC for Kerberos integrity
 pbkdf2 = { version = "0.12", features = ["simple"] }  # Key derivation
 filetime = "0.2.26"
-base64 = "0.22"  # Base64 encoding for generation metadata xattr transport
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

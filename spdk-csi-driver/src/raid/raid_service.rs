@@ -26,6 +26,7 @@ pub async fn create_raid1_bdev(
             "name": raid_name,
             "raid_level": "1",
             "base_bdevs": base_bdevs,
+            "superblock": true,
         }
     });
 

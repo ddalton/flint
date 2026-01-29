@@ -38,7 +38,6 @@ COPY lvol-flush.patch /tmp/
 COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
-COPY lvol-xattr-rpc.patch /tmp/
 
 # Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -59,9 +58,6 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
-    # Apply lvol xattr RPC support (enables generation tracking for replica consistency)
-    patch -p1 < /tmp/lvol-xattr-rpc.patch && \
-    echo "✅ Lvol xattr RPC support applied (bdev_lvol_set/get/remove_xattr)" && \
     rm /tmp/*.patch && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
     make -j$(nproc)

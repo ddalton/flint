@@ -24,10 +24,6 @@ pub struct ReplicaInfo {
     pub target_ip: Option<String>,
     pub target_port: Option<u16>,
     pub health: String, // "online", "degraded", "failed"
-    #[serde(default)]
-    pub generation: u64, // Generation number for tracking replica consistency (0 = uninitialized)
-    #[serde(default)]
-    pub generation_timestamp: u64, // Unix timestamp when generation was last updated
 }
 
 /// Disk information from SPDK (no CRD needed)
