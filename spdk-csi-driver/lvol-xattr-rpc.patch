@@ -1,0 +1,326 @@
+From: SPDK CSI Driver <spdk-csi@flint.local>
+Date: Wed, 29 Jan 2026 00:00:00 +0000
+Subject: [PATCH] Add RPC methods for lvol blob xattr operations
+
+This patch adds three new RPC methods to expose blob extended attributes
+(xattrs) for logical volumes:
+- bdev_lvol_set_xattr: Set an xattr on an lvol
+- bdev_lvol_get_xattr: Get an xattr from an lvol
+- bdev_lvol_remove_xattr: Remove an xattr from an lvol
+
+These methods enable storing custom metadata (like generation numbers
+for replica consistency tracking) in the blob metadata without affecting
+the data path or volume expansion operations.
+
+Use case: CSI drivers can use xattrs to track volume generations across
+replicas to detect split-brain scenarios and stale replicas after node
+restarts in distributed storage systems.
+
+Signed-off-by: SPDK CSI Driver <spdk-csi@flint.local>
+---
+ module/bdev/lvol/vbdev_lvol_rpc.c | 241 ++++++++++++++++++++++++++++++
+ 1 file changed, 241 insertions(+)
+
+diff --git a/module/bdev/lvol/vbdev_lvol_rpc.c b/module/bdev/lvol/vbdev_lvol_rpc.c
+index 1234567..abcdefg 100644
+--- a/module/bdev/lvol/vbdev_lvol_rpc.c
++++ b/module/bdev/lvol/vbdev_lvol_rpc.c
+@@ -1655,3 +1655,244 @@ SPDK_RPC_REGISTER("bdev_lvol_check_bad_blocks", rpc_bdev_lvol_check_bad_blocks,
+ 		  SPDK_RPC_RUNTIME)
+ SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_lvol_check_bad_blocks, check_lvol_bad_blocks)
+ #endif
++
++/* ============================================================================
++ * XATTR RPC METHODS FOR LVOL METADATA
++ * ============================================================================
++ * These methods expose blob xattr operations for logical volumes, enabling
++ * custom metadata storage (e.g., generation tracking for replica consistency)
++ * without impacting the data path or volume expansion.
++ * ========================================================================= */
++
++struct rpc_bdev_lvol_set_xattr {
++	char *name;           /* lvol bdev name */
++	char *xattr_name;     /* xattr key */
++	char *xattr_value;    /* xattr value (base64 encoded) */
++};
++
++static void
++free_rpc_bdev_lvol_set_xattr(struct rpc_bdev_lvol_set_xattr *req)
++{
++	free(req->name);
++	free(req->xattr_name);
++	free(req->xattr_value);
++}
++
++static const struct spdk_json_object_decoder rpc_bdev_lvol_set_xattr_decoders[] = {
++	{"name", offsetof(struct rpc_bdev_lvol_set_xattr, name), spdk_json_decode_string},
++	{"xattr_name", offsetof(struct rpc_bdev_lvol_set_xattr, xattr_name), spdk_json_decode_string},
++	{"xattr_value", offsetof(struct rpc_bdev_lvol_set_xattr, xattr_value), spdk_json_decode_string},
++};
++
++static void
++rpc_bdev_lvol_set_xattr_cb(void *cb_arg, int lvolerrno)
++{
++	struct spdk_jsonrpc_request *request = cb_arg;
++
++	if (lvolerrno != 0) {
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
++						 spdk_strerror(-lvolerrno));
++		return;
++	}
++
++	spdk_jsonrpc_send_bool_response(request, true);
++}
++
++static void
++rpc_bdev_lvol_set_xattr(struct spdk_jsonrpc_request *request,
++			const struct spdk_json_val *params)
++{
++	struct rpc_bdev_lvol_set_xattr req = {};
++	struct spdk_bdev *bdev;
++	struct spdk_lvol *lvol;
++	void *decoded_value = NULL;
++	size_t decoded_len;
++	int rc;
++
++	if (spdk_json_decode_object(params, rpc_bdev_lvol_set_xattr_decoders,
++				    SPDK_COUNTOF(rpc_bdev_lvol_set_xattr_decoders),
++				    &req)) {
++		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
++						 "spdk_json_decode_object failed");
++		goto cleanup;
++	}
++
++	if (req.name == NULL || req.xattr_name == NULL || req.xattr_value == NULL) {
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "Missing required parameter");
++		goto cleanup;
++	}
++
++	bdev = spdk_bdev_get_by_name(req.name);
++	if (bdev == NULL) {
++		SPDK_ERRLOG("bdev '%s' not found\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -ENODEV, "bdev not found");
++		goto cleanup;
++	}
++
++	lvol = vbdev_lvol_get_from_bdev(bdev);
++	if (lvol == NULL) {
++		SPDK_ERRLOG("'%s' is not an lvol bdev\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "not an lvol bdev");
++		goto cleanup;
++	}
++
++	/* Decode base64 value */
++	decoded_value = spdk_base64_decode(req.xattr_value, &decoded_len);
++	if (decoded_value == NULL) {
++		SPDK_ERRLOG("Failed to decode base64 xattr value\n");
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "invalid base64 value");
++		goto cleanup;
++	}
++
++	/* Set xattr on the underlying blob */
++	rc = spdk_blob_set_xattr(lvol->blob, req.xattr_name, decoded_value, decoded_len);
++	if (rc != 0) {
++		SPDK_ERRLOG("Failed to set xattr '%s': %s\n", req.xattr_name, spdk_strerror(-rc));
++		free(decoded_value);
++		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
++		goto cleanup;
++	}
++
++	free(decoded_value);
++
++	/* Persist the blob metadata */
++	spdk_blob_sync_md(lvol->blob, rpc_bdev_lvol_set_xattr_cb, request);
++	free_rpc_bdev_lvol_set_xattr(&req);
++	return;
++
++cleanup:
++	free_rpc_bdev_lvol_set_xattr(&req);
++}
++SPDK_RPC_REGISTER("bdev_lvol_set_xattr", rpc_bdev_lvol_set_xattr, SPDK_RPC_RUNTIME)
++
++/* ============================================================================
++ * GET XATTR
++ * ========================================================================= */
++
++struct rpc_bdev_lvol_get_xattr {
++	char *name;
++	char *xattr_name;
++};
++
++static void
++free_rpc_bdev_lvol_get_xattr(struct rpc_bdev_lvol_get_xattr *req)
++{
++	free(req->name);
++	free(req->xattr_name);
++}
++
++static const struct spdk_json_object_decoder rpc_bdev_lvol_get_xattr_decoders[] = {
++	{"name", offsetof(struct rpc_bdev_lvol_get_xattr, name), spdk_json_decode_string},
++	{"xattr_name", offsetof(struct rpc_bdev_lvol_get_xattr, xattr_name), spdk_json_decode_string},
++};
++
++static void
++rpc_bdev_lvol_get_xattr(struct spdk_jsonrpc_request *request,
++			const struct spdk_json_val *params)
++{
++	struct rpc_bdev_lvol_get_xattr req = {};
++	struct spdk_bdev *bdev;
++	struct spdk_lvol *lvol;
++	const void *value;
++	size_t value_len;
++	char *encoded_value;
++	struct spdk_json_write_ctx *w;
++	int rc;
++
++	if (spdk_json_decode_object(params, rpc_bdev_lvol_get_xattr_decoders,
++				    SPDK_COUNTOF(rpc_bdev_lvol_get_xattr_decoders),
++				    &req)) {
++		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
++						 "spdk_json_decode_object failed");
++		goto cleanup;
++	}
++
++	if (req.name == NULL || req.xattr_name == NULL) {
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "Missing required parameter");
++		goto cleanup;
++	}
++
++	bdev = spdk_bdev_get_by_name(req.name);
++	if (bdev == NULL) {
++		SPDK_ERRLOG("bdev '%s' not found\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -ENODEV, "bdev not found");
++		goto cleanup;
++	}
++
++	lvol = vbdev_lvol_get_from_bdev(bdev);
++	if (lvol == NULL) {
++		SPDK_ERRLOG("'%s' is not an lvol bdev\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "not an lvol bdev");
++		goto cleanup;
++	}
++
++	rc = spdk_blob_get_xattr_value(lvol->blob, req.xattr_name, &value, &value_len);
++	if (rc != 0) {
++		SPDK_DEBUGLOG(lvol_rpc, "xattr '%s' not found on lvol '%s'\n", req.xattr_name, req.name);
++		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
++		goto cleanup;
++	}
++
++	/* Encode value as base64 for JSON transport */
++	encoded_value = spdk_base64_encode(value, value_len);
++	if (encoded_value == NULL) {
++		SPDK_ERRLOG("Failed to base64 encode xattr value\n");
++		spdk_jsonrpc_send_error_response(request, -ENOMEM, "base64 encode failed");
++		goto cleanup;
++	}
++
++	w = spdk_jsonrpc_begin_result(request);
++	spdk_json_write_object_begin(w);
++	spdk_json_write_named_string(w, "name", req.name);
++	spdk_json_write_named_string(w, "xattr_name", req.xattr_name);
++	spdk_json_write_named_string(w, "xattr_value", encoded_value);
++	spdk_json_write_named_uint64(w, "value_len", value_len);
++	spdk_json_write_object_end(w);
++	spdk_jsonrpc_end_result(request, w);
++
++	free(encoded_value);
++
++cleanup:
++	free_rpc_bdev_lvol_get_xattr(&req);
++}
++SPDK_RPC_REGISTER("bdev_lvol_get_xattr", rpc_bdev_lvol_get_xattr, SPDK_RPC_RUNTIME)
++
++/* ============================================================================
++ * REMOVE XATTR
++ * ========================================================================= */
++
++struct rpc_bdev_lvol_remove_xattr {
++	char *name;
++	char *xattr_name;
++};
++
++static void
++free_rpc_bdev_lvol_remove_xattr(struct rpc_bdev_lvol_remove_xattr *req)
++{
++	free(req->name);
++	free(req->xattr_name);
++}
++
++static const struct spdk_json_object_decoder rpc_bdev_lvol_remove_xattr_decoders[] = {
++	{"name", offsetof(struct rpc_bdev_lvol_remove_xattr, name), spdk_json_decode_string},
++	{"xattr_name", offsetof(struct rpc_bdev_lvol_remove_xattr, xattr_name), spdk_json_decode_string},
++};
++
++static void
++rpc_bdev_lvol_remove_xattr_cb(void *cb_arg, int lvolerrno)
++{
++	struct spdk_jsonrpc_request *request = cb_arg;
++
++	if (lvolerrno != 0) {
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
++						 spdk_strerror(-lvolerrno));
++		return;
++	}
++
++	spdk_jsonrpc_send_bool_response(request, true);
++}
++
++static void
++rpc_bdev_lvol_remove_xattr(struct spdk_jsonrpc_request *request,
++			   const struct spdk_json_val *params)
++{
++	struct rpc_bdev_lvol_remove_xattr req = {};
++	struct spdk_bdev *bdev;
++	struct spdk_lvol *lvol;
++	int rc;
++
++	if (spdk_json_decode_object(params, rpc_bdev_lvol_remove_xattr_decoders,
++				    SPDK_COUNTOF(rpc_bdev_lvol_remove_xattr_decoders),
++				    &req)) {
++		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
++						 "spdk_json_decode_object failed");
++		goto cleanup;
++	}
++
++	if (req.name == NULL || req.xattr_name == NULL) {
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "Missing required parameter");
++		goto cleanup;
++	}
++
++	bdev = spdk_bdev_get_by_name(req.name);
++	if (bdev == NULL) {
++		SPDK_ERRLOG("bdev '%s' not found\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -ENODEV, "bdev not found");
++		goto cleanup;
++	}
++
++	lvol = vbdev_lvol_get_from_bdev(bdev);
++	if (lvol == NULL) {
++		SPDK_ERRLOG("'%s' is not an lvol bdev\n", req.name);
++		spdk_jsonrpc_send_error_response(request, -EINVAL, "not an lvol bdev");
++		goto cleanup;
++	}
++
++	rc = spdk_blob_remove_xattr(lvol->blob, req.xattr_name);
++	if (rc != 0) {
++		SPDK_ERRLOG("Failed to remove xattr '%s': %s\n", req.xattr_name, spdk_strerror(-rc));
++		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
++		goto cleanup;
++	}
++
++	/* Persist the blob metadata */
++	spdk_blob_sync_md(lvol->blob, rpc_bdev_lvol_remove_xattr_cb, request);
++	free_rpc_bdev_lvol_remove_xattr(&req);
++	return;
++
++cleanup:
++	free_rpc_bdev_lvol_remove_xattr(&req);
++}
++SPDK_RPC_REGISTER("bdev_lvol_remove_xattr", rpc_bdev_lvol_remove_xattr, SPDK_RPC_RUNTIME)
+-- 
+2.43.0
+
