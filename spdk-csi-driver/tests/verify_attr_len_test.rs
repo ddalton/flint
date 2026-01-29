@@ -8,9 +8,10 @@ fn test_attr_vals_byte_count() {
     // The kernel's verify_attr_len() checks this and returns -EIO if mismatch
     
     // Count bytes from server logs for attrs {1, 3, 4, 8, 20, 33, 35, 36, 37, 41, 45, 47, 52, 53, 55}:
-    // Attr 1 (TYPE): 4 bytes
-    // Attr 3 (SIZE): 8 bytes  
-    // Attr 4 (CHANGE): 8 bytes
+    // Per RFC 5661 Section 5.8:
+    // Attr 1 (TYPE): nfs_ftype4 (enum) = 4 bytes
+    // Attr 3 (CHANGE): changeid4 (uint64) = 8 bytes
+    // Attr 4 (SIZE): uint64 = 8 bytes
     // Attr 8 (FSID): 16 bytes
     // Attr 20 (FILEID): 8 bytes
     // Attr 33 (MODE): 4 bytes
@@ -31,7 +32,7 @@ fn test_attr_vals_byte_count() {
     let expected_total = 4+8+8+16+8+4+4+8+8+8+8+12+12+12+8;
     assert_eq!(expected_total, 128, "Expected attribute bytes should sum to 128");
     
-    println!("✅ Attribute byte count verified: 116 bytes");
+    println!("✅ Attribute byte count verified: 128 bytes");
     println!("   This matches what we declare in attr_vals_len field");
     println!("   If kernel's verify_attr_len fails, issue is elsewhere");
 }
