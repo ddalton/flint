@@ -125,7 +125,7 @@ impl SpdkNative {
         let _test_conn = UnixStream::connect(&socket_path).await
             .map_err(|e| anyhow!("Failed to connect to SPDK socket {}: {}", socket_path, e))?;
         
-        println!("✅ [SPDK_RPC] Connected to SPDK at {}", socket_path);
+        tracing::info!("[SPDK_RPC] Connected to SPDK at {}", socket_path);
         
         Ok(SpdkNative {
             socket_path,
@@ -135,28 +135,28 @@ impl SpdkNative {
     
     /// Call SPDK RPC method (matches the Call method from Go client)
     async fn call_rpc(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        eprintln!("🔍 [SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
-        
+        tracing::trace!("[SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
+
         // Handle empty parameters like official SPDK CGO bridge
         // "Force Go client to skip 'params' parameter in JSON-RPC call"
         let normalized_params = match &params {
             Some(Value::Object(map)) if map.is_empty() => {
-                eprintln!("   Normalized empty object {{}} to None");
+                tracing::trace!("   Normalized empty object {{}} to None");
                 None // Empty object -> nil
             }
             Some(Value::Array(arr)) if arr.is_empty() => {
-                eprintln!("   Normalized empty array [] to None");
+                tracing::trace!("   Normalized empty array [] to None");
                 None  // Empty array -> nil
             }
             other => {
                 if other.is_some() {
-                    eprintln!("   Keeping params as-is (not empty): {:?}", other);
+                    tracing::trace!("   Keeping params as-is (not empty): {:?}", other);
                 }
                 other.clone() // Fix: use clone() instead of cloned()
             }
         };
-        
-        eprintln!("🔍 [SPDK_NATIVE] After normalization: {:?}", normalized_params);
+
+        tracing::trace!("[SPDK_NATIVE] After normalization: {:?}", normalized_params);
         
         // Validate parameters according to SPDK Go client rules
         if let Some(ref p) = normalized_params {
@@ -196,9 +196,9 @@ impl SpdkNative {
         
         let response: RpcResponse = serde_json::from_str(&response_line).map_err(|e| {
             // Log on error to help troubleshoot RPC issues
-            eprintln!("❌ [SPDK_RPC] Failed to parse response for method '{}'", method);
-            eprintln!("   Error: {}", e);
-            eprintln!("   Response (first 500 chars): {}", 
+            tracing::error!("[SPDK_RPC] Failed to parse response for method '{}'", method);
+            tracing::error!("   Error: {}", e);
+            tracing::error!("   Response (first 500 chars): {}",
                      if response_line.len() > 500 { &response_line[..500] } else { &response_line });
             e
         })?;
@@ -219,7 +219,7 @@ impl SpdkNative {
             Some(result) => Ok(result),
             None => {
                 // Return null as a valid result (like Go client does)
-                println!("🔧 [SPDK_RPC] Received null result - returning Value::Null");
+                tracing::trace!("[SPDK_RPC] Received null result - returning Value::Null");
                 Ok(Value::Null)
             }
         }
@@ -445,7 +445,7 @@ impl SpdkNative {
 
 impl Drop for SpdkNative {
     fn drop(&mut self) {
-        println!("🔌 [SPDK_RPC] Closing RPC client");
+        tracing::debug!("[SPDK_RPC] Closing RPC client");
     }
 }
 

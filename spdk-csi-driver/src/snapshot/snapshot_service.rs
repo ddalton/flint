@@ -42,7 +42,7 @@ impl SnapshotService {
         lvol_name: &str,
         snapshot_name: &str,
     ) -> Result<CreateSnapshotResponse, MinimalStateError> {
-        println!("📸 [SNAPSHOT_SERVICE] Creating snapshot: {} from lvol: {}", 
+        tracing::info!("[SNAPSHOT_SERVICE] Creating snapshot: {} from lvol: {}",
                  snapshot_name, lvol_name);
 
         // Clean socket path (remove unix:// prefix if present)
@@ -72,7 +72,7 @@ impl SnapshotService {
             })?
             .to_string();
 
-        println!("✅ [SNAPSHOT_SERVICE] Snapshot created with UUID: {}", snapshot_uuid);
+        tracing::info!("[SNAPSHOT_SERVICE] Snapshot created with UUID: {}", snapshot_uuid);
 
         // Get snapshot details for response
         let snapshot_info = self.get_snapshot_details(&snapshot_uuid).await?;
@@ -103,7 +103,7 @@ impl SnapshotService {
         snapshot_name: &str,
         clone_name: &str,
     ) -> Result<CloneSnapshotResponse, MinimalStateError> {
-        println!("🔄 [SNAPSHOT_SERVICE] Cloning snapshot: {} to: {}", 
+        tracing::info!("[SNAPSHOT_SERVICE] Cloning snapshot: {} to: {}",
                  snapshot_name, clone_name);
 
         let socket_path = self.spdk_socket_path.trim_start_matches("unix://");
@@ -131,13 +131,13 @@ impl SnapshotService {
             })?
             .to_string();
 
-        println!("✅ [SNAPSHOT_SERVICE] Clone created with UUID: {}", clone_uuid);
+        tracing::info!("[SNAPSHOT_SERVICE] Clone created with UUID: {}", clone_uuid);
 
         // Get clone details
-        println!("🔍 [SNAPSHOT_SERVICE] Getting clone details for: {}", clone_uuid);
+        tracing::debug!("[SNAPSHOT_SERVICE] Getting clone details for: {}", clone_uuid);
         let clone_info = self.get_snapshot_details(&clone_uuid).await?;
-        
-        println!("📋 [SNAPSHOT_SERVICE] Clone details: lvs_name={:?}, size={} bytes", 
+
+        tracing::debug!("[SNAPSHOT_SERVICE] Clone details: lvs_name={:?}, size={} bytes",
                  clone_info.lvs_name, clone_info.size_bytes);
 
         Ok(CloneSnapshotResponse {
@@ -159,7 +159,7 @@ impl SnapshotService {
         &self,
         snapshot_uuid: &str,
     ) -> Result<DeleteSnapshotResponse, MinimalStateError> {
-        println!("🗑️ [SNAPSHOT_SERVICE] Deleting snapshot: {}", snapshot_uuid);
+        tracing::info!("[SNAPSHOT_SERVICE] Deleting snapshot: {}", snapshot_uuid);
 
         let socket_path = self.spdk_socket_path.trim_start_matches("unix://");
 
@@ -179,7 +179,7 @@ impl SnapshotService {
                 message: format!("SPDK snapshot deletion failed: {}", e),
             })?;
 
-        println!("✅ [SNAPSHOT_SERVICE] Snapshot deleted: {}", snapshot_uuid);
+        tracing::info!("[SNAPSHOT_SERVICE] Snapshot deleted: {}", snapshot_uuid);
 
         Ok(DeleteSnapshotResponse {
             success: true,
@@ -192,7 +192,7 @@ impl SnapshotService {
     /// Queries all lvols from SPDK and filters for snapshots based on naming convention.
     /// Our snapshots have names starting with "snap_".
     pub async fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>, MinimalStateError> {
-        println!("📋 [SNAPSHOT_SERVICE] Listing snapshots on node: {}", self.node_name);
+        tracing::debug!("[SNAPSHOT_SERVICE] Listing snapshots on node: {}", self.node_name);
 
         let socket_path = self.spdk_socket_path.trim_start_matches("unix://");
 
@@ -247,7 +247,7 @@ impl SnapshotService {
             }
         }
 
-        println!("✅ [SNAPSHOT_SERVICE] Found {} snapshots", snapshots.len());
+        tracing::debug!("[SNAPSHOT_SERVICE] Found {} snapshots", snapshots.len());
         Ok(snapshots)
     }
 
@@ -311,25 +311,25 @@ impl SnapshotService {
 
     /// Extract LVS name from lvol JSON
     fn extract_lvs_name_from_lvol(&self, lvol: &Value) -> Option<String> {
-        println!("🔍 [SNAPSHOT_SERVICE] Extracting LVS name from lvol JSON");
-        
+        tracing::trace!("[SNAPSHOT_SERVICE] Extracting LVS name from lvol JSON");
+
         // The lvol alias contains the LVS name: "lvs_name/vol_name"
         let alias = lvol.get("aliases")
             .and_then(|a| a.as_array())
             .and_then(|arr| arr.first())
             .and_then(|a| a.as_str());
-        
+
         if let Some(alias_str) = alias {
-            println!("🔍 [SNAPSHOT_SERVICE] Found alias: {}", alias_str);
+            tracing::trace!("[SNAPSHOT_SERVICE] Found alias: {}", alias_str);
             // Extract LVS name from alias (format: "lvs_name/vol_or_snap_name")
             if let Some(lvs_name) = alias_str.split('/').next() {
-                println!("✅ [SNAPSHOT_SERVICE] Extracted LVS name from alias: {}", lvs_name);
+                tracing::trace!("[SNAPSHOT_SERVICE] Extracted LVS name from alias: {}", lvs_name);
                 return Some(lvs_name.to_string());
             }
         }
-        
-        println!("⚠️ [SNAPSHOT_SERVICE] Could not extract LVS name from lvol JSON");
-        println!("   Aliases: {:?}", lvol.get("aliases"));
+
+        tracing::warn!("[SNAPSHOT_SERVICE] Could not extract LVS name from lvol JSON");
+        tracing::debug!("   Aliases: {:?}", lvol.get("aliases"));
         // Note: Full lvol JSON not logged (too verbose)
         None
     }

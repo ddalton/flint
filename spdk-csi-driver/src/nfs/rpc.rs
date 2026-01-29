@@ -165,17 +165,17 @@ impl CallMessage {
 
         // Get remaining bytes (procedure arguments)
         let remaining_count = dec.remaining();
-        eprintln!("DEBUG: After RPC header, {} bytes remaining for procedure args", remaining_count);
+        tracing::debug!("After RPC header, {} bytes remaining for procedure args", remaining_count);
 
         // DEBUG: Print first 40 bytes before extraction
         if remaining_count > 0 {
             let peek_len = remaining_count.min(40);
-            eprintln!("DEBUG: RPC args peek (first {} bytes): {:02x?}", peek_len, dec.peek_bytes(peek_len));
+            tracing::debug!("RPC args peek (first {} bytes): {:02x?}", peek_len, dec.peek_bytes(peek_len));
         }
 
         let args = dec.into_remaining_bytes();
-        eprintln!("DEBUG: Extracted args bytes length: {}", args.len());
-        eprintln!("DEBUG: Args first 40 bytes: {:02x?}", &args[..args.len().min(40)]);
+        tracing::debug!("Extracted args bytes length: {}", args.len());
+        tracing::debug!("Args first 40 bytes: {:02x?}", &args[..args.len().min(40)]);
 
         Ok((call_msg, args))
     }

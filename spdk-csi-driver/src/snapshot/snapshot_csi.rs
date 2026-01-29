@@ -35,7 +35,7 @@ impl SnapshotController {
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
         
-        println!("📸 [SNAPSHOT_CSI] CreateSnapshot: volume={}, name={}", 
+        tracing::info!("📸 [SNAPSHOT_CSI] CreateSnapshot: volume={}, name={}", 
                  req.source_volume_id, req.name);
 
         // Step 1: Find source volume
@@ -44,7 +44,7 @@ impl SnapshotController {
             .await
             .map_err(|e| Status::not_found(format!("Source volume not found: {}", e)))?;
 
-        println!("✅ [SNAPSHOT_CSI] Found source volume on node: {}", volume_info.node_name);
+        tracing::info!("✅ [SNAPSHOT_CSI] Found source volume on node: {}", volume_info.node_name);
 
         // Step 2: Generate unique snapshot name
         // Format: snap_{volume_id}_{timestamp}
@@ -54,7 +54,7 @@ impl SnapshotController {
             .as_secs();
         let snapshot_name = format!("snap_{}_{}", req.source_volume_id, timestamp);
 
-        println!("📸 [SNAPSHOT_CSI] Generated snapshot name: {}", snapshot_name);
+        tracing::info!("📸 [SNAPSHOT_CSI] Generated snapshot name: {}", snapshot_name);
 
         // Step 3: Call node agent to create snapshot
         let payload = serde_json::json!({
@@ -74,7 +74,7 @@ impl SnapshotController {
 
         let size_bytes = response["size_bytes"].as_i64().unwrap_or(0);
 
-        println!("✅ [SNAPSHOT_CSI] Snapshot created: {}", snapshot_uuid);
+        tracing::info!("✅ [SNAPSHOT_CSI] Snapshot created: {}", snapshot_uuid);
 
         // Step 4: Return CSI response
         let snapshot = Snapshot {
@@ -89,7 +89,7 @@ impl SnapshotController {
             group_snapshot_id: String::new(), // Not using group snapshots
         };
 
-        println!("🎉 [SNAPSHOT_CSI] CreateSnapshot succeeded: {}", snapshot_uuid);
+        tracing::info!("🎉 [SNAPSHOT_CSI] CreateSnapshot succeeded: {}", snapshot_uuid);
 
         Ok(Response::new(CreateSnapshotResponse {
             snapshot: Some(snapshot),
@@ -110,13 +110,13 @@ impl SnapshotController {
     ) -> Result<Response<DeleteSnapshotResponse>, Status> {
         let req = request.into_inner();
         
-        println!("🗑️ [SNAPSHOT_CSI] DeleteSnapshot: {}", req.snapshot_id);
+        tracing::info!("🗑️ [SNAPSHOT_CSI] DeleteSnapshot: {}", req.snapshot_id);
 
         // Query all nodes to find the snapshot
         let nodes = self.driver.get_all_nodes().await
             .map_err(|e| Status::internal(format!("Failed to list nodes: {}", e)))?;
 
-        println!("🔍 [SNAPSHOT_CSI] Searching for snapshot across {} nodes", nodes.len());
+        tracing::info!("🔍 [SNAPSHOT_CSI] Searching for snapshot across {} nodes", nodes.len());
 
         let mut snapshot_found = false;
 
@@ -129,23 +129,23 @@ impl SnapshotController {
                 .call_node_agent(&node, "/api/snapshots/delete", &payload)
                 .await {
                 Ok(_) => {
-                    println!("✅ [SNAPSHOT_CSI] Deleted snapshot from node: {}", node);
+                    tracing::info!("✅ [SNAPSHOT_CSI] Deleted snapshot from node: {}", node);
                     snapshot_found = true;
                     break;
                 }
                 Err(e) => {
                     // Snapshot might not be on this node, continue searching
-                    println!("ℹ️ [SNAPSHOT_CSI] Snapshot not on node {}: {}", node, e);
+                    tracing::info!("ℹ️ [SNAPSHOT_CSI] Snapshot not on node {}: {}", node, e);
                 }
             }
         }
 
         if !snapshot_found {
-            println!("⚠️ [SNAPSHOT_CSI] Snapshot not found (may already be deleted)");
+            tracing::info!("⚠️ [SNAPSHOT_CSI] Snapshot not found (may already be deleted)");
             // This is OK - delete is idempotent
         }
 
-        println!("🎉 [SNAPSHOT_CSI] DeleteSnapshot succeeded");
+        tracing::info!("🎉 [SNAPSHOT_CSI] DeleteSnapshot succeeded");
 
         Ok(Response::new(DeleteSnapshotResponse {}))
     }
@@ -165,19 +165,19 @@ impl SnapshotController {
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
         let req = request.into_inner();
         
-        println!("📋 [SNAPSHOT_CSI] ListSnapshots");
+        tracing::info!("📋 [SNAPSHOT_CSI] ListSnapshots");
         if !req.source_volume_id.is_empty() {
-            println!("📋 [SNAPSHOT_CSI] Filter: source_volume_id={}", req.source_volume_id);
+            tracing::info!("📋 [SNAPSHOT_CSI] Filter: source_volume_id={}", req.source_volume_id);
         }
         if !req.snapshot_id.is_empty() {
-            println!("📋 [SNAPSHOT_CSI] Filter: snapshot_id={}", req.snapshot_id);
+            tracing::info!("📋 [SNAPSHOT_CSI] Filter: snapshot_id={}", req.snapshot_id);
         }
 
         // Query all nodes for snapshots
         let nodes = self.driver.get_all_nodes().await
             .map_err(|e| Status::internal(format!("Failed to list nodes: {}", e)))?;
 
-        println!("🔍 [SNAPSHOT_CSI] Querying {} nodes for snapshots", nodes.len());
+        tracing::info!("🔍 [SNAPSHOT_CSI] Querying {} nodes for snapshots", nodes.len());
 
         let mut all_snapshots = Vec::new();
 
@@ -187,7 +187,7 @@ impl SnapshotController {
                 .await {
                 Ok(response) => {
                     if let Some(snapshots) = response["snapshots"].as_array() {
-                        println!("✅ [SNAPSHOT_CSI] Node {} has {} snapshots", node, snapshots.len());
+                        tracing::info!("✅ [SNAPSHOT_CSI] Node {} has {} snapshots", node, snapshots.len());
                         
                         for snap in snapshots {
                             let snapshot = Snapshot {
@@ -228,13 +228,13 @@ impl SnapshotController {
                     }
                 }
                 Err(e) => {
-                    println!("⚠️ [SNAPSHOT_CSI] Failed to list snapshots on node {}: {}", node, e);
+                    tracing::info!("⚠️ [SNAPSHOT_CSI] Failed to list snapshots on node {}: {}", node, e);
                     // Continue with other nodes
                 }
             }
         }
 
-        println!("✅ [SNAPSHOT_CSI] Found {} total snapshots (after filtering)", all_snapshots.len());
+        tracing::info!("✅ [SNAPSHOT_CSI] Found {} total snapshots (after filtering)", all_snapshots.len());
 
         // TODO: Implement pagination if needed (max_entries, starting_token)
         // For now, return all snapshots

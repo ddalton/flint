@@ -336,8 +336,8 @@ async fn handle_compound(
 ) -> Bytes {
     // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
-    eprintln!("DEBUG handle_compound: args.len()={}", args.len());
-    eprintln!("DEBUG handle_compound: First 32 bytes (hex): {:02x?}", &args[..args.len().min(32)]);
+    tracing::trace!("handle_compound: args.len()={}", args.len());
+    tracing::trace!("handle_compound: First 32 bytes (hex): {:02x?}", &args[..args.len().min(32)]);
 
     // Create a decoder from the procedure arguments
     let decoder = XdrDecoder::new(args);

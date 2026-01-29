@@ -81,17 +81,17 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
         match tokio::fs::read_to_string(namespace_path).await {
             Ok(namespace) => {
                 let namespace = namespace.trim().to_string();
-                println!("📍 [NAMESPACE] Detected current namespace: {}", namespace);
+                tracing::info!("[NAMESPACE] Detected current namespace: {}", namespace);
                 return Ok(namespace);
             }
             Err(e) => {
-                println!("⚠️ [NAMESPACE] Failed to read namespace file: {}", e);
+                tracing::warn!("[NAMESPACE] Failed to read namespace file: {}", e);
             }
         }
     }
     
     // Fallback to default if running outside cluster
-    println!("⚠️ [NAMESPACE] Using fallback namespace: flint-system");
+    tracing::warn!("[NAMESPACE] Using fallback namespace: flint-system");
     Ok("flint-system".to_string())
 }
 
@@ -99,7 +99,7 @@ async fn get_current_namespace() -> Result<String, Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
     let target_namespace = get_current_namespace().await?;
-    println!("🎯 [OPERATOR] Using namespace for custom resources: {}", target_namespace);
+    tracing::info!("[OPERATOR] Using namespace for custom resources: {}", target_namespace);
     
     let ctx = Arc::new(Context {
         client: client.clone(),
@@ -137,10 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     controller.for_each(|res| async move {
         match res {
             Ok((obj_ref, action)) => {
-                println!("Reconciled {}: {:?}", obj_ref.name, action);
+                tracing::debug!("Reconciled {}: {:?}", obj_ref.name, action);
             }
             Err(e) => {
-                eprintln!("Controller error: {}", e);
+                tracing::error!("Controller error: {}", e);
             }
         }
     }).await;
@@ -181,7 +181,7 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                     if ctx.rebuild_enabled {
                         for &failed_index in &failed_replicas {
                             if let Err(e) = handle_failed_replica(&spdk_volume, &ctx, failed_index, &spdk_disks).await {
-                                eprintln!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
+                                tracing::error!("Failed to handle failed replica {} for volume {}: {}", failed_index, volume_id, e);
                                 status.state = "failed".to_string();
                             }
                         }
@@ -198,7 +198,7 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                 }
             }
             Err(e) => {
-                eprintln!("Error getting RAID status for volume {}: {}", volume_id, e);
+                tracing::error!("Error getting RAID status for volume {}: {}", volume_id, e);
             }
         }
     } else {
@@ -218,13 +218,13 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
                             status.degraded = !should_be_healthy;
                             
                             if !should_be_healthy {
-                                eprintln!("Lvol {} is unhealthy: {:?}", bdev_name, lvol_status.error_reason);
+                                tracing::warn!("Lvol {} is unhealthy: {:?}", bdev_name, lvol_status.error_reason);
                             }
                             status_update_needed = true;
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error checking lvol status for {}: {}", bdev_name, e);
+                        tracing::error!("Error checking lvol status for {}: {}", bdev_name, e);
                     }
                 }
             }
@@ -325,7 +325,7 @@ async fn handle_failed_replica(
         new_lvol_bdev,
     ).await?;
 
-    println!("Successfully initiated SPDK native rebuild for volume {} replica {}", 
+    tracing::info!("Successfully initiated SPDK native rebuild for volume {} replica {}",
              volume_id, failed_replica_index);
 
     Ok(())
@@ -414,7 +414,7 @@ async fn create_replacement_lvol(
     let target_node_name = &replacement_disk.spec.node_id;
     let rpc_url = get_rpc_url_for_node(&ctx.client, target_node_name).await?;
     
-    println!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
+    tracing::info!("Creating replacement lvol on node '{}' via URL '{}'", target_node_name, rpc_url);
 
     // Convert bytes to MiB as required by SPDK bdev_lvol_create RPC
     let size_in_mib = (size_bytes + 1048575) / 1048576; // Round up to nearest MiB
@@ -629,7 +629,7 @@ async fn health_monitor_task(ctx: Arc<Context>) {
         interval.tick().await;
         
         if let Err(e) = perform_periodic_health_check(&ctx).await {
-            eprintln!("Health check failed: {}", e);
+            tracing::error!("Health check failed: {}", e);
         }
     }
 }
@@ -747,7 +747,7 @@ fn error_policy(obj: Arc<SpdkVolume>, error: &kube::Error, _ctx: Arc<Context>) -
             Action::await_change()
         }
         _ => {
-            eprintln!("Error reconciling volume {}: {}", 
+            tracing::error!("Error reconciling volume {}: {}",
                       obj.spec.volume_id, error);
             Action::requeue(Duration::from_secs(60))
         }
@@ -769,7 +769,7 @@ async fn start_health_server() {
         .parse()
         .unwrap_or(9809);
     
-    println!("Starting health server on port {}", health_port);
+    tracing::info!("Starting health server on port {}", health_port);
     warp::serve(health)
         .run(([0, 0, 0, 0], health_port))
         .await;

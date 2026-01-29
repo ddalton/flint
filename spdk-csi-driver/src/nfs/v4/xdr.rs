@@ -46,10 +46,10 @@ impl Nfs4XdrEncoder for XdrEncoder {
     }
 
     fn encode_filehandle(&mut self, fh: &Nfs4FileHandle) {
-        eprintln!("DEBUG encode_filehandle: fh.data.len()={}, first 32 bytes: {:02x?}", 
+        tracing::trace!("encode_filehandle: fh.data.len()={}, first 32 bytes: {:02x?}",
                   fh.data.len(), &fh.data[..fh.data.len().min(32)]);
         self.encode_opaque(&fh.data);
-        eprintln!("DEBUG encode_filehandle: opaque encoded ({} bytes + padding)", fh.data.len());
+        tracing::trace!("encode_filehandle: opaque encoded ({} bytes + padding)", fh.data.len());
     }
 
     fn encode_sessionid(&mut self, sid: &SessionId) {

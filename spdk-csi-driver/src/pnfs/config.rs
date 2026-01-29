@@ -521,7 +521,7 @@ impl PnfsConfig {
             if let Some(end) = result[start..].find('}') {
                 let var_name = &result[start + 2..start + end];
                 let replacement = env::var(var_name).unwrap_or_else(|_| {
-                    eprintln!("Warning: Environment variable '{}' not found, keeping original", var_name);
+                    tracing::warn!("Environment variable '{}' not found, keeping original", var_name);
                     format!("${{{}}}", var_name)
                 });
                 result.replace_range(start..start + end + 1, &replacement);

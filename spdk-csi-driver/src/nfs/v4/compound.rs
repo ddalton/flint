@@ -576,19 +576,19 @@ impl CompoundContext {
 impl CompoundRequest {
     /// Decode a COMPOUND request from XDR
     pub fn decode(mut decoder: XdrDecoder) -> Result<Self, String> {
-        eprintln!("DEBUG CompoundRequest::decode: Starting with {} bytes", decoder.remaining());
+        tracing::trace!("DEBUG CompoundRequest::decode: Starting with {} bytes", decoder.remaining());
 
         // Decode tag
         let tag = decoder.decode_string()?;
-        eprintln!("DEBUG CompoundRequest::decode: After tag decode (tag='{}'): {} bytes remaining", tag, decoder.remaining());
+        tracing::trace!("DEBUG CompoundRequest::decode: After tag decode (tag='{}'): {} bytes remaining", tag, decoder.remaining());
 
         // Decode minor version
         let minor_version = decoder.decode_u32()?;
-        eprintln!("DEBUG CompoundRequest::decode: After minor_version decode (={}): {} bytes remaining", minor_version, decoder.remaining());
+        tracing::trace!("DEBUG CompoundRequest::decode: After minor_version decode (={}): {} bytes remaining", minor_version, decoder.remaining());
 
         // Decode operation count
         let op_count = decoder.decode_u32()? as usize;
-        eprintln!("DEBUG CompoundRequest::decode: After op_count decode (={}): {} bytes remaining", op_count, decoder.remaining());
+        tracing::trace!("DEBUG CompoundRequest::decode: After op_count decode (={}): {} bytes remaining", op_count, decoder.remaining());
         debug!("COMPOUND: tag='{}', minor_version={}, op_count={}", tag, minor_version, op_count);
 
         // Decode operations
@@ -598,12 +598,12 @@ impl CompoundRequest {
             if decoder.remaining() < 4 {
                 let err = format!("Operation {}/{}: Not enough data for opcode (need 4 bytes, have {})", 
                                  i + 1, op_count, decoder.remaining());
-                eprintln!("ERROR CompoundRequest::decode: {}", err);
+                tracing::trace!("ERROR CompoundRequest::decode: {}", err);
                 return Err(err);
             }
             
             let opcode = decoder.decode_u32()?;
-            eprintln!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining", 
+            tracing::trace!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining", 
                      i + 1, op_count, opcode, decoder.remaining());
             debug!("  Operation {}: opcode={}", i, opcode);
 
@@ -612,7 +612,7 @@ impl CompoundRequest {
                 Err(e) => {
                     let err = format!("Operation {}/{} (opcode={}): Failed to decode: {}", 
                                      i + 1, op_count, opcode, e);
-                    eprintln!("ERROR CompoundRequest::decode: {}", err);
+                    tracing::trace!("ERROR CompoundRequest::decode: {}", err);
                     return Err(err);
                 }
             };
@@ -685,12 +685,12 @@ impl CompoundRequest {
             }
             opcode::SETATTR => {
                 let stateid = decoder.decode_stateid()?;
-                eprintln!("DEBUG SETATTR: After stateid, {} bytes remaining", decoder.remaining());
+                tracing::trace!("DEBUG SETATTR: After stateid, {} bytes remaining", decoder.remaining());
                 
                 // Decode fattr4 structure (bitmap + attr_vals), NOT simple opaque
                 // Decode bitmap4 (array of u32)
                 let bitmap_len = decoder.decode_u32()?;
-                eprintln!("DEBUG SETATTR: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                tracing::trace!("DEBUG SETATTR: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
                 
                 let mut bitmap_words = Vec::with_capacity(bitmap_len as usize);
                 for _ in 0..bitmap_len {
@@ -699,7 +699,7 @@ impl CompoundRequest {
                 
                 // Decode attrlist4 (opaque bytes)
                 let attr_vals = decoder.decode_opaque()?;
-                eprintln!("DEBUG SETATTR: decoded fattr4: {} bitmap words, {} bytes attr_vals, {} bytes remaining", 
+                tracing::trace!("DEBUG SETATTR: decoded fattr4: {} bitmap words, {} bytes attr_vals, {} bytes remaining", 
                          bitmap_len, attr_vals.len(), decoder.remaining());
                 
                 // Re-encode as single blob for Operation::SetAttr
@@ -725,47 +725,47 @@ impl CompoundRequest {
 
             // File I/O operations
             opcode::OPEN => {
-                eprintln!("DEBUG OPEN: Starting decode, {} bytes remaining", decoder.remaining());
+                tracing::trace!("DEBUG OPEN: Starting decode, {} bytes remaining", decoder.remaining());
                 let seqid = decoder.decode_u32()?;
-                eprintln!("DEBUG OPEN: seqid={}, {} bytes after", seqid, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: seqid={}, {} bytes after", seqid, decoder.remaining());
                 let share_access = decoder.decode_u32()?;
-                eprintln!("DEBUG OPEN: share_access=0x{:x}, {} bytes after", share_access, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: share_access=0x{:x}, {} bytes after", share_access, decoder.remaining());
                 let share_deny = decoder.decode_u32()?;
-                eprintln!("DEBUG OPEN: share_deny=0x{:x}, {} bytes after", share_deny, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: share_deny=0x{:x}, {} bytes after", share_deny, decoder.remaining());
                 
                 // Owner (state_owner) - this is open_owner4 which is a struct with clientid + opaque
                 // Per RFC 5661: struct open_owner4 { clientid4 clientid; opaque owner<>; }
-                eprintln!("DEBUG OPEN: Decoding open_owner4, {} bytes before", decoder.remaining());
+                tracing::trace!("DEBUG OPEN: Decoding open_owner4, {} bytes before", decoder.remaining());
                 let owner_clientid = decoder.decode_u64()?;  // clientid4
-                eprintln!("DEBUG OPEN: owner_clientid={}, {} bytes after", owner_clientid, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: owner_clientid={}, {} bytes after", owner_clientid, decoder.remaining());
                 let owner = decoder.decode_opaque()?.to_vec();  // owner opaque
-                eprintln!("DEBUG OPEN: owner {} bytes, {} bytes remaining after owner", owner.len(), decoder.remaining());
+                tracing::trace!("DEBUG OPEN: owner {} bytes, {} bytes remaining after owner", owner.len(), decoder.remaining());
                 
                 // Openflag4 - this is a union with opentype4 as discriminator (RFC 5661 §18.16)
                 let opentype = decoder.decode_u32()?;  // OPEN4_NOCREATE=0, OPEN4_CREATE=1
-                eprintln!("DEBUG OPEN: opentype={}, {} bytes remaining", opentype, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: opentype={}, {} bytes remaining", opentype, decoder.remaining());
                 
                 // Decode createhow4 only if opentype == OPEN4_CREATE (1)
                 let openhow = if opentype == 1 {
                     // OPEN4_CREATE - decode createhow4 (discriminated union)
                     let createmode = decoder.decode_u32()?;
-                    eprintln!("DEBUG OPEN: createmode={}, {} bytes remaining", createmode, decoder.remaining());
+                    tracing::trace!("DEBUG OPEN: createmode={}, {} bytes remaining", createmode, decoder.remaining());
                     match createmode {
                         0 | 1 => {
                             // UNCHECKED4 or GUARDED4 - decode createattrs (fattr4)
                             // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
-                            eprintln!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs fattr4, {} bytes before", decoder.remaining());
+                            tracing::trace!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs fattr4, {} bytes before", decoder.remaining());
                             
                             // Decode bitmap4 (array of u32)
                             let bitmap_len = decoder.decode_u32()?;
-                            eprintln!("DEBUG OPEN: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                            tracing::trace!("DEBUG OPEN: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
                             for _ in 0..bitmap_len {
                                 let _bitmap_word = decoder.decode_u32()?;
                             }
                             
                             // Decode attrlist4 (opaque bytes)
                             let attrs = decoder.decode_opaque()?;
-                            eprintln!("DEBUG OPEN: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
+                            tracing::trace!("DEBUG OPEN: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
                                      bitmap_len, attrs.len(), decoder.remaining());
                             OpenHow { createmode, attrs: Some(attrs) }
                         }
@@ -797,7 +797,7 @@ impl CompoundRequest {
                 
                 // Claim (discriminated union) - RFC 5661 Section 18.16
                 let claim_type = decoder.decode_u32()?;
-                eprintln!("DEBUG OPEN: claim_type={}, {} bytes remaining", claim_type, decoder.remaining());
+                tracing::trace!("DEBUG OPEN: claim_type={}, {} bytes remaining", claim_type, decoder.remaining());
                 let file = match claim_type {
                     0 => {
                         // CLAIM_NULL - filename
@@ -806,9 +806,9 @@ impl CompoundRequest {
                     1 => {
                         // CLAIM_PREVIOUS - delegate_type (u32)
                         // Used for reclaim after server reboot
-                        eprintln!("DEBUG OPEN: CLAIM_PREVIOUS - decoding delegate_type, {} bytes before", decoder.remaining());
+                        tracing::trace!("DEBUG OPEN: CLAIM_PREVIOUS - decoding delegate_type, {} bytes before", decoder.remaining());
                         let delegate_type = decoder.decode_u32()?;
-                        eprintln!("DEBUG OPEN: CLAIM_PREVIOUS - decoded delegate_type={}, {} bytes after", delegate_type, decoder.remaining());
+                        tracing::trace!("DEBUG OPEN: CLAIM_PREVIOUS - decoded delegate_type={}, {} bytes after", delegate_type, decoder.remaining());
                         String::new()
                     }
                     2 => {
@@ -874,9 +874,9 @@ impl CompoundRequest {
 
             // Modify operations
             opcode::CREATE => {
-                eprintln!("DEBUG CREATE: Starting decode, {} bytes remaining", decoder.remaining());
+                tracing::trace!("DEBUG CREATE: Starting decode, {} bytes remaining", decoder.remaining());
                 let objtype_raw = decoder.decode_u32()?;
-                eprintln!("DEBUG CREATE: objtype_raw={}, {} bytes after", objtype_raw, decoder.remaining());
+                tracing::trace!("DEBUG CREATE: objtype_raw={}, {} bytes after", objtype_raw, decoder.remaining());
                 let objtype = match objtype_raw {
                     1 => Nfs4FileType::Regular,
                     2 => Nfs4FileType::Directory,
@@ -890,20 +890,20 @@ impl CompoundRequest {
                     _ => Nfs4FileType::Regular,
                 };
                 let objname = decoder.decode_string()?;
-                eprintln!("DEBUG CREATE: objname='{}', {} bytes after", objname, decoder.remaining());
+                tracing::trace!("DEBUG CREATE: objname='{}', {} bytes after", objname, decoder.remaining());
                 
                 // Per RFC 5661 Section 18.6, CREATE is a discriminated union based on objtype
                 // For NF4LNK (symlink), there's linkdata BEFORE createattrs
                 let linkdata = if objtype == Nfs4FileType::Symlink {
                     // Decode linkdata (target path for symlink)
                     let link = decoder.decode_string()?;
-                    eprintln!("DEBUG CREATE: Symlink linkdata='{}', {} bytes after", link, decoder.remaining());
+                    tracing::trace!("DEBUG CREATE: Symlink linkdata='{}', {} bytes after", link, decoder.remaining());
                     Some(link)
                 } else if objtype == Nfs4FileType::BlockDevice || objtype == Nfs4FileType::CharDevice {
                     // For block/char devices, decode specdata (major/minor device numbers)
                     let _specdata1 = decoder.decode_u32()?;  // major
                     let _specdata2 = decoder.decode_u32()?;  // minor
-                    eprintln!("DEBUG CREATE: Device specdata decoded, {} bytes after", decoder.remaining());
+                    tracing::trace!("DEBUG CREATE: Device specdata decoded, {} bytes after", decoder.remaining());
                     None
                 } else {
                     // All other types (Regular, Directory, Socket, Fifo) have no extra data
@@ -912,18 +912,18 @@ impl CompoundRequest {
                 
                 // Decode createattrs (fattr4) - RFC 5661 Section 18.6
                 // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
-                eprintln!("DEBUG CREATE: Decoding createattrs fattr4, {} bytes before", decoder.remaining());
+                tracing::trace!("DEBUG CREATE: Decoding createattrs fattr4, {} bytes before", decoder.remaining());
                 
                 // Decode bitmap4 (array of u32)
                 let bitmap_len = decoder.decode_u32()?;
-                eprintln!("DEBUG CREATE: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                tracing::trace!("DEBUG CREATE: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
                 for _ in 0..bitmap_len {
                     let _bitmap_word = decoder.decode_u32()?;
                 }
                 
                 // Decode attrlist4 (opaque bytes)
                 let _createattrs = decoder.decode_opaque()?;
-                eprintln!("DEBUG CREATE: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
+                tracing::trace!("DEBUG CREATE: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
                          bitmap_len, _createattrs.len(), decoder.remaining());
                 
                 Ok(Operation::Create { objtype, objname, linkdata })
@@ -1163,7 +1163,7 @@ impl CompoundRequest {
 
             // pNFS operations (opcodes 47-51)
             opcode::LAYOUTGET => {
-                eprintln!("🎯🎯🎯 DECODING LAYOUTGET (opcode 50) 🎯🎯🎯");
+                tracing::trace!("🎯🎯🎯 DECODING LAYOUTGET (opcode 50) 🎯🎯🎯");
                 let signal_layout_avail = decoder.decode_bool()?;
                 let layout_type = decoder.decode_u32()?;
                 let iomode = decoder.decode_u32()?;
@@ -1172,7 +1172,7 @@ impl CompoundRequest {
                 let minlength = decoder.decode_u64()?;
                 let stateid = decoder.decode_stateid()?;
                 let maxcount = decoder.decode_u32()?;
-                eprintln!("🎯 LAYOUTGET decoded: offset={}, length={}, iomode={}", offset, length, iomode);
+                tracing::trace!("🎯 LAYOUTGET decoded: offset={}, length={}, iomode={}", offset, length, iomode);
                 Ok(Operation::LayoutGet {
                     signal_layout_avail,
                     layout_type,
@@ -1185,14 +1185,14 @@ impl CompoundRequest {
                 })
             }
             opcode::GETDEVICEINFO => {
-                eprintln!("🎯🎯🎯 DECODING GETDEVICEINFO (opcode 47) 🎯🎯🎯");
+                tracing::trace!("🎯🎯🎯 DECODING GETDEVICEINFO (opcode 47) 🎯🎯🎯");
                 // Device ID is FIXED 16-byte opaque (no length prefix!)
                 let device_id = decoder.decode_fixed_opaque(16)?.to_vec();
-                eprintln!("🎯 GETDEVICEINFO device_id decoded: {} bytes", device_id.len());
+                tracing::trace!("🎯 GETDEVICEINFO device_id decoded: {} bytes", device_id.len());
                 let layout_type = decoder.decode_u32()?;
                 let maxcount = decoder.decode_u32()?;
                 let notify_count = decoder.decode_u32()?;
-                eprintln!("🎯 GETDEVICEINFO fully decoded: layout_type={}, maxcount={}", layout_type, maxcount);
+                tracing::trace!("🎯 GETDEVICEINFO fully decoded: layout_type={}, maxcount={}", layout_type, maxcount);
                 let mut notify_types = Vec::new();
                 for _ in 0..notify_count {
                     notify_types.push(decoder.decode_u32()?);
@@ -1249,8 +1249,8 @@ impl CompoundResponse {
         }
 
         let bytes = encoder.finish();
-        eprintln!("DEBUG CompoundResponse: Sending {} bytes", bytes.len());
-        eprintln!("DEBUG CompoundResponse: First 80 bytes: {:02x?}", &bytes[..bytes.len().min(80)]);
+        tracing::trace!("DEBUG CompoundResponse: Sending {} bytes", bytes.len());
+        tracing::trace!("DEBUG CompoundResponse: First 80 bytes: {:02x?}", &bytes[..bytes.len().min(80)]);
         debug!("✅ COMPOUND response encoded: {} results, {} bytes total", result_count, bytes.len());
         bytes
     }

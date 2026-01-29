@@ -94,18 +94,18 @@ async fn handle_create_snapshot(
     req: CreateSnapshotRequest,
     service: Arc<SnapshotService>,
 ) -> Result<impl Reply, Rejection> {
-    println!("🌐 [SNAPSHOT_ROUTES] POST /api/snapshots/create: {}", req.snapshot_name);
+    tracing::info!("[SNAPSHOT_ROUTES] POST /api/snapshots/create: {}", req.snapshot_name);
 
     match service.create_snapshot(&req.lvol_name, &req.snapshot_name).await {
         Ok(response) => {
-            println!("✅ [SNAPSHOT_ROUTES] Snapshot created: {}", response.snapshot_uuid);
+            tracing::info!("[SNAPSHOT_ROUTES] Snapshot created: {}", response.snapshot_uuid);
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
                 warp::http::StatusCode::OK,
             ))
         }
         Err(e) => {
-            println!("❌ [SNAPSHOT_ROUTES] Failed to create snapshot: {}", e);
+            tracing::error!("[SNAPSHOT_ROUTES] Failed to create snapshot: {}", e);
             let error_response = serde_json::json!({
                 "error": format!("Failed to create snapshot: {}", e),
                 "snapshot_name": req.snapshot_name,
@@ -123,11 +123,11 @@ async fn handle_delete_snapshot(
     req: DeleteSnapshotRequest,
     service: Arc<SnapshotService>,
 ) -> Result<impl Reply, Rejection> {
-    println!("🌐 [SNAPSHOT_ROUTES] POST /api/snapshots/delete: {}", req.snapshot_uuid);
+    tracing::info!("[SNAPSHOT_ROUTES] POST /api/snapshots/delete: {}", req.snapshot_uuid);
 
     match service.delete_snapshot(&req.snapshot_uuid).await {
         Ok(response) => {
-            println!("✅ [SNAPSHOT_ROUTES] Snapshot deleted: {}", req.snapshot_uuid);
+            tracing::info!("[SNAPSHOT_ROUTES] Snapshot deleted: {}", req.snapshot_uuid);
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
                 warp::http::StatusCode::OK,
@@ -136,7 +136,7 @@ async fn handle_delete_snapshot(
         Err(e) => {
             // For delete, not found is OK (idempotent)
             if e.to_string().contains("not found") {
-                println!("ℹ️ [SNAPSHOT_ROUTES] Snapshot not found (already deleted): {}", req.snapshot_uuid);
+                tracing::info!("[SNAPSHOT_ROUTES] Snapshot not found (already deleted): {}", req.snapshot_uuid);
                 let response = DeleteSnapshotResponse {
                     success: true,
                     message: Some("Snapshot not found (already deleted)".to_string()),
@@ -146,7 +146,7 @@ async fn handle_delete_snapshot(
                     warp::http::StatusCode::OK,
                 ))
             } else {
-                println!("❌ [SNAPSHOT_ROUTES] Failed to delete snapshot: {}", e);
+                tracing::error!("[SNAPSHOT_ROUTES] Failed to delete snapshot: {}", e);
                 let error_response = serde_json::json!({
                     "error": format!("Failed to delete snapshot: {}", e),
                     "snapshot_uuid": req.snapshot_uuid,
@@ -165,19 +165,19 @@ async fn handle_clone_snapshot(
     req: CloneSnapshotRequest,
     service: Arc<SnapshotService>,
 ) -> Result<impl Reply, Rejection> {
-    println!("🌐 [SNAPSHOT_ROUTES] POST /api/snapshots/clone: {} -> {}", 
+    tracing::info!("[SNAPSHOT_ROUTES] POST /api/snapshots/clone: {} -> {}",
              req.snapshot_uuid, req.clone_name);
 
     match service.clone_snapshot(&req.snapshot_uuid, &req.clone_name).await {
         Ok(response) => {
-            println!("✅ [SNAPSHOT_ROUTES] Clone created: {}", response.clone_uuid);
+            tracing::info!("[SNAPSHOT_ROUTES] Clone created: {}", response.clone_uuid);
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
                 warp::http::StatusCode::OK,
             ))
         }
         Err(e) => {
-            println!("❌ [SNAPSHOT_ROUTES] Failed to clone snapshot: {}", e);
+            tracing::error!("[SNAPSHOT_ROUTES] Failed to clone snapshot: {}", e);
             let error_response = serde_json::json!({
                 "error": format!("Failed to clone snapshot: {}", e),
                 "snapshot_uuid": req.snapshot_uuid,
@@ -195,11 +195,11 @@ async fn handle_clone_snapshot(
 async fn handle_list_snapshots(
     service: Arc<SnapshotService>,
 ) -> Result<impl Reply, Rejection> {
-    println!("🌐 [SNAPSHOT_ROUTES] GET /api/snapshots/list");
+    tracing::debug!("[SNAPSHOT_ROUTES] GET /api/snapshots/list");
 
     match service.list_snapshots().await {
         Ok(snapshots) => {
-            println!("✅ [SNAPSHOT_ROUTES] Listed {} snapshots", snapshots.len());
+            tracing::debug!("[SNAPSHOT_ROUTES] Listed {} snapshots", snapshots.len());
             let response = ListSnapshotsResponse { snapshots };
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -207,7 +207,7 @@ async fn handle_list_snapshots(
             ))
         }
         Err(e) => {
-            println!("❌ [SNAPSHOT_ROUTES] Failed to list snapshots: {}", e);
+            tracing::error!("[SNAPSHOT_ROUTES] Failed to list snapshots: {}", e);
             let error_response = serde_json::json!({
                 "error": format!("Failed to list snapshots: {}", e),
             });
@@ -226,7 +226,7 @@ async fn handle_get_snapshot_info(
 ) -> Result<impl Reply, Rejection> {
     let snapshot_uuid = &req.snapshot_uuid;
 
-    println!("🌐 [SNAPSHOT_ROUTES] POST /api/snapshots/get_info: {}", snapshot_uuid);
+    tracing::debug!("[SNAPSHOT_ROUTES] POST /api/snapshots/get_info: {}", snapshot_uuid);
 
     if snapshot_uuid.is_empty() ||snapshot_uuid == "" {
         let error_response = serde_json::json!({
@@ -240,14 +240,14 @@ async fn handle_get_snapshot_info(
 
     match service.find_snapshot(snapshot_uuid).await {
         Ok(Some(snapshot)) => {
-            println!("✅ [SNAPSHOT_ROUTES] Found snapshot: {}", snapshot_uuid);
+            tracing::debug!("[SNAPSHOT_ROUTES] Found snapshot: {}", snapshot_uuid);
             Ok(warp::reply::with_status(
                 warp::reply::json(&snapshot),
                 warp::http::StatusCode::OK,
             ))
         }
         Ok(None) => {
-            println!("ℹ️ [SNAPSHOT_ROUTES] Snapshot not found: {}", snapshot_uuid);
+            tracing::info!("[SNAPSHOT_ROUTES] Snapshot not found: {}", snapshot_uuid);
             let error_response = serde_json::json!({
                 "error": "Snapshot not found",
                 "snapshot_uuid": snapshot_uuid,
@@ -258,7 +258,7 @@ async fn handle_get_snapshot_info(
             ))
         }
         Err(e) => {
-            println!("❌ [SNAPSHOT_ROUTES] Error querying snapshot: {}", e);
+            tracing::error!("[SNAPSHOT_ROUTES] Error querying snapshot: {}", e);
             let error_response = serde_json::json!({
                 "error": format!("Failed to query snapshot: {}", e),
                 "snapshot_uuid": snapshot_uuid,

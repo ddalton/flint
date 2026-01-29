@@ -11,7 +11,7 @@ pub async fn create_raid1_bdev(
     base_bdevs: Vec<String>,
     rpc_call: impl Fn(&str, Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>> + Send>>,
 ) -> Result<String, MinimalStateError> {
-    println!("🔧 [RAID] Creating RAID 1 bdev: {} with {} base bdevs on node: {}", 
+    tracing::info!("[RAID] Creating RAID 1 bdev: {} with {} base bdevs on node: {}",
              raid_name, base_bdevs.len(), node_name);
 
     if base_bdevs.len() < 2 {
@@ -36,7 +36,7 @@ pub async fn create_raid1_bdev(
             message: format!("Failed to create RAID bdev: {}", e)
         })?;
 
-    println!("✅ [RAID] RAID 1 bdev created: {}", raid_name);
+    tracing::info!("[RAID] RAID 1 bdev created: {}", raid_name);
     Ok(raid_name.to_string())
 }
 
@@ -46,7 +46,7 @@ pub async fn delete_raid_bdev(
     raid_name: &str,
     rpc_call: impl Fn(&str, Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>> + Send>>,
 ) -> Result<(), MinimalStateError> {
-    println!("🗑️ [RAID] Deleting RAID bdev: {} on node: {}", raid_name, node_name);
+    tracing::info!("[RAID] Deleting RAID bdev: {} on node: {}", raid_name, node_name);
 
     let payload = json!({
         "method": "bdev_raid_delete",
@@ -61,7 +61,7 @@ pub async fn delete_raid_bdev(
             message: format!("Failed to delete RAID bdev: {}", e)
         })?;
 
-    println!("✅ [RAID] RAID bdev deleted: {}", raid_name);
+    tracing::info!("[RAID] RAID bdev deleted: {}", raid_name);
     Ok(())
 }
 
@@ -122,7 +122,7 @@ pub async fn add_base_bdev_to_raid(
     base_bdev: &str,
     rpc_call: impl Fn(&str, Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>> + Send>>,
 ) -> Result<(), MinimalStateError> {
-    println!("🔧 [RAID] Adding base bdev {} to RAID {} on node: {}", 
+    tracing::info!("[RAID] Adding base bdev {} to RAID {} on node: {}",
              base_bdev, raid_name, node_name);
 
     let payload = json!({
@@ -139,7 +139,7 @@ pub async fn add_base_bdev_to_raid(
             message: format!("Failed to add base bdev to RAID: {}", e)
         })?;
 
-    println!("✅ [RAID] Base bdev added to RAID: {}", base_bdev);
+    tracing::info!("[RAID] Base bdev added to RAID: {}", base_bdev);
     Ok(())
 }
 

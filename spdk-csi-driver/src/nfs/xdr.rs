@@ -250,7 +250,7 @@ impl XdrDecoder {
             vec.push(self.buf.get_u8());
         }
 
-        eprintln!("DEBUG into_remaining_bytes: extracted {} bytes into vec", vec.len());
+        tracing::trace!("into_remaining_bytes: extracted {} bytes into vec", vec.len());
         Bytes::from(vec)
     }
 
