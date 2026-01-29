@@ -21,7 +21,6 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::os::unix::fs::FileExt;
-use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Open claim types
@@ -191,7 +190,6 @@ pub struct CommitRes {
 struct CachedFile {
     file: Arc<std::sync::Mutex<File>>,
     path: PathBuf,
-    last_access: Instant,
 }
 
 /// I/O operation handler with file descriptor caching
@@ -760,7 +758,6 @@ impl IoOperationHandler {
             self.fd_cache.insert(op.stateid.clone(), CachedFile {
                 file: Arc::clone(&file_arc),
                 path: path.clone(),
-                last_access: Instant::now(),
             });
             
             info!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);

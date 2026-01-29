@@ -510,15 +510,12 @@ impl LockOperationHandler {
         debug!("LOCKU: offset={}, length={}", op.offset, op.length);
 
         // Check current filehandle
-        let current_fh = match &ctx.current_fh {
-            Some(fh) => fh,
-            None => {
-                return LockURes {
-                    status: Nfs4Status::NoFileHandle,
-                    stateid: None,
-                };
-            }
-        };
+        if ctx.current_fh.is_none() {
+            return LockURes {
+                status: Nfs4Status::NoFileHandle,
+                stateid: None,
+            };
+        }
 
         // Validate lock stateid
         if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
@@ -530,7 +527,7 @@ impl LockOperationHandler {
         }
 
         // Remove lock
-        if let Some(lock) = self.lock_mgr.remove_lock(&op.stateid) {
+        if self.lock_mgr.remove_lock(&op.stateid).is_some() {
             info!("LOCKU: Released lock on range {}+{}", op.offset, op.length);
 
             // Return updated stateid

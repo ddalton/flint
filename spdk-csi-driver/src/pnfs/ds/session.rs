@@ -47,7 +47,6 @@ pub struct DsSessionManager {
 }
 
 struct DsSession {
-    sessionid: [u8; 16],
     /// Per-slot sequence tracking (DS typically only needs slot 0)
     /// We use a simple approach: track last seen sequence per slot
     slot_sequences: Vec<u32>,
@@ -73,7 +72,6 @@ impl DsSessionManager {
         
         // Create session entry
         let session = DsSession {
-            sessionid,
             slot_sequences: vec![0; self.max_slots as usize],
         };
         
@@ -98,7 +96,7 @@ impl DsSessionManager {
         sessionid: [u8; 16],
         sequenceid: u32,
         slotid: u32,
-        highest_slotid: u32,
+        _highest_slotid: u32,
     ) -> Result<SequenceResult, u32> {
         debug!(
             "🔥 DS SEQUENCE: sessionid={:02x}{:02x}{:02x}{:02x}..., seq={}, slot={}",
@@ -117,7 +115,6 @@ impl DsSessionManager {
                 debug!("Creating new DS session for {:02x}{:02x}{:02x}{:02x}...",
                        sessionid[0], sessionid[1], sessionid[2], sessionid[3]);
                 DsSession {
-                    sessionid,
                     slot_sequences: vec![0; self.max_slots as usize],
                 }
             });

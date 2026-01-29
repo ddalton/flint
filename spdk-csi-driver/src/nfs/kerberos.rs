@@ -12,7 +12,7 @@
 //! - RFC 1964: The Kerberos Version 5 GSS-API Mechanism
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use tracing::{debug, info};
 use aes::{Aes128, Aes256, cipher::{BlockEncrypt, BlockDecrypt, KeyInit, generic_array::GenericArray}};
@@ -289,6 +289,7 @@ pub struct KerberosContext {
 }
 
 /// Kerberos key usage constants (RFC 4120 Section 7.5.1)
+#[allow(dead_code)]
 mod key_usage {
     pub const AS_REP_ENC_PART: i32 = 3;
     pub const TGS_REP_ENC_PART: i32 = 8;
@@ -433,6 +434,7 @@ fn aes_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// CTS encryption for last two full blocks (swap them)
+#[allow(dead_code)]
 fn aes_cts_encrypt_last_two_blocks(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     assert_eq!(data.len(), 32); // Two full blocks
     
@@ -449,6 +451,7 @@ fn aes_cts_encrypt_last_two_blocks(key: &[u8], iv: &[u8], data: &[u8]) -> Result
 
 /// CTS encryption for one full block + partial block
 /// Kerberos uses "last two blocks" CTS variant
+#[allow(dead_code)]
 fn aes_cts_encrypt_partial(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let partial_len = data.len() % 16;
     let p1 = &data[..16];
@@ -577,10 +580,10 @@ fn aes_cts_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> 
         let cn_partial_end = cn_partial_start + remainder;
         
         // C[n]_partial: ciphertext[cn_partial_start..cn_partial_end]
-        let c_n_partial = &ciphertext[cn_partial_start..cn_partial_end];
-        
+        let _c_n_partial = &ciphertext[cn_partial_start..cn_partial_end];
+
         // C[n-1]: ciphertext[cn_partial_end..end]
-        let c_n_minus_1 = &ciphertext[cn_partial_end..];
+        let _c_n_minus_1 = &ciphertext[cn_partial_end..];
         
         // Per Schneier's "Applied Cryptography" pages 195-196 and search results:
         // Input format: C[0], ..., C[n-2], T (16 bytes), C[n-1]_partial (remainder bytes)
@@ -708,6 +711,7 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> 
 
 /// CTS decryption for partial last block
 /// Reverse of CTS encryption
+#[allow(dead_code)]
 fn aes_cts_decrypt_partial(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let partial_len = data.len() % 16;
     
@@ -1097,6 +1101,7 @@ impl Ticket {
 
 /// Decrypted ticket content (EncTicketPart from RFC 4120)
 #[derive(Debug)]
+#[allow(dead_code)]
 struct EncTicketPart {
     flags: u32,
     key: SessionKey,
@@ -1198,6 +1203,7 @@ impl EncTicketPart {
 
 /// Kerberos Authenticator (RFC 4120 Section 5.5.1)
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Authenticator {
     crealm: String,
     cname: Vec<String>,
@@ -1797,7 +1803,8 @@ fn encode_asn1_octet_string(data: &[u8]) -> Vec<u8> {
 }
 
 /// Encode KerberosTime as GeneralizedTime
-fn encode_kerberos_time(timestamp: i64) -> Vec<u8> {
+#[allow(dead_code)]
+fn encode_kerberos_time(_timestamp: i64) -> Vec<u8> {
     // For simplicity, encode current time as GeneralizedTime
     // Format: YYYYMMDDHHMMSSz
     let time_str = format!("{}Z", chrono::Utc::now().format("%Y%m%d%H%M%S"));
@@ -2108,11 +2115,12 @@ impl KerberosContext {
     }
     
     /// Generate a minimal valid AP-REP token wrapped in GSS-API framing
-    /// 
+    ///
     /// Structure:
     /// - GSS-API Application tag [0x60]
     /// - GSS OID for Kerberos (1.2.840.113554.1.2.2)
     /// - Kerberos AP-REP message
+    #[allow(dead_code)]
     fn generate_ap_rep_token() -> Result<Vec<u8>> {
         let mut token = Vec::new();
         
@@ -2145,8 +2153,9 @@ impl KerberosContext {
         debug!("Generated GSS-wrapped AP-REP: {} bytes", token.len());
         Ok(token)
     }
-    
+
     /// Encode the inner AP-REP structure
+    #[allow(dead_code)]
     fn encode_ap_rep_inner() -> Vec<u8> {
         let mut inner = Vec::new();
         
@@ -2284,7 +2293,6 @@ mod tests {
         let krb5_oid = vec![0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
 
         // Check if the OID appears in the token
-        let token_str = format!("{:02x?}", token);
         assert!(token.windows(krb5_oid.len()).any(|window| window == krb5_oid.as_slice()),
                 "AP-REP should contain Kerberos OID");
     }

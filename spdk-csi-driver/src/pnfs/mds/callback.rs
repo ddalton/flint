@@ -27,10 +27,8 @@ pub struct CallbackManager {
 
 /// Callback channel to a specific client
 struct CallbackChannel {
-    session_id: SessionId,
     callback_addr: Option<String>,  // Client callback address (from CREATE_SESSION)
     callback_prog: u32,              // Callback program number
-    callback_sec: Vec<u32>,          // Security flavors for callback
 }
 
 impl CallbackManager {
@@ -47,16 +45,14 @@ impl CallbackManager {
         session_id: SessionId,
         callback_addr: Option<String>,
         callback_prog: u32,
-        callback_sec: Vec<u32>,
+        _callback_sec: Vec<u32>,
     ) {
         let mut channels = self.channels.write().await;
         channels.insert(
             session_id,
             CallbackChannel {
-                session_id,
                 callback_addr: callback_addr.clone(),
                 callback_prog,
-                callback_sec,
             },
         );
         info!(

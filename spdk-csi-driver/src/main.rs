@@ -233,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Create minimal CSI services
-    let identity_service = MinimalIdentityService::new(driver.clone());
+    let identity_service = MinimalIdentityService::new();
     let controller_service = MinimalControllerService::new(driver.clone());
     let node_service = MinimalNodeService::new(driver.clone());
     
@@ -309,13 +309,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Minimal Identity Service Implementation
-struct MinimalIdentityService {
-    driver: Arc<SpdkCsiDriver>,
-}
+struct MinimalIdentityService;
 
 impl MinimalIdentityService {
-    fn new(driver: Arc<SpdkCsiDriver>) -> Self {
-        Self { driver }
+    fn new() -> Self {
+        Self
     }
 }
 
@@ -1048,7 +1046,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         
         // Handle synthetic volumeHandle for NFS PVs
         // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts
-        let (actual_volume_id, is_nfs_pv) = if volume_id.starts_with("nfs-server-") {
+        let (actual_volume_id, _is_nfs_pv) = if volume_id.starts_with("nfs-server-") {
             let original_id = req.volume_context.get("originalVolumeId")
                 .ok_or_else(|| tonic::Status::invalid_argument(
                     "NFS PV missing originalVolumeId in volumeAttributes"
@@ -1313,7 +1311,6 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         ];
         
         // Validate requested capabilities
-        let mut confirmed = None;
         for cap in &req.volume_capabilities {
             if let Some(access_mode) = &cap.access_mode {
                 let mode = Mode::try_from(access_mode.mode).unwrap_or(Mode::Unknown);
@@ -1330,7 +1327,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
         
         // All capabilities are supported
-        confirmed = Some(spdk_csi_driver::csi::validate_volume_capabilities_response::Confirmed {
+        let confirmed = Some(spdk_csi_driver::csi::validate_volume_capabilities_response::Confirmed {
             volume_context: req.volume_context.clone(),
             volume_capabilities: req.volume_capabilities.clone(),
             parameters: req.parameters.clone(),

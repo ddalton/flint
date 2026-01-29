@@ -18,8 +18,12 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // CREATE_SESSION flags (RFC 5661 §18.36)
+// Defined for protocol completeness; not all flags are implemented yet
+#[allow(dead_code)]
 const CREATE_SESSION4_FLAG_PERSIST: u32 = 0x0000_0001;
+#[allow(dead_code)]
 const CREATE_SESSION4_FLAG_CONN_BACK_CHAN: u32 = 0x0000_0002;
+#[allow(dead_code)]
 const CREATE_SESSION4_FLAG_CONN_RDMA: u32 = 0x0000_0004;
 
 /// EXCHANGE_ID operation (opcode 42)
@@ -437,11 +441,9 @@ impl SessionOperationHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nfs::v4::state::LeaseManager;
 
     #[test]
     fn test_exchange_id() {
-        let lease_mgr = Arc::new(LeaseManager::new());
         let state_mgr = Arc::new(StateManager::new());
         let handler = SessionOperationHandler::new(state_mgr.clone());
 

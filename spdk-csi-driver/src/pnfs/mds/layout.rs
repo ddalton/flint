@@ -110,11 +110,11 @@ pub enum LayoutType {
 #[derive(Debug, Clone, Copy)]
 enum LayoutPolicyImpl {
     /// Simple round-robin across all DSs
-    RoundRobin { next_device: usize },
-    
+    RoundRobin,
+
     /// Interleaved striping for parallel I/O
     Stripe,
-    
+
     /// Prefer DS on same node as client (future)
     Locality,
 }
@@ -127,7 +127,7 @@ impl LayoutManager {
         stripe_size: u64,
     ) -> Self {
         let policy_impl = match policy {
-            ConfigLayoutPolicy::RoundRobin => LayoutPolicyImpl::RoundRobin { next_device: 0 },
+            ConfigLayoutPolicy::RoundRobin => LayoutPolicyImpl::RoundRobin,
             ConfigLayoutPolicy::Stripe => LayoutPolicyImpl::Stripe,
             ConfigLayoutPolicy::Locality => LayoutPolicyImpl::Locality,
         };
@@ -170,7 +170,7 @@ impl LayoutManager {
         );
 
         let segments = match self.policy {
-            LayoutPolicyImpl::RoundRobin { .. } => {
+            LayoutPolicyImpl::RoundRobin => {
                 self.generate_roundrobin_layout(offset, length, &devices)?
             }
             LayoutPolicyImpl::Stripe => {
@@ -222,7 +222,7 @@ impl LayoutManager {
 
         let mut segments = Vec::new();
         let current_offset = offset;
-        let end_offset = offset.saturating_add(length);
+        let _end_offset = offset.saturating_add(length);
 
         // Simple round-robin: assign entire range to first device
         // In a more sophisticated implementation, we would split across multiple devices

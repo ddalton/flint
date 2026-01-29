@@ -665,8 +665,6 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                             .map(|s| s.as_str()).unwrap_or("");
                         let node_name = attrs.get("flint.csi.storage.io/node-name")
                             .map(|s| s.as_str()).unwrap_or("");
-                        let lvs_name = attrs.get("flint.csi.storage.io/lvs-name")
-                            .map(|s| s.as_str()).unwrap_or("");
                         let replica_count = attrs.get("flint.csi.storage.io/replica-count")
                             .and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
                         let size_str = attrs.get("size")
@@ -1525,16 +1523,11 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
             let snapshot_uuid = snap["snapshot_uuid"].as_str().unwrap_or("");
             let consumed = bdev_consumption_map.get(snapshot_uuid).copied().unwrap_or(0);
             
-            // Try to get cluster size from lvs_name (e.g., "lvs_flnt-4-46-m1_memory-m1")
+            // Get lvs_name for output
             let lvs_name = snap["lvs_name"].as_str().unwrap_or("");
-            let cluster_size = cluster_size_map.iter()
-                .find(|(uuid, _)| {
-                    // Match by lvs name if we can extract it
-                    // For now, use default 4MB if not found
-                    false
-                })
-                .map(|(_, size)| *size)
-                .unwrap_or(4194304); // Default 4MB cluster size
+            // TODO: Try to get cluster size from lvs_name (e.g., "lvs_flnt-4-46-m1_memory-m1")
+            // For now, use default 4MB cluster size
+            let cluster_size = 4194304u64;
             
             let allocated_clusters = if cluster_size > 0 { consumed / cluster_size } else { 0 };
             

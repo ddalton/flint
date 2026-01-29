@@ -116,7 +116,7 @@ impl MinimalDiskService {
         
         if let Some(bdev_list) = bdevs["result"].as_array() {
             debug!(count = bdev_list.len(), "[DEBUG] Found bdevs in result array");
-            for (i, bdev) in bdev_list.iter().enumerate() {
+            for (_i, bdev) in bdev_list.iter().enumerate() {
                 // Note: Individual bdev JSON not logged (too verbose). Only extracted values logged below.
 
                 if let Some(disk_info) = self.bdev_to_disk_info(bdev, &lvstores, &controllers, &bdevs).await? {
@@ -1828,7 +1828,7 @@ impl MinimalDiskService {
         let product_name = bdev["product_name"].as_str().unwrap_or("");
         let block_size = bdev["block_size"].as_u64().unwrap_or(0);
         let num_blocks = bdev["num_blocks"].as_u64().unwrap_or(0);
-        let claimed = bdev["claimed"].as_bool().unwrap_or(false);
+        let _claimed = bdev["claimed"].as_bool().unwrap_or(false);
         
         // Note: Extracted values not logged (too verbose during discovery with 20+ bdevs)
 
@@ -1999,7 +1999,7 @@ impl MinimalDiskService {
         if let Some(lvs_list) = lvstores["result"].as_array() {
             println!("✅ [LVS_SEARCH] Found {} LVS stores to check", lvs_list.len());
 
-            for (i, lvs) in lvs_list.iter().enumerate() {
+            for (_i, lvs) in lvs_list.iter().enumerate() {
                 // Note: Raw LVS JSON not logged (verbose). Only checking base_bdev match.
 
                 if let Some(base_bdev) = lvs["base_bdev"].as_str() {

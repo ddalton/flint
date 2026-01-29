@@ -547,7 +547,7 @@ impl DataServer {
                 }
 
                 opcode::READ => {
-                    let stateid = match decoder.decode_stateid() {
+                    let _stateid = match decoder.decode_stateid() {
                         Ok(s) => s,
                         Err(_) => {
                             results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));

@@ -675,7 +675,7 @@ pub fn encode_file_layout(
 pub fn encode_device_addr_file_layout(
     netid: &str,
     uaddr: &str,
-    multipath_addrs: &[String],
+    _multipath_addrs: &[String],
 ) -> Bytes {
     let mut encoder = XdrEncoder::new();
     

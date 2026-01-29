@@ -32,7 +32,6 @@ pub struct MetadataServer {
     layout_manager: Arc<LayoutManager>,
     operation_handler: Arc<PnfsOperationHandler>,
     base_dispatcher: Arc<CompoundDispatcher>,
-    fh_manager: Arc<FileHandleManager>,
     gss_manager: Arc<RpcSecGssManager>,
 }
 
@@ -113,7 +112,6 @@ impl MetadataServer {
             layout_manager,
             operation_handler,
             base_dispatcher,
-            fh_manager,
             gss_manager,
         })
     }

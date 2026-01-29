@@ -5,25 +5,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-// XDR encoding helpers
-fn encode_u32(val: u32) -> [u8; 4] {
-    val.to_be_bytes()
-}
-
-fn encode_string(s: &str) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let len = s.len() as u32;
-    buf.extend_from_slice(&encode_u32(len));
-    buf.extend_from_slice(s.as_bytes());
-    
-    // Pad to 4-byte boundary
-    let padding = (4 - (len % 4)) % 4;
-    for _ in 0..padding {
-        buf.push(0);
-    }
-    buf
-}
-
 async fn send_rpc_call(
     stream: &mut TcpStream,
     xid: u32,

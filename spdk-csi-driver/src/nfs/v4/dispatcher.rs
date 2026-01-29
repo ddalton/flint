@@ -28,14 +28,8 @@ use tracing::{debug, info, warn};
 
 /// COMPOUND dispatcher - processes COMPOUND requests
 pub struct CompoundDispatcher {
-    /// File handle manager
-    fh_mgr: Arc<FileHandleManager>,
-
     /// State manager (clients, sessions, stateids, leases)
     state_mgr: Arc<StateManager>,
-
-    /// Lock manager
-    lock_mgr: Arc<LockManager>,
 
     /// Operation handlers
     session_handler: SessionOperationHandler,
@@ -76,9 +70,7 @@ impl CompoundDispatcher {
         let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone());
 
         Self {
-            fh_mgr,
             state_mgr,
-            lock_mgr,
             session_handler,
             file_handler,
             io_handler,
@@ -89,6 +81,7 @@ impl CompoundDispatcher {
     }
     
     /// Check if an opcode is a pNFS operation
+    #[allow(dead_code)]
     fn is_pnfs_opcode(opcode: u32) -> bool {
         matches!(opcode, 
             opcode::GETDEVICEINFO |   // 47
@@ -598,7 +591,7 @@ impl CompoundDispatcher {
             }
 
             // NFSv4.2 performance operations
-            Operation::Copy { src_stateid, dst_stateid, src_offset, dst_offset, count, consecutive, synchronous } => {
+            Operation::Copy { src_stateid, dst_stateid, src_offset, dst_offset, count, consecutive: _, synchronous } => {
                 let op = CopyOp {
                     src_stateid,
                     dst_stateid,
@@ -1218,6 +1211,7 @@ impl CompoundDispatcher {
     
     /// Encode FILE layout with multiple segments for striping across DSes
     /// Per RFC 5661 Section 13.3 - NFSv4.1 File Layout Type
+    #[allow(dead_code)]
     fn encode_file_layout_striped(
         segments: &[crate::pnfs::mds::layout::LayoutSegment],
         filehandle: &[u8],
@@ -1281,7 +1275,8 @@ impl CompoundDispatcher {
         
         result
     }
-    
+
+    #[allow(dead_code)]
     fn encode_file_layout(
         segment: &crate::pnfs::mds::layout::LayoutSegment,
         filehandle: &[u8],

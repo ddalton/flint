@@ -1,6 +1,10 @@
 // NFSv4 Basic File Operations
 //
 // This module implements core file operations for NFSv4:
+//
+// Note: Some FATTR4_* constants and helper functions are defined for RFC 5661
+// protocol completeness but not yet used in the current implementation.
+#![allow(dead_code)]
 // - File handle operations: PUTROOTFH, PUTFH, GETFH, SAVEFH, RESTOREFH
 // - Navigation: LOOKUP, LOOKUPP
 // - Attributes: GETATTR, SETATTR
@@ -1137,7 +1141,7 @@ fn encode_pseudo_root_attribute(
 fn encode_single_attribute(
     attr_id: u32,
     metadata: &std::fs::Metadata,
-    path: &Path,
+    _path: &Path,
     buf: &mut BytesMut,
 ) -> bool {
     match attr_id {

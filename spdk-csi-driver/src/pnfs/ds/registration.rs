@@ -20,7 +20,6 @@ use tracing::{debug, error, info, warn};
 pub struct RegistrationClient {
     device_id: String,
     mds_endpoint: String,
-    heartbeat_interval: Duration,
     grpc_client: Option<MdsControlClient<Channel>>,
 }
 
@@ -29,12 +28,11 @@ impl RegistrationClient {
     pub fn new(
         device_id: String,
         mds_endpoint: String,
-        heartbeat_interval: Duration,
+        _heartbeat_interval: Duration,
     ) -> Self {
         Self {
             device_id,
             mds_endpoint,
-            heartbeat_interval,
             grpc_client: None,
         }
     }

@@ -320,7 +320,7 @@ impl PerfOperationHandler {
     pub async fn handle_copy(
         &self,
         op: CopyOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> CopyRes {
         info!("COPY: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
@@ -512,7 +512,7 @@ impl PerfOperationHandler {
     pub async fn handle_clone(
         &self,
         op: CloneOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> CloneRes {
         info!("CLONE: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
@@ -684,7 +684,7 @@ impl PerfOperationHandler {
     pub async fn handle_allocate(
         &self,
         op: AllocateOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> AllocateRes {
         debug!("ALLOCATE: offset={}, length={}", op.offset, op.length);
 
@@ -717,7 +717,7 @@ impl PerfOperationHandler {
     pub async fn handle_deallocate(
         &self,
         op: DeallocateOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> DeallocateRes {
         debug!("DEALLOCATE: offset={}, length={}", op.offset, op.length);
 
@@ -753,7 +753,7 @@ impl PerfOperationHandler {
     pub async fn handle_seek(
         &self,
         op: SeekOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> SeekRes {
         debug!("SEEK: offset={}, what={:?}", op.offset, op.what);
 
@@ -793,7 +793,7 @@ impl PerfOperationHandler {
     pub async fn handle_read_plus(
         &self,
         op: ReadPlusOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> ReadPlusRes {
         debug!("READ_PLUS: offset={}, count={}", op.offset, op.count);
 
@@ -832,7 +832,7 @@ impl PerfOperationHandler {
     pub async fn handle_io_advise(
         &self,
         op: IoAdviseOp,
-        ctx: &CompoundContext,
+        _ctx: &CompoundContext,
     ) -> IoAdviseRes {
         debug!("IO_ADVISE: offset={}, length={}", op.offset, op.length);
 

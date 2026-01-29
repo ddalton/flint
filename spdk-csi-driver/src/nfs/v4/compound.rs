@@ -688,9 +688,6 @@ impl CompoundRequest {
                 eprintln!("DEBUG SETATTR: After stateid, {} bytes remaining", decoder.remaining());
                 
                 // Decode fattr4 structure (bitmap + attr_vals), NOT simple opaque
-                // Save current position for potential re-encoding
-                let start_remaining = decoder.remaining();
-                
                 // Decode bitmap4 (array of u32)
                 let bitmap_len = decoder.decode_u32()?;
                 eprintln!("DEBUG SETATTR: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
@@ -1314,7 +1311,7 @@ impl CompoundResponse {
                             encoder.encode_bool(res.eof);
                         } else {
                             // Encode directory entries as linked list
-                            for (i, entry) in res.entries.iter().enumerate() {
+                            for entry in res.entries.iter() {
                                 // value_follows (or next_entry for subsequent entries)
                                 encoder.encode_bool(true);
                                 

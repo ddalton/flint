@@ -402,7 +402,7 @@ impl PnfsOperationHandler {
             };
 
             match filehandle_pnfs::parse_pnfs_filehandle(&fh) {
-                Ok((_, file_id, stripe_index)) => {
+                Ok((_, file_id, _stripe_index)) => {
                     // For MDS, we need to map file_id back to original file
                     // Since we don't have a persistent mapping yet, use a simple approach
                     // TODO: Implement persistent file_id -> path mapping
