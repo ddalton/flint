@@ -507,11 +507,11 @@ mod tests {
     fn test_empty_params_normalization() {
         // Test empty object -> None
         let empty_object = Some(json!({}));
-        let spdk = SpdkNative {
+        let _spdk = SpdkNative {
             socket_path: "/tmp/test.sock".to_string(),
             request_id: AtomicU64::new(0),
         };
-        
+
         // Simulate the normalization logic
         let normalized = match &empty_object {
             Some(Value::Object(map)) if map.is_empty() => None,

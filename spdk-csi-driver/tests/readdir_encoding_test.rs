@@ -450,7 +450,7 @@ mod tests {
         println!("  ✓ attrs.bitmap: [{}]", bitmap_word);
         
         // entry4.attrs.attr_vals
-        let attr_vals_len = u32::from_be_bytes([
+        let _attr_vals_len = u32::from_be_bytes([
             encoded[offset], encoded[offset+1], encoded[offset+2], encoded[offset+3],
         ]) as usize;
         offset += 4;
@@ -653,7 +653,7 @@ mod tests {
         println!("\n=== Test: READDIR Does Not Return Unrequested Attributes ===");
         
         // Client only requests TYPE and SIZE
-        let requested_bitmap = vec![
+        let _requested_bitmap = vec![
             0x0000001a, // Word 0: Type(1), Change(3), Size(4)
         ];
         

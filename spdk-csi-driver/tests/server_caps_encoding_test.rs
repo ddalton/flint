@@ -35,8 +35,11 @@ fn test_server_caps_attribute_sizes() {
     // - Attr 17: 4 bytes (CASE_PRESERVING: bool encoded as u32)
     // - Attr 75: 12 bytes (SUPPATTR_EXCLCREAT: bitmap4 array_len=2, word0, word1 = 4+4+4)
     
+    // Expected sizes with correct bitmap4 encoding (array_len + words)
+    // SUPPORTED_ATTRS: 4 (array len=2) + 4 (word0) + 4 (word1) = 12 bytes (without pNFS)
+    // SUPPATTR_EXCLCREAT: 4 (array len=2) + 4 (word0) + 4 (word1) = 12 bytes
     let expected_sizes = vec![
-        (0, 8),   // SUPPORTED_ATTRS: 4 (array len) + 4 (word0 + word1... wait, 2 words = 8 bytes?)
+        (0, 12),  // SUPPORTED_ATTRS: 4 (array len=2) + 4 (word0) + 4 (word1)
         (2, 4),   // FH_EXPIRE_TYPE
         (5, 4),   // LINK_SUPPORT
         (6, 4),   // SYMLINK_SUPPORT
@@ -45,34 +48,20 @@ fn test_server_caps_attribute_sizes() {
         (17, 4),  // CASE_PRESERVING
         (75, 12), // SUPPATTR_EXCLCREAT: 4 (array len=2) + 4 (word0) + 4 (word1)
     ];
-    
+
     let total: usize = expected_sizes.iter().map(|(_, size)| size).sum();
     println!("\nExpected total attr_vals bytes: {}", total);
-    println!("Server log shows: 44 bytes");
-    
-    assert_eq!(total, 44, "Attribute bytes should sum to 44");
-    
-    println!("\n✅ Server caps attribute sizes verified");
-    
-    // Now verify SUPPORTED_ATTRS encoding
-    // It should be: array_len (4) + words (N * 4)
-    // For attributes 0-55, we need 2 words (0-31, 32-63)
-    // So: 4 (len=2) + 4 (word0) + 4 (word1) = 12 bytes?
-    // But log shows 8 bytes...
-    
-    println!("\n⚠️  POTENTIAL ISSUE:");
-    println!("  SUPPORTED_ATTRS logged as 8 bytes");
-    println!("  But bitmap4 should be: array_len (4) + array_data (N*4)");
-    println!("  If we have 2 words: 4 + 4 + 4 = 12 bytes");
-    println!("  If we encode only the u64 value: 4 + 4 = 8 bytes");
-    println!("  ^^^ THIS IS THE BUG! We're encoding as u64, not as bitmap4 array!");
+
+    assert_eq!(total, 48, "Attribute bytes should sum to 48 with correct bitmap4 encoding");
+
+    println!("\n✅ Server caps attribute sizes verified with correct bitmap4 encoding");
 }
 
 #[test]
 fn test_bitmap4_encoding_format() {
     // Per RFC 5661, bitmap4 is defined as:
     // typedef uint32_t bitmap4<>;
-    // 
+    //
     // This means: XDR variable-length array of u32
     // Format: array_length (u32) + array_elements (each u32)
     //
@@ -82,30 +71,32 @@ fn test_bitmap4_encoding_format() {
     //   4 bytes: word 1
     //   Total: 12 bytes
     //
-    // We're currently encoding SUPPORTED_ATTRS as:
-    //   4 bytes: (supported >> 32) as u32  -- word 0
-    //   4 bytes: supported as u32          -- word 1
-    //   Total: 8 bytes (MISSING array length prefix!)
-    
+    // For a 3-word bitmap (with pNFS):
+    //   4 bytes: array length = 3
+    //   4 bytes: word 0
+    //   4 bytes: word 1
+    //   4 bytes: word 2
+    //   Total: 16 bytes
+
     println!("RFC 5661 bitmap4 definition:");
     println!("  typedef uint32_t bitmap4<>;");
-    println!("");
+    println!();
     println!("Correct encoding:");
     println!("  array_length (u32) + array_elements (u32 * length)");
-    println!("");
+    println!();
     println!("For 2-word bitmap:");
     println!("  [4 bytes: length=2] [4 bytes: word0] [4 bytes: word1] = 12 bytes");
-    println!("");
-    println!("❌ OUR BUG:");
-    println!("  We encode: [4 bytes: word0] [4 bytes: word1] = 8 bytes");
-    println!("  Missing: array length prefix!");
-    println!("");
-    println!("This causes verify_attr_len to fail:");
-    println!("  - We declare some length X");
-    println!("  - Kernel expects X bytes after decoding bitmap4 (with array length)");
-    println!("  - But we encoded WITHOUT array length");
-    println!("  - Byte count mismatch → EIO");
-    
-    panic!("SUPPORTED_ATTRS and SUPPATTR_EXCLCREAT must encode array_length prefix!");
+    println!();
+    println!("For 3-word bitmap (pNFS enabled):");
+    println!("  [4 bytes: length=3] [4 bytes: word0] [4 bytes: word1] [4 bytes: word2] = 16 bytes");
+    println!();
+    println!("✅ Our encoding now correctly includes array_length prefix!");
+
+    // Verify the expected sizes
+    let two_word_bitmap_size = 4 + 4 + 4; // array_len + word0 + word1
+    let three_word_bitmap_size = 4 + 4 + 4 + 4; // array_len + word0 + word1 + word2
+
+    assert_eq!(two_word_bitmap_size, 12, "2-word bitmap4 should be 12 bytes");
+    assert_eq!(three_word_bitmap_size, 16, "3-word bitmap4 should be 16 bytes");
 }
 

@@ -130,8 +130,7 @@ fn test_layoutget_response_encoding() {
     // 9. Layout content (nfsv4_1_file_layout4)
     // Device ID (16 bytes, no length prefix in the layout content itself)
     assert_eq!(&result[offset..offset+16], &device_id, "Device ID mismatch in layout content");
-    offset += 16;
-    
+
     println!("✅ All fields parsed correctly!");
 }
 

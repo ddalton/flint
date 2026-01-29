@@ -31,18 +31,14 @@ fn test_getattr_fattr4_structure() {
     assert_eq!(expected.len(), 24, "fattr4 with 2 attributes should be 24 bytes");
     
     // Parse it back
-    let mut offset = 0;
     let bitmap_len = u32::from_be_bytes([expected[0], expected[1], expected[2], expected[3]]);
     assert_eq!(bitmap_len, 1);
-    offset += 4;
-    
+
     let bitmap_word = u32::from_be_bytes([expected[4], expected[5], expected[6], expected[7]]);
     assert_eq!(bitmap_word, 0x0A); // bits 1,3
-    offset += 4;
-    
+
     let attr_vals_len = u32::from_be_bytes([expected[8], expected[9], expected[10], expected[11]]);
     assert_eq!(attr_vals_len, 12, "attr_vals should be 12 bytes");
-    offset += 4;
     
     // The GETATTR response encoding should be:
     // opcode (4) + status (4) + fattr4 (24) = 32 bytes total

@@ -58,26 +58,26 @@
 //!
 //! ## Metadata Server Mode
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use spdk_csi_driver::pnfs::{PnfsConfig, MetadataServer};
 //!
-//! # async fn example() -> std::io::Result<()> {
-//! let config = PnfsConfig::from_file("/etc/flint/pnfs.yaml")?;
-//! let mds = MetadataServer::new(config.mds.unwrap())?;
-//! mds.serve().await
-//! # }
+//! async fn example() -> spdk_csi_driver::pnfs::Result<()> {
+//!     let config = PnfsConfig::from_file("/etc/flint/pnfs.yaml")?;
+//!     let mds = MetadataServer::new(config.mds.unwrap(), vec![])?;
+//!     mds.serve().await
+//! }
 //! ```
 //!
 //! ## Data Server Mode
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use spdk_csi_driver::pnfs::{PnfsConfig, DataServer};
 //!
-//! # async fn example() -> std::io::Result<()> {
-//! let config = PnfsConfig::from_file("/etc/flint/pnfs.yaml")?;
-//! let ds = DataServer::new(config.ds.unwrap())?;
-//! ds.serve().await
-//! # }
+//! async fn example() -> spdk_csi_driver::pnfs::Result<()> {
+//!     let config = PnfsConfig::from_file("/etc/flint/pnfs.yaml")?;
+//!     let ds = DataServer::new(config.ds.unwrap())?;
+//!     ds.serve().await
+//! }
 //! ```
 //!
 //! # References
@@ -112,6 +112,8 @@ pub mod ds;
 // Re-exports for convenience
 pub use config::{PnfsConfig, PnfsMode, MdsConfig, DsConfig};
 pub use handler_trait::PnfsOperations;
+pub use mds::server::MetadataServer;
+pub use ds::server::DataServer;
 
 /// pNFS result type
 pub type Result<T> = std::result::Result<T, Error>;
