@@ -16,6 +16,7 @@ pub struct VolumeSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaInfo {
     pub node_name: String,
+    pub node_uid: String, // Kubernetes node UID for PV label-based discovery
     pub disk_pci_address: String,
     pub lvol_uuid: String,
     pub lvol_name: String,

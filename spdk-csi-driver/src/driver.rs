@@ -269,6 +269,15 @@ impl SpdkCsiDriver {
                     message: "Selected disk has no LVS name".to_string()
                 })?;
 
+            // Fetch node UID for replica tracking
+            let node_uid = match self.get_node_uid(&node_info.node_name).await {
+                Ok(uid) => uid,
+                Err(e) => {
+                    println!("⚠️ [DRIVER] Failed to get node UID for {}: {}, using empty", node_info.node_name, e);
+                    String::new()
+                }
+            };
+
             match self.create_lvol(
                 &node_info.node_name,
                 lvs_name,
@@ -282,6 +291,7 @@ impl SpdkCsiDriver {
 
                     let replica = ReplicaInfo {
                         node_name: node_info.node_name.clone(),
+                        node_uid: node_uid.clone(),
                         disk_pci_address: node_info.disk.pci_address.clone(),
                         lvol_uuid: lvol_uuid.clone(),
                         lvol_name: format!("vol_{}", replica_volume_id),
@@ -398,15 +408,25 @@ impl SpdkCsiDriver {
         // - Immediate accuracy after volume creation (invalidation)
         // - External changes detected within 60s (background refresh)
         self.capacity_cache.invalidate(&node_name).await;
-        
+
+        // Fetch node UID for replica tracking
+        let node_uid = match self.get_node_uid(&node_name).await {
+            Ok(uid) => uid,
+            Err(e) => {
+                println!("⚠️ [DRIVER] Failed to get node UID for {}: {}, using empty", node_name, e);
+                String::new()
+            }
+        };
+
         println!("✅ [DRIVER] Volume {} created successfully with lvol UUID: {}", volume_id, lvol_uuid);
-        
+
         // Return full volume creation result with metadata
         Ok(VolumeCreationResult {
             volume_id: volume_id.to_string(),
             size_bytes,
             replicas: vec![ReplicaInfo {
                 node_name: node_name.to_string(),
+                node_uid,
                 disk_pci_address: selected_disk.pci_address.clone(),
                 lvol_uuid: lvol_uuid.clone(),
                 lvol_name: format!("vol_{}", volume_id),
@@ -438,12 +458,21 @@ impl SpdkCsiDriver {
         }
 
         // Create distributed multi-replica volume
-        self.create_distributed_multi_replica_volume(
+        let result = self.create_distributed_multi_replica_volume(
             volume_id,
             size_bytes,
             replica_count,
             thin_provision
-        ).await
+        ).await?;
+
+        // Add replica node labels to PV for node-based discovery on restart
+        // This enables nodes to find which volumes have local replicas when they come back online
+        if let Err(e) = self.add_replica_node_labels(volume_id, &result.replicas).await {
+            // Log but don't fail - labels are for optimization, not critical path
+            println!("⚠️ [DRIVER] Failed to add replica node labels (non-fatal): {}", e);
+        }
+
+        Ok(result)
     }
 
     /// Get SPDK RPC URL for a specific node (simplified)
@@ -479,8 +508,75 @@ impl SpdkCsiDriver {
                 }
             }
         }
-        
+
         Err(Status::not_found(format!("No IP address found for node {}", node_name)))
+    }
+
+    /// Get node UID from Kubernetes API
+    /// Used to create unique labels for replica tracking on PVs
+    pub async fn get_node_uid(&self, node_name: &str) -> Result<String, Status> {
+        let nodes_api: Api<k8sNode> = Api::all(self.kube_client.clone());
+        let node = nodes_api.get(node_name).await
+            .map_err(|e| Status::internal(format!("Failed to get node {}: {}", node_name, e)))?;
+
+        node.metadata.uid
+            .ok_or_else(|| Status::not_found(format!("No UID found for node {}", node_name)))
+    }
+
+    /// Add replica node labels to PV for node-based discovery on restart
+    /// Labels format: flint.csi.storage.io/replica-{node_uid}=true
+    pub async fn add_replica_node_labels(
+        &self,
+        volume_id: &str,
+        replicas: &[ReplicaInfo],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::api::{Patch, PatchParams};
+
+        println!("🏷️ [DRIVER] Adding replica node labels to PV: {}", volume_id);
+
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+
+        // Build labels map with node UIDs
+        let mut labels = serde_json::Map::new();
+        for replica in replicas {
+            if !replica.node_uid.is_empty() {
+                let label_key = format!("flint.csi.storage.io/replica-{}", replica.node_uid);
+                labels.insert(label_key, serde_json::json!("true"));
+                println!("   Adding label for node {} (UID: {})", replica.node_name, replica.node_uid);
+            }
+        }
+
+        if labels.is_empty() {
+            println!("⚠️ [DRIVER] No valid node UIDs found, skipping label patching");
+            return Ok(());
+        }
+
+        let patch = serde_json::json!({
+            "metadata": {
+                "labels": labels
+            }
+        });
+
+        // Retry with backoff - PV may not exist yet if external-provisioner hasn't created it
+        for attempt in 1..=3 {
+            match pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                Ok(_) => {
+                    println!("✅ [DRIVER] Replica node labels added to PV: {} ({} labels)", volume_id, labels.len());
+                    return Ok(());
+                }
+                Err(e) if attempt < 3 => {
+                    println!("⚠️ [DRIVER] Failed to patch PV (attempt {}): {}, retrying...", attempt, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    println!("❌ [DRIVER] Failed to add replica labels after {} attempts: {}", attempt, e);
+                    return Err(format!("Failed to add replica labels: {}", e).into());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Get current node IP (cached)
@@ -864,7 +960,7 @@ impl SpdkCsiDriver {
     }
 
     /// Create ublk block device (internal implementation)
-    async fn create_ublk_block_device(&self, bdev_name: &str, volume_id: &str, ublk_id: u32) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
+    async fn create_ublk_block_device(&self, bdev_name: &str, _volume_id: &str, ublk_id: u32) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [MINIMAL_UBLK] Creating ublk device for bdev: {} with ID: {}", bdev_name, ublk_id);
 
         // Note: ublk target is initialized by node agent on startup

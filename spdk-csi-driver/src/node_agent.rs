@@ -12,10 +12,17 @@ use warp::http::StatusCode;
 
 use crate::minimal_disk_service::MinimalDiskService;
 use crate::driver::SpdkCsiDriver;
+use crate::minimal_models::ReplicaInfo;
+
+// Kubernetes API imports for node UID and PV queries
+use kube::Api;
+use kube::api::ListParams;
+use k8s_openapi::api::core::v1::PersistentVolume;
 
 /// Minimal State Node Agent - Uses direct SPDK queries instead of CRDs
 pub struct NodeAgent {
     pub node_name: String,
+    pub node_uid: Arc<tokio::sync::RwLock<String>>, // Kubernetes node UID for PV label-based replica discovery
     pub spdk_socket_path: String,
     pub disk_service: MinimalDiskService,
     pub driver: Arc<SpdkCsiDriver>,
@@ -31,6 +38,7 @@ impl NodeAgent {
 
         Self {
             node_name,
+            node_uid: Arc::new(tokio::sync::RwLock::new(String::new())), // Will be fetched asynchronously in start()
             spdk_socket_path,
             disk_service,
             driver,
@@ -50,6 +58,7 @@ impl NodeAgent {
 
         Self {
             node_name,
+            node_uid: Arc::new(tokio::sync::RwLock::new(String::new())), // Will be fetched asynchronously in start()
             spdk_socket_path,
             disk_service,
             driver,
@@ -59,6 +68,19 @@ impl NodeAgent {
     /// Start the minimal node agent with HTTP API
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🚀 [MINIMAL_NODE_AGENT] Starting minimal state node agent: {}", self.node_name);
+
+        // Fetch node UID from Kubernetes API for replica discovery
+        println!("🔍 [MINIMAL_NODE_AGENT] Fetching node UID from Kubernetes API...");
+        match self.driver.get_node_uid(&self.node_name).await {
+            Ok(uid) => {
+                *self.node_uid.write().await = uid.clone();
+                println!("✅ [MINIMAL_NODE_AGENT] Node UID: {}", uid);
+            }
+            Err(e) => {
+                println!("⚠️ [MINIMAL_NODE_AGENT] Failed to fetch node UID: {}", e);
+                println!("   Replica reconciliation will be disabled");
+            }
+        }
 
         // Initialize ublk subsystem on startup
         println!("🔧 [MINIMAL_NODE_AGENT] Initializing ublk subsystem...");
@@ -94,6 +116,18 @@ impl NodeAgent {
             Err(e) => {
                 println!("⚠️ [MINIMAL_NODE_AGENT] Initial discovery failed (continuing anyway): {}", e);
             }
+        }
+
+        // Reconcile replica targets for node recovery
+        // This sets up NVMe-oF targets for any local replicas so remote RAID members can reconnect
+        let node_uid = self.node_uid.read().await.clone();
+        if !node_uid.is_empty() {
+            println!("🔄 [MINIMAL_NODE_AGENT] Running replica target reconciliation...");
+            if let Err(e) = self.reconcile_replica_targets().await {
+                println!("⚠️ [MINIMAL_NODE_AGENT] Replica reconciliation failed (non-fatal): {}", e);
+            }
+        } else {
+            println!("⏭️ [MINIMAL_NODE_AGENT] Skipping replica reconciliation (no node UID)");
         }
 
         // Start disk discovery loop (use FAST mode to avoid expensive auto-recovery every 30s)
@@ -1621,6 +1655,278 @@ impl NodeAgent {
             }
         }
     }
+
+    // ==================== REPLICA RECONCILIATION ====================
+    // These functions handle node recovery by setting up NVMe-oF targets
+    // for local replicas so remote RAID members can reconnect.
+
+    /// Reconcile replica targets on node startup
+    /// Queries PVs with labels matching this node's UID and sets up NVMe-oF targets
+    /// for any local replicas, enabling RAID bdevs on other nodes to reconnect.
+    async fn reconcile_replica_targets(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let node_uid = self.node_uid.read().await.clone();
+        println!("🔄 [RECONCILE] Starting replica target reconciliation for node: {} (UID: {})",
+                 self.node_name, node_uid);
+
+        // Query PVs with label selector: flint.csi.storage.io/replica-{node_uid}=true
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let label_selector = format!("flint.csi.storage.io/replica-{}=true", node_uid);
+        let lp = ListParams::default().labels(&label_selector);
+
+        let pv_list = match pvs.list(&lp).await {
+            Ok(list) => list,
+            Err(e) => {
+                println!("❌ [RECONCILE] Failed to query PVs: {}", e);
+                return Err(format!("Failed to query PVs: {}", e).into());
+            }
+        };
+
+        println!("📋 [RECONCILE] Found {} PVs with local replicas", pv_list.items.len());
+
+        let mut success_count = 0;
+        let mut skip_count = 0;
+        let mut error_count = 0;
+
+        for pv in pv_list.items {
+            let volume_id = match &pv.metadata.name {
+                Some(name) => name.clone(),
+                None => {
+                    println!("⚠️ [RECONCILE] PV has no name, skipping");
+                    skip_count += 1;
+                    continue;
+                }
+            };
+
+            println!("🔍 [RECONCILE] Processing volume: {}", volume_id);
+
+            // Extract replica info from PV volumeAttributes
+            let replicas = match self.get_replicas_from_pv(&pv) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    println!("   ⏭️ Volume {} has no replica info (single replica?), skipping", volume_id);
+                    skip_count += 1;
+                    continue;
+                }
+                Err(e) => {
+                    println!("   ⚠️ Failed to parse replicas for {}: {}", volume_id, e);
+                    error_count += 1;
+                    continue;
+                }
+            };
+
+            // Find the local replica for this node (match by node_uid or node_name)
+            let (replica_index, local_replica) = match replicas.iter().enumerate()
+                .find(|(_, r)| r.node_uid == node_uid || r.node_name == self.node_name) {
+                Some((i, r)) => (i, r),
+                None => {
+                    println!("   ⚠️ No local replica found for volume {} (label mismatch?)", volume_id);
+                    skip_count += 1;
+                    continue;
+                }
+            };
+
+            println!("   Found local replica {} (lvol: {})", replica_index, local_replica.lvol_uuid);
+
+            // Verify the lvol exists locally
+            match self.verify_local_lvol(&local_replica.lvol_uuid).await {
+                Ok(bdev_name) => {
+                    println!("   ✓ Local lvol verified: {}", bdev_name);
+                }
+                Err(e) => {
+                    println!("   ⚠️ Local lvol {} not found: {}", local_replica.lvol_uuid, e);
+                    skip_count += 1;
+                    continue;
+                }
+            }
+
+            // Setup NVMe-oF target for this replica (idempotent)
+            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica).await {
+                Ok(_) => {
+                    println!("   ✅ NVMe-oF target set up for replica {}", replica_index);
+                    success_count += 1;
+                }
+                Err(e) => {
+                    println!("   ❌ Failed to setup NVMe-oF target: {}", e);
+                    error_count += 1;
+                }
+            }
+        }
+
+        println!("✅ [RECONCILE] Reconciliation complete: {} targets set up, {} skipped, {} errors",
+                 success_count, skip_count, error_count);
+
+        Ok(())
+    }
+
+    /// Extract replica info from PV volumeAttributes
+    fn get_replicas_from_pv(&self, pv: &PersistentVolume) -> Result<Option<Vec<ReplicaInfo>>, Box<dyn std::error::Error + Send + Sync>> {
+        let spec = pv.spec.as_ref()
+            .ok_or("PV has no spec")?;
+
+        let csi = spec.csi.as_ref()
+            .ok_or("PV has no CSI spec")?;
+
+        let attrs = csi.volume_attributes.as_ref()
+            .ok_or("PV has no volumeAttributes")?;
+
+        // Check replica count first
+        let replica_count = attrs.get("flint.csi.storage.io/replica-count")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1);
+
+        if replica_count <= 1 {
+            return Ok(None);
+        }
+
+        // Multi-replica: Read replicas JSON
+        let replicas_json = attrs.get("flint.csi.storage.io/replicas")
+            .ok_or("Multi-replica volume missing replicas attribute")?;
+
+        let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
+        Ok(Some(replicas))
+    }
+
+    /// Verify that a local lvol exists and return its bdev name
+    async fn verify_local_lvol(&self, lvol_uuid: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let rpc = json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": lvol_uuid
+            }
+        });
+
+        match self.disk_service.call_spdk_rpc(&rpc).await {
+            Ok(response) => {
+                if let Some(result) = response.get("result") {
+                    if let Some(bdevs) = result.as_array() {
+                        if !bdevs.is_empty() {
+                            if let Some(name) = bdevs[0].get("name").and_then(|n| n.as_str()) {
+                                return Ok(name.to_string());
+                            }
+                            return Ok(lvol_uuid.to_string());
+                        }
+                    }
+                }
+                Err(format!("Lvol {} not found in SPDK", lvol_uuid).into())
+            }
+            Err(e) => Err(format!("Failed to query lvol {}: {}", lvol_uuid, e).into())
+        }
+    }
+
+    /// Setup NVMe-oF target for a local replica
+    /// Creates subsystem, adds namespace, and adds listener (all idempotent)
+    async fn setup_nvmeof_target_for_replica(
+        &self,
+        volume_id: &str,
+        replica_index: usize,
+        replica: &ReplicaInfo,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Generate NQN using same format as driver
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index);
+
+        println!("      Setting up NVMe-oF target: {}", nqn);
+
+        // Get node IP for listener
+        let node_ip = self.driver.get_node_ip(&self.node_name).await
+            .map_err(|e| format!("Failed to get node IP: {}", e))?;
+
+        let target_port = self.driver.nvmeof_target_port;
+        let transport = &self.driver.nvmeof_transport;
+
+        // Step 1: Check if subsystem already exists (idempotency)
+        let get_subsystem_rpc = json!({
+            "method": "nvmf_get_subsystems",
+            "params": {
+                "nqn": nqn
+            }
+        });
+
+        let subsystem_exists = match self.disk_service.call_spdk_rpc(&get_subsystem_rpc).await {
+            Ok(response) => {
+                if let Some(result) = response.get("result") {
+                    if let Some(subsystems) = result.as_array() {
+                        !subsystems.is_empty()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Err(_) => false
+        };
+
+        if subsystem_exists {
+            println!("      ℹ️ Subsystem already exists (idempotent): {}", nqn);
+            return Ok(());
+        }
+
+        // Step 2: Create subsystem
+        let create_subsystem_rpc = json!({
+            "method": "nvmf_create_subsystem",
+            "params": {
+                "nqn": nqn,
+                "allow_any_host": true,
+                "serial_number": format!("SPDK{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs()),
+                "model_number": "SPDK CSI Volume"
+            }
+        });
+
+        match self.disk_service.call_spdk_rpc(&create_subsystem_rpc).await {
+            Ok(_) => println!("      ✓ Subsystem created"),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("      ℹ️ Subsystem already exists (race condition)");
+            }
+            Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
+        }
+
+        // Step 3: Add namespace with lvol bdev
+        let add_namespace_rpc = json!({
+            "method": "nvmf_subsystem_add_ns",
+            "params": {
+                "nqn": nqn,
+                "namespace": {
+                    "nsid": 1,
+                    "bdev_name": replica.lvol_uuid
+                }
+            }
+        });
+
+        match self.disk_service.call_spdk_rpc(&add_namespace_rpc).await {
+            Ok(_) => println!("      ✓ Namespace added"),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("      ℹ️ Namespace already exists");
+            }
+            Err(e) => return Err(format!("Failed to add namespace: {}", e).into()),
+        }
+
+        // Step 4: Add TCP listener
+        let add_listener_rpc = json!({
+            "method": "nvmf_subsystem_add_listener",
+            "params": {
+                "nqn": nqn,
+                "listen_address": {
+                    "trtype": transport.to_uppercase(),
+                    "traddr": node_ip,
+                    "trsvcid": target_port.to_string(),
+                    "adrfam": "ipv4"
+                }
+            }
+        });
+
+        match self.disk_service.call_spdk_rpc(&add_listener_rpc).await {
+            Ok(_) => println!("      ✓ Listener added on {}:{}", node_ip, target_port),
+            Err(e) if e.to_string().contains("already exists") => {
+                println!("      ℹ️ Listener already exists");
+            }
+            Err(e) => return Err(format!("Failed to add listener: {}", e).into()),
+        }
+
+        println!("      🎉 NVMe-oF target ready: {}", nqn);
+        Ok(())
+    }
 }
 
 // Request/Response types for dashboard compatibility
@@ -1645,6 +1951,7 @@ impl Clone for NodeAgent {
     fn clone(&self) -> Self {
         Self {
             node_name: self.node_name.clone(),
+            node_uid: self.node_uid.clone(),
             spdk_socket_path: self.spdk_socket_path.clone(),
             disk_service: self.disk_service.clone(),
             driver: self.driver.clone(),
