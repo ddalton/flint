@@ -1457,80 +1457,160 @@ impl SpdkCsiDriver {
     }
 
     /// Create RAID 1 bdev from replicas with mixed local/remote access
+    ///
+    /// This function handles graceful degradation: if some replicas are unavailable,
+    /// it will create a degraded RAID with the available replicas (minimum 2 required).
+    /// Unavailable replicas can be added later when their nodes recover.
     pub async fn create_raid_from_replicas(
         &self,
         volume_id: &str,
         replicas: &[ReplicaInfo],
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let current_node = &self.node_id;
-        
+
         println!("🔧 [DRIVER] Creating RAID 1 on node: {}", current_node);
         println!("🔧 [DRIVER] Processing {} replicas...", replicas.len());
 
-        // Check minimum replica requirement
-        let available_replicas: Vec<&ReplicaInfo> = replicas.iter()
-            .filter(|r| self.is_node_available_sync(&r.node_name))
-            .collect();
-
-        if available_replicas.len() < 2 {
-            return Err(format!(
-                "Cannot create RAID 1: need minimum 2 replicas, only {} available",
-                available_replicas.len()
-            ).into());
-        }
-
-        if available_replicas.len() < replicas.len() {
-            println!("⚠️ [DRIVER] DEGRADED: {}/{} replicas available", 
-                     available_replicas.len(), replicas.len());
-        }
-
-        // Attach each replica (local or remote)
+        // Try to attach each replica, collecting successes and failures
         let mut base_bdevs = Vec::new();
+        let mut unavailable_replicas: Vec<(&ReplicaInfo, String)> = Vec::new();
 
-        for (i, replica) in available_replicas.iter().enumerate() {
+        for (i, replica) in replicas.iter().enumerate() {
             if replica.node_name == *current_node {
-                // LOCAL: Use lvol bdev directly
-                println!("   Replica {}: LOCAL access (lvol: {})", 
+                // LOCAL: Use lvol bdev directly - this should always work if the lvol exists
+                println!("   Replica {}: LOCAL access (lvol: {})",
                          i + 1, replica.lvol_uuid);
-                base_bdevs.push(replica.lvol_uuid.clone());
+
+                // Verify local lvol exists before adding
+                match self.verify_local_lvol_exists(&replica.lvol_uuid).await {
+                    Ok(bdev_name) => {
+                        println!("   ✓ Local replica verified: {}", bdev_name);
+                        base_bdevs.push(bdev_name);
+                    }
+                    Err(e) => {
+                        let reason = format!("Local lvol not found: {}", e);
+                        println!("   ✗ Replica {} UNAVAILABLE: {}", i + 1, reason);
+                        unavailable_replicas.push((replica, reason));
+                    }
+                }
             } else {
-                // REMOTE: Setup NVMe-oF and attach
-                println!("   Replica {}: REMOTE access (node: {}, setting up NVMe-oF...)", 
+                // REMOTE: Setup NVMe-oF and attach - may fail if node is down
+                println!("   Replica {}: REMOTE access (node: {}, setting up NVMe-oF...)",
                          i + 1, replica.node_name);
 
-                // Create NVMe-oF target on remote node
-                let nqn = format!("nqn.2024-11.com.flint:volume:{}:replica:{}", volume_id, i);
-                let conn_info = self.setup_nvmeof_target_on_node(
-                    &replica.node_name,
-                    &replica.lvol_uuid,
-                    &format!("{}_{}", volume_id, i),
-                ).await?;
-
-                // Attach NVMe-oF target from current node
-                let nvme_bdev = self.connect_to_nvmeof_target(&conn_info).await?;
-                println!("   ✓ Attached remote replica as: {}", nvme_bdev);
-                base_bdevs.push(nvme_bdev);
+                match self.try_attach_remote_replica(volume_id, replica, i).await {
+                    Ok(nvme_bdev) => {
+                        println!("   ✓ Attached remote replica as: {}", nvme_bdev);
+                        base_bdevs.push(nvme_bdev);
+                    }
+                    Err(e) => {
+                        let reason = format!("NVMe-oF connection failed: {}", e);
+                        println!("   ✗ Replica {} on node {} UNAVAILABLE: {}",
+                                 i + 1, replica.node_name, reason);
+                        unavailable_replicas.push((replica, reason));
+                    }
+                }
             }
         }
 
-        // Create RAID 1 bdev
+        // Check if we have minimum replicas for RAID 1
+        let total_replicas = replicas.len();
+        let available_count = base_bdevs.len();
+        let unavailable_count = unavailable_replicas.len();
+
+        if available_count < 2 {
+            // Cannot create RAID with fewer than 2 replicas
+            let unavailable_nodes: Vec<String> = unavailable_replicas
+                .iter()
+                .map(|(r, reason)| format!("{} ({})", r.node_name, reason))
+                .collect();
+
+            return Err(format!(
+                "Cannot create RAID 1: need minimum 2 replicas, only {} available. \
+                 Unavailable: [{}]",
+                available_count,
+                unavailable_nodes.join(", ")
+            ).into());
+        }
+
+        // Log degraded status if applicable
+        if unavailable_count > 0 {
+            println!("⚠️ [DRIVER] DEGRADED MODE: {}/{} replicas available",
+                     available_count, total_replicas);
+            for (replica, reason) in &unavailable_replicas {
+                println!("   - {} on node {}: {}",
+                         replica.lvol_uuid, replica.node_name, reason);
+            }
+            println!("   Note: Unavailable replicas will be re-added when nodes recover");
+        }
+
+        // Create RAID 1 bdev with available replicas
         let raid_name = format!("raid_{}", volume_id);
-        println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs", 
+        println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
                  raid_name, base_bdevs.len());
 
         let raid_bdev_name = self.create_raid1_bdev(&raid_name, base_bdevs).await?;
 
-        println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
+        if unavailable_count > 0 {
+            println!("⚠️ [DRIVER] RAID 1 bdev created in DEGRADED mode: {}", raid_bdev_name);
+        } else {
+            println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
+        }
 
         Ok(raid_bdev_name)
     }
 
-    /// Check if a node is available (simplified sync version)
-    fn is_node_available_sync(&self, _node_name: &str) -> bool {
-        // In production, this would check node readiness via K8s API
-        // For now, optimistically assume available
-        // TODO: Add proper node health checking
-        true
+    /// Try to attach a remote replica via NVMe-oF
+    /// Returns Ok(bdev_name) on success, Err on failure (node down, connection refused, etc.)
+    async fn try_attach_remote_replica(
+        &self,
+        volume_id: &str,
+        replica: &ReplicaInfo,
+        replica_index: usize,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Create NVMe-oF target on remote node
+        let conn_info = self.setup_nvmeof_target_on_node(
+            &replica.node_name,
+            &replica.lvol_uuid,
+            &format!("{}_{}", volume_id, replica_index),
+        ).await?;
+
+        // Attach NVMe-oF target from current node
+        let nvme_bdev = self.connect_to_nvmeof_target(&conn_info).await?;
+        Ok(nvme_bdev)
+    }
+
+    /// Verify that a local lvol exists and return its bdev name
+    async fn verify_local_lvol_exists(
+        &self,
+        lvol_uuid: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Query SPDK to verify the lvol exists
+        let payload = serde_json::json!({
+            "method": "bdev_get_bdevs",
+            "params": {
+                "name": lvol_uuid
+            }
+        });
+
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await {
+            Ok(response) => {
+                // Check if response contains the bdev
+                if let Some(result) = response.get("result") {
+                    if let Some(bdevs) = result.as_array() {
+                        if !bdevs.is_empty() {
+                            // Return the bdev name (could be UUID or lvs/name format)
+                            if let Some(name) = bdevs[0].get("name").and_then(|n| n.as_str()) {
+                                return Ok(name.to_string());
+                            }
+                            return Ok(lvol_uuid.to_string());
+                        }
+                    }
+                }
+                Err(format!("Lvol {} not found in SPDK", lvol_uuid).into())
+            }
+            Err(e) => Err(format!("Failed to query lvol {}: {}", lvol_uuid, e).into())
+        }
     }
 
     /// Create RAID 1 bdev
