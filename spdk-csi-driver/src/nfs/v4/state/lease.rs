@@ -239,7 +239,7 @@ impl Default for LeaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+    
 
     #[test]
     fn test_lease_creation() {

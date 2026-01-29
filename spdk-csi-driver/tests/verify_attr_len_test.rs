@@ -1,8 +1,6 @@
 // Test to verify attr_vals length matches actual encoded bytes
 // This simulates what Linux kernel's verify_attr_len() does
 
-use spdk_csi_driver::nfs::xdr::XdrDecoder;
-use bytes::Bytes;
 
 #[test]
 fn test_attr_vals_byte_count() {

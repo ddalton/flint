@@ -1,7 +1,6 @@
 // Standalone test for read delegations
 // Run with: cargo test --test delegation_test
 
-use std::path::PathBuf;
 
 // Note: This is a minimal test to verify delegation logic
 // The full unit tests are in src/nfs/v4/state/delegation.rs

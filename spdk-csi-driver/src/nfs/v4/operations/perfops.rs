@@ -951,7 +951,7 @@ mod tests {
     #[tokio::test]
     async fn test_allocate() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 
@@ -968,7 +968,7 @@ mod tests {
     #[tokio::test]
     async fn test_deallocate() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 
@@ -985,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn test_seek_data() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 
@@ -1002,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn test_seek_hole() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 
@@ -1019,7 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_plus() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 
@@ -1036,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn test_io_advise() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let ctx = CompoundContext::new(0);
 
         let stateid = create_test_stateid(&handler, 1);
 

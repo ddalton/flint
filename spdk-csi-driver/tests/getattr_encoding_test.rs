@@ -1,7 +1,7 @@
 // Test for GETATTR XDR encoding correctness
 // This verifies we don't double-wrap the fattr4 structure
 
-use bytes::{BytesMut, BufMut, Bytes};
+use bytes::{BytesMut, BufMut};
 use spdk_csi_driver::nfs::xdr::{XdrEncoder, XdrDecoder};
 
 #[test]

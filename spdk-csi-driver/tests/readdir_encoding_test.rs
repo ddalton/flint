@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use bytes::{Bytes, BytesMut, BufMut};
+    use bytes::{BytesMut, BufMut};
 
     /// Mock Fattr4 structure
     #[derive(Debug, Clone)]
@@ -280,7 +280,7 @@ mod tests {
         // After cookieverf and value_follows, we should have:
         // Entry 1 + next_entry=TRUE + Entry 2 + next_entry=FALSE + eof
         
-        let mut offset = 8; // Skip cookieverf
+        let offset = 8; // Skip cookieverf
         let value_follows = u32::from_be_bytes([
             encoded[offset], encoded[offset+1], encoded[offset+2], encoded[offset+3],
         ]);

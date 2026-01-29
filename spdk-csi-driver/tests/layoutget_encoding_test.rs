@@ -5,7 +5,6 @@
 //!
 //! Based on RFC 5661 Section 18.43.2 (LAYOUTGET response)
 
-use bytes::Bytes;
 
 /// Test LAYOUTGET response encoding matches RFC 5661 format
 #[test]
