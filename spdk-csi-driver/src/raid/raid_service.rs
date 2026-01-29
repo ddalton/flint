@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 use crate::minimal_models::MinimalStateError;
-use crate::raid::raid_models::{RaidHealthStatus, RaidRebuildStatus};
+use crate::raid::raid_models::RaidHealthStatus;
 
 /// Create RAID 1 bdev from base bdevs
 pub async fn create_raid1_bdev(

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tracing::{debug, info, warn};
-use bytes::{Bytes, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// Translate UID to NFSv4 owner string
 ///
@@ -585,7 +585,7 @@ fn encode_pseudo_root_attributes(
     pnfs_enabled: bool,
 ) -> (Vec<u8>, Vec<u32>) {
     use std::collections::BTreeSet;
-    use crate::nfs::v4::pseudo::{PSEUDO_ROOT_FSID, PSEUDO_ROOT_FILEID};
+    
     
     // Parse bitmap to get list of requested attribute IDs in order
     let mut requested_attrs = BTreeSet::new();

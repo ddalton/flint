@@ -175,7 +175,7 @@ impl IoOperationHandler {
                 // Sync data only (not metadata)
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::FileExt;
+                    
                     // On Unix, sync_data() syncs data but not metadata
                     file.sync_data().map_err(|e| crate::pnfs::Error::Io(e))?;
                 }

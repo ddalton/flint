@@ -32,7 +32,7 @@ use k8s_openapi::api::core::v1::{
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
     PersistentVolume, PersistentVolumeSpec, ObjectReference,
     CSIPersistentVolumeSource, ContainerPort,
-    Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm,
+    Affinity, NodeAffinity, NodeSelectorTerm,
     NodeSelectorRequirement, PreferredSchedulingTerm, ResourceRequirements,
     Service, ServiceSpec, ServicePort,
 };

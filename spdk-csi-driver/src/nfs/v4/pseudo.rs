@@ -10,7 +10,7 @@
 
 use crate::nfs::v4::protocol::Nfs4FileHandle;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};

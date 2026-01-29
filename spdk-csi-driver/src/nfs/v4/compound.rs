@@ -22,7 +22,7 @@ use super::protocol::*;
 use super::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use bytes::Bytes;
-use tracing::{info, warn, debug};
+use tracing::{warn, debug};
 
 /// COMPOUND request
 #[derive(Debug)]

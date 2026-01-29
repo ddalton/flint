@@ -391,7 +391,7 @@ impl PnfsOperationHandler {
     /// Update file size based on filehandle
     fn update_file_size(&self, filehandle: &[u8], new_size: u64) -> Result<(), String> {
         use std::fs;
-        use std::os::unix::fs::MetadataExt;
+        
         use crate::nfs::v4::filehandle_pnfs;
 
         // Parse filehandle to get file path
@@ -436,7 +436,7 @@ impl PnfsOperationHandler {
 
     /// Update file modification time
     fn update_file_mtime(&self, filehandle: &[u8], mtime_nanos: u64) -> Result<(), String> {
-        use std::fs;
+        
         use filetime::{FileTime, set_file_mtime};
         use crate::nfs::v4::filehandle_pnfs;
 

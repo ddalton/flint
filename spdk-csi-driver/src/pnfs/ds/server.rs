@@ -17,7 +17,7 @@ use crate::pnfs::Result;
 use crate::nfs::rpc::{CallMessage, ReplyBuilder};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status, exchgid_flags};
-use crate::nfs::v4::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
+use crate::nfs::v4::xdr::Nfs4XdrDecoder;
 use crate::nfs::v4::state::{ClientManager, LeaseManager};
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;

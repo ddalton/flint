@@ -12,10 +12,8 @@
 // Every NFSv4.1 COMPOUND (except EXCHANGE_ID) must start with SEQUENCE
 
 use crate::nfs::v4::protocol::*;
-use crate::nfs::v4::state::{StateManager, StateType};
-use crate::nfs::v4::xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder};
+use crate::nfs::v4::state::StateManager;
 use crate::nfs::v4::compound::ChannelAttrs;
-use bytes::{BytesMut, BufMut};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 

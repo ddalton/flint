@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// NFS server configuration
 #[derive(Debug, Clone)]

@@ -9,7 +9,7 @@
 //! - RFC 1964: The Kerberos Version 5 GSS-API Mechanism
 
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
-use crate::nfs::kerberos::{Keytab, KerberosContext, KerberosError};
+use crate::nfs::kerberos::{Keytab, KerberosContext};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;

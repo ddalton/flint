@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use kube::{Api, Client};
 use k8s_openapi::api::core::v1::ConfigMap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Reserved devices configuration manager
 /// Reads the flint-reserved-devices ConfigMap to determine which devices

@@ -13,7 +13,6 @@
 use crate::pnfs::Result;
 use crate::pnfs::grpc::{MdsControlClient, RegisterRequest, HeartbeatRequest, UnregisterRequest, HealthStatus};
 use std::time::Duration;
-use tokio::time::interval;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 

@@ -18,11 +18,10 @@
 // - Handlers access shared managers without cloning
 
 use crate::nfs::v4::protocol::*;
-use crate::nfs::v4::compound::{CompoundRequest, CompoundResponse, CompoundContext, Operation, OperationResult, ExchangeIdResult, CreateSessionResult, SequenceResult, ChannelAttrs};
+use crate::nfs::v4::compound::{CompoundRequest, CompoundResponse, CompoundContext, Operation, OperationResult, ExchangeIdResult, CreateSessionResult, SequenceResult};
 use crate::nfs::v4::state::{StateManager, StateType};
 use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::operations::*;
-use crate::nfs::v4::operations::ioops::UNSTABLE4;
 use bytes::Bytes;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -417,7 +416,7 @@ impl CompoundDispatcher {
                 };
                 let res = self.file_handler.handle_readdir(op, context).await;
                 if res.status == Nfs4Status::Ok {
-                    use crate::nfs::v4::compound::{ReadDirResult, DirEntry};
+                    use crate::nfs::v4::compound::ReadDirResult;
                     // Entries are already pre-encoded with attrs as Bytes
                     OperationResult::ReadDir(res.status, Some(ReadDirResult {
                         entries: res.entries,

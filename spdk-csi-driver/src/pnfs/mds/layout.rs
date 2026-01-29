@@ -221,7 +221,7 @@ impl LayoutManager {
         }
 
         let mut segments = Vec::new();
-        let mut current_offset = offset;
+        let current_offset = offset;
         let end_offset = offset.saturating_add(length);
 
         // Simple round-robin: assign entire range to first device
