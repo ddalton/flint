@@ -1,9 +1,9 @@
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
 @@ -3913,6 +3913,11 @@
- 
+
  	bool					force_recover;
- 
+
 +	/* Batched recovery optimization */
 +	struct spdk_blob_md_page	*batch_pages;
 +	uint32_t			batch_start;
@@ -12,10 +12,10 @@
  	/* These fields are used in the spdk_bs_dump path. */
  	bool					dumping;
  	FILE					*fp;
-@@ -4881,6 +4886,10 @@
+@@ -4861,6 +4866,10 @@
  	bs_batch_close(batch);
  }
- 
+
 +/* Batch size for parallel recovery reads. 64 pages = 256KB buffer */
 +#define BS_RECOVERY_READ_BATCH 64
 +
@@ -23,26 +23,26 @@
  static void
  bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  {
-@@ -4924,6 +4933,88 @@
+@@ -4903,6 +4912,88 @@
  }
- 
+
  static void
 +bs_load_replay_batch_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 +{
 +	struct spdk_bs_load_ctx *ctx = cb_arg;
 +	uint32_t i;
-+	
++
 +	if (bserrno != 0) {
 +		spdk_free(ctx->batch_pages);
 +		bs_load_ctx_fail(ctx, bserrno);
 +		return;
 +	}
-+	
++
 +	/* Process all pages in the batch */
 +	for (i = 0; i < ctx->batch_count; i++) {
 +		ctx->cur_page = ctx->batch_start + i;
 +		ctx->page = &ctx->batch_pages[i];
-+		
++
 +		if (bs_load_cur_md_page_valid(ctx) == true) {
 +			if (ctx->page->sequence_num == 0 || ctx->in_page_chain == true) {
 +				spdk_spin_lock(&ctx->bs->used_lock);
@@ -59,7 +59,7 @@
 +			}
 +		}
 +	}
-+	
++
 +	/* Move to next batch */
 +	ctx->page_index = ctx->batch_start + ctx->batch_count - 1;
 +	spdk_free(ctx->batch_pages);
@@ -72,18 +72,18 @@
 +	spdk_bs_batch_t *batch;
 +	uint32_t remaining, batch_size, i;
 +	uint64_t lba;
-+	
++
 +	remaining = ctx->super->md_len - ctx->page_index - 1;
-+	
++
 +	if (remaining == 0) {
 +		bs_load_replay_md_chain_cpl(ctx);
 +		return;
 +	}
-+	
++
 +	batch_size = remaining < BS_RECOVERY_READ_BATCH ? remaining : BS_RECOVERY_READ_BATCH;
 +	ctx->batch_start = ctx->page_index + 1;
 +	ctx->batch_count = batch_size;
-+	
++
 +	ctx->batch_pages = spdk_zmalloc(ctx->bs->md_page_size * batch_size, 0,
 +	                                 NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
 +	if (!ctx->batch_pages) {
@@ -98,7 +98,7 @@
 +		bs_load_replay_cur_md_page(ctx);
 +		return;
 +	}
-+	
++
 +	batch = bs_sequence_to_batch(ctx->seq, bs_load_replay_batch_cpl, ctx);
 +	for (i = 0; i < batch_size; i++) {
 +		lba = bs_md_page_to_lba(ctx->bs, ctx->batch_start + i);
@@ -112,7 +112,7 @@
  bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
  {
  	uint64_t lba;
-@@ -4939,14 +5030,10 @@
+@@ -4918,14 +5009,10 @@
  bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
  {
  	ctx->page_index = 0;
@@ -129,5 +129,5 @@
 +	ctx->page_index = -1;
 +	bs_load_replay_batch_read(ctx);
  }
- 
+
  static void

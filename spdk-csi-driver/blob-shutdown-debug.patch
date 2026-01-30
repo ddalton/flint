@@ -1,6 +1,6 @@
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -5834,6 +5834,9 @@
+@@ -5832,6 +5832,9 @@
  static void
  bs_unload_finish(struct spdk_bs_load_ctx *ctx, int bserrno)
  {
@@ -9,16 +9,16 @@
 +	SPDK_NOTICELOG("==========================================\n");
  	spdk_bs_sequence_t *seq = ctx->seq;
  	struct spdk_blob_store *bs = ctx->bs;
- 
-@@ -5941,7 +5944,10 @@
+
+@@ -5939,7 +5942,10 @@
  	struct spdk_bs_cpl	cpl;
  	struct spdk_bs_load_ctx *ctx;
- 
+
 -	SPDK_DEBUGLOG(blob, "Syncing blobstore\n");
 +	SPDK_NOTICELOG("==========================================\n");
 +	SPDK_NOTICELOG("BLOBSTORE UNLOAD STARTING\n");
 +	SPDK_NOTICELOG("  This will flush metadata and mark clean\n");
 +	SPDK_NOTICELOG("==========================================\n");
- 
+
  	/*
  	 * If external snapshot channels are being destroyed while the blobstore is unloaded, the

@@ -39,9 +39,9 @@ COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 
-# Clone, configure, and build SPDK v25.09.x with full NVMe-oF and ublk support
+# Clone, configure, and build SPDK v26.01 with full NVMe-oF and ublk support
 RUN git clone https://github.com/spdk/spdk.git . && \
-    git checkout v25.09.x && \
+    git checkout v26.01 && \
     git submodule update --init --recursive && \
     # Apply custom patch to enhance SPDK_ERRLOG message in lib/nvmf/ctrlr.c
     sed -i 's/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address\.\\n",/SPDK_ERRLOG("Subsystem '\''%s'\'' does not allow host '\''%s'\'' to connect at this address. Listener address is %s\/%s\/%s\\n",/' lib/nvmf/ctrlr.c && \
@@ -141,7 +141,7 @@ RUN mkdir -p /etc/spdk && \
 RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
-echo "Starting SPDK v25.09.x (PID: $$)"\n\
+echo "Starting SPDK v26.01 (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
 exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
     chmod +x /usr/local/bin/spdk-csi-start.sh

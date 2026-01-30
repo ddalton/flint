@@ -1,6 +1,6 @@
 --- a/module/bdev/lvol/vbdev_lvol.c
 +++ b/module/bdev/lvol/vbdev_lvol.c
-@@ -854,6 +854,7 @@ vbdev_lvol_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+@@ -855,6 +855,7 @@ vbdev_lvol_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
  	case SPDK_BDEV_IO_TYPE_READ:
  	case SPDK_BDEV_IO_TYPE_SEEK_DATA:
  	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
@@ -8,9 +8,9 @@
  		return true;
  	default:
  		return false;
-@@ -976,6 +977,15 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
+@@ -907,6 +908,15 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
  }
- 
+
  static void
 +lvol_flush(struct spdk_lvol *lvol, struct spdk_io_channel *ch,
 +	   struct spdk_bdev_io *bdev_io)
@@ -21,10 +21,10 @@
 +}
 +
 +static void
- vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
+ lvol_write_zeroes(struct spdk_lvol *lvol, struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
  {
- 	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
-@@ -1003,6 +1013,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
+ 	uint64_t start_page, num_pages;
+@@ -1003,6 +1013,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
  	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
  		lvol_seek_hole(lvol, bdev_io);
  		break;
