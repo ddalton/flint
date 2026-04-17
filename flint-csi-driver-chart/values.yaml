@@ -269,6 +269,27 @@ blockDevice:
     # Recommended: 512-1024 for high-performance NVMe (7GB/s+)
     queueDepth: 512
 
+# SPDK Target runtime configuration
+spdkTarget:
+  # Extra arguments passed to spdk_tgt (requires "$@" in entrypoint)
+  # For Kind/dev clusters without hugepages (low CPU usage):
+  #   extraArgs: ["--no-huge", "-s", "256", "--no-pci", "--interrupt-mode"]
+  extraArgs: []
+
+  # Hugepages configuration
+  hugepages:
+    # Set to false to disable hugepages (for --no-huge mode)
+    enabled: true
+    # Hugepage size: "2Mi" or "1Gi"
+    size: "2Mi"
+    # Total hugepage memory to request
+    amount: "8Gi"
+
+  # Memory request/limit (separate from hugepages)
+  memory:
+    request: "1Gi"
+    limit: "2Gi"
+
 # Node resources configuration (e.g., CPU core masks for SPDK target)
 nodeResources:
   spdkTarget:

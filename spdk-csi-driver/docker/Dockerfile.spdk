@@ -143,7 +143,7 @@ echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
 echo "Starting SPDK v26.01 (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
-exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json\n' > /usr/local/bin/spdk-csi-start.sh && \
+exec /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json "$@"\n' > /usr/local/bin/spdk-csi-start.sh && \
     chmod +x /usr/local/bin/spdk-csi-start.sh
 
 # Expose the standard SPDK NVMe-oF port for TCP transport (though CSI mainly uses RPC)

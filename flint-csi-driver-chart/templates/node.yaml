@@ -41,6 +41,12 @@ spec:
           restartPolicy: Always  # Native sidecar: starts first, stays running
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
+          {{- if .Values.spdkTarget.extraArgs }}
+          args:
+            {{- range .Values.spdkTarget.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -71,7 +77,7 @@ spec:
                     echo "[$(date)] preStop: Initiating graceful SPDK shutdown..."
                     python3 -c '
                     import socket, json, time
-                    
+
                     def spdk_rpc(method, params=None):
                         s = socket.socket(socket.AF_UNIX)
                         s.settimeout(10)
@@ -85,7 +91,7 @@ spec:
                         if "error" in resp:
                             raise Exception(resp["error"])
                         return resp.get("result")
-                    
+
                     try:
                         print(f"[{time.strftime(\"%c\")}] preStop: Step 1 - Stopping all ublk devices...")
                         # Get all ublk devices using ublk_get_disks RPC
@@ -103,7 +109,7 @@ spec:
                                     print(f"  Warning: Failed to stop ublk {ublk_id}: {e}")
                         print(f"[{time.strftime(\"%c\")}] preStop: Stopped {ublk_stopped} ublk devices")
                         time.sleep(1)
-                        
+
                         print(f"[{time.strftime(\"%c\")}] preStop: Step 2 - Deleting NVMe-oF subsystems...")
                         # Get all NVMe-oF subsystems
                         subsystems = spdk_rpc("nvmf_get_subsystems") or []
@@ -120,11 +126,11 @@ spec:
                                     pass
                         print(f"[{time.strftime(\"%c\")}] preStop: Deleted {deleted_count} NVMe-oF subsystems")
                         time.sleep(1)
-                        
+
                         print(f"[{time.strftime(\"%c\")}] preStop: Step 3 - Sending SIGTERM to SPDK...")
                         spdk_rpc("spdk_kill_instance", {"sig_name": "SIGTERM"})
                         print(f"[{time.strftime(\"%c\")}] preStop: SPDK shutdown initiated")
-                        
+
                         # Give SPDK time to unload LVS and flush blobstore metadata
                         # After stopping ublk devices, LVS can be cleanly unloaded
                         # Blobstore flush: ~5s, thread cleanup: ~5s
@@ -135,14 +141,20 @@ spec:
                     '
           resources:
             limits:
-              hugepages-2Mi: "8Gi"
-              memory: "2Gi"
+              {{- if .Values.spdkTarget.hugepages.enabled }}
+              hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
+              {{- end }}
+              memory: {{ .Values.spdkTarget.memory.limit | quote }}
             requests:
-              hugepages-2Mi: "8Gi" 
-              memory: "1Gi"
+              {{- if .Values.spdkTarget.hugepages.enabled }}
+              hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
+              {{- end }}
+              memory: {{ .Values.spdkTarget.memory.request | quote }}
           volumeMounts:
+            {{- if .Values.spdkTarget.hugepages.enabled }}
             - name: hugepages
               mountPath: /hugepages
+            {{- end }}
             - name: spdk-socket
               mountPath: /var/tmp
             - name: device-dir
@@ -226,6 +238,12 @@ spec:
           restartPolicy: Always  # Native sidecar: starts first, stays running
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           imagePullPolicy: Always
+          {{- if .Values.spdkTarget.extraArgs }}
+          args:
+            {{- range .Values.spdkTarget.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
@@ -247,14 +265,20 @@ spec:
             failureThreshold: 60
           resources:
             limits:
-              hugepages-2Mi: "8Gi"
-              memory: "2Gi"
+              {{- if .Values.spdkTarget.hugepages.enabled }}
+              hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
+              {{- end }}
+              memory: {{ .Values.spdkTarget.memory.limit | quote }}
             requests:
-              hugepages-2Mi: "8Gi" 
-              memory: "1Gi"
+              {{- if .Values.spdkTarget.hugepages.enabled }}
+              hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
+              {{- end }}
+              memory: {{ .Values.spdkTarget.memory.request | quote }}
           volumeMounts:
+            {{- if .Values.spdkTarget.hugepages.enabled }}
             - name: hugepages
               mountPath: /hugepages
+            {{- end }}
             - name: spdk-socket
               mountPath: /var/tmp
             - name: device-dir
@@ -394,8 +418,10 @@ spec:
           hostPath:
             path: /sys
             type: Directory
+        {{- if .Values.spdkTarget.hugepages.enabled }}
         - name: hugepages
           emptyDir:
             medium: HugePages
+        {{- end }}
         - name: spdk-socket
           emptyDir: {}

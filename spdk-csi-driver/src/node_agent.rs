@@ -366,8 +366,8 @@ impl NodeAgent {
         let snapshot_routes = register_snapshot_routes(snapshot_service);
         // ============= END SNAPSHOT INTEGRATION =============
 
-        // Combine all routes
-        list_disks
+        // Combine all routes (boxed to avoid type overflow with deep .or() nesting)
+        let routes = list_disks
             .or(list_disks_post)
             .or(list_uninitialized)
             .or(disk_status)
@@ -380,6 +380,7 @@ impl NodeAgent {
             .or(create_lvol)
             .or(delete_lvol)
             .or(resize_lvol)
+            .boxed()
             .or(spdk_rpc)
             .or(ublk_create_target)
             .or(ublk_create)
@@ -391,8 +392,9 @@ impl NodeAgent {
             .or(check_volume_health)
             .or(check_volume_exists)
             .or(system_memory)
-            .or(snapshot_routes)  // Add snapshot routes
-            .with(warp::cors().allow_any_origin())
+            .or(snapshot_routes);
+
+        routes.with(warp::cors().allow_any_origin())
     }
 
     fn with_node_agent(&self, node_agent: Arc<NodeAgent>) -> impl Filter<Extract = (Arc<NodeAgent>,), Error = std::convert::Infallible> + Clone {
