@@ -298,17 +298,19 @@ spdkTarget:
     image:
       name: spdk-tgt-kind
       tag: latest
+    # SPDK DPDK EAL memory allocation in MB (passed as -s flag)
+    # Must be large enough for: iobuf pools (~170MB) + virtual disk + subsystem overhead
+    spdkMemoryMB: 2048
     # Virtual disk: malloc bdev + LVS for CSI capacity (allocated from SPDK memory)
-    # Size must fit within SPDK memory (-s 1024 minus ~100MB overhead)
+    # Size must fit within spdkMemoryMB minus ~300MB overhead for pools/subsystems
     virtualDisk:
-      sizeMB: 0          # e.g. 512 for 512MB. 0 = disabled. Max ~800MB with -s 1024
+      sizeMB: 0          # e.g. 1536 for 1.5GB. 0 = disabled
       path: "/var/tmp/spdk-virtual.img"
       lvsName: "lvs_kind"
-    # Container memory limits (must exceed SPDK -s value + process overhead)
-    # With -s 1024 and 512MB malloc bdev, SPDK uses ~1.1GB total
+    # Container memory limits (must exceed spdkMemoryMB + ~512MB process overhead)
     memory:
-      request: "1280Mi"
-      limit: "1536Mi"
+      request: "2048Mi"
+      limit: "2560Mi"
 
 # Node resources configuration (e.g., CPU core masks for SPDK target)
 nodeResources:

@@ -50,7 +50,7 @@ spec:
             {{- if .Values.spdkTarget.kindMode.enabled }}
             - "--no-huge"
             - "-s"
-            - "1024"
+            - {{ .Values.spdkTarget.kindMode.spdkMemoryMB | quote }}
             - "--no-pci"
             - "--interrupt-mode"
             {{- end }}
@@ -278,7 +278,7 @@ spec:
             {{- if .Values.spdkTarget.kindMode.enabled }}
             - "--no-huge"
             - "-s"
-            - "1024"
+            - {{ .Values.spdkTarget.kindMode.spdkMemoryMB | quote }}
             - "--no-pci"
             - "--interrupt-mode"
             {{- end }}
