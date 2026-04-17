@@ -273,7 +273,7 @@ blockDevice:
 spdkTarget:
   # Extra arguments passed to spdk_tgt (requires "$@" in entrypoint)
   # For Kind/dev clusters without hugepages (low CPU usage):
-  #   extraArgs: ["--no-huge", "-s", "256", "--no-pci", "--interrupt-mode"]
+  #   extraArgs: ["--no-huge", "-s", "1024", "--no-pci", "--interrupt-mode"]
   extraArgs: []
 
   # Hugepages configuration
