@@ -272,8 +272,7 @@ blockDevice:
 # SPDK Target runtime configuration
 spdkTarget:
   # Extra arguments passed to spdk_tgt (requires "$@" in entrypoint)
-  # For Kind/dev clusters without hugepages (low CPU usage):
-  #   extraArgs: ["--no-huge", "-s", "1024", "--no-pci", "--interrupt-mode"]
+  # For Kind/dev clusters, use kindMode.enabled=true instead of manual extraArgs
   extraArgs: []
 
   # Hugepages configuration
@@ -289,6 +288,27 @@ spdkTarget:
   memory:
     request: "1Gi"
     limit: "2Gi"
+
+  # Kind/dev cluster mode: uses --wait-for-rpc to minimize memory pools
+  # and optionally creates a virtual disk for CSI capacity.
+  # Reduces SPDK memory from ~1.4GB to ~26MB by minimizing ioBuf and iSCSI pools.
+  kindMode:
+    enabled: false
+    # Override SPDK image for Kind (uses spdk-tgt-kind with wait-for-rpc entrypoint)
+    image:
+      name: spdk-tgt-kind
+      tag: latest
+    # Virtual disk: malloc bdev + LVS for CSI capacity (allocated from SPDK memory)
+    # Size must fit within SPDK memory (-s 1024 minus ~100MB overhead)
+    virtualDisk:
+      sizeMB: 0          # e.g. 512 for 512MB. 0 = disabled. Max ~800MB with -s 1024
+      path: "/var/tmp/spdk-virtual.img"
+      lvsName: "lvs_kind"
+    # Container memory limits (must exceed SPDK -s value + process overhead)
+    # With -s 1024 and 512MB malloc bdev, SPDK uses ~1.1GB total
+    memory:
+      request: "1280Mi"
+      limit: "1536Mi"
 
 # Node resources configuration (e.g., CPU core masks for SPDK target)
 nodeResources:

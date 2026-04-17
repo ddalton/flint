@@ -39,10 +39,21 @@ spec:
       initContainers:
         - name: spdk-tgt
           restartPolicy: Always  # Native sidecar: starts first, stays running
+          {{- if .Values.spdkTarget.kindMode.enabled }}
+          image: "{{ .Values.images.repository }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
+          {{- else }}
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
+          {{- end }}
           imagePullPolicy: Always
-          {{- if .Values.spdkTarget.extraArgs }}
+          {{- if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
           args:
+            {{- if .Values.spdkTarget.kindMode.enabled }}
+            - "--no-huge"
+            - "-s"
+            - "1024"
+            - "--no-pci"
+            - "--interrupt-mode"
+            {{- end }}
             {{- range .Values.spdkTarget.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -50,23 +61,35 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if and .Values.spdkTarget.kindMode.enabled (gt (int .Values.spdkTarget.kindMode.virtualDisk.sizeMB) 0) }}
+            - name: VIRTUAL_DISK_SIZE_MB
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.sizeMB | quote }}
+            - name: VIRTUAL_DISK_PATH
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.path | quote }}
+            - name: VIRTUAL_DISK_LVS_NAME
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.lvsName | quote }}
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
               add:
                 - SYS_ADMIN
                 - SYS_RAWIO
-          # Startup probe: container is "ready" when SPDK socket exists
-          # flint-csi-driver won't start until this probe succeeds
           startupProbe:
             exec:
               command:
+                {{- if .Values.spdkTarget.kindMode.enabled }}
+                - test
+                - -f
+                - /var/tmp/spdk.ready
+                {{- else }}
                 - test
                 - -S
                 - /var/tmp/spdk.sock
+                {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 1
-            failureThreshold: 60  # Wait up to 60 seconds for SPDK to create socket
+            failureThreshold: {{ if .Values.spdkTarget.kindMode.enabled }}120{{ else }}60{{ end }}
           lifecycle:
             preStop:
               exec:
@@ -141,17 +164,25 @@ spec:
                     '
           resources:
             limits:
-              {{- if .Values.spdkTarget.hugepages.enabled }}
+              {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
               hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
               {{- end }}
+              {{- if .Values.spdkTarget.kindMode.enabled }}
+              memory: {{ .Values.spdkTarget.kindMode.memory.limit | quote }}
+              {{- else }}
               memory: {{ .Values.spdkTarget.memory.limit | quote }}
+              {{- end }}
             requests:
-              {{- if .Values.spdkTarget.hugepages.enabled }}
+              {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
               hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
               {{- end }}
+              {{- if .Values.spdkTarget.kindMode.enabled }}
+              memory: {{ .Values.spdkTarget.kindMode.memory.request | quote }}
+              {{- else }}
               memory: {{ .Values.spdkTarget.memory.request | quote }}
+              {{- end }}
           volumeMounts:
-            {{- if .Values.spdkTarget.hugepages.enabled }}
+            {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
             - name: hugepages
               mountPath: /hugepages
             {{- end }}
@@ -236,10 +267,21 @@ spec:
       initContainers:
         - name: spdk-tgt
           restartPolicy: Always  # Native sidecar: starts first, stays running
+          {{- if .Values.spdkTarget.kindMode.enabled }}
+          image: "{{ .Values.images.repository }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
+          {{- else }}
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
+          {{- end }}
           imagePullPolicy: Always
-          {{- if .Values.spdkTarget.extraArgs }}
+          {{- if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
           args:
+            {{- if .Values.spdkTarget.kindMode.enabled }}
+            - "--no-huge"
+            - "-s"
+            - "1024"
+            - "--no-pci"
+            - "--interrupt-mode"
+            {{- end }}
             {{- range .Values.spdkTarget.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -247,35 +289,56 @@ spec:
           env:
             - name: SPDK_VERSION
               value: "v25.05.x"
+            {{- if and .Values.spdkTarget.kindMode.enabled (gt (int .Values.spdkTarget.kindMode.virtualDisk.sizeMB) 0) }}
+            - name: VIRTUAL_DISK_SIZE_MB
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.sizeMB | quote }}
+            - name: VIRTUAL_DISK_PATH
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.path | quote }}
+            - name: VIRTUAL_DISK_LVS_NAME
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.lvsName | quote }}
+            {{- end }}
           securityContext:
             privileged: true
             capabilities:
               add:
                 - SYS_ADMIN
                 - SYS_RAWIO
-          # Startup probe: container is "ready" when SPDK socket exists
           startupProbe:
             exec:
               command:
+                {{- if .Values.spdkTarget.kindMode.enabled }}
+                - test
+                - -f
+                - /var/tmp/spdk.ready
+                {{- else }}
                 - test
                 - -S
                 - /var/tmp/spdk.sock
+                {{- end }}
             initialDelaySeconds: 1
             periodSeconds: 1
-            failureThreshold: 60
+            failureThreshold: {{ if .Values.spdkTarget.kindMode.enabled }}120{{ else }}60{{ end }}
           resources:
             limits:
-              {{- if .Values.spdkTarget.hugepages.enabled }}
+              {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
               hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
               {{- end }}
+              {{- if .Values.spdkTarget.kindMode.enabled }}
+              memory: {{ .Values.spdkTarget.kindMode.memory.limit | quote }}
+              {{- else }}
               memory: {{ .Values.spdkTarget.memory.limit | quote }}
+              {{- end }}
             requests:
-              {{- if .Values.spdkTarget.hugepages.enabled }}
+              {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
               hugepages-{{ .Values.spdkTarget.hugepages.size }}: {{ .Values.spdkTarget.hugepages.amount | quote }}
               {{- end }}
+              {{- if .Values.spdkTarget.kindMode.enabled }}
+              memory: {{ .Values.spdkTarget.kindMode.memory.request | quote }}
+              {{- else }}
               memory: {{ .Values.spdkTarget.memory.request | quote }}
+              {{- end }}
           volumeMounts:
-            {{- if .Values.spdkTarget.hugepages.enabled }}
+            {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
             - name: hugepages
               mountPath: /hugepages
             {{- end }}
@@ -418,7 +481,7 @@ spec:
           hostPath:
             path: /sys
             type: Directory
-        {{- if .Values.spdkTarget.hugepages.enabled }}
+        {{- if and .Values.spdkTarget.hugepages.enabled (not .Values.spdkTarget.kindMode.enabled) }}
         - name: hugepages
           emptyDir:
             medium: HugePages

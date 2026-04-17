@@ -1,0 +1,9 @@
+# Thin layer on production SPDK image for Kind/dev clusters.
+# Uses --wait-for-rpc to minimize memory pools before subsystem init,
+# reducing SPDK memory from ~1.4GB to ~26MB.
+FROM dilipdalton/spdk-tgt:latest
+
+COPY spdk-csi-start-kind.sh /usr/local/bin/spdk-csi-start-kind.sh
+RUN chmod +x /usr/local/bin/spdk-csi-start-kind.sh
+
+ENTRYPOINT ["/usr/local/bin/spdk-csi-start-kind.sh"]
