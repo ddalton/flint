@@ -1507,18 +1507,46 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         println!("📏 [CONTROLLER] Expanding volume {} to {} bytes", volume_id, new_size_bytes);
 
-        // For NFS emptyDir volumes, expansion is a no-op (emptyDir has no size limit)
-        // Detect by checking if volume metadata lookup fails (NFS volumes don't store SPDK metadata)
-        let volume_info = match self.driver.get_volume_info(&volume_id).await {
-            Ok(info) => info,
-            Err(_) => {
-                println!("📏 [CONTROLLER] Volume {} appears to be NFS-backed, expansion is a no-op", volume_id);
-                return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
-                    capacity_bytes: new_size_bytes as i64,
-                    node_expansion_required: false,
-                }));
+        // Dispatch on PV volume_attributes rather than swallowing metadata-lookup errors:
+        // a transient K8s API failure must not be mistaken for "this is an NFS volume"
+        // and silently report expansion success on a real SPDK volume.
+        use kube::Api;
+        use k8s_openapi::api::core::v1::PersistentVolume;
+
+        let pv_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let pv = match pv_api.get(&volume_id).await {
+            Ok(pv) => pv,
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                return Err(tonic::Status::not_found(format!("Volume {} not found", volume_id)));
+            }
+            Err(e) => {
+                return Err(tonic::Status::internal(format!(
+                    "Failed to look up PV for volume {}: {}", volume_id, e
+                )));
             }
         };
+
+        let attrs = pv.spec.as_ref()
+            .and_then(|spec| spec.csi.as_ref())
+            .and_then(|csi| csi.volume_attributes.as_ref());
+
+        let is_nfs_emptydir = attrs
+            .and_then(|a| a.get("nfs.flint.io/backend"))
+            .map(|v| v == "emptydir")
+            .unwrap_or(false);
+
+        if is_nfs_emptydir {
+            println!("📏 [CONTROLLER] Volume {} is NFS emptyDir-backed — expansion is a no-op", volume_id);
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                capacity_bytes: new_size_bytes as i64,
+                node_expansion_required: false,
+            }));
+        }
+
+        let volume_info = self.driver.get_volume_info(&volume_id).await
+            .map_err(|e| tonic::Status::failed_precondition(format!(
+                "Volume {} metadata not found: {}", volume_id, e
+            )))?;
 
         println!("✅ [CONTROLLER] Found volume on node: {}", volume_info.node_name);
 
