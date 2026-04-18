@@ -94,27 +94,35 @@ pub struct ClientManager {
 
 impl ClientManager {
     /// Create a new client manager
-    pub fn new(lease_manager: Arc<LeaseManager>) -> Self {
+    /// `volume_id` ensures each NFS server instance has a unique NFSv4 server_owner,
+    /// preventing the Linux kernel from treating separate NFS pods as trunked paths
+    /// to the same server (which causes cross-volume data corruption).
+    pub fn new(lease_manager: Arc<LeaseManager>, volume_id: &str) -> Self {
         // Determine server mode: standalone NFS vs pNFS (MDS/DS)
         // PNFS_MODE can be: "standalone", "mds", "ds"
         // If not set, assume standalone mode (safer default for flint-nfs-server)
         let pnfs_mode = std::env::var("PNFS_MODE").ok();
         let is_pnfs = pnfs_mode.as_deref() == Some("mds") || pnfs_mode.as_deref() == Some("ds");
-        
+
         // Server identifiers: different for pNFS vs standalone
-        // IMPORTANT: MDS and DS must have DIFFERENT server_scope to prevent trunking!
+        // IMPORTANT: Each standalone NFS server MUST have a unique server_owner
+        // to prevent NFSv4 trunking detection from merging connections.
         let server_owner = if is_pnfs {
             "flint-pnfs".to_string()
-        } else {
+        } else if volume_id.is_empty() {
             "flint-nfs".to_string()
+        } else {
+            format!("flint-nfs-{}", volume_id)
         };
-        
+
         // Read server_scope from environment (allows MDS vs DS differentiation)
         let server_scope = if is_pnfs {
             std::env::var("PNFS_SERVER_SCOPE")
                 .unwrap_or_else(|_| "flint-pnfs-mds".to_string())
-        } else {
+        } else if volume_id.is_empty() {
             "flint-nfs-standalone".to_string()
+        } else {
+            format!("flint-nfs-{}", volume_id)
         }.into_bytes();
 
         info!("ClientManager created - mode={:?}, server_owner={}, server_scope={}", 
@@ -239,7 +247,7 @@ mod tests {
     #[test]
     fn test_exchange_id_new_client() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr);
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let owner = b"client1".to_vec();
         let verifier = 12345;
@@ -255,7 +263,7 @@ mod tests {
     #[test]
     fn test_exchange_id_existing_client() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr);
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let owner = b"client1".to_vec();
         let verifier = 12345;
@@ -274,7 +282,7 @@ mod tests {
     #[test]
     fn test_client_reboot() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr);
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let owner = b"client1".to_vec();
         let verifier1 = 12345;
@@ -293,7 +301,7 @@ mod tests {
     #[test]
     fn test_sequence_update() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr);
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let (client_id, _, _) = client_mgr.exchange_id(b"client1".to_vec(), 12345, 0);
 
@@ -307,7 +315,7 @@ mod tests {
     #[test]
     fn test_client_removal() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr);
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let (client_id, _, _) = client_mgr.exchange_id(b"client1".to_vec(), 12345, 0);
 

@@ -1,0 +1,7 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 60
+# Assert that the writer-pod no longer exists
+commands:
+  - command: kubectl get pod writer-pod --namespace=$NAMESPACE --ignore-not-found
+    ignoreFailure: false

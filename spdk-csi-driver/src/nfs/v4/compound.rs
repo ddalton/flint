@@ -139,6 +139,11 @@ pub enum Operation {
     },
     DestroySession(SessionId),
     DestroyClientId(u64),        // clientid
+    BindConnToSession {
+        sessionid: SessionId,
+        dir: u32,                // CDFC4_FORE=1, CDFC4_BACK=2, CDFC4_FORE_OR_BOTH=3
+        use_conn_in_rdma_mode: bool,
+    },
     Sequence {
         sessionid: SessionId,
         sequenceid: u32,
@@ -378,6 +383,7 @@ pub enum OperationResult {
     CreateSession(Nfs4Status, Option<CreateSessionResult>),
     DestroySession(Nfs4Status),
     DestroyClientId(Nfs4Status),
+    BindConnToSession(Nfs4Status, Option<SessionId>, u32, bool), // sessionid, dir, use_rdma
     Sequence(Nfs4Status, Option<SequenceResult>),
     ReclaimComplete(Nfs4Status),
     SecInfoNoName(Nfs4Status),
@@ -434,6 +440,7 @@ impl OperationResult {
             OperationResult::CreateSession(s, _) => *s,
             OperationResult::DestroySession(s) => *s,
             OperationResult::DestroyClientId(s) => *s,
+            OperationResult::BindConnToSession(s, _, _, _) => *s,
             OperationResult::Sequence(s, _) => *s,
             OperationResult::ReclaimComplete(s) => *s,
             OperationResult::SecInfoNoName(s) => *s,
@@ -1013,6 +1020,16 @@ impl CompoundRequest {
                 let sessionid = decoder.decode_sessionid()?;
                 Ok(Operation::DestroySession(sessionid))
             }
+            opcode::BIND_CONN_TO_SESSION => {
+                let sessionid = decoder.decode_sessionid()?;
+                let dir = decoder.decode_u32()?;
+                let use_conn_in_rdma_mode = decoder.decode_bool()?;
+                Ok(Operation::BindConnToSession {
+                    sessionid,
+                    dir,
+                    use_conn_in_rdma_mode,
+                })
+            }
             opcode::DESTROY_CLIENTID => {
                 let clientid = decoder.decode_u64()?;
                 Ok(Operation::DestroyClientId(clientid))
@@ -1575,6 +1592,17 @@ impl CompoundResponse {
             OperationResult::DestroyClientId(status) => {
                 encoder.encode_u32(opcode::DESTROY_CLIENTID);
                 encoder.encode_status(status);
+            }
+            OperationResult::BindConnToSession(status, session_id, dir, use_rdma) => {
+                encoder.encode_u32(opcode::BIND_CONN_TO_SESSION);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(ref sid) = session_id {
+                        encoder.encode_sessionid(sid);
+                        encoder.encode_u32(dir);
+                        encoder.encode_bool(use_rdma);
+                    }
+                }
             }
             OperationResult::Sequence(status, seq_res) => {
                 encoder.encode_u32(opcode::SEQUENCE);

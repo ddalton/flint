@@ -241,6 +241,27 @@ impl CompoundDispatcher {
                 OperationResult::DestroySession(res.status)
             }
 
+            Operation::BindConnToSession { sessionid, dir, use_conn_in_rdma_mode } => {
+                info!("BIND_CONN_TO_SESSION: sessionid={:?}, dir={}", sessionid, dir);
+                if self.state_mgr.sessions.get_session(&sessionid).is_some() {
+                    info!("BIND_CONN_TO_SESSION: Session found, binding connection");
+                    OperationResult::BindConnToSession(
+                        Nfs4Status::Ok,
+                        Some(sessionid),
+                        dir,
+                        use_conn_in_rdma_mode,
+                    )
+                } else {
+                    warn!("BIND_CONN_TO_SESSION: Session {:?} not found", sessionid);
+                    OperationResult::BindConnToSession(
+                        Nfs4Status::BadSession,
+                        None,
+                        dir,
+                        use_conn_in_rdma_mode,
+                    )
+                }
+            }
+
             Operation::DestroyClientId(clientid) => {
                 // DESTROY_CLIENTID is used to destroy unused client IDs
                 // For now, we'll just return OK status
@@ -1443,7 +1464,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(""));
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)

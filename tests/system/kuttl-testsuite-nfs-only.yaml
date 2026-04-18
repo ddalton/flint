@@ -1,0 +1,13 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+metadata:
+  name: flint-csi-nfs-only-tests
+# Tests compatible with nfs-only mode (no SPDK)
+# Excludes: multi-replica (requires SPDK replication), snapshot-restore (requires SPDK snapshots),
+#           rox-multi-pod (requires snapshot-based ROX volumes)
+testDirs:
+  - tests-nfs-only/
+timeout: 300
+parallel: 4
+suppress:
+  - events

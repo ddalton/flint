@@ -692,23 +692,31 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.name.clone();
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
-        // Check if creating from snapshot or volume (PVC clone) first
-        if let Some(content_source) = &req.volume_content_source {
-            if let Some(source_type) = &content_source.r#type {
-                use spdk_csi_driver::csi::volume_content_source::Type;
-                
-                let size_bytes = req.capacity_range.as_ref()
-                    .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
-                    .unwrap_or(1024 * 1024 * 1024) as u64;
-                
-                match source_type {
-                    Type::Snapshot(snapshot) => {
-                        println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
-                        return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
-                    }
-                    Type::Volume(volume_source) => {
-                        println!("🔄 [CONTROLLER] Creating volume from PVC (clone): {}", volume_source.volume_id);
-                        return self.create_volume_from_volume(&volume_id, &volume_source.volume_id, size_bytes).await;
+        // Check nfsEmptyDir FIRST — in emptyDir mode all volumes (including clones/snapshots)
+        // are backed by ephemeral emptyDir, so we skip SPDK entirely
+        let nfs_empty_dir_early = req.parameters.get("nfsEmptyDir")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if !nfs_empty_dir_early {
+            // Check if creating from snapshot or volume (PVC clone) — requires SPDK
+            if let Some(content_source) = &req.volume_content_source {
+                if let Some(source_type) = &content_source.r#type {
+                    use spdk_csi_driver::csi::volume_content_source::Type;
+
+                    let size_bytes = req.capacity_range.as_ref()
+                        .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
+                        .unwrap_or(1024 * 1024 * 1024) as u64;
+
+                    match source_type {
+                        Type::Snapshot(snapshot) => {
+                            println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
+                            return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
+                        }
+                        Type::Volume(volume_source) => {
+                            println!("🔄 [CONTROLLER] Creating volume from PVC (clone): {}", volume_source.volume_id);
+                            return self.create_volume_from_volume(&volume_id, &volume_source.volume_id, size_bytes).await;
+                        }
                     }
                 }
             }
@@ -727,6 +735,52 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
 
+        let nfs_empty_dir = req.parameters.get("nfsEmptyDir")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        // NFS emptyDir mode: skip SPDK entirely, serve all volumes via NFS with emptyDir backing
+        if nfs_empty_dir {
+            println!("📡 [NFS-EMPTYDIR] Volume {} will be served via NFS with emptyDir backend", volume_id);
+            println!("   Size: {} bytes ({}Gi)", size_bytes, size_bytes / (1024 * 1024 * 1024));
+
+            let mut volume_context = std::collections::HashMap::new();
+            volume_context.insert("nfs.flint.io/enabled".to_string(), "true".to_string());
+            volume_context.insert("nfs.flint.io/backend".to_string(), "emptydir".to_string());
+            volume_context.insert("size".to_string(), format!("{}Gi", size_bytes / (1024 * 1024 * 1024)));
+
+            // Echo back content_source if this was a clone/snapshot request
+            // The provisioner requires this in the response to confirm the clone was handled
+            let content_source = req.volume_content_source.as_ref().and_then(|cs| {
+                cs.r#type.as_ref().map(|t| {
+                    use spdk_csi_driver::csi::volume_content_source::Type;
+                    match t {
+                        Type::Volume(v) => spdk_csi_driver::csi::VolumeContentSource {
+                            r#type: Some(Type::Volume(spdk_csi_driver::csi::volume_content_source::VolumeSource {
+                                volume_id: v.volume_id.clone(),
+                            })),
+                        },
+                        Type::Snapshot(s) => spdk_csi_driver::csi::VolumeContentSource {
+                            r#type: Some(Type::Snapshot(spdk_csi_driver::csi::volume_content_source::SnapshotSource {
+                                snapshot_id: s.snapshot_id.clone(),
+                            })),
+                        },
+                    }
+                })
+            });
+
+            let response = spdk_csi_driver::csi::CreateVolumeResponse {
+                volume: Some(spdk_csi_driver::csi::Volume {
+                    volume_id: volume_id.clone(),
+                    capacity_bytes: size_bytes as i64,
+                    volume_context,
+                    content_source,
+                    accessible_topology: vec![],
+                }),
+            };
+            return Ok(tonic::Response::new(response));
+        }
+
         // Check if ReadWriteMany (RWX) or ReadOnlyMany (ROX) is requested
         // Both use NFS for multi-pod access
         let is_rwx = req.volume_capabilities.iter().any(|cap| {
@@ -737,7 +791,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 false
             }
         });
-        
+
         let is_rox = req.volume_capabilities.iter().any(|cap| {
             if let Some(access_mode) = &cap.access_mode {
                 use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
@@ -746,9 +800,9 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 false
             }
         });
-        
+
         let uses_nfs = is_rwx || is_rox;
-        
+
         if uses_nfs {
             if is_rox {
                 println!("🔒 [ROX] ReadOnlyMany access mode detected for volume: {}", volume_id);
@@ -758,7 +812,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             println!("✅ [NFS] Volume will be served via NFS");
         }
 
-        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}, ROX: {}", 
+        println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}, ROX: {}",
                  volume_id, size_bytes, replica_count, thin_provision, is_rwx, is_rox);
 
         // Call the driver's create volume method
@@ -1075,24 +1129,39 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .get("nfs.flint.io/enabled")
             .map(|v| v == "true")
             .unwrap_or(false);
-        
-        // Both ROX and RWX use NFS for multi-pod access
-        // ROX exports read-only, RWX exports read-write
-        if is_rox || is_rwx {
-            if is_rox {
+
+        let is_emptydir_nfs = req.volume_context
+            .get("nfs.flint.io/backend")
+            .map(|v| v == "emptydir")
+            .unwrap_or(false);
+
+        // NFS path: RWX, ROX, or emptyDir-backed volumes
+        if is_rox || is_rwx || is_emptydir_nfs {
+            if is_emptydir_nfs {
+                println!("📡 [NFS-EMPTYDIR] Volume {} using NFS with emptyDir backend", volume_id);
+            } else if is_rox {
                 println!("🔒 [ROX] ReadOnlyMany volume detected - using NFS (read-only)");
             } else {
                 println!("🔄 [RWX] ReadWriteMany volume detected - using NFS (read-write)");
             }
             println!("   Volume ID: {}", volume_id);
             println!("   Node requesting: {}", node_id);
-            
-            // Parse replica nodes from volume_context
-            let replica_nodes = match spdk_csi_driver::rwx_nfs::parse_replica_nodes(&req.volume_context) {
-                Ok(nodes) => nodes,
-                Err(e) => {
-                    println!("❌ [RWX] Failed to parse replica nodes: {}", e);
-                    return Err(e);
+
+            let nfs_backend = if is_emptydir_nfs {
+                spdk_csi_driver::rwx_nfs::NfsBackend::EmptyDir
+            } else {
+                spdk_csi_driver::rwx_nfs::NfsBackend::Pvc
+            };
+
+            let replica_nodes = if is_emptydir_nfs {
+                vec![]
+            } else {
+                match spdk_csi_driver::rwx_nfs::parse_replica_nodes(&req.volume_context) {
+                    Ok(nodes) => nodes,
+                    Err(e) => {
+                        println!("❌ [RWX] Failed to parse replica nodes: {}", e);
+                        return Err(e);
+                    }
                 }
             };
             
@@ -1124,7 +1193,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     &replica_nodes,
                     &req.volume_context,
                     capacity_bytes,
-                    is_rox // ROX=true (read-only), RWX=false (read-write)
+                    is_rox,
+                    nfs_backend.clone(),
                 ).await?;
             } else {
                 println!("ℹ️  [RWX] NFS server pod already exists for volume: {}", volume_id);
@@ -1437,9 +1507,18 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         println!("📏 [CONTROLLER] Expanding volume {} to {} bytes", volume_id, new_size_bytes);
 
-        // Find which node has the volume
-        let volume_info = self.driver.get_volume_info(&volume_id).await
-            .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+        // For NFS emptyDir volumes, expansion is a no-op (emptyDir has no size limit)
+        // Detect by checking if volume metadata lookup fails (NFS volumes don't store SPDK metadata)
+        let volume_info = match self.driver.get_volume_info(&volume_id).await {
+            Ok(info) => info,
+            Err(_) => {
+                println!("📏 [CONTROLLER] Volume {} appears to be NFS-backed, expansion is a no-op", volume_id);
+                return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                    capacity_bytes: new_size_bytes as i64,
+                    node_expansion_required: false,
+                }));
+            }
+        };
 
         println!("✅ [CONTROLLER] Found volume on node: {}", volume_info.node_name);
 
@@ -2249,9 +2328,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // Build mount options
             // Note: NFSv4 uses standard port 2049, no need to specify if default
             let mount_opts = if readonly {
-                "vers=4.2,ro".to_string()
+                "vers=4.2,noresvport,ro".to_string()
             } else {
-                "vers=4.2".to_string()
+                "vers=4.2,noresvport".to_string()
             };
             
             // PRE-MOUNT CHECKS
@@ -2351,7 +2430,35 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         if staging_skipped && is_ephemeral {
             // EPHEMERAL VOLUME with no staging: Create lvol and mount directly
             println!("📦 [NODE_PUBLISH] Ephemeral volume - NodeStageVolume was skipped, creating lvol now");
-            
+
+            // Check if SPDK is available — if not, use tmpfs (nfs-only mode)
+            let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
+            if !std::path::Path::new(socket_path).exists() {
+                println!("📦 [NODE_PUBLISH] SPDK unavailable — using tmpfs for ephemeral volume");
+                let size_str = req.volume_context.get("size").map(|s| s.as_str()).unwrap_or("100Mi");
+                // Convert Kubernetes size format (e.g. "100Mi", "1Gi") to tmpfs format (bytes)
+                let tmpfs_size = if size_str.ends_with("Gi") {
+                    let n: u64 = size_str.trim_end_matches("Gi").parse().unwrap_or(1);
+                    format!("{}", n * 1024 * 1024 * 1024)
+                } else if size_str.ends_with("Mi") {
+                    let n: u64 = size_str.trim_end_matches("Mi").parse().unwrap_or(100);
+                    format!("{}", n * 1024 * 1024)
+                } else {
+                    size_str.to_string()
+                };
+                let mount_output = std::process::Command::new("mount")
+                    .args(["-t", "tmpfs", "-o", &format!("size={}", tmpfs_size), "tmpfs", &target_path])
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to mount tmpfs: {}", e)))?;
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    return Err(tonic::Status::internal(format!("tmpfs mount failed: {}", error)));
+                }
+                println!("✅ [NODE_PUBLISH] Ephemeral volume mounted as tmpfs at {}", target_path);
+                let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
+                return Ok(response);
+            }
+
             // For ephemeral volumes, use a shorter name (SPDK has ~64 char limit)
             // Extract last 56 chars of volume_id (keeps it unique while fitting limit)
             let short_volume_id = if volume_id.len() > 56 {
@@ -2361,7 +2468,6 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             };
             let lvol_name = format!("eph_{}", short_volume_id);
             println!("📦 [NODE_PUBLISH] Using short lvol name: {} (len: {})", lvol_name, lvol_name.len());
-            let socket_path = self.driver.spdk_rpc_url.trim_start_matches("unix://");
             let spdk = spdk_csi_driver::spdk_native::SpdkNative::new(Some(socket_path.to_string())).await
                 .map_err(|e| tonic::Status::internal(format!("Failed to connect to SPDK: {}", e)))?;
             

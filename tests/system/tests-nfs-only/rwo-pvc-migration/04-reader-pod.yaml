@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reader-pod
+  labels:
+    test: csi-reader
+spec:
+  restartPolicy: Never
+  # Anti-affinity to ensure it runs on a different node than the writer
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: test
+                operator: In
+                values:
+                  - csi-writer
+          topologyKey: kubernetes.io/hostname
+  containers:
+    - name: reader
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Reading data from PVC..."
+          if [ ! -f /data/test-file.txt ]; then
+            echo "ERROR: test-file.txt not found!"
+            exit 1
+          fi
+          echo "File contents:"
+          cat /data/test-file.txt
+          if grep -q "CSI Driver Test - RWO Migration" /data/test-file.txt; then
+            echo "SUCCESS: Data verified!"
+            exit 0
+          else
+            echo "ERROR: Expected data not found!"
+            exit 1
+          fi
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: test-pvc

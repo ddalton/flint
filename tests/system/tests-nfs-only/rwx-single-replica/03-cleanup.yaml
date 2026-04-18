@@ -1,0 +1,26 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-2
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-writer-3
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rwx-verifier
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rwx-test-pvc
+

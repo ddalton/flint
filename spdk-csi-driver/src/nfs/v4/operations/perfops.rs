@@ -875,7 +875,7 @@ mod tests {
         std::fs::write(export_path.join("dest.txt"), b"destination file").unwrap();
         
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(""));
         let handler = PerfOperationHandler::new(state_mgr, fh_mgr);
         (handler, temp_dir)
     }

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: post-expansion-pod
+spec:
+  restartPolicy: Never
+  containers:
+    - name: verifier
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Verifying data after expansion..."
+          
+          # Check original file exists
+          if [ ! -f /data/test-file.txt ]; then
+            echo "ERROR: Original file not found!"
+            exit 1
+          fi
+          
+          cat /data/test-file.txt
+          
+          if grep -q "Initial data before expansion" /data/test-file.txt; then
+            echo "SUCCESS: Original data preserved!"
+          else
+            echo "ERROR: Original data corrupted!"
+            exit 1
+          fi
+          
+          # Check disk space increased
+          echo "Checking available space..."
+          df -h /data
+          
+          # Try to write more data to use expanded space
+          dd if=/dev/zero of=/data/expanded-file bs=1M count=500 || true
+          sync
+          
+          echo "Post-expansion verification completed"
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: expandable-pvc

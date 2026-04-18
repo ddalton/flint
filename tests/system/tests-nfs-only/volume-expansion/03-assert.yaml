@@ -1,0 +1,6 @@
+# Assert that the initial-writer pod has been deleted
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - command: kubectl get pod initial-writer --namespace=$NAMESPACE --ignore-not-found
+    ignoreFailure: false

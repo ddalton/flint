@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: post-expansion-pod
+status:
+  phase: Succeeded
+  containerStatuses:
+    - name: verifier
+      state:
+        terminated:
+          exitCode: 0
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: expandable-pvc
+status:
+  phase: Bound
+  # After pod remount, filesystem should be resized and capacity updated
+  capacity:
+    storage: 2Gi

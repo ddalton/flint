@@ -63,7 +63,7 @@ impl NfsServer {
     pub fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
         let fh_mgr = Arc::new(FileHandleManager::new(config.export_path.clone()));
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(&config.volume_id));
         let lock_mgr = Arc::new(LockManager::new());
 
         // Create COMPOUND dispatcher (creates handlers internally)

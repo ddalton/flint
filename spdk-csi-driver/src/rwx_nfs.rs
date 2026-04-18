@@ -41,6 +41,12 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use tokio::time::{sleep, Duration};
 use tonic::Status;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum NfsBackend {
+    Pvc,
+    EmptyDir,
+}
+
 /// NFS configuration loaded from environment variables (set by Helm chart)
 #[derive(Clone, Debug)]
 pub struct NfsConfig {
@@ -176,6 +182,7 @@ pub async fn create_nfs_server_pod(
     volume_context: &HashMap<String, String>,
     capacity_bytes: i64,
     read_only: bool,
+    backend: NfsBackend,
 ) -> Result<(), Status> {
     // SAFETY: Early return if NFS disabled (zero-regression guarantee)
     let config = match NfsConfig::from_env() {
@@ -196,14 +203,15 @@ pub async fn create_nfs_server_pod(
     let nfs_volume_handle = format!("nfs-server-{}", volume_id);
     
     let mode = if read_only { "ROX (ReadOnlyMany)" } else { "RWX (ReadWriteMany)" };
+    let backend_desc = if backend == NfsBackend::EmptyDir { "emptyDir" } else { "RWO PVC" };
     eprintln!("🚀 [NFS] Creating NFS server infrastructure: {}", pod_name);
     eprintln!("   Volume ID: {}", volume_id);
-    eprintln!("   NFS volumeHandle: {}", nfs_volume_handle);
     eprintln!("   Namespace: {}", config.namespace);
     eprintln!("   Access Mode: {}", mode);
-    eprintln!("   Mount Method: RWO PVC (HA-capable with multi-replica)");
+    eprintln!("   Backend: {}", backend_desc);
     eprintln!("   Replica nodes: {:?}", replica_nodes);
-    
+
+    if backend == NfsBackend::Pvc {
     // Step 1: Create PV (RWO mode) with synthetic volumeHandle
     eprintln!("📦 [NFS] Step 1: Creating PV for NFS pod (RWO mode)");
     let pv_api: Api<PersistentVolume> = Api::all(kube_client.clone());
@@ -306,9 +314,10 @@ pub async fn create_nfs_server_pod(
             return Err(Status::internal(format!("Failed to create NFS PVC: {}", e)));
         }
     }
-    
-    // Step 3: Create NFS pod
-    eprintln!("📦 [NFS] Step 3: Creating NFS pod");
+    } // end if backend == NfsBackend::Pvc
+
+    // Create NFS pod
+    eprintln!("📦 [NFS] Creating NFS pod (backend: {})", backend_desc);
     
     // Build preferred node affinity to optimize for replica nodes
     // Uses "preferred" (not "required") for HA flexibility:
@@ -411,11 +420,22 @@ pub async fn create_nfs_server_pod(
             
             volumes: Some(vec![Volume {
                 name: "volume-data".to_string(),
-                // Mount RWO PVC - leverages multi-replica/RAID for HA
-                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                    claim_name: pvc_name.clone(),
-                    read_only: Some(false),  // NFS pod needs write access
-                }),
+                persistent_volume_claim: if backend == NfsBackend::Pvc {
+                    Some(PersistentVolumeClaimVolumeSource {
+                        claim_name: pvc_name.clone(),
+                        read_only: Some(false),
+                    })
+                } else {
+                    None
+                },
+                empty_dir: if backend == NfsBackend::EmptyDir {
+                    Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource {
+                        size_limit: Some(Quantity(format!("{}", capacity_bytes))),
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                },
                 ..Default::default()
             }]),
             

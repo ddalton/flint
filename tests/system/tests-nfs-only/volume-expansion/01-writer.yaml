@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: initial-writer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Initial data before expansion" > /data/test-file.txt
+          dd if=/dev/zero of=/data/largefile bs=1M count=100
+          sync
+          df -h /data
+          echo "Initial write completed"
+      volumeMounts:
+        - name: test-volume
+          mountPath: /data
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: expandable-pvc

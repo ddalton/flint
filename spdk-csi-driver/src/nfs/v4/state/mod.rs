@@ -40,9 +40,9 @@ pub struct StateManager {
 
 impl StateManager {
     /// Create a new state manager
-    pub fn new() -> Self {
+    pub fn new(volume_id: &str) -> Self {
         let lease_manager = Arc::new(LeaseManager::new());
-        let client_manager = Arc::new(ClientManager::new(lease_manager.clone()));
+        let client_manager = Arc::new(ClientManager::new(lease_manager.clone(), volume_id));
         let session_manager = Arc::new(SessionManager::new());
         let stateid_manager = Arc::new(StateIdManager::new());
         let delegation_manager = Arc::new(DelegationManager::new());
@@ -84,7 +84,7 @@ impl StateManager {
 
 impl Default for StateManager {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired_removes_clients_and_sessions() {
-        let state_mgr = StateManager::new();
+        let state_mgr = StateManager::new("");
 
         // Create a client and session
         let (client_id, _seq, _is_new) = state_mgr.clients.exchange_id(
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired_with_no_expired_clients() {
-        let state_mgr = StateManager::new();
+        let state_mgr = StateManager::new("");
 
         // Create a client and session
         let (client_id, _, _) = state_mgr.clients.exchange_id(
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_get_expired_clients_returns_empty_for_active_leases() {
-        let state_mgr = StateManager::new();
+        let state_mgr = StateManager::new("");
 
         // Create a client with active lease
         let (client_id, _, _) = state_mgr.clients.exchange_id(

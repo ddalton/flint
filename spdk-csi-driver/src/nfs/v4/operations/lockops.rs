@@ -560,7 +560,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(""));
         let lock_mgr = Arc::new(LockManager::new());
         let handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr);
         (handler, fh_mgr, temp_dir)

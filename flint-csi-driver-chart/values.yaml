@@ -106,6 +106,8 @@ deployment:
   #   - node-agent: Both CSI protocol and disk management (not recommended)
   # "embedded": Single container with embedded SPDK and CSI (legacy compatibility)
   #   - flint-csi-driver: Single container with SPDK embedded (privileged)
+  # "nfs-only": No SPDK sidecar — all volumes served via NFS with emptyDir (Kind/dev clusters)
+  #   - flint-csi-driver: CSI protocol handler only (~100MB vs ~3GB per node)
   nodeMode: "three-container"
 
 # Logging configuration
@@ -141,6 +143,7 @@ storageClass:
     numReplicas: "1"  # Single replica (default). Set to "2" or "3" for multi-replica HA (not yet implemented)
     autoRebuild: "true"
     thinProvision: "false"  # Set to "true" for thin provisioning (space allocated on write)
+    nfsEmptyDir: "false"  # Set to "true" for Kind/dev clusters (bypasses kernel block device requirement)
 
 # VolumeSnapshotClass configuration
 snapshotClass:

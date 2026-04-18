@@ -933,7 +933,7 @@ mod tests {
         std::fs::write(export_path.join("testfile.txt"), b"test data for reading").unwrap();
         
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(""));
         let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
         (handler, fh_mgr, temp_dir)
     }

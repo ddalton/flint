@@ -1,0 +1,6 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - command: kubectl delete pod initial-writer --namespace=$NAMESPACE --ignore-not-found=true
+  - command: kubectl wait --for=delete pod initial-writer --namespace=$NAMESPACE --timeout=60s || true
+

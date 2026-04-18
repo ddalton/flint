@@ -51,7 +51,7 @@ impl MetadataServer {
         let fh_manager = Arc::new(FileHandleManager::new(export_path));
 
         // Initialize state manager (for NFSv4 sessions, stateids)
-        let state_mgr = Arc::new(StateManager::new());
+        let state_mgr = Arc::new(StateManager::new(""));
         
         // Initialize lock manager
         let lock_mgr = Arc::new(LockManager::new());
