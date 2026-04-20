@@ -1154,7 +1154,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             };
 
             let replica_nodes = if is_emptydir_nfs {
-                vec![]
+                vec![node_id.clone()]
             } else {
                 match spdk_csi_driver::rwx_nfs::parse_replica_nodes(&req.volume_context) {
                     Ok(nodes) => nodes,

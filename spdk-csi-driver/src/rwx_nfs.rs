@@ -375,7 +375,11 @@ pub async fn create_nfs_server_pod(
             ..Default::default()
         },
         spec: Some(PodSpec {
-            // Node affinity: Run on any replica node (scheduler picks best)
+            node_name: if backend == NfsBackend::EmptyDir {
+                replica_nodes.first().cloned()
+            } else {
+                None
+            },
             affinity: Some(Affinity {
                 node_affinity: Some(node_affinity),
                 ..Default::default()
@@ -428,10 +432,10 @@ pub async fn create_nfs_server_pod(
                 } else {
                     None
                 },
-                empty_dir: if backend == NfsBackend::EmptyDir {
-                    Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource {
-                        size_limit: Some(Quantity(format!("{}", capacity_bytes))),
-                        ..Default::default()
+                host_path: if backend == NfsBackend::EmptyDir {
+                    Some(k8s_openapi::api::core::v1::HostPathVolumeSource {
+                        path: format!("/var/flint-data/{}", volume_id),
+                        type_: Some("DirectoryOrCreate".to_string()),
                     })
                 } else {
                     None
