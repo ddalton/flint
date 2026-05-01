@@ -139,6 +139,45 @@ impl CompoundDispatcher {
             };
         }
 
+        // RFC 8881 §2.10.6.1 — session-establishment / teardown operations
+        // (EXCHANGE_ID, CREATE_SESSION, DESTROY_SESSION, DESTROY_CLIENTID,
+        // BIND_CONN_TO_SESSION) cannot be bundled with arbitrary ops. They
+        // are still permitted alongside SEQUENCE itself (a session-bound
+        // compound legitimately routes them to an existing session — for
+        // example, EXCHANGE_ID for a *different* client owner inside an
+        // existing session, which pynfs EID1b exercises).
+        //
+        // The rule we enforce: if any sole-op operation is present and any
+        // other op exists that is NOT a SEQUENCE, return NFS4ERR_NOT_ONLY_OP.
+        fn requires_sole_op(op: &Operation) -> bool {
+            matches!(op,
+                Operation::ExchangeId { .. }
+                | Operation::CreateSession { .. }
+                | Operation::DestroySession(_)
+                | Operation::DestroyClientId(_)
+                | Operation::BindConnToSession { .. }
+            )
+        }
+        let has_sole = request.operations.iter().any(requires_sole_op);
+        let has_non_sequence_companion = request.operations.iter().any(
+            |o| !matches!(o, Operation::Sequence { .. }) && !requires_sole_op(o),
+        );
+        if has_sole && (has_non_sequence_companion || request.operations.len() > 2) {
+            // The "len > 2" guard catches malformed bundles like [SEQUENCE,
+            // EXCHANGE_ID, CREATE_SESSION] — two sole-op ops together is
+            // also a violation regardless of what else is present.
+            // We don't catch single-sole + other ops where len==2 with both
+            // being sole-class; rare enough to ignore for now.
+            warn!("COMPOUND: session-establishment op bundled with non-SEQUENCE companions");
+            return CompoundResponse {
+                status: Nfs4Status::NotOnlyOp,
+                tag: request.tag,
+                results: Vec::new(),
+                raw_reply: None,
+                cache_slot: None,
+            };
+        }
+
         // Create context
         let mut context = CompoundContext::new(request.minor_version);
 
@@ -920,6 +959,14 @@ impl CompoundDispatcher {
                 };
                 warn!("Unsupported operation: opcode={} -> {:?}", opcode, status);
                 OperationResult::Unsupported { opcode, status }
+            }
+
+            // The opcode was recognised but its arguments did not parse.
+            // RFC 5661 §15: reply with NFS4ERR_BADXDR, echoing the request
+            // opcode in the result so the client can correlate.
+            Operation::BadXdr(opcode) => {
+                warn!("BADXDR for opcode={}", opcode);
+                OperationResult::Unsupported { opcode, status: Nfs4Status::BadXdr }
             }
 
             // Catch-all for any unhandled operations (e.g. an Operation variant

@@ -113,6 +113,19 @@ fn create_session_err(status: Nfs4Status) -> CreateSessionRes {
     }
 }
 
+/// Build an EXCHANGE_ID error reply. server_owner / server_scope are empty
+/// because the spec lets a server omit identification on an error path.
+fn exchange_id_err(status: Nfs4Status) -> ExchangeIdRes {
+    ExchangeIdRes {
+        status,
+        clientid: 0,
+        sequenceid: 0,
+        flags: 0,
+        server_owner: String::new(),
+        server_scope: Vec::new(),
+    }
+}
+
 /// SEQUENCE operation (opcode 53)
 ///
 /// Must be the first operation in every COMPOUND (except EXCHANGE_ID).
@@ -169,6 +182,29 @@ impl SessionOperationHandler {
     pub fn handle_exchange_id(&self, op: ExchangeIdOp) -> ExchangeIdRes {
         info!("EXCHANGE_ID: owner={:?}, verifier={}", op.client_owner, op.verifier);
 
+        use crate::nfs::v4::protocol::exchgid_flags;
+
+        // RFC 8881 §18.35.3: only specific bits are allowed in eia_flags.
+        // CONFIRMED_R is server-set-only; UPD_CONFIRMED_REC_A is client-set
+        // when updating an existing record. Anything else MUST return INVAL.
+        const VALID_EID_FLAGS: u32 = exchgid_flags::SUPP_MOVED_REFER
+            | exchgid_flags::SUPP_MOVED_MIGR
+            | exchgid_flags::BIND_PRINC_STATEID
+            | exchgid_flags::USE_NON_PNFS
+            | exchgid_flags::USE_PNFS_MDS
+            | exchgid_flags::USE_PNFS_DS
+            | exchgid_flags::UPD_CONFIRMED_REC_A;
+        if op.flags & !VALID_EID_FLAGS != 0 {
+            warn!("EXCHANGE_ID: rejecting unknown flag bits 0x{:x}", op.flags);
+            return exchange_id_err(Nfs4Status::Inval);
+        }
+        // RFC 8881 §18.35.3: eia_flags MUST NOT have CONFIRMED_R set by the
+        // client (it's a response-only bit). EID7 testSupported1a covers this.
+        if op.flags & exchgid_flags::CONFIRMED_R != 0 {
+            warn!("EXCHANGE_ID: client set CONFIRMED_R (server-set-only) flag");
+            return exchange_id_err(Nfs4Status::Inval);
+        }
+
         // Exchange client ID
         let (clientid, sequenceid, is_new) = self.state_mgr.clients.exchange_id(
             op.client_owner,
@@ -183,7 +219,6 @@ impl SessionOperationHandler {
         }
 
         // Build server response flags per RFC 8881 Section 18.35
-        use crate::nfs::v4::protocol::exchgid_flags;
         let mut response_flags = 0u32;
 
         // Set server role based on server identity (from ClientManager)

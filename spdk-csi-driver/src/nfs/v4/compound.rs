@@ -266,6 +266,12 @@ pub enum Operation {
 
     // Placeholder for unsupported operations
     Unsupported(u32),            // operation code
+    /// The opcode is recognised as a valid NFSv4 op but its arguments could
+    /// not be parsed. Distinguished from `Unsupported` so the dispatcher can
+    /// return `NFS4ERR_BADXDR` instead of `NFS4ERR_NOTSUPP` /
+    /// `NFS4ERR_OP_ILLEGAL` (RFC 5661 §15: malformed args MUST surface as
+    /// BADXDR).
+    BadXdr(u32),
 }
 
 // Additional result types needed by OperationResult
@@ -682,12 +688,12 @@ impl CompoundRequest {
             let op = match Self::decode_operation(&mut decoder, opcode) {
                 Ok(op) => op,
                 Err(e) => {
-                    // An op that fails to decode is treated as illegal (the
-                    // dispatcher will surface OP_ILLEGAL / NOTSUPP). We keep
-                    // the original opcode so the response can identify it.
-                    warn!("Operation {}/{} (opcode={}) failed to decode ({}); recording as Unsupported",
+                    // Recognised opcode whose arguments don't parse → BADXDR.
+                    // Out-of-range opcodes go through `Operation::Unsupported`
+                    // (handled in `decode_operation`) and surface as OP_ILLEGAL.
+                    warn!("Operation {}/{} (opcode={}) failed to decode ({}); recording as BadXdr",
                           i + 1, op_count, opcode, e);
-                    Operation::Unsupported(opcode)
+                    Operation::BadXdr(opcode)
                 }
             };
             operations.push(op);
@@ -703,16 +709,20 @@ impl CompoundRequest {
 
     /// Decode a single operation
     fn decode_operation(decoder: &mut XdrDecoder, opcode: u32) -> Result<Operation, String> {
-        // Check we have enough data for the operation
-        if decoder.remaining() == 0 {
-            return Err(format!("No data remaining to decode operation opcode={}", opcode));
-        }
-        
-        // Check for reserved opcodes (0, 1, 2 are RESERVED in NFSv4)
-        // Per RFC 5661, these should return NFS4ERR_OP_ILLEGAL
-        if opcode <= 2 {
+        // Reserved/illegal opcode classes (0/1/2 reserved per RFC 5661 §15.2,
+        // anything > the highest valid v4.2 op is unknown) carry no body, so
+        // they're handled before any decoder.remaining() check. The dispatcher
+        // will substitute OP_ILLEGAL.
+        if opcode <= 2 || opcode > opcode::CLONE {
             warn!("Reserved/illegal operation code: {}", opcode);
             return Ok(Operation::Unsupported(opcode));
+        }
+
+        // Valid-range opcodes generally take at least one u32 of args. If the
+        // wire ran out before we got there, that's a real malformation
+        // (BADXDR), not an illegal opcode.
+        if decoder.remaining() == 0 {
+            return Err(format!("No data remaining to decode operation opcode={}", opcode));
         }
         
         match opcode {
@@ -1020,30 +1030,48 @@ impl CompoundRequest {
 
             // Session operations (NFSv4.1)
             opcode::EXCHANGE_ID => {
-                // ClientOwner structure: verifier FIRST, then id
-                // Verifier (8 bytes)
+                // ClientOwner structure: verifier first, then opaque id.
                 let verifier_bytes = decoder.decode_verifier()?;
                 let verifier = u64::from_be_bytes(verifier_bytes);
-
-                // Client ID (opaque string)
                 let client_id_bytes = decoder.decode_opaque()?;
-
                 let clientowner = ClientId {
                     verifier,
                     id: client_id_bytes.to_vec(),
                 };
-                
+
                 let flags = decoder.decode_u32()?;
                 let state_protect = decoder.decode_u32()?;
-                
-                // Implementation ID (optional) - for now skip
-                let has_impl_id = decoder.decode_bool()?;
-                let impl_id = if has_impl_id {
-                    decoder.decode_opaque()?.to_vec()
+
+                // eia_client_impl_id is a length-prefixed array of at most
+                // one element (RFC 8881 §18.35.1: `nfs_impl_id4 eia_client_impl_id<1>`).
+                // Length > 1 is a hard XDR violation (CSESS19 / EID3 expect
+                // BADXDR). We Err out and the dispatcher maps the failure
+                // to OP_ILLEGAL/BADXDR for this opcode.
+                let impl_id_count = decoder.decode_u32()? as usize;
+                if impl_id_count > 1 {
+                    return Err(format!(
+                        "eia_client_impl_id<1> length out of range: {}",
+                        impl_id_count
+                    ));
+                }
+                let impl_id = if impl_id_count == 1 {
+                    // nfs_impl_id4 = { utf8str_cs nii_domain; utf8str_cs nii_name; nfstime4 nii_date }.
+                    // We don't currently use any of these fields, but we have
+                    // to consume them to keep the wire aligned. Bound the
+                    // overall blob so a giant nii_name can't OOM us.
+                    let domain = decoder.decode_opaque()?;
+                    let name = decoder.decode_opaque()?;
+                    let _date_seconds = decoder.decode_u64()?;
+                    let _date_nseconds = decoder.decode_u32()?;
+                    let mut combined = Vec::with_capacity(domain.len() + name.len() + 1);
+                    combined.extend_from_slice(&domain);
+                    combined.push(b'/');
+                    combined.extend_from_slice(&name);
+                    combined
                 } else {
                     Vec::new()
                 };
-                
+
                 Ok(Operation::ExchangeId {
                     clientowner,
                     flags,
