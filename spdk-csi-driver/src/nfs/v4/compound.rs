@@ -323,7 +323,7 @@ pub struct ReadPlusResult {
     pub segments: Vec<ReadPlusSegment>,
 }
 
-/// Channel attributes for sessions
+/// Channel attributes for sessions (RFC 5661 §18.36 channel_attrs4)
 #[derive(Debug, Clone)]
 pub struct ChannelAttrs {
     pub header_pad_size: u32,
@@ -332,6 +332,10 @@ pub struct ChannelAttrs {
     pub max_response_size_cached: u32,
     pub max_operations: u32,
     pub max_requests: u32,
+    /// `ca_rdma_ird<1>` — present only for RDMA transports, at most one
+    /// element. We decode it so the wire framing stays aligned, but otherwise
+    /// ignore it (we are TCP-only for now).
+    pub rdma_ird: Vec<u32>,
 }
 
 impl Default for ChannelAttrs {
@@ -343,6 +347,7 @@ impl Default for ChannelAttrs {
             max_response_size_cached: 64 * 1024,
             max_operations: 8,
             max_requests: 128,
+            rdma_ird: Vec::new(),
         }
     }
 }
@@ -1047,30 +1052,74 @@ impl CompoundRequest {
                 })
             }
             opcode::CREATE_SESSION => {
+                // Wire layout (RFC 5661 §18.36):
+                //   csa_clientid (u64)
+                //   csa_sequence (u32)
+                //   csa_flags    (u32)
+                //   csa_fore_chan_attrs : channel_attrs4
+                //   csa_back_chan_attrs : channel_attrs4
+                //   csa_cb_program (u32)
+                //   csa_sec_parms<>   (callback_sec_parms4 array)
+                //
+                // channel_attrs4 itself ends with `ca_rdma_ird<1>`, an
+                // optional one-element u32 array. The decoder previously
+                // skipped that array, which silently mis-framed every
+                // subsequent field on the wire — this fixes that.
+
+                fn decode_channel_attrs(d: &mut XdrDecoder) -> Result<ChannelAttrs, String> {
+                    let header_pad_size = d.decode_u32()?;
+                    let max_request_size = d.decode_u32()?;
+                    let max_response_size = d.decode_u32()?;
+                    let max_response_size_cached = d.decode_u32()?;
+                    let max_operations = d.decode_u32()?;
+                    let max_requests = d.decode_u32()?;
+
+                    // ca_rdma_ird<1>: 0 or 1 u32. Anything longer is invalid
+                    // per the XDR <1> bound; surface as a decode error so the
+                    // dispatcher returns BADXDR instead of silently desyncing.
+                    let rdma_ird_len = d.decode_u32()? as usize;
+                    if rdma_ird_len > 1 {
+                        return Err(format!(
+                            "ca_rdma_ird<1> length out of range: {} (max 1)",
+                            rdma_ird_len
+                        ));
+                    }
+                    let mut rdma_ird = Vec::with_capacity(rdma_ird_len);
+                    for _ in 0..rdma_ird_len {
+                        rdma_ird.push(d.decode_u32()?);
+                    }
+
+                    Ok(ChannelAttrs {
+                        header_pad_size,
+                        max_request_size,
+                        max_response_size,
+                        max_response_size_cached,
+                        max_operations,
+                        max_requests,
+                        rdma_ird,
+                    })
+                }
+
                 let clientid = decoder.decode_u64()?;
                 let sequence = decoder.decode_u32()?;
                 let flags = decoder.decode_u32()?;
-                
-                // Fore channel attributes
-                let fore_chan_attrs = ChannelAttrs {
-                    header_pad_size: decoder.decode_u32()?,
-                    max_request_size: decoder.decode_u32()?,
-                    max_response_size: decoder.decode_u32()?,
-                    max_response_size_cached: decoder.decode_u32()?,
-                    max_operations: decoder.decode_u32()?,
-                    max_requests: decoder.decode_u32()?,
-                };
 
-                // Back channel attributes
-                let back_chan_attrs = ChannelAttrs {
-                    header_pad_size: decoder.decode_u32()?,
-                    max_request_size: decoder.decode_u32()?,
-                    max_response_size: decoder.decode_u32()?,
-                    max_response_size_cached: decoder.decode_u32()?,
-                    max_operations: decoder.decode_u32()?,
-                    max_requests: decoder.decode_u32()?,
-                };
-                
+                let fore_chan_attrs = decode_channel_attrs(decoder)?;
+                let back_chan_attrs = decode_channel_attrs(decoder)?;
+
+                // csa_cb_program is a u32 we don't need yet (no backchannel).
+                let _csa_cb_program = decoder.decode_u32()?;
+
+                // csa_sec_parms<> is a discriminated union on auth_flavor4 —
+                // it has variable, flavor-specific body sizes, NOT a uniform
+                // length prefix per element. We don't currently support a
+                // back channel, so we don't act on it at all. CREATE_SESSION
+                // is universally the last op in the COMPOUND, so leaving the
+                // remaining bytes unconsumed does not desync the next op.
+                // Implementing a proper backchannel will require decoding
+                // each flavor's body explicitly (AUTH_NONE = 0 bytes,
+                // AUTH_SYS = authsys_parms, RPCSEC_GSS = gss_cb_handles4).
+
                 Ok(Operation::CreateSession {
                     clientid,
                     sequence,

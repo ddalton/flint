@@ -99,6 +99,20 @@ pub struct CreateSessionRes {
     pub back_chan_attrs: ChannelAttrs,
 }
 
+/// Build a CREATE_SESSION error reply with zeroed channel attributes. Used
+/// for every error path so we have a single source of truth for the result
+/// shape.
+fn create_session_err(status: Nfs4Status) -> CreateSessionRes {
+    CreateSessionRes {
+        status,
+        sessionid: SessionId([0; 16]),
+        sequence: 0,
+        flags: 0,
+        fore_chan_attrs: ChannelAttrs::default(),
+        back_chan_attrs: ChannelAttrs::default(),
+    }
+}
+
 /// SEQUENCE operation (opcode 53)
 ///
 /// Must be the first operation in every COMPOUND (except EXCHANGE_ID).
@@ -224,82 +238,76 @@ impl SessionOperationHandler {
         }
     }
 
-    /// Handle CREATE_SESSION operation
+    /// Handle CREATE_SESSION operation. Validates input per RFC 5661 §18.36
+    /// before negotiating channel sizes:
+    ///   * unknown bits in csa_flags          → NFS4ERR_INVAL
+    ///   * channel sizes below server minimum → NFS4ERR_TOOSMALL
+    ///   * unknown clientid                   → NFS4ERR_STALE_CLIENTID
+    /// "Clamp the value upward to a known good number" (the previous behavior)
+    /// is wrong: it makes a buggy client succeed with degraded settings instead
+    /// of telling them the session won't work.
     pub fn handle_create_session(&self, op: CreateSessionOp) -> CreateSessionRes {
         info!("CREATE_SESSION: clientid={}, sequence={}", op.clientid, op.sequence);
         info!("CREATE_SESSION: Client requested - max_request={}, max_response={}, max_ops={}",
               op.fore_chan_attrs.max_request_size, op.fore_chan_attrs.max_response_size, op.fore_chan_attrs.max_operations);
 
+        // Defined csa_flags bits (RFC 5661 §18.36.3): PERSIST | CONN_BACK_CHAN | CONN_RDMA.
+        const VALID_FLAGS: u32 = CREATE_SESSION4_FLAG_PERSIST
+            | CREATE_SESSION4_FLAG_CONN_BACK_CHAN
+            | CREATE_SESSION4_FLAG_CONN_RDMA;
+        if op.flags & !VALID_FLAGS != 0 {
+            warn!("CREATE_SESSION: rejecting unknown flag bits 0x{:x}", op.flags);
+            return create_session_err(Nfs4Status::Inval);
+        }
+
+        // Server minimums for channel sizes (RFC 5661 §18.36.4):
+        //   "If the server is unable to support the value (it is too small),
+        //    the server will use NFS4ERR_TOOSMALL".
+        // 1024 is conservative — the smallest reasonable RPC carrying a one-op
+        // COMPOUND fits in well under that.
+        const MIN_REQUEST_SIZE: u32 = 1024;
+        const MIN_RESPONSE_SIZE: u32 = 1024;
+        const MIN_OPERATIONS: u32 = 1;
+
+        for (chan, attrs) in [
+            ("fore", &op.fore_chan_attrs),
+            ("back", &op.back_chan_attrs),
+        ] {
+            if attrs.max_request_size < MIN_REQUEST_SIZE
+                || attrs.max_response_size < MIN_RESPONSE_SIZE
+                || attrs.max_operations < MIN_OPERATIONS
+            {
+                warn!("CREATE_SESSION: {chan}-channel attrs too small ({:?})", attrs);
+                return create_session_err(Nfs4Status::TooSmall);
+            }
+        }
+
         // Verify client exists
         if self.state_mgr.clients.get_client(op.clientid).is_none() {
             warn!("CREATE_SESSION: Client {} not found", op.clientid);
-            return CreateSessionRes {
-                status: Nfs4Status::StaleClientId,
-                sessionid: SessionId([0; 16]),
-                sequence: 0,
-                flags: 0,
-                fore_chan_attrs: ChannelAttrs {
-                    header_pad_size: 0,
-                    max_request_size: 0,
-                    max_response_size: 0,
-                    max_response_size_cached: 0,
-                    max_operations: 0,
-                    max_requests: 0,
-                },
-                back_chan_attrs: ChannelAttrs {
-                    header_pad_size: 0,
-                    max_request_size: 0,
-                    max_response_size: 0,
-                    max_response_size_cached: 0,
-                    max_operations: 0,
-                    max_requests: 0,
-                },
-            };
+            return create_session_err(Nfs4Status::StaleClientId);
         }
 
         // Update client sequence
         if let Err(e) = self.state_mgr.clients.update_sequence(op.clientid) {
             warn!("CREATE_SESSION: Failed to update sequence: {}", e);
-            return CreateSessionRes {
-                status: Nfs4Status::SeqMisordered,
-                sessionid: SessionId([0; 16]),
-                sequence: 0,
-                flags: 0,
-                fore_chan_attrs: ChannelAttrs {
-                    header_pad_size: 0,
-                    max_request_size: 0,
-                    max_response_size: 0,
-                    max_response_size_cached: 0,
-                    max_operations: 0,
-                    max_requests: 0,
-                },
-                back_chan_attrs: ChannelAttrs {
-                    header_pad_size: 0,
-                    max_request_size: 0,
-                    max_response_size: 0,
-                    max_response_size_cached: 0,
-                    max_operations: 0,
-                    max_requests: 0,
-                },
-            };
+            return create_session_err(Nfs4Status::SeqMisordered);
         }
 
-        // Negotiate session buffer sizes
-        // Use the MINIMUM of what client requested and our server maximums
-        // Server maximums: 1MB for requests/responses (standard for modern NFS)
-        const SERVER_MAX_REQUEST: u32 = 1 * 1024 * 1024;  // 1MB
-        const SERVER_MAX_RESPONSE: u32 = 1 * 1024 * 1024; // 1MB
+        // Negotiate session buffer sizes. Take the *minimum* of client-requested
+        // and server-maximum. We've already rejected requests below the server
+        // minimum above, so the negotiated value is always >= MIN_*.
+        const SERVER_MAX_REQUEST: u32 = 1024 * 1024;
+        const SERVER_MAX_RESPONSE: u32 = 1024 * 1024;
         const SERVER_MAX_OPS: u32 = 128;
-        
-        let negotiated_max_request = op.fore_chan_attrs.max_request_size.min(SERVER_MAX_REQUEST).max(1024);
-        let negotiated_max_response = op.fore_chan_attrs.max_response_size.min(SERVER_MAX_RESPONSE).max(1024);
-        let negotiated_max_ops = op.fore_chan_attrs.max_operations.min(SERVER_MAX_OPS).max(8);
-        
-        info!("CREATE_SESSION: Server offers: req={}, resp={}, ops={}", 
-              SERVER_MAX_REQUEST, SERVER_MAX_RESPONSE, SERVER_MAX_OPS);
-        info!("CREATE_SESSION: Negotiated (final): req={}, resp={}, ops={}", 
+
+        let negotiated_max_request = op.fore_chan_attrs.max_request_size.min(SERVER_MAX_REQUEST);
+        let negotiated_max_response = op.fore_chan_attrs.max_response_size.min(SERVER_MAX_RESPONSE);
+        let negotiated_max_ops = op.fore_chan_attrs.max_operations.min(SERVER_MAX_OPS);
+
+        info!("CREATE_SESSION: Negotiated: req={}, resp={}, ops={}",
               negotiated_max_request, negotiated_max_response, negotiated_max_ops);
-        
+
         // Create session with negotiated sizes
         let session = self.state_mgr.sessions.create_session(
             op.clientid,
@@ -321,15 +329,8 @@ impl SessionOperationHandler {
         // If we are not offering a backchannel, RFC 5661 says csr_flags MUST NOT
         // set CREATE_SESSION4_FLAG_CONN_BACK_CHAN and the backchannel attrs should
         // be zeroed so the client knows callbacks are unavailable.
-        let back_chan_attrs = ChannelAttrs {
-            header_pad_size: 0,
-            max_request_size: 0,
-            max_response_size: 0,
-            max_response_size_cached: 0,
-            max_operations: 0,
-            max_requests: 0,
-        };
-        
+        let back_chan_attrs = ChannelAttrs::default();
+
         CreateSessionRes {
             status: Nfs4Status::Ok,
             sessionid: session.session_id,
@@ -342,6 +343,7 @@ impl SessionOperationHandler {
                 max_response_size_cached: 64 * 1024,
                 max_operations: session.fore_chan_maxops,
                 max_requests: 128,
+                rdma_ird: Vec::new(),
             },
             back_chan_attrs,
         }
