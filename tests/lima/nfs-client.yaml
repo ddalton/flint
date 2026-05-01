@@ -1,0 +1,99 @@
+# Lima VM for NFSv4.1 protocol testing.
+#
+# Usage:
+#   limactl start --name=flint-nfs-client tests/lima/nfs-client.yaml
+#   limactl shell flint-nfs-client
+#
+# Inside the VM the host is reachable at host.lima.internal.
+# The flint-nfs-server (running on the macOS host) is then mountable as:
+#   sudo mount -t nfs4 -o minorversion=1,proto=tcp,port=20490 \
+#       host.lima.internal:/ /mnt/flint
+#
+# pynfs is installed under /opt/pynfs and runs against host.lima.internal:20490.
+
+vmType: "vz"
+arch: "default"
+cpus: 2
+memory: "2GiB"
+disk: "10GiB"
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+mounts:
+  - location: "~"
+    writable: false
+
+# Default user-mode networking is sufficient: the macOS host is reachable from
+# the VM as host.lima.internal. We do NOT use `networks: lima: shared` because
+# that requires the privileged socket_vmnet helper (`brew install socket_vmnet`
+# + sudo install), which adds friction without benefit for this test loop.
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y \
+        nfs-common \
+        nfs4-acl-tools \
+        python3 \
+        python3-pip \
+        python3-venv \
+        git \
+        build-essential \
+        libkrb5-dev \
+        libgssapi-krb5-2 \
+        krb5-multidev \
+        swig \
+        flex \
+        bison
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      # pynfs (the Linux NFS reference test suite) lives in nfs-utils' git tree.
+      if [ ! -d /opt/pynfs ]; then
+        git clone --depth=1 git://git.linux-nfs.org/projects/bfields/pynfs.git /opt/pynfs || \
+        git clone --depth=1 https://github.com/kofemann/pynfs.git /opt/pynfs
+      fi
+      cd /opt/pynfs
+      python3 -m venv .venv
+      .venv/bin/pip install --upgrade pip setuptools wheel
+      # pynfs needs gssapi bindings for sec=krb5 tests; skip if it fails — sec=sys is enough for us.
+      .venv/bin/pip install ply || true
+      .venv/bin/pip install gssapi || true
+      # Build the XDR-generated bits.
+      cd nfs4.1 && make || true
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      mkdir -p /mnt/flint
+      chmod 0777 /mnt/flint
+
+probes:
+  - description: "pynfs is installed"
+    script: |
+      #!/bin/bash
+      set -eux
+      test -d /opt/pynfs/nfs4.1
+    hint: "pynfs failed to clone or build; check the provision logs."
+
+message: |
+  Flint NFS test VM is up.
+
+  Run pynfs against the flint server (running on macOS host port 20490):
+    limactl shell flint-nfs-client -- bash -lc \
+      'cd /opt/pynfs/nfs4.1 && \
+       sudo ./testserver.py host.lima.internal:20490 --maketree all'
+
+  Mount and exercise the server manually:
+    limactl shell flint-nfs-client -- bash -lc \
+      'sudo mount -t nfs4 -o minorversion=1,proto=tcp,port=20490 \
+         host.lima.internal:/ /mnt/flint && ls /mnt/flint'

@@ -29,3 +29,4 @@ tests/system/config/*.kubeconfig
 # Test artifacts
 tests/system/kuttl-test-*
 tests/system/*.log
+.claude/

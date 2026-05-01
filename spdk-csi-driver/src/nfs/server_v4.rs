@@ -218,11 +218,18 @@ async fn handle_tcp_connection(
             continue;
         }
 
-        // Read message
+        // Read message.
+        //
+        // We size `buf` to the fragment length and let `read_exact` populate
+        // the slice. The previous form used `unsafe { set_len(length) }`,
+        // which is undefined behavior if `read_exact` returned an error
+        // before fully writing the buffer (the user of `buf` could then
+        // observe uninitialized memory). `resize` is implemented as a single
+        // `RawVec::reserve` + memset pair and is essentially free relative to
+        // the I/O cost of receiving `length` bytes from the socket.
         buf.clear();
-        buf.reserve(length);
-        unsafe { buf.set_len(length); }
-        
+        buf.resize(length, 0);
+
         debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
         reader.read_exact(&mut buf[..length]).await?;
         

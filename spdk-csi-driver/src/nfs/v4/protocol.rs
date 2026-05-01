@@ -91,6 +91,12 @@ pub mod opcode {
     pub const SEEK: u32 = 69;            // Find data/holes
     pub const WRITE_SAME: u32 = 70;      // Write pattern
     pub const CLONE: u32 = 71;           // Atomic copy-on-write clone
+
+    // RFC 5661 §15.2 — sentinel returned in the COMPOUND result array when the
+    // request contained an opcode that is not a legal NFSv4 operation
+    // (reserved 0/1/2 or out of range). The status accompanying it is
+    // NFS4ERR_OP_ILLEGAL.
+    pub const ILLEGAL: u32 = 10044;
 }
 
 /// EXCHANGE_ID Flags (RFC 8881 Section 18.35)
@@ -116,131 +122,264 @@ pub mod exchgid_flags {
 
 /// NFSv4 Status Codes (nfsstat4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Discriminants are the wire values from RFC 7530 §13 (NFSv4.0),
+// RFC 8881 §15 (NFSv4.1) and RFC 7862 §15 (NFSv4.2). Variant names are kept
+// stable across this audit so existing call sites don't need to change — only
+// the numeric encoding does. Cross-referenced against pynfs's
+// xdrdef/nfs4_const.py.
 #[repr(u32)]
 pub enum Nfs4Status {
     Ok = 0,
-    Perm = 1,               // Operation not permitted
-    NoEnt = 2,              // No such file or directory
-    Io = 5,                 // I/O error
-    NxIo = 6,               // No such device or address
-    Access = 13,            // Permission denied
-    Exist = 17,             // File exists
-    XDev = 18,              // Cross-device link
-    NotDir = 20,            // Not a directory
-    IsDir = 21,             // Is a directory
-    Inval = 22,             // Invalid argument
-    FBig = 27,              // File too large
-    NoSpc = 28,             // No space left on device
-    RoFs = 30,              // Read-only filesystem
-    MLink = 31,             // Too many links
-    NameTooLong = 63,       // File name too long
-    NotEmpty = 66,          // Directory not empty
-    DQuot = 69,             // Disk quota exceeded
-    Stale = 70,             // Stale file handle
-    BadHandle = 10001,      // Illegal filehandle
-    BadType = 10007,        // Invalid file type
-    FhExpired = 10014,      // Volatile filehandle expired
-    ShareDenied = 10015,    // Share denied
-    Denied = 10016,         // Lock unavailable
-    ClIdInUse = 10017,      // Client ID in use
-    Resource = 10018,       // Out of resource
-    Moved = 10019,          // Filesystem relocated
-    NoFileHandle = 10020,   // Current filehandle not set
-    MinorVersMismatch = 10021,  // Minor version mismatch
-    StaleClientId = 10022,  // Stale client ID
-    StaleStateId = 10023,   // Stale stateid
-    OldStateId = 10024,     // Old stateid
-    BadStateId = 10025,     // Bad stateid
-    BadSeqId = 10026,       // Bad sequence ID
-    NotSame = 10027,        // Verifiers not same
-    LockRange = 10028,      // Lock range error
-    SymLink = 10029,        // Symlinks not supported
-    RestoReFh = 10030,      // Restore FH error
-    LeaseMovied = 10031,    // Lease moved
-    AttrNotsupp = 10032,    // Attribute not supported
-    NoGrace = 10033,        // Not in grace period
-    ReclaimBad = 10034,     // Reclaim error
-    ReclaimConflict = 10035, // Reclaim conflict
-    BadXdr = 10036,         // Bad XDR
-    LocksHeld = 10037,      // Locks held
-    OpenMode = 10038,       // Bad open mode
-    BadOwner = 10039,       // Bad lock owner
-    BadChar = 10040,        // Bad character in name
-    BadName = 10041,        // Bad component name
-    BadRange = 10042,       // Bad byte range
-    LockNotsupp = 10043,    // Lock not supported
-    OpIllegal = 10044,      // Illegal operation
-    Deadlock = 10045,       // Deadlock detected
-    FileOpen = 10046,       // File is open
-    AdminRevoked = 10047,   // Lock revoked by admin
-    CbPathDown = 10048,     // Callback path down
+    Perm = 1,
+    NoEnt = 2,
+    Io = 5,
+    NxIo = 6,
+    Access = 13,
+    Exist = 17,
+    XDev = 18,
+    NotDir = 20,
+    IsDir = 21,
+    Inval = 22,
+    FBig = 27,
+    NoSpc = 28,
+    RoFs = 30,
+    MLink = 31,
+    NameTooLong = 63,
+    NotEmpty = 66,
+    DQuot = 69,
+    Stale = 70,
 
-    // NFSv4.1 status codes
+    // NFSv4.0 status codes
+    BadHandle = 10001,
+    BadCookie = 10003,
+    NotSupp = 10004,
+    TooSmall = 10005,
+    ServerFault = 10006,
+    BadType = 10007,
+    Delay = 10008,
+    Same = 10009,
+    Denied = 10010,
+    Expired = 10011,
+    Locked = 10012,
+    Grace = 10013,
+    FhExpired = 10014,
+    ShareDenied = 10015,
+    WrongSec = 10016,
+    ClIdInUse = 10017,
+    Resource = 10018,
+    Moved = 10019,
+    NoFileHandle = 10020,
+    MinorVersMismatch = 10021,
+    StaleClientId = 10022,
+    StaleStateId = 10023,
+    OldStateId = 10024,
+    BadStateId = 10025,
+    BadSeqId = 10026,
+    NotSame = 10027,
+    LockRange = 10028,
+    SymLink = 10029,
+    RestoReFh = 10030,
+    LeaseMovied = 10031,    // (RFC: LEASE_MOVED — variant name retained for compat)
+    AttrNotsupp = 10032,
+    NoGrace = 10033,
+    ReclaimBad = 10034,
+    ReclaimConflict = 10035,
+    BadXdr = 10036,
+    LocksHeld = 10037,
+    OpenMode = 10038,
+    BadOwner = 10039,
+    BadChar = 10040,
+    BadName = 10041,
+    BadRange = 10042,
+    LockNotsupp = 10043,
+    OpIllegal = 10044,
+    Deadlock = 10045,
+    FileOpen = 10046,
+    AdminRevoked = 10047,
+    CbPathDown = 10048,
+
+    // NFSv4.1 status codes (RFC 8881 §15)
     BadIoMode = 10049,
     BadLayout = 10050,
-    BadSessionId = 10051,
-    BadSession = 10052,
-    LayoutTrylater = 10053,
-    LayoutUnavail = 10054,
-    NoMatchingLayout = 10055,
-    ReclaimTooMany = 10056,
-    Unknown = 10057,
-    SeqMisordered = 10058,
-    SequencePos = 10059,
-    ReqTooBig = 10060,
-    RepTooBig = 10061,
-    RepTooBigToCache = 10062,
-    RetryUncachedRep = 10063,
-    UnsafeCompound = 10064,
-    TooManyOps = 10065,
-    OpNotInSession = 10066,
-    HashAlgUnsupp = 10067,
-    ConnNotBoundToSession = 10068,
-    ClientIdBusy = 10069,
-    ProtNotsupp = 10070,
-    NotOnlyOp = 10071,
-    NotSupp = 10072,
-    ServerScopeNomatch = 10073,
-    StateProtected = 10074,
-    RejectedDeleg = 10075,
-    ReturnConflict = 10076,
-    DelegRevoked = 10077,
+    BadSessionDigest = 10051,
+    BadSession = 10052,         // BADSESSION (10052)
+    BadSessionId = 10053,       // (RFC: BADSLOT — variant name retained)
+    CompleteAlready = 10054,
+    ConnNotBoundToSession = 10055,
+    DelegAlreadyWanted = 10056,
+    BackChanBusy = 10057,
+    LayoutTrylater = 10058,
+    LayoutUnavail = 10059,
+    NoMatchingLayout = 10060,
+    RecallConflict = 10061,
+    UnknownLayoutType = 10062,
+    SeqMisordered = 10063,
+    SequencePos = 10064,
+    ReqTooBig = 10065,
+    RepTooBig = 10066,
+    RepTooBigToCache = 10067,
+    RetryUncachedRep = 10068,
+    UnsafeCompound = 10069,
+    TooManyOps = 10070,
+    OpNotInSession = 10071,
+    HashAlgUnsupp = 10072,
+    // 10073 is unassigned per RFC 8881
+    ClientIdBusy = 10074,
+    PnfsIoHole = 10075,
+    SeqFalseRetry = 10076,
+    BadHighSlot = 10077,
+    DeadSession = 10078,
+    EncrAlgUnsupp = 10079,
+    PnfsNoLayout = 10080,
+    NotOnlyOp = 10081,
+    WrongCred = 10082,
+    WrongType = 10083,
+    DirDelegUnavail = 10084,
+    RejectedDeleg = 10085,
+    ReturnConflict = 10086,
+    DelegRevoked = 10087,
 
-    // NFSv4.2 status codes
-    WrongType = 10078,
-    PartnerNotsupp = 10079,
-    PartnerNoAuth = 10080,
-    UnionNotsupp = 10081,
-    OffloadDenied = 10082,
-    WrongLfs = 10083,
-    BadLfs = 10084,
-    BadLabelPolicy = 10085,
-    OffloadNoReqs = 10086,
+    // NFSv4.2 status codes (RFC 7862 §15)
+    PartnerNotsupp = 10088,
+    PartnerNoAuth = 10089,
+    UnionNotsupp = 10090,
+    OffloadDenied = 10091,
+    WrongLfs = 10092,
+    BadLabel = 10093,
+    OffloadNoReqs = 10094,
+
+    // Sentinel used when decoding an unknown/future status code from the wire.
+    // Kept high to avoid collisions with any defined NFSv4 status value.
+    Unknown = 0xFFFF_FFFF,
+
+    // Aliases retained for older internal call sites — names removed in this
+    // audit map to the corrected values above:
+    //   * `ProtNotsupp`   → `NotSupp`
+    //   * `BadLfs`        → `BadLabel`
+    //   * `BadLabelPolicy`→ `BadLabel`
+    //   * `StateProtected`→ no replacement (was misnamed; not used in code)
+    //   * `ReclaimTooMany`→ no replacement (was misnamed)
+    //   * `ServerScopeNomatch` → no replacement (was misnamed)
 }
 
 impl Nfs4Status {
+    /// Map a wire status code to the enum. Falls back to `Unknown` for codes
+    /// outside the union of NFSv4.0 / 4.1 / 4.2 RFCs — `Unknown` is a sentinel
+    /// (`0xFFFF_FFFF`) and should never round-trip back onto the wire; check
+    /// for it before encoding.
     pub fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::Ok,
             1 => Self::Perm,
             2 => Self::NoEnt,
             5 => Self::Io,
+            6 => Self::NxIo,
             13 => Self::Access,
             17 => Self::Exist,
+            18 => Self::XDev,
             20 => Self::NotDir,
             21 => Self::IsDir,
             22 => Self::Inval,
+            27 => Self::FBig,
             28 => Self::NoSpc,
             30 => Self::RoFs,
+            31 => Self::MLink,
+            63 => Self::NameTooLong,
+            66 => Self::NotEmpty,
+            69 => Self::DQuot,
             70 => Self::Stale,
             10001 => Self::BadHandle,
+            10003 => Self::BadCookie,
+            10004 => Self::NotSupp,
+            10005 => Self::TooSmall,
+            10006 => Self::ServerFault,
+            10007 => Self::BadType,
+            10008 => Self::Delay,
+            10009 => Self::Same,
+            10010 => Self::Denied,
+            10011 => Self::Expired,
+            10012 => Self::Locked,
+            10013 => Self::Grace,
+            10014 => Self::FhExpired,
+            10015 => Self::ShareDenied,
+            10016 => Self::WrongSec,
+            10017 => Self::ClIdInUse,
+            10018 => Self::Resource,
+            10019 => Self::Moved,
             10020 => Self::NoFileHandle,
             10021 => Self::MinorVersMismatch,
+            10022 => Self::StaleClientId,
             10023 => Self::StaleStateId,
+            10024 => Self::OldStateId,
             10025 => Self::BadStateId,
+            10026 => Self::BadSeqId,
+            10027 => Self::NotSame,
+            10028 => Self::LockRange,
+            10029 => Self::SymLink,
+            10030 => Self::RestoReFh,
+            10031 => Self::LeaseMovied,
+            10032 => Self::AttrNotsupp,
             10033 => Self::NoGrace,
+            10034 => Self::ReclaimBad,
+            10035 => Self::ReclaimConflict,
+            10036 => Self::BadXdr,
+            10037 => Self::LocksHeld,
+            10038 => Self::OpenMode,
+            10039 => Self::BadOwner,
+            10040 => Self::BadChar,
+            10041 => Self::BadName,
+            10042 => Self::BadRange,
+            10043 => Self::LockNotsupp,
             10044 => Self::OpIllegal,
-            10072 => Self::NotSupp,
+            10045 => Self::Deadlock,
+            10046 => Self::FileOpen,
+            10047 => Self::AdminRevoked,
+            10048 => Self::CbPathDown,
+            10049 => Self::BadIoMode,
+            10050 => Self::BadLayout,
+            10051 => Self::BadSessionDigest,
+            10052 => Self::BadSession,
+            10053 => Self::BadSessionId,
+            10054 => Self::CompleteAlready,
+            10055 => Self::ConnNotBoundToSession,
+            10056 => Self::DelegAlreadyWanted,
+            10057 => Self::BackChanBusy,
+            10058 => Self::LayoutTrylater,
+            10059 => Self::LayoutUnavail,
+            10060 => Self::NoMatchingLayout,
+            10061 => Self::RecallConflict,
+            10062 => Self::UnknownLayoutType,
+            10063 => Self::SeqMisordered,
+            10064 => Self::SequencePos,
+            10065 => Self::ReqTooBig,
+            10066 => Self::RepTooBig,
+            10067 => Self::RepTooBigToCache,
+            10068 => Self::RetryUncachedRep,
+            10069 => Self::UnsafeCompound,
+            10070 => Self::TooManyOps,
+            10071 => Self::OpNotInSession,
+            10072 => Self::HashAlgUnsupp,
+            10074 => Self::ClientIdBusy,
+            10075 => Self::PnfsIoHole,
+            10076 => Self::SeqFalseRetry,
+            10077 => Self::BadHighSlot,
+            10078 => Self::DeadSession,
+            10079 => Self::EncrAlgUnsupp,
+            10080 => Self::PnfsNoLayout,
+            10081 => Self::NotOnlyOp,
+            10082 => Self::WrongCred,
+            10083 => Self::WrongType,
+            10084 => Self::DirDelegUnavail,
+            10085 => Self::RejectedDeleg,
+            10086 => Self::ReturnConflict,
+            10087 => Self::DelegRevoked,
+            10088 => Self::PartnerNotsupp,
+            10089 => Self::PartnerNoAuth,
+            10090 => Self::UnionNotsupp,
+            10091 => Self::OffloadDenied,
+            10092 => Self::WrongLfs,
+            10093 => Self::BadLabel,
+            10094 => Self::OffloadNoReqs,
             _ => Self::Unknown,
         }
     }

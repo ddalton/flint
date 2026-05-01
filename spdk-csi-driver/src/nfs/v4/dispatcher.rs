@@ -96,6 +96,31 @@ impl CompoundDispatcher {
     pub async fn dispatch_compound(&self, request: CompoundRequest) -> CompoundResponse {
         info!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
+        // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
+        // versions before doing any work. Only 0 (v4.0), 1 (v4.1) and 2 (v4.2)
+        // are defined; anything else MUST return NFS4ERR_MINOR_VERS_MISMATCH
+        // with an empty result array.
+        if request.minor_version > NFS_V4_MINOR_VERSION_2 {
+            warn!("COMPOUND: rejecting unknown minor version {}", request.minor_version);
+            return CompoundResponse {
+                status: Nfs4Status::MinorVersMismatch,
+                tag: request.tag,
+                results: Vec::new(),
+            };
+        }
+
+        // RFC 5661 §3.2: tag is utf8str_cs. Non-UTF-8 → NFS4ERR_INVAL with an
+        // empty result array. Decode is lenient (so we can produce this clean
+        // error) but the dispatcher enforces it here.
+        if !request.tag_valid {
+            warn!("COMPOUND: tag is not valid UTF-8");
+            return CompoundResponse {
+                status: Nfs4Status::Inval,
+                tag: request.tag,
+                results: Vec::new(),
+            };
+        }
+
         // Create context
         let mut context = CompoundContext::new(request.minor_version);
 
@@ -840,16 +865,33 @@ impl CompoundDispatcher {
                 self.handle_layoutreturn(reclaim, layout_type, iomode, layoutreturn)
             }
 
-            // Unsupported operations
+            // Unsupported operations — RFC 5661 §15.2 distinguishes:
+            //   * "illegal" opcodes (reserved 0/1/2 or out of range) MUST be
+            //     reported with sentinel resop OP_ILLEGAL and status
+            //     NFS4ERR_OP_ILLEGAL;
+            //   * "valid but unimplemented" opcodes echo the request opcode
+            //     with status NFS4ERR_NOTSUPP.
+            // The COMPOUND-level (top-of-reply) status is set from the result's
+            // status() and aborts the chain, so the choice has to be made here
+            // rather than at encode time.
             Operation::Unsupported(opcode) => {
-                warn!("Unsupported operation: opcode={}", opcode);
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+                let is_illegal = opcode < 3 || opcode > opcode::CLONE;
+                let status = if is_illegal {
+                    Nfs4Status::OpIllegal
+                } else {
+                    Nfs4Status::NotSupp
+                };
+                warn!("Unsupported operation: opcode={} -> {:?}", opcode, status);
+                OperationResult::Unsupported { opcode, status }
             }
 
-            // Catch-all for any unhandled operations
+            // Catch-all for any unhandled operations (e.g. an Operation variant
+            // that was decoded but the dispatcher hasn't been wired to handle).
+            // No opcode available here, so we surface NOTSUPP and let the
+            // encoder substitute OP_ILLEGAL.
             _ => {
                 warn!("Unhandled operation in dispatcher - returning NotSupp");
-                OperationResult::Unsupported(Nfs4Status::NotSupp)
+                OperationResult::Unsupported { opcode: 0, status: Nfs4Status::OpIllegal }
             }
         }
     }
@@ -1476,6 +1518,7 @@ mod tests {
 
         let request = CompoundRequest {
             tag: "test".to_string(),
+            tag_valid: true,
             minor_version: 2,
             operations: vec![
                 Operation::PutRootFh,
@@ -1494,6 +1537,7 @@ mod tests {
 
         let request = CompoundRequest {
             tag: "session".to_string(),
+            tag_valid: true,
             minor_version: 2,
             operations: vec![
                 Operation::ExchangeId {
@@ -1529,6 +1573,7 @@ mod tests {
 
         let request = CompoundRequest {
             tag: "fileops".to_string(),
+            tag_valid: true,
             minor_version: 2,
             operations: vec![
                 Operation::PutRootFh,
@@ -1549,6 +1594,7 @@ mod tests {
 
         let request = CompoundRequest {
             tag: "error".to_string(),
+            tag_valid: true,
             minor_version: 2,
             operations: vec![
                 Operation::GetFh,  // This will fail (no current FH)
@@ -1568,6 +1614,7 @@ mod tests {
         // Create a client via EXCHANGE_ID
         let request = CompoundRequest {
             tag: "stats".to_string(),
+            tag_valid: true,
             minor_version: 2,
             operations: vec![
                 Operation::ExchangeId {

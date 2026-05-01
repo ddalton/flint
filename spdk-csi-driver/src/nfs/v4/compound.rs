@@ -27,7 +27,13 @@ use tracing::{warn, debug};
 /// COMPOUND request
 #[derive(Debug)]
 pub struct CompoundRequest {
+    /// Tag set by the client. UTF-8 if `tag_valid`; lossy-converted otherwise
+    /// so we can still echo it back per RFC 5661 §15.1.
     pub tag: String,
+    /// `false` when the wire tag was not valid UTF-8. The dispatcher returns
+    /// `NFS4ERR_INVAL` in that case (instead of letting the RPC layer reject
+    /// the call as `GARBAGE_ARGS`).
+    pub tag_valid: bool,
     pub minor_version: u32,
     pub operations: Vec<Operation>,
 }
@@ -402,8 +408,12 @@ pub enum OperationResult {
     GetDeviceInfo(Nfs4Status, Option<Bytes>), // Encoded device info
     LayoutReturn(Nfs4Status),
 
-    // Generic result for unsupported operations
-    Unsupported(Nfs4Status),
+    // Generic result for unsupported operations.
+    // Carries the original opcode so the encoder can comply with RFC 5661
+    // §15.2: an illegal opcode (reserved 0/1/2 or out of range) is reported
+    // with sentinel opcode OP_ILLEGAL (10044) and status NFS4ERR_OP_ILLEGAL,
+    // while a valid-but-unimplemented opcode echoes itself with NFS4ERR_NOTSUPP.
+    Unsupported { opcode: u32, status: Nfs4Status },
 
     // Locking operations
     Lock(Nfs4Status, Option<StateId>),
@@ -457,7 +467,7 @@ impl OperationResult {
             OperationResult::LayoutGet(s, _) => *s,
             OperationResult::GetDeviceInfo(s, _) => *s,
             OperationResult::LayoutReturn(s) => *s,
-            OperationResult::Unsupported(s) => *s,
+            OperationResult::Unsupported { status, .. } => *status,
         }
     }
 }
@@ -581,46 +591,77 @@ impl CompoundContext {
 }
 
 impl CompoundRequest {
-    /// Decode a COMPOUND request from XDR
+    /// Decode a COMPOUND request from XDR.
+    ///
+    /// Decoder errors here surface to the caller as RPC `GARBAGE_ARGS`, which
+    /// makes the COMPOUND-level error reporting (NFS4ERR_INVAL,
+    /// NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_OP_ILLEGAL) unreachable. So we are
+    /// careful to:
+    ///   * accept non-UTF-8 tags (set `tag_valid=false`, dispatcher returns
+    ///     `NFS4ERR_INVAL` per RFC 5661 §3.2);
+    ///   * accept any minor version (dispatcher returns
+    ///     `NFS4ERR_MINOR_VERS_MISMATCH` if it's not one we support, even when
+    ///     the operation array is malformed);
+    ///   * recover from a per-operation decode failure by replacing it with
+    ///     `Operation::Unsupported(opcode)`, so the COMPOUND can still produce
+    ///     a well-formed reply.
     pub fn decode(mut decoder: XdrDecoder) -> Result<Self, String> {
         tracing::trace!("DEBUG CompoundRequest::decode: Starting with {} bytes", decoder.remaining());
 
-        // Decode tag
-        let tag = decoder.decode_string()?;
-        tracing::trace!("DEBUG CompoundRequest::decode: After tag decode (tag='{}'): {} bytes remaining", tag, decoder.remaining());
+        // Decode tag as opaque bytes; lossy-convert to UTF-8 so a non-UTF-8
+        // tag (RFC 5661 §15 says servers MUST detect this) doesn't crash
+        // request decode.
+        let tag_bytes = decoder.decode_opaque()?;
+        let tag_valid = std::str::from_utf8(&tag_bytes).is_ok();
+        let tag = String::from_utf8_lossy(&tag_bytes).into_owned();
+        tracing::trace!("DEBUG CompoundRequest::decode: After tag decode (tag='{}', valid={}): {} bytes remaining",
+                 tag, tag_valid, decoder.remaining());
 
-        // Decode minor version
+        // Decode minor version. Don't reject here — let the dispatcher do it
+        // so the COMPOUND-level reply uses NFS4ERR_MINOR_VERS_MISMATCH (RFC
+        // requires that response even when the rest of the body is malformed).
         let minor_version = decoder.decode_u32()?;
         tracing::trace!("DEBUG CompoundRequest::decode: After minor_version decode (={}): {} bytes remaining", minor_version, decoder.remaining());
+
+        // If the minor version is unsupported, skip operation decoding entirely
+        // and hand an empty op list to the dispatcher. This handles compounds
+        // that pair a bogus minor version with malformed operations
+        // (pynfs COMP4b sends `version=50` with `op.illegal()`).
+        if minor_version > NFS_V4_MINOR_VERSION_2 {
+            return Ok(Self { tag, tag_valid, minor_version, operations: Vec::new() });
+        }
 
         // Decode operation count
         let op_count = decoder.decode_u32()? as usize;
         tracing::trace!("DEBUG CompoundRequest::decode: After op_count decode (={}): {} bytes remaining", op_count, decoder.remaining());
         debug!("COMPOUND: tag='{}', minor_version={}, op_count={}", tag, minor_version, op_count);
 
-        // Decode operations
+        // Decode operations. Per-op failures degrade to Operation::Unsupported
+        // rather than aborting the whole compound; an op array that runs out
+        // of bytes mid-opcode still aborts (the wire is unrecoverable).
         let mut operations = Vec::with_capacity(op_count);
         for i in 0..op_count {
-            // Verify we have enough data for the opcode
             if decoder.remaining() < 4 {
-                let err = format!("Operation {}/{}: Not enough data for opcode (need 4 bytes, have {})", 
+                let err = format!("Operation {}/{}: Not enough data for opcode (need 4 bytes, have {})",
                                  i + 1, op_count, decoder.remaining());
                 tracing::trace!("ERROR CompoundRequest::decode: {}", err);
                 return Err(err);
             }
-            
+
             let opcode = decoder.decode_u32()?;
-            tracing::trace!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining", 
+            tracing::trace!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining",
                      i + 1, op_count, opcode, decoder.remaining());
             debug!("  Operation {}: opcode={}", i, opcode);
 
             let op = match Self::decode_operation(&mut decoder, opcode) {
                 Ok(op) => op,
                 Err(e) => {
-                    let err = format!("Operation {}/{} (opcode={}): Failed to decode: {}", 
-                                     i + 1, op_count, opcode, e);
-                    tracing::trace!("ERROR CompoundRequest::decode: {}", err);
-                    return Err(err);
+                    // An op that fails to decode is treated as illegal (the
+                    // dispatcher will surface OP_ILLEGAL / NOTSUPP). We keep
+                    // the original opcode so the response can identify it.
+                    warn!("Operation {}/{} (opcode={}) failed to decode ({}); recording as Unsupported",
+                          i + 1, op_count, opcode, e);
+                    Operation::Unsupported(opcode)
                 }
             };
             operations.push(op);
@@ -628,6 +669,7 @@ impl CompoundRequest {
 
         Ok(Self {
             tag,
+            tag_valid,
             minor_version,
             operations,
         })
@@ -1782,9 +1824,25 @@ impl CompoundResponse {
                 }
             }
 
-            // Unsupported operations
-            OperationResult::Unsupported(status) => {
-                encoder.encode_status(status);
+            // Unsupported operations — RFC 5661 §15.2.
+            // The result array entry is `nfs_resop4`, which is a *discriminated
+            // union*: the first u32 names the opcode the result corresponds to,
+            // followed by the per-op result body. The previous implementation
+            // omitted the discriminant entirely, causing the client to read
+            // the status word as the next opcode and either decode garbage or
+            // raise GARBAGE_ARGS.
+            //
+            // For an opcode the client should never have sent (reserved 0/1/2
+            // or out of range) we substitute OP_ILLEGAL with NFS4ERR_OP_ILLEGAL.
+            // For a recognized but unimplemented opcode we echo it with
+            // NFS4ERR_NOTSUPP so the client can match the result to the request
+            // entry.
+            OperationResult::Unsupported { opcode: req_opcode, status } => {
+                let is_illegal = req_opcode < 3 || req_opcode > opcode::CLONE;
+                let resop = if is_illegal { opcode::ILLEGAL } else { req_opcode };
+                let resstatus = if is_illegal { Nfs4Status::OpIllegal } else { status };
+                encoder.encode_u32(resop);
+                encoder.encode_status(resstatus);
             }
         }
     }
