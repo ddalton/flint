@@ -21,6 +21,26 @@ use tracing::{debug, info, warn};
 /// Maximum slots per session (conservative default)
 pub const MAX_SLOTS: u32 = 128;
 
+/// Outcome of processing a SEQUENCE op against a session slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeqStatus {
+    /// First time we've seen this `sequence_id` on this slot. The compound
+    /// runs normally and the reply is cached against the slot when dispatch
+    /// finishes.
+    New,
+    /// Exact resend (`sequence_id == slot.sequence_id`). The cached reply
+    /// (if any) is in `cached`. RFC 8881 §15.1.10.4: server MUST return the
+    /// cached reply byte-for-byte; if no reply is cached (the client
+    /// retransmitted before the original returned), respond with
+    /// `NFS4ERR_RETRY_UNCACHED_REP`.
+    Replay { cached: Option<Vec<u8>> },
+    /// `sequence_id` is anywhere other than `slot.sequence_id` or
+    /// `slot.sequence_id + 1` — RFC 8881 §15.1.10.4 mandates
+    /// `NFS4ERR_SEQ_MISORDERED`. We do *not* "resync"; that would defeat
+    /// exactly-once semantics by silently accepting any seqid jump.
+    Misordered,
+}
+
 /// Slot state (for exactly-once semantics)
 #[derive(Debug, Clone)]
 pub struct Slot {
@@ -102,9 +122,8 @@ impl Session {
         }
     }
 
-    /// Process a SEQUENCE operation in a slot
-    /// Returns true if this is a new request, false if replay
-    pub fn process_sequence(&mut self, slot_id: u32, sequence_id: u32) -> Result<bool, String> {
+    /// Process a SEQUENCE operation in a slot.
+    pub fn process_sequence(&mut self, slot_id: u32, sequence_id: u32) -> Result<SeqStatus, String> {
         if slot_id >= self.slots.len() as u32 {
             return Err("Slot ID out of range".to_string());
         }
@@ -116,43 +135,34 @@ impl Session {
             slot_id, sequence_id, slot.sequence_id, slot.sequence_id + 1
         );
 
-        if sequence_id == slot.sequence_id {
-            // Replay - return cached response
-            debug!("✅ SEQUENCE replay detected: slot={}, seq={}", slot_id, sequence_id);
-            Ok(false)
-        } else if sequence_id == slot.sequence_id + 1 {
-            // New request - update slot
-            debug!("✅ SEQUENCE new request: slot={}, seq={} (was {})", 
-                   slot_id, sequence_id, slot.sequence_id);
-            slot.sequence_id = sequence_id;
-            slot.cached_response = None; // Will be filled after operation completes
-            self.highest_slotid = self.highest_slotid.max(slot_id);
-            Ok(true)
-        } else if slot.sequence_id == 0 && sequence_id == 1 {
-            // Special case: first operation after session creation
-            debug!("✅ SEQUENCE first request: slot={}, seq={}", slot_id, sequence_id);
-            slot.sequence_id = sequence_id;
-            self.highest_slotid = self.highest_slotid.max(slot_id);
-            Ok(true)
-        } else if sequence_id > slot.sequence_id + 1 {
-            // Client is ahead - likely due to previous errors that didn't increment server-side
-            // Resync to client's sequence to recover (common pattern in session management)
-            warn!(
-                "⚠️ SEQUENCE resync: slot={}, server was at {}, client at {} - resyncing",
-                slot_id, slot.sequence_id, sequence_id
-            );
-            slot.sequence_id = sequence_id;
+        // First request after CREATE_SESSION: spec says first slot use must
+        // be seqid=1 (slot starts at 0). Treat this as a new request.
+        if slot.sequence_id == 0 && sequence_id == 1 {
+            debug!("✅ SEQUENCE first request: slot={}, seq=1", slot_id);
+            slot.sequence_id = 1;
             slot.cached_response = None;
             self.highest_slotid = self.highest_slotid.max(slot_id);
-            Ok(true)
+            return Ok(SeqStatus::New);
+        }
+
+        if sequence_id == slot.sequence_id {
+            debug!("✅ SEQUENCE replay: slot={}, seq={}, cached={}",
+                   slot_id, sequence_id, slot.cached_response.is_some());
+            Ok(SeqStatus::Replay { cached: slot.cached_response.clone() })
+        } else if sequence_id == slot.sequence_id.wrapping_add(1) {
+            debug!("✅ SEQUENCE new request: slot={}, seq={} (was {})",
+                   slot_id, sequence_id, slot.sequence_id);
+            slot.sequence_id = sequence_id;
+            // Clear last reply now; new reply will be cached when dispatch
+            // completes. Leaving it set would let us return a *different*
+            // operation's reply on a transient bug — tighter to drop early.
+            slot.cached_response = None;
+            self.highest_slotid = self.highest_slotid.max(slot_id);
+            Ok(SeqStatus::New)
         } else {
-            // Client is behind - this is a protocol violation (client went backwards)
-            warn!(
-                "❌ SEQUENCE error: slot={}, expected {}, got {} (client went backwards)",
-                slot_id, slot.sequence_id + 1, sequence_id
-            );
-            Err(format!("Sequence ID mismatch: expected {}, got {}",
-                       slot.sequence_id + 1, sequence_id))
+            warn!("❌ SEQUENCE misordered: slot={}, expected {} or {}, got {}",
+                  slot_id, slot.sequence_id, slot.sequence_id.wrapping_add(1), sequence_id);
+            Ok(SeqStatus::Misordered)
         }
     }
 
@@ -327,23 +337,30 @@ mod tests {
         let mgr = SessionManager::new();
         let session = mgr.create_session(1, 0, 0, 1024, 1024, 16);
 
-        // Process first sequence
+        // First request on slot 0
         let result = mgr.get_session_mut(&session.session_id, |s| {
             s.process_sequence(0, 1)
         });
-        assert_eq!(result, Some(Ok(true)));
+        assert_eq!(result, Some(Ok(SeqStatus::New)));
 
-        // Process same sequence again (replay)
+        // Cache a fake reply, then replay → cached bytes returned.
+        mgr.get_session_mut(&session.session_id, |s| s.cache_response(0, vec![0xAA]));
         let result = mgr.get_session_mut(&session.session_id, |s| {
             s.process_sequence(0, 1)
         });
-        assert_eq!(result, Some(Ok(false)));
+        assert_eq!(result, Some(Ok(SeqStatus::Replay { cached: Some(vec![0xAA]) })));
 
-        // Process next sequence
+        // Next sequence id → new request, cached reply cleared.
         let result = mgr.get_session_mut(&session.session_id, |s| {
             s.process_sequence(0, 2)
         });
-        assert_eq!(result, Some(Ok(true)));
+        assert_eq!(result, Some(Ok(SeqStatus::New)));
+
+        // Non-monotonic jump → misordered, no resync.
+        let result = mgr.get_session_mut(&session.session_id, |s| {
+            s.process_sequence(0, 99)
+        });
+        assert_eq!(result, Some(Ok(SeqStatus::Misordered)));
     }
 
     #[test]

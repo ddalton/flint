@@ -83,13 +83,27 @@ impl CompoundDispatcher {
     /// Check if an opcode is a pNFS operation
     #[allow(dead_code)]
     fn is_pnfs_opcode(opcode: u32) -> bool {
-        matches!(opcode, 
+        matches!(opcode,
             opcode::GETDEVICEINFO |   // 47
             opcode::GETDEVICELIST |   // 48
             opcode::LAYOUTCOMMIT |    // 49
             opcode::LAYOUTGET |       // 50
             opcode::LAYOUTRETURN      // 51
         )
+    }
+
+    /// Store an encoded COMPOUND reply against a session slot for future
+    /// replay matching (RFC 8881 §15.1.10.4 exactly-once semantics).
+    ///
+    /// The RPC layer calls this after encoding finishes, with the exact bytes
+    /// it is about to send to the client. A subsequent SEQUENCE for the same
+    /// (session, slot, seqid) returns these bytes verbatim instead of
+    /// re-executing the operations. The cache is per-slot; bytes are
+    /// dropped on the next forward-progress SEQUENCE on the slot.
+    pub fn cache_slot_reply(&self, session_id: &SessionId, slot_id: u32, bytes: Bytes) {
+        let _ = self.state_mgr.sessions.get_session_mut(session_id, |s| {
+            s.cache_response(slot_id, bytes.to_vec())
+        });
     }
 
     /// Process a COMPOUND request
@@ -106,6 +120,8 @@ impl CompoundDispatcher {
                 status: Nfs4Status::MinorVersMismatch,
                 tag: request.tag,
                 results: Vec::new(),
+                raw_reply: None,
+                cache_slot: None,
             };
         }
 
@@ -118,6 +134,8 @@ impl CompoundDispatcher {
                 status: Nfs4Status::Inval,
                 tag: request.tag,
                 results: Vec::new(),
+                raw_reply: None,
+                cache_slot: None,
             };
         }
 
@@ -130,7 +148,7 @@ impl CompoundDispatcher {
 
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
-            
+
             // Log pNFS operations with high visibility
             match &operation {
                 Operation::LayoutGet { .. } => {
@@ -144,6 +162,21 @@ impl CompoundDispatcher {
 
             // Dispatch operation
             let result = self.dispatch_operation(operation, &mut context).await;
+
+            // RFC 8881 §2.10.6.2 exactly-once: SEQUENCE detected an exact
+            // resend with a cached reply on the slot. Stop touching state and
+            // hand the cached bytes back verbatim. context.replay_reply was
+            // populated by the SEQUENCE handler before it returned.
+            if context.replay_reply.is_some() {
+                debug!("COMPOUND[{}]: SEQUENCE replay short-circuit", i);
+                return CompoundResponse {
+                    status: Nfs4Status::Ok,
+                    tag: request.tag,
+                    results: Vec::new(),
+                    raw_reply: context.replay_reply.take(),
+                    cache_slot: None,
+                };
+            }
 
             // Check status
             let status = result.status();
@@ -161,6 +194,10 @@ impl CompoundDispatcher {
             status: final_status,
             tag: request.tag,
             results,
+            raw_reply: None,
+            // Propagate the cache hint so the RPC layer caches the encoded
+            // reply against the slot once it has the byte representation.
+            cache_slot: context.cache_slot,
         }
     }
 
@@ -238,7 +275,7 @@ impl CompoundDispatcher {
                     highest_slotid,
                     cache_this: cachethis,
                 };
-                let res = self.session_handler.handle_sequence(op);
+                let res = self.session_handler.handle_sequence(op, context);
                 if res.status == Nfs4Status::Ok {
                     // Store session_id in context for subsequent operations
                     context.session_id = Some(res.sessionid);

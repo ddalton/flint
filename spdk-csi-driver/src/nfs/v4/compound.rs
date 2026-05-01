@@ -44,6 +44,16 @@ pub struct CompoundResponse {
     pub status: Nfs4Status,
     pub tag: String,
     pub results: Vec<OperationResult>,
+    /// When set, the encoder returns these bytes verbatim and ignores
+    /// `status`/`tag`/`results`. Used for exactly-once SEQUENCE replay
+    /// (RFC 8881 §15.1.10.4): the cached reply MUST be byte-for-byte
+    /// identical to the original.
+    pub raw_reply: Option<Bytes>,
+    /// When set, after the response is encoded the resulting bytes MUST be
+    /// stored on this `(session, slot)` for future replay matching. Set by
+    /// the SEQUENCE handler when it accepts a new request; consumed by the
+    /// RPC layer after `encode()`.
+    pub cache_slot: Option<(SessionId, u32)>,
 }
 
 impl CompoundResponse {
@@ -52,6 +62,8 @@ impl CompoundResponse {
             status: Nfs4Status::Ok,
             tag: String::new(),
             results: Vec::new(),
+            raw_reply: None,
+            cache_slot: None,
         }
     }
 }
@@ -537,6 +549,13 @@ pub struct CompoundContext {
     /// Session ID (set by SEQUENCE operation)
     /// Used to determine client_id for stateful operations
     pub session_id: Option<SessionId>,
+    /// When the SEQUENCE op detected a slot replay with a cached reply, the
+    /// dispatcher stops processing further ops and the COMPOUND-level reply
+    /// is replaced with these bytes (RFC 8881 §15.1.10.4 exactly-once).
+    pub replay_reply: Option<Bytes>,
+    /// `(session_id, slot_id)` to associate the encoded reply with for
+    /// future replay matching. Populated by SEQUENCE for new requests.
+    pub cache_slot: Option<(SessionId, u32)>,
 }
 
 impl CompoundContext {
@@ -546,6 +565,8 @@ impl CompoundContext {
             saved_fh: None,
             minor_version,
             session_id: None,
+            replay_reply: None,
+            cache_slot: None,
         }
     }
 
@@ -1286,8 +1307,21 @@ impl CompoundRequest {
 }
 
 impl CompoundResponse {
-    /// Encode a COMPOUND response to XDR
+    /// Encode a COMPOUND response to XDR.
+    ///
+    /// If `self.raw_reply` is `Some`, those bytes are returned verbatim. This
+    /// is the SEQUENCE replay path (RFC 8881 §15.1.10.4): the cached reply
+    /// from the slot MUST be byte-for-byte identical to the original
+    /// response, so we never re-encode it from `results`/`status`/`tag`.
     pub fn encode(self) -> Bytes {
+        if let Some(raw) = self.raw_reply {
+            tracing::trace!(
+                "DEBUG CompoundResponse::encode: raw replay reply ({} bytes)",
+                raw.len()
+            );
+            return raw;
+        }
+
         let mut encoder = XdrEncoder::new();
 
         // Encode overall status

@@ -370,8 +370,20 @@ async fn handle_compound(
            compound_resp.status,
            compound_resp.results.len());
 
+    // Pull the cache hint off before we move the response into encode().
+    // RFC 8881 §15.1.10.4 requires the slot reply cache to hold the *exact*
+    // bytes the client received, so we capture it after encoding finishes.
+    let cache_slot = compound_resp.cache_slot;
+
     // Encode COMPOUND response
     let compound_data = compound_resp.encode();
+
+    // Cache the encoded reply against the SEQUENCE slot for replay matching.
+    // Skipped automatically when the COMPOUND short-circuited a replay
+    // (cache_slot is None on that path).
+    if let Some((session_id, slot_id)) = cache_slot {
+        dispatcher.cache_slot_reply(&session_id, slot_id, compound_data.clone());
+    }
 
     // Build RPC SUCCESS reply with compound data
     // The compound response is the procedure-specific result data

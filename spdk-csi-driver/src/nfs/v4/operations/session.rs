@@ -13,7 +13,7 @@
 
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::state::StateManager;
-use crate::nfs::v4::compound::ChannelAttrs;
+use crate::nfs::v4::compound::{ChannelAttrs, CompoundContext};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -347,12 +347,23 @@ impl SessionOperationHandler {
         }
     }
 
-    /// Handle SEQUENCE operation
-    pub fn handle_sequence(&self, op: SequenceOp) -> SequenceRes {
+    /// Handle SEQUENCE operation.
+    ///
+    /// Implements RFC 8881 §15.1.10 exactly-once semantics by writing two hints
+    /// onto the COMPOUND context:
+    ///
+    /// - `replay_reply`: when the slot reports an exact resend with a cached
+    ///   reply, the bytes are placed here. The dispatcher short-circuits the
+    ///   rest of the COMPOUND and returns these bytes verbatim.
+    /// - `cache_slot`: on a new request, the `(session, slot)` pair is recorded
+    ///   so the RPC layer caches the encoded reply against this slot once it
+    ///   has the byte representation.
+    ///
+    /// The hints are zero-cost on the happy path: a single Option write.
+    pub fn handle_sequence(&self, op: SequenceOp, ctx: &mut CompoundContext) -> SequenceRes {
         debug!("SEQUENCE: sessionid={:?}, sequenceid={}, slotid={}",
                op.sessionid, op.sequenceid, op.slotid);
 
-        // Get session
         let session = match self.state_mgr.sessions.get_session(&op.sessionid) {
             Some(s) => s,
             None => {
@@ -368,15 +379,17 @@ impl SessionOperationHandler {
             }
         };
 
-        // Process sequence in slot
-        let is_new_request = match self.state_mgr.sessions.get_session_mut(&op.sessionid, |s| {
+        let outcome = self.state_mgr.sessions.get_session_mut(&op.sessionid, |s| {
             s.process_sequence(op.slotid, op.sequenceid)
-        }) {
-            Some(Ok(is_new)) => is_new,
+        });
+
+        let outcome = match outcome {
+            Some(Ok(s)) => s,
             Some(Err(e)) => {
-                warn!("SEQUENCE: Error processing sequence: {}", e);
+                // Slot index out of range; treat as BADSLOT.
+                warn!("SEQUENCE: slot error: {}", e);
                 return SequenceRes {
-                    status: Nfs4Status::SeqMisordered,
+                    status: Nfs4Status::BadSessionId,
                     sessionid: op.sessionid,
                     sequenceid: 0,
                     slotid: 0,
@@ -385,7 +398,7 @@ impl SessionOperationHandler {
                 };
             }
             None => {
-                warn!("SEQUENCE: Session {:?} disappeared", op.sessionid);
+                warn!("SEQUENCE: session {:?} disappeared", op.sessionid);
                 return SequenceRes {
                     status: Nfs4Status::BadSession,
                     sessionid: op.sessionid,
@@ -397,12 +410,60 @@ impl SessionOperationHandler {
             }
         };
 
-        if !is_new_request {
-            debug!("SEQUENCE: Replay detected, returning cached response");
-            // TODO: Return cached response from slot
+        match outcome {
+            crate::nfs::v4::state::session::SeqStatus::Misordered => {
+                return SequenceRes {
+                    status: Nfs4Status::SeqMisordered,
+                    sessionid: op.sessionid,
+                    sequenceid: 0,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    target_highest_slotid: 0,
+                };
+            }
+            crate::nfs::v4::state::session::SeqStatus::Replay { cached: Some(bytes) } => {
+                // Hand the cached reply back verbatim. Skip lease renewal —
+                // we are returning the original reply unchanged, and renewing
+                // again would duplicate the side-effect.
+                debug!("SEQUENCE: replay with cached reply ({} bytes)", bytes.len());
+                ctx.replay_reply = Some(bytes::Bytes::from(bytes));
+                // The status / counters here are placeholders — the dispatcher
+                // will discard this SequenceRes and replace it with the cached
+                // reply bytes. Returning Ok lets the dispatcher avoid logging
+                // a spurious "Operation failed" warning before short-circuit.
+                return SequenceRes {
+                    status: Nfs4Status::Ok,
+                    sessionid: op.sessionid,
+                    sequenceid: op.sequenceid,
+                    slotid: op.slotid,
+                    highest_slotid: session.highest_slotid,
+                    target_highest_slotid: 127,
+                };
+            }
+            crate::nfs::v4::state::session::SeqStatus::Replay { cached: None } => {
+                // Resend before the original reply was cached. RFC 8881
+                // §15.1.10.4: NFS4ERR_RETRY_UNCACHED_REP forces the client to
+                // wait for the in-flight reply rather than re-execute.
+                warn!("SEQUENCE: replay before reply was cached → RETRY_UNCACHED_REP");
+                return SequenceRes {
+                    status: Nfs4Status::RetryUncachedRep,
+                    sessionid: op.sessionid,
+                    sequenceid: 0,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    target_highest_slotid: 0,
+                };
+            }
+            crate::nfs::v4::state::session::SeqStatus::New => {
+                // Record where the reply bytes should be cached once the
+                // RPC layer has them. cachethis is a hint — we always cache
+                // for now (matches Linux server behaviour). Honoring the hint
+                // is a perf optimisation we can add later.
+                ctx.cache_slot = Some((op.sessionid, op.slotid));
+            }
         }
 
-        // Renew lease
+        // Renew lease on every accepted SEQUENCE.
         if let Err(e) = self.state_mgr.leases.renew_lease(session.client_id) {
             warn!("SEQUENCE: Failed to renew lease: {}", e);
         }
@@ -413,7 +474,7 @@ impl SessionOperationHandler {
             sequenceid: op.sequenceid,
             slotid: op.slotid,
             highest_slotid: session.highest_slotid,
-            target_highest_slotid: 127, // We support up to 128 slots
+            target_highest_slotid: 127, // we support up to 128 slots
         }
     }
 
@@ -525,9 +586,13 @@ mod tests {
             cache_this: false,
         };
 
-        let res = handler.handle_sequence(seq_op);
+        let mut ctx = CompoundContext::new(1);
+        let res = handler.handle_sequence(seq_op, &mut ctx);
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.slotid, 0);
+        // New request → cache slot recorded for the RPC layer.
+        assert_eq!(ctx.cache_slot, Some((create_res.sessionid, 0)));
+        assert!(ctx.replay_reply.is_none());
     }
 
     #[test]
@@ -563,10 +628,17 @@ mod tests {
             highest_slotid: 0,
             cache_this: false,
         };
-        let res1 = handler.handle_sequence(seq_op1);
+        let mut ctx1 = CompoundContext::new(1);
+        let res1 = handler.handle_sequence(seq_op1, &mut ctx1);
         assert_eq!(res1.status, Nfs4Status::Ok);
 
-        // Replay same sequence (should succeed)
+        // Simulate the RPC layer caching the encoded reply.
+        state_mgr.sessions.get_session_mut(&create_res.sessionid, |s| {
+            s.cache_response(0, vec![0xDE, 0xAD, 0xBE, 0xEF])
+        });
+
+        // Replay the same SEQUENCE → handler should signal a replay by
+        // populating ctx.replay_reply with the cached bytes.
         let seq_op2 = SequenceOp {
             sessionid: create_res.sessionid,
             sequenceid: 1,
@@ -574,8 +646,13 @@ mod tests {
             highest_slotid: 0,
             cache_this: false,
         };
-        let res2 = handler.handle_sequence(seq_op2);
+        let mut ctx2 = CompoundContext::new(1);
+        let res2 = handler.handle_sequence(seq_op2, &mut ctx2);
         assert_eq!(res2.status, Nfs4Status::Ok);
+        assert_eq!(
+            ctx2.replay_reply.as_ref().map(|b| b.as_ref()),
+            Some(&[0xDE, 0xAD, 0xBE, 0xEFu8][..])
+        );
     }
 
     #[test]
