@@ -18,7 +18,7 @@
 use super::super::protocol::StateId;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Special stateid for anonymous/READ-only operations
 pub const ANONYMOUS_STATEID: StateId = StateId {
@@ -170,12 +170,22 @@ impl StateIdManager {
         stateid
     }
 
-    /// Validate a stateid
-    /// Returns Ok(()) if valid, Err(reason) if invalid
+    /// Validate a stateid for any state-using operation (WRITE, OPEN_DOWNGRADE,
+    /// CLOSE, LOCK, …).
     ///
-    /// LOCK-FREE: Critical path for all NFSv4 operations - concurrent validations
+    /// RFC 8881 §16.2.3.1 / §8.2.2 admits four forms:
+    ///   * `ANONYMOUS_STATEID` (all zeros)
+    ///   * `READ_BYPASS_STATEID` (all 0xFF)
+    ///   * "Current stateid" form: `seqid == 0` with a non-zero `other`. The
+    ///     server MUST resolve this to the most recent seqid for that
+    ///     `other`. Linux clients carry seqid=0 routinely after an OPEN
+    ///     because the open-response seqid doesn't propagate to subsequent
+    ///     ops in the same COMPOUND.
+    ///   * Exact match of the server's current `seqid` for `other`.
+    ///
+    /// We do NOT accept `seqid - 1` here — that's a READ-only relaxation
+    /// (see `validate_for_read`).
     pub fn validate(&self, stateid: &StateId) -> Result<(), String> {
-        // Check for special stateids
         if stateid == &ANONYMOUS_STATEID {
             return Ok(());
         }
@@ -183,75 +193,65 @@ impl StateIdManager {
             return Ok(());
         }
 
-        if let Some(entry) = self.states.get(&stateid.other) {
-            // Check if revoked
-            if entry.revoked {
-                return Err("StateId revoked".to_string());
-            }
+        let entry = self.states.get(&stateid.other)
+            .ok_or_else(|| "StateId not found".to_string())?;
+        if entry.revoked {
+            return Err("StateId revoked".to_string());
+        }
 
-            // Check sequence number
-            if stateid.seqid != entry.seqid {
-                return Err(format!("StateId sequence mismatch: expected {}, got {}",
-                                  entry.seqid, stateid.seqid));
-            }
+        // "Current stateid" form: seqid=0 with a non-zero other resolves to
+        // the latest seqid the server holds for this state.
+        if stateid.seqid == 0 {
+            return Ok(());
+        }
 
+        if stateid.seqid == entry.seqid {
             Ok(())
         } else {
-            Err("StateId not found".to_string())
+            Err(format!("StateId sequence mismatch: expected {} (or 0 for current), got {}",
+                       entry.seqid, stateid.seqid))
         }
     }
 
-    /// Validate a stateid with relaxed sequence checking for READ operations
-    /// Allows seqid=0 for anonymous/first reads, or accepts any seqid if the stateid exists
+    /// Validate a stateid for READ.
     ///
-    /// Per RFC 5661: Some clients may use seqid=0 for READ operations
-    /// LOCK-FREE: Critical path for all NFSv4 operations - concurrent validations
+    /// RFC 5661 §8.2.2 / §18.22: READ accepts a few stateid forms:
+    ///   * `ANONYMOUS_STATEID` (all zeros) — anonymous read.
+    ///   * `READ_BYPASS_STATEID` (all 0xFF) — bypass file locking checks.
+    ///   * An open / lock / delegation stateid whose `seqid` matches the
+    ///     server's current value, OR is the immediately preceding value
+    ///     (the client may legitimately race a SETATTR/OPEN_DOWNGRADE
+    ///     against READ — RFC 5661 §8.2.2 specifically allows the
+    ///     "current" stateid OR `seqid - 1`).
+    ///
+    /// The previous implementation also accepted any unknown stateid with
+    /// `seqid == 0` and any seqid mismatch with a `warn!()` — both are RFC
+    /// violations that hide client bugs.
     pub fn validate_for_read(&self, stateid: &StateId) -> Result<(), String> {
-        // Check for special stateids
         if stateid == &ANONYMOUS_STATEID {
-            debug!("READ: Accepting ANONYMOUS_STATEID (seqid=0, other=all zeros)");
             return Ok(());
         }
         if stateid == &READ_BYPASS_STATEID {
-            debug!("READ: Accepting READ_BYPASS_STATEID (seqid=0xFFFFFFFF, other=all 0xFF)");
             return Ok(());
         }
 
-        // Special case: Accept any stateid with seqid=0 as anonymous read
-        if stateid.seqid == 0 {
-            // Check if this matches any known stateid (ignoring seqid)
-            if let Some(entry) = self.states.get(&stateid.other) {
-                if entry.revoked {
-                    return Err("StateId revoked".to_string());
-                }
-                // Accept seqid=0 for READ operations (relaxed validation)
-                debug!("READ: Accepting stateid with seqid=0 (relaxed validation), expected seqid={}", entry.seqid);
-                return Ok(());
-            } else {
-                // Unknown stateid - treat as anonymous read
-                debug!("READ: Accepting unknown stateid with seqid=0 as anonymous read");
-                return Ok(());
-            }
+        let entry = self.states.get(&stateid.other)
+            .ok_or_else(|| "StateId not found".to_string())?;
+        if entry.revoked {
+            return Err("StateId revoked".to_string());
         }
 
-        // Standard validation for non-zero seqid
-        if let Some(entry) = self.states.get(&stateid.other) {
-            // Check if revoked
-            if entry.revoked {
-                return Err("StateId revoked".to_string());
-            }
-
-            // For READ, accept either exact seqid or seqid-1 (client may use old seqid)
-            if stateid.seqid == entry.seqid || stateid.seqid == entry.seqid - 1 {
-                Ok(())
-            } else {
-                warn!("READ: StateId sequence mismatch: expected {}, got {} (will accept anyway for READ compatibility)", 
-                      entry.seqid, stateid.seqid);
-                // For READ operations, accept anyway (lenient)
-                Ok(())
-            }
+        // Accept exact seqid, or seqid - 1 (a one-behind retransmit window).
+        // saturating_sub avoids underflow when `entry.seqid == 0`; in that
+        // case only an exact `seqid == 0` match is acceptable.
+        let prev = entry.seqid.saturating_sub(1);
+        if stateid.seqid == entry.seqid || stateid.seqid == prev {
+            Ok(())
         } else {
-            Err("StateId not found".to_string())
+            Err(format!(
+                "StateId seqid mismatch: expected {} (or {}), got {}",
+                entry.seqid, prev, stateid.seqid
+            ))
         }
     }
 

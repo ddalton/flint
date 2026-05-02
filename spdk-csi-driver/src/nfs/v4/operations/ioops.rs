@@ -682,8 +682,12 @@ impl IoOperationHandler {
             }
         };
 
-        // Validate stateid with relaxed checking (accept seqid=0 like READ)
-        if let Err(e) = self.state_mgr.stateids.validate_for_read(&op.stateid) {
+        // RFC 5661 §18.32: WRITE requires a stateid with an exact seqid. The
+        // `ANONYMOUS_STATEID` is allowed only for opens that don't establish
+        // share state, and `validate()` short-circuits on it. The previous
+        // form used the relaxed READ validator, which accepted any seqid=0
+        // stateid as anonymous — that's a write-share-deny bypass.
+        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
             warn!("WRITE: Invalid stateid: {}", e);
             return WriteRes {
                 status: Nfs4Status::BadStateId,
@@ -1118,40 +1122,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_with_relaxed_stateid_validation() {
+    async fn test_write_rejects_unknown_stateid() {
+        // RFC 8881 §16.2.3.1 / §8.2.2: WRITE accepts the special bypass
+        // stateids, the "current stateid" form (seqid=0 with a known
+        // `other`), or an exact seqid match. A stateid with an `other`
+        // that the server has never seen MUST be rejected as
+        // NFS4ERR_BAD_STATEID — accepting it (as the previous "relaxed"
+        // implementation did) was a write-share-deny bypass.
         let (handler, fh_mgr, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
-        // Create a test file first
         let test_file = temp.path().join("test-write.txt");
         std::fs::File::create(&test_file).unwrap();
-        
-        // Set current filehandle to the test file
         ctx.current_fh = Some(fh_mgr.path_to_filehandle(&test_file).unwrap());
 
-        // Allocate a stateid with seqid=1
-        let stateid = handler.state_mgr.stateids.allocate(
-            StateType::Open,
-            1,
-            Some(ctx.current_fh.as_ref().unwrap().data.clone()),
-        );
-
-        // Test WRITE with seqid=0 (client sends wrong seqid)
+        // Unknown `other` — never allocated.
+        let bogus = StateId { seqid: 0, other: [0xAB; 12] };
         let write_op = WriteOp {
-            stateid: StateId {
-                seqid: 0,  // Client sends 0 instead of 1
-                other: stateid.other,
-            },
+            stateid: bogus,
             offset: 0,
             stable: UNSTABLE4,
             data: Bytes::from("test data"),
         };
 
         let write_res = handler.handle_write(write_op, &ctx).await;
-        
-        // Should succeed with relaxed validation
-        assert_eq!(write_res.status, Nfs4Status::Ok);
-        assert_eq!(write_res.count, 9);
+        assert_eq!(write_res.status, Nfs4Status::BadStateId);
+        assert_eq!(write_res.count, 0);
     }
 
     #[tokio::test]
@@ -1237,12 +1233,11 @@ mod tests {
         assert_eq!(open_res.status, Nfs4Status::Ok);
         let stateid = open_res.stateid.unwrap();
 
-        // 2. WRITE data
+        // 2. WRITE data — use the open stateid as-is. WRITE now requires an
+        // exact seqid (RFC 5661 §18.32); the previous test mutated seqid to
+        // 0 to exercise the now-removed relaxed path.
         let write_op = WriteOp {
-            stateid: StateId {
-                seqid: 0,  // Use relaxed validation
-                other: stateid.other,
-            },
+            stateid,
             offset: 0,
             stable: FILE_SYNC4,
             data: Bytes::from("Hello, NFS!"),
@@ -1252,12 +1247,10 @@ mod tests {
         assert_eq!(write_res.status, Nfs4Status::Ok);
         assert_eq!(write_res.count, 11);
 
-        // 3. READ data back
+        // 3. READ data back. READ still allows ANONYMOUS_STATEID and the
+        // current/previous seqid, so we can re-use the open stateid.
         let read_op = ReadOp {
-            stateid: StateId {
-                seqid: 0,
-                other: stateid.other,
-            },
+            stateid,
             offset: 0,
             count: 100,
         };

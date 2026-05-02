@@ -394,6 +394,19 @@ impl LockOperationHandler {
             }
         }
 
+        // RFC 5661 §18.10.3: `length == 0` is reserved to mean "lock from
+        // offset to EOF". For any non-zero length, `offset + length` MUST not
+        // overflow u64; if it does, the server MUST return NFS4ERR_INVAL.
+        if op.length != 0 && op.offset.checked_add(op.length).is_none() {
+            warn!("LOCK: byte range overflow (offset={}, length={})",
+                  op.offset, op.length);
+            return LockRes {
+                status: Nfs4Status::Inval,
+                stateid: None,
+                denied: None,
+            };
+        }
+
         let range = LockRange {
             offset: op.offset,
             length: op.length,
@@ -419,8 +432,24 @@ impl LockOperationHandler {
             };
         }
 
-        // Allocate lock stateid
-        let client_id = 1; // TODO: Get from context
+        // Resolve the owning client from the SEQUENCE-set session id. Without
+        // this, every client's locks were tagged to a hardcoded `client_id=1`,
+        // which made multi-client RWX scenarios silently share lock state and
+        // caused one client's lease expiry to wipe everyone else's locks.
+        let client_id = match ctx.session_id.and_then(|sid|
+            self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id)
+        ) {
+            Some(id) => id,
+            None => {
+                warn!("LOCK: no session in context, returning NFS4ERR_BAD_SESSION");
+                return LockRes {
+                    status: Nfs4Status::BadSession,
+                    stateid: None,
+                    denied: None,
+                };
+            }
+        };
+
         let lock_stateid = self.state_mgr.stateids.allocate(
             StateType::Lock,
             client_id,
@@ -570,6 +599,15 @@ mod tests {
         handler.state_mgr.stateids.allocate(StateType::Open, client_id, None)
     }
 
+    /// Set up a session for `client_id` and return the SessionId so a test
+    /// can populate `CompoundContext::session_id`. The LOCK handler now
+    /// resolves client_id from the session id rather than hardcoding 1.
+    fn create_test_session(handler: &LockOperationHandler, client_id: u64) -> SessionId {
+        handler.state_mgr.sessions
+            .create_session(client_id, 0, 0, 1024 * 1024, 1024 * 1024, 8)
+            .session_id
+    }
+
     #[test]
     fn test_lock_range_overlap() {
         let range1 = LockRange { offset: 0, length: 100 };
@@ -610,6 +648,7 @@ mod tests {
     fn test_lock_acquire() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         let open_stateid = create_test_stateid(&handler, 1);
@@ -635,6 +674,7 @@ mod tests {
     fn test_lock_conflict() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         let open_stateid = create_test_stateid(&handler, 1);
@@ -676,6 +716,7 @@ mod tests {
     fn test_lock_shared() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         // Two read locks should not conflict
@@ -714,6 +755,7 @@ mod tests {
     fn test_lockt() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         let open_stateid = create_test_stateid(&handler, 1);
@@ -749,6 +791,7 @@ mod tests {
     fn test_locku() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         let open_stateid = create_test_stateid(&handler, 1);
@@ -786,6 +829,7 @@ mod tests {
     fn test_lock_after_unlock() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
         ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
 
         let open_stateid1 = create_test_stateid(&handler, 1);
