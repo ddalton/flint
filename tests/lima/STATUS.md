@@ -2,7 +2,7 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after SECINFO + SECINFO_NO_NAME (4 new pynfs PASSes).
+**Last updated:** 2026-05-02, after VERIFY/NVERIFY (1 more pynfs PASS, 153/18).
 **Branch:** `kind-no-spdk`.
 
 ### Headline
@@ -29,7 +29,7 @@ audit baseline       0     0     24M    hash matches (MDS-direct)
 
 ```
 Baseline (original audit run): 26 PASS  / 69 FAIL  / 167 SKIP   (96 runnable)
-Current head:                 152 PASS  / 19 FAIL  / 91  SKIP  (171 runnable)
+Current head:                 153 PASS  / 18 FAIL  / 91  SKIP  (171 runnable)
 ```
 
 5.8× the original pass count. Six suites at 100%; nine more above 70%.
@@ -57,8 +57,8 @@ st_courtesy            4/5    80%
 st_open                5/7    71%
 st_secinfo_no_name     4/4   100%   ✓ ← new this session
 st_secinfo             2/2   100%   ✓ ← new this session
+st_verify              1/1   100%   ✓ ← new this session
 st_reclaim_complete    1/4    25%
-st_verify              0/1     0%
 st_delegation          0/3     0% (blocked on CB_RECALL)
 ```
 

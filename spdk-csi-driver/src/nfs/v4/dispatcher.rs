@@ -621,6 +621,13 @@ impl CompoundDispatcher {
                 }
             }
 
+            Operation::Verify { attrs } => {
+                self.handle_verify(attrs, false, context).await
+            }
+            Operation::Nverify { attrs } => {
+                self.handle_verify(attrs, true, context).await
+            }
+
             Operation::SetAttr { stateid, attrs } => {
                 // Convert Bytes to Fattr4
                 // For now, we'll treat the bytes as raw attribute values
@@ -1513,6 +1520,80 @@ impl CompoundDispatcher {
     /// the CFH (currently every export shares fsid=1, matching what
     /// `handle_layoutget` stamps onto each `LayoutOwner`), then route
     /// through the pNFS handler.
+    /// VERIFY (RFC 5661 §18.30) and NVERIFY (§18.31).
+    ///
+    /// VERIFY succeeds (Ok) iff the supplied fattr4 matches the server's
+    /// view of the current FH; mismatch → NFS4ERR_NOT_SAME. NVERIFY is
+    /// the inverse: match → NFS4ERR_SAME, mismatch → Ok. We re-use the
+    /// GETATTR machinery for the canonical server encoding so the
+    /// comparison is bytewise-trivial — RFC requires VERIFY to behave
+    /// "as if" the server ran GETATTR for the same bitmap and compared.
+    /// If any requested attr isn't in the server's supported_bitmap,
+    /// reply NFS4ERR_ATTRNOTSUPP per §18.30.3.
+    async fn handle_verify(
+        &self,
+        attrs: Bytes,
+        is_nverify: bool,
+        context: &mut CompoundContext,
+    ) -> OperationResult {
+        let mk = |s| if is_nverify {
+            OperationResult::Nverify(s)
+        } else {
+            OperationResult::Verify(s)
+        };
+
+        // Decode the inbound fattr4: bitmap4 (u32 array) + attrlist4 (opaque).
+        let mut decoder = crate::nfs::xdr::XdrDecoder::new(attrs);
+        let bitmap_len = match decoder.decode_u32() {
+            Ok(n) => n as usize,
+            Err(_) => return mk(Nfs4Status::BadXdr),
+        };
+        let mut want_bitmap = Vec::with_capacity(bitmap_len);
+        for _ in 0..bitmap_len {
+            match decoder.decode_u32() {
+                Ok(w) => want_bitmap.push(w),
+                Err(_) => return mk(Nfs4Status::BadXdr),
+            }
+        }
+        let want_vals = match decoder.decode_opaque() {
+            Ok(b) => b,
+            Err(_) => return mk(Nfs4Status::BadXdr),
+        };
+
+        // Ask the GETATTR handler for the server's encoding of the same bitmap.
+        let op = GetAttrOp { attr_request: want_bitmap.clone() };
+        let res = self.file_handler.handle_getattr(op, context).await;
+        if res.status != Nfs4Status::Ok {
+            return mk(res.status);
+        }
+        let fattr = match res.obj_attributes {
+            Some(f) => f,
+            None => return mk(Nfs4Status::ServerFault),
+        };
+
+        // ATTRNOTSUPP if the server's `attrmask` doesn't cover every
+        // requested bit. Compare as bitwise subset, padding the shorter
+        // bitmap with zeros so length differences don't trip us.
+        let max_words = want_bitmap.len().max(fattr.attrmask.len());
+        for i in 0..max_words {
+            let want = want_bitmap.get(i).copied().unwrap_or(0);
+            let have = fattr.attrmask.get(i).copied().unwrap_or(0);
+            if (want & !have) != 0 {
+                return mk(Nfs4Status::AttrNotsupp);
+            }
+        }
+
+        // Bytewise compare the attrlist4 payloads.
+        let same = want_vals.as_ref() == fattr.attr_vals.as_slice();
+        let status = match (is_nverify, same) {
+            (false, true)  => Nfs4Status::Ok,
+            (false, false) => Nfs4Status::NotSame,
+            (true, true)   => Nfs4Status::Same,
+            (true, false)  => Nfs4Status::Ok,
+        };
+        mk(status)
+    }
+
     fn handle_layoutreturn(
         &self,
         reclaim: bool,

@@ -151,6 +151,12 @@ pub enum Operation {
         stateid: StateId,
         attrs: Bytes,            // encoded attributes
     },
+    /// VERIFY (RFC 5661 §18.30) — succeed iff the supplied fattr4 matches
+    /// the server's view of the current FH. NVERIFY (§18.31) is the
+    /// inverse. Both arms re-pack the decoded `bitmap + attrlist4` as a
+    /// single blob to keep downstream comparison logic in one place.
+    Verify { attrs: Bytes },
+    Nverify { attrs: Bytes },
     Access(u32),                 // access bits
 
     // Modify operations
@@ -453,6 +459,8 @@ pub enum OperationResult {
     // Attributes
     GetAttr(Nfs4Status, Option<Bytes>),   // encoded attributes
     SetAttr(Nfs4Status),
+    Verify(Nfs4Status),
+    Nverify(Nfs4Status),
     Access(Nfs4Status, Option<(u32, u32)>),  // (supported, access granted)
 
     // Modify
@@ -525,6 +533,8 @@ impl OperationResult {
             OperationResult::Commit(s, _) => *s,
             OperationResult::GetAttr(s, _) => *s,
             OperationResult::SetAttr(s) => *s,
+            OperationResult::Verify(s) => *s,
+            OperationResult::Nverify(s) => *s,
             OperationResult::Access(s, _) => *s,
             OperationResult::Create(s, _, _) => *s,
             OperationResult::Remove(s, _) => *s,
@@ -921,6 +931,31 @@ impl CompoundRequest {
             opcode::ACCESS => {
                 let access = decoder.decode_u32()?;
                 Ok(Operation::Access(access))
+            }
+            opcode::VERIFY | opcode::NVERIFY => {
+                // RFC 5661 §18.30.1 / §18.31.1: arg is fattr4 (bitmap4 +
+                // attrlist4 opaque). Re-pack as a single blob so the
+                // dispatcher can decode it once and compare.
+                use bytes::{BytesMut, BufMut};
+                let bitmap_len = decoder.decode_u32()?;
+                let mut bitmap_words = Vec::with_capacity(bitmap_len as usize);
+                for _ in 0..bitmap_len {
+                    bitmap_words.push(decoder.decode_u32()?);
+                }
+                let attr_vals = decoder.decode_opaque()?;
+                let mut attrs_buf = BytesMut::new();
+                attrs_buf.put_u32(bitmap_len);
+                for word in bitmap_words {
+                    attrs_buf.put_u32(word);
+                }
+                attrs_buf.put_u32(attr_vals.len() as u32);
+                attrs_buf.put_slice(&attr_vals);
+                let attrs = attrs_buf.freeze();
+                if opcode == opcode::VERIFY {
+                    Ok(Operation::Verify { attrs })
+                } else {
+                    Ok(Operation::Nverify { attrs })
+                }
             }
 
             // File I/O operations
@@ -1779,6 +1814,16 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 encoder.encode_u32(0);  // attrsset bitmap length = 0
             }
+            OperationResult::Verify(status) => {
+                // RFC 5661 §18.30.2: VERIFY4res = nfsstat4 only.
+                encoder.encode_u32(opcode::VERIFY);
+                encoder.encode_status(status);
+            }
+            OperationResult::Nverify(status) => {
+                // RFC 5661 §18.31.2: NVERIFY4res = nfsstat4 only.
+                encoder.encode_u32(opcode::NVERIFY);
+                encoder.encode_status(status);
+            }
             OperationResult::Access(status, access_result) => {
                 encoder.encode_u32(opcode::ACCESS);
                 encoder.encode_status(status);
@@ -2496,6 +2541,43 @@ mod tests {
             _ => panic!("wrong variant"),
         }
         assert_eq!(d.remaining(), 0);
+    }
+
+    #[test]
+    fn test_verify_decode_repacks_fattr4() {
+        // VERIFY arg = fattr4 (bitmap4 + attrlist4 opaque). The decoder
+        // re-packs into a single Bytes blob (so the dispatcher can
+        // re-decode it once the GETATTR result is in hand).
+        let mut buf = BytesMut::new();
+        buf.put_u32(1); // bitmap_len = 1
+        buf.put_u32(0x0000_000A); // attrs: TYPE(1) + SIZE(3)
+        let payload = [0x00, 0x00, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0x10, 0x00];
+        buf.put_u32(payload.len() as u32);
+        buf.put_slice(&payload);
+        let mut d = XdrDecoder::new(buf.freeze());
+        let op = CompoundRequest::decode_operation(&mut d, opcode::VERIFY)
+            .expect("decode VERIFY");
+        let attrs = match op {
+            Operation::Verify { attrs } => attrs,
+            _ => panic!("wrong variant"),
+        };
+        // Re-decode the repacked blob: should see the same shape.
+        let mut d2 = XdrDecoder::new(attrs);
+        assert_eq!(d2.decode_u32().unwrap(), 1);
+        assert_eq!(d2.decode_u32().unwrap(), 0x0000_000A);
+        let attr_vals = d2.decode_opaque().unwrap();
+        assert_eq!(attr_vals.as_ref(), &payload);
+    }
+
+    #[test]
+    fn test_nverify_uses_same_decoder() {
+        let mut buf = BytesMut::new();
+        buf.put_u32(0); // bitmap_len = 0
+        buf.put_u32(0); // attrs len = 0
+        let mut d = XdrDecoder::new(buf.freeze());
+        let op = CompoundRequest::decode_operation(&mut d, opcode::NVERIFY)
+            .expect("decode NVERIFY");
+        assert!(matches!(op, Operation::Nverify { .. }));
     }
 
     #[test]
