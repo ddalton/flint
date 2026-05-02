@@ -90,6 +90,15 @@ spec:
             - name: NFS_ENABLED
               value: "false"
             {{- end }}
+            {{- if .Values.pnfs.enabled }}
+            # pNFS — when enabled, StorageClasses with `parameters.layout: pnfs`
+            # provision volumes by talking to this MDS endpoint over gRPC.
+            # The driver's main.rs reads this env var via PnfsCsi::from_env();
+            # if unset (the default), the entire pNFS code path is dormant
+            # and SPDK behaviour is byte-identical to the no-pNFS build.
+            - name: FLINT_PNFS_MDS_ENDPOINT
+              value: {{ required "pnfs.mdsEndpoint is required when pnfs.enabled is true" .Values.pnfs.mdsEndpoint | quote }}
+            {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"
           ports:

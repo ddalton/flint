@@ -1,0 +1,56 @@
+# Example pNFS StorageClass for the Flint CSI driver.
+#
+# Pre-requisites
+#   1. A running Flint pNFS MDS reachable from the CSI controller pod.
+#      The chart values.yaml `pnfs.mdsEndpoint` must point at it.
+#   2. Helm install of flint-csi-driver-chart with `--set pnfs.enabled=true`
+#      (off by default — see values.yaml).
+#   3. At least one DS DaemonSet running on cluster nodes that have local
+#      storage; see deployments/pnfs-ds-daemonset.yaml for a starting point.
+#
+# Once those are in place, this StorageClass lets users provision
+# pNFS-backed volumes by claiming a PVC against `flint-pnfs`.
+#
+# Performance characteristics (single-host bench, see ADR 0003):
+#   - ~1.6× faster sequential writes vs single-server NFS at fsync=1
+#     across 1, 4, 8 concurrent jobs (block-size invariant).
+#   - Sequential reads tie at the loopback bottleneck on a single host;
+#     real cross-host deployments are expected to scale ~linearly
+#     with DS count.
+#
+# What's NOT covered yet (not blockers for the perf tier):
+#   - Volume expansion (allowVolumeExpansion: false below).
+#   - Snapshots / clones.
+#   - Replication / HA — losing a DS loses the data on that DS.
+#     For durability today, snapshot-spillover to S3 is the recommended
+#     pattern; FFL mirroring is a future feature.
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flint-pnfs
+  labels:
+    app.kubernetes.io/name: flint-csi-driver
+    app.kubernetes.io/component: pnfs
+
+# Same provisioner as every other Flint StorageClass — the driver
+# branches on `parameters.layout` to pick the right backend.
+provisioner: flint.csi.storage.io
+
+# WaitForFirstConsumer matches the chart default and is the right
+# choice for pNFS too: it lets the scheduler place pods first, after
+# which the MDS can issue locality-aware layouts (a future enhancement
+# tracked in the pNFS roadmap).
+volumeBindingMode: WaitForFirstConsumer
+
+# pNFS volumes do not yet support expansion through the CSI driver.
+# When `ControllerExpandVolume` lands for the pNFS path this can flip
+# to true.
+allowVolumeExpansion: false
+
+reclaimPolicy: Delete
+
+parameters:
+  # Selects the pNFS code path in the driver. Without this key, the
+  # driver defaults to its existing single-server-NFS / SPDK paths.
+  layout: pnfs

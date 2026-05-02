@@ -1,0 +1,62 @@
+# In-cluster Services for the Flint pNFS MDS.
+#
+# Two services for two distinct concerns:
+#
+# 1. flint-pnfs-mds-grpc (ClusterIP, port 50051)
+#    The CSI controller pod uses this to call CreateVolume /
+#    DeleteVolume on the MDS. ClusterIP is fine — the controller
+#    runs in-cluster.
+#
+#    The chart's values.yaml `pnfs.mdsEndpoint` should match the
+#    DNS name of this service:
+#      "flint-pnfs-mds-grpc.flint-system.svc.cluster.local:50051"
+#    or, if the chart and MDS are deployed in the same namespace,
+#    just "flint-pnfs-mds-grpc:50051".
+#
+# 2. flint-pnfs-mds-nfs (ClusterIP, port 2049)
+#    The kernel NFS client (running on every node where a pNFS PVC
+#    is mounted) connects here. Some clusters expose this via a
+#    separate Service shape (NodePort, LoadBalancer) depending on
+#    where the client lives — see pnfs-nodeport-services.yaml for
+#    that variant. This file ships the in-cluster default.
+#
+# Both services target the same Deployment (`app: pnfs-mds`).
+# The Deployment manifest itself is at
+# deployments/pnfs-mds-deployment.yaml.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-mds-grpc
+  namespace: flint-system
+  labels:
+    app: flint-pnfs-mds
+    component: control-plane
+spec:
+  type: ClusterIP
+  selector:
+    app: pnfs-mds
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-mds-nfs
+  namespace: flint-system
+  labels:
+    app: flint-pnfs-mds
+    component: data-plane
+spec:
+  type: ClusterIP
+  selector:
+    app: pnfs-mds
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP

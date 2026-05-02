@@ -246,6 +246,42 @@ nfs:
   # Image pull secrets for NFS server (if registry requires authentication)
   imagePullSecrets: []
 
+# pNFS support (Parallel NFS, RFC 8881) — opt-in.
+#
+# When enabled, StorageClasses with `parameters.layout: pnfs` are
+# provisioned by talking to a Flint pNFS MDS over gRPC; the resulting
+# volume is striped across one or more Data Servers (DSes) and
+# mounted on the kernel client via NFSv4.1.
+#
+# Disabled by default. The flint-csi-controller reads
+# FLINT_PNFS_MDS_ENDPOINT from the env var injected here; if unset
+# (i.e. pnfs.enabled is false), every pNFS code path in the driver
+# is dormant and SPDK-only deployments are byte-identical to the
+# pre-pNFS build.
+#
+# Operators are responsible for deploying the MDS + DSes themselves
+# (see deployments/pnfs-mds-deployment.yaml and
+# deployments/pnfs-ds-daemonset.yaml as starting points). The chart
+# does NOT install them automatically because the right shape
+# (single MDS vs HA, DS placement policy, storage backing) is
+# environment-specific.
+pnfs:
+  # When false, the FLINT_PNFS_MDS_ENDPOINT env var is omitted and
+  # the driver refuses any layout: pnfs StorageClass with a clear
+  # FAILED_PRECONDITION error. This is the safe default.
+  enabled: false
+
+  # gRPC endpoint of the MDS. Required iff pnfs.enabled is true.
+  # Forms accepted by the driver:
+  #   "flint-pnfs-mds:50051"            — bare host:port (http:// added)
+  #   "http://flint-pnfs-mds:50051"     — explicit scheme
+  #   "https://mds.example.com:50051"   — TLS (channel honours it,
+  #                                        though cluster TLS isn't
+  #                                        provisioned by this chart)
+  # Default form assumes a Service named "flint-pnfs-mds" in the same
+  # namespace as the controller exposes the gRPC port at 50051.
+  mdsEndpoint: ""
+
 # Block device configuration
 blockDevice:
   # Backend type: "ublk" (default, high performance) or "nvmeof" (kernel NVMe-oF)
