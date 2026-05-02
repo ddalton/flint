@@ -2709,8 +2709,23 @@ impl FileOperationHandler {
                     };
                 }
             }
+            // Special-file types (SOCK, FIFO, BLK, CHR). We don't currently
+            // model them as native nodes — creating BLK/CHR via mknod() needs
+            // root, and pNFS-CSI exports never want callers actually
+            // dereferencing a host device. Create a regular file as a
+            // stand-in so LOOKUP/PUTFH/GETFH/REMOVE on the name work; tests
+            // that depend on the *type* (NF4SOCK etc.) will still fail.
+            // Returning Ok also keeps pynfs's --maketree from skipping
+            // every test that names the file later.
+            Nfs4FileType::Socket
+            | Nfs4FileType::Fifo
+            | Nfs4FileType::BlockDevice
+            | Nfs4FileType::CharDevice => {
+                debug!("CREATE: {:?} → regular-file stand-in at {:?}",
+                       op.objtype, obj_path);
+                tokio::fs::File::create(&obj_path).await.map(|_| ())
+            }
             _ => {
-                // Other types not supported yet (BlockDevice, CharDevice, Socket, Fifo)
                 warn!("CREATE: Object type {:?} not yet supported", op.objtype);
                 return CreateRes {
                     status: Nfs4Status::BadType,

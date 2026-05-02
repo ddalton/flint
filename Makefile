@@ -119,13 +119,19 @@ test-nfs-mount: ## Sanity: mount and write a file from the VM (requires nfs-serv
 	  umount /mnt/flint'
 
 .PHONY: test-nfs-protocol
-test-nfs-protocol: ## Run pynfs NFSv4.1 conformance suite against the host
+test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
+	# `--maketree` builds the test directory ($(NFS_EXPORT)/tmp/tree) of
+	# regular file, dir, symlink, socket/fifo/block/char stand-ins that
+	# the suite expects. Without it most tests SKIP. Pre-create /tmp on
+	# the export so the build step has a writable parent.
+	mkdir -p $(NFS_EXPORT)/tmp
+	chmod 0777 $(NFS_EXPORT)/tmp
 	limactl shell $(LIMA_VM) -- bash -lc '\
 	  cd /opt/pynfs/nfs4.1 && \
-	  sudo .venv/bin/python ./testserver.py \
-	    $(LIMA_HOST_ADDR):$(NFS_PORT) \
-	    --minorversion=1 \
-	    --showomit --rundeps all || true'
+	  python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
+	    --maketree --nocleanup --json=/tmp/pynfs.json all || true'
+	limactl cp $(LIMA_VM):/tmp/pynfs.json /tmp/flint-pynfs-results.json
+	@echo "Results: /tmp/flint-pynfs-results.json"
 
 .PHONY: test-nfs-frag
 test-nfs-frag: ## Force fragmented WRITE (T1) — large file via dd over NFS
