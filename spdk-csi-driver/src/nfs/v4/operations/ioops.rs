@@ -186,9 +186,18 @@ pub struct CommitRes {
     pub writeverf: u64,
 }
 
-/// Cached open file entry
+/// Cached open file entry.
+///
+/// `file` is an `Arc<File>` rather than `Arc<Mutex<File>>` because every
+/// operation we perform on it — `write_at`, `read_at`, `sync_all`,
+/// `sync_data` — takes `&File`, not `&mut File`. Positioned I/O
+/// (`pwrite(2)` / `pread(2)`) is explicitly safe to call concurrently
+/// from multiple threads on Linux and macOS, so the mutex was
+/// unnecessary serialization. Removing it lets multiple WRITEs to the
+/// same stateid (rare in practice but possible) actually parallelize
+/// down to the kernel.
 struct CachedFile {
-    file: Arc<std::sync::Mutex<File>>,
+    file: Arc<File>,
     path: PathBuf,
 }
 
@@ -756,8 +765,8 @@ impl IoOperationHandler {
                 }
             };
             
-            let file_arc = Arc::new(std::sync::Mutex::new(file));
-            
+            let file_arc = Arc::new(file);
+
             // Cache the file descriptor
             self.fd_cache.insert(op.stateid.clone(), CachedFile {
                 file: Arc::clone(&file_arc),
@@ -777,24 +786,24 @@ impl IoOperationHandler {
         
         let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
-            
-            // Get mutable access to file (lock for this write)
-            let file = file_arc.lock().unwrap();
-            
-            // Write data using positioned I/O (no seek needed - concurrent safe!)
-            let bytes_written = file.write_at(&data_clone, offset)?;
-            
+
+            // Positioned I/O: pwrite(2) takes an offset and is safe to
+            // call concurrently from multiple threads on the same
+            // file descriptor (no seek pointer is mutated). No mutex
+            // needed; the kernel serializes at the page-cache level.
+            let bytes_written = file_arc.write_at(&data_clone, offset)?;
+
             // Handle stability requirement
             // UNSTABLE4 (0): Can cache, flush later (fast)
             // DATA_SYNC4 (1): Sync data, metadata can be cached
             // FILE_SYNC4 (2): Sync both data and metadata (slow)
             if stable == FILE_SYNC4 {
-                file.sync_all()?; // Full fsync
+                file_arc.sync_all()?; // Full fsync
             } else if stable == DATA_SYNC4 {
-                file.sync_data()?; // Sync data only
+                file_arc.sync_data()?; // Sync data only
             }
             // UNSTABLE4: no sync, will be done on COMMIT
-            
+
             Ok(bytes_written)
         }).await;
 
@@ -874,22 +883,33 @@ impl IoOperationHandler {
         // Perform fsync to commit UNSTABLE writes to stable storage
         // This is critical for data integrity!
         let write_verifier = self.write_verifier;
-        
-        let commit_result = tokio::task::spawn_blocking(move || {
-            // Open file for syncing
-            let file = match std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-            {
-                Ok(f) => f,
-                Err(e) => return Err(e),
-            };
 
-            // Full fsync: sync both data and metadata
-            // This ensures UNSTABLE writes are committed to persistent storage
-            file.sync_all()?;
-            
-            Ok(())
+        // Try to reuse the WRITE-side cached fd: COMMIT carries no
+        // stateid (RFC 5661 §18.3 — `count4` and `offset4` only), so
+        // we look up any cached fd whose path matches. This avoids a
+        // namespace lookup + open syscall on every fsync, which on
+        // fsync-heavy workloads is measurable. Falls back to the
+        // open-fresh path if no cached fd exists (e.g. the file was
+        // committed by a different connection or the cache evicted).
+        let cached_fd = self.fd_cache.iter()
+            .find(|entry| entry.value().path == path)
+            .map(|entry| Arc::clone(&entry.value().file));
+
+        let commit_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if let Some(file_arc) = cached_fd {
+                // Hot path: reuse the WRITE-side cached fd. sync_all
+                // takes &File so the Arc<File> works directly — no
+                // mutex needed (positioned I/O is concurrency-safe).
+                file_arc.sync_all()?;
+                Ok(())
+            } else {
+                // Cold path: no cached fd. Open fresh and sync.
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)?;
+                file.sync_all()?;
+                Ok(())
+            }
         }).await;
 
         match commit_result {
