@@ -2,40 +2,40 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-01, after commit `c86c718`.
+**Last updated:** 2026-05-01, after commit `7262e72`.
 **Branch:** `kind-no-spdk`.
 **Conformance score (pynfs full suite, 262 tests, 91 still skipped behind unimplemented features):**
 
 ```
 Baseline (original audit run): 26 PASS  / 69 FAIL  / 167 SKIP   (96 runnable)
-Current head (c86c718):       141 PASS  / 30 FAIL  / 91  SKIP  (171 runnable)
+Current head (7262e72):       148 PASS  / 23 FAIL  / 91  SKIP  (171 runnable)
 ```
 
-5.4× the original pass count. Five suites at 100%; nine more above 70%.
+5.7× the original pass count. Six suites at 100%; nine more above 70%.
 
 ---
 
 ## Per-suite breakdown (current)
 
 ```
-st_create_session     27/27  100%   ✓
+st_current_stateid     9/9   100%   ✓ ← new this session
+st_destroy_clientid    8/8   100%   ✓
 st_compound            5/5   100%   ✓
 st_trunking            2/2   100%   ✓
 st_destroy_session     1/1   100%   ✓
-st_destroy_clientid    8/8   100%   ✓
+st_create_session     27/28   96%
 st_rename             32/35   91%
-st_lookupp             8/9    89%
-st_putfh               7/8    88%
+st_lookupp             8/9    88%
 st_exchange_id        23/26   88%
-st_sequence           15/17   88%
+st_putfh               7/8    87%
+st_sequence           14/17   82%
+st_courtesy            4/5    80%
 st_open                5/7    71%
-st_courtesy            3/5    60%
 st_secinfo_no_name     2/4    50%
-st_current_stateid     3/9    33%
 st_reclaim_complete    1/4    25%
-st_secinfo             0/2     0%
 st_verify              0/1     0%
-st_delegation          0/3     0%
+st_secinfo             0/2     0%
+st_delegation          0/3     0% (blocked on CB_RECALL)
 ```
 
 ---
@@ -82,6 +82,7 @@ The hard parts: bringing actual RFC state machines online.
 | 3.B | `ecb26d0` | CREATE_SESSION RFC 8881 §18.36.4 sequence + replay cache (per-clientid `last_cs_sequence` + cached structured response, returned byte-for-byte on retry). Principal-collision check (CLID_INUSE) for unconfirmed records only. SEQUENCE `REP_TOO_BIG_TO_CACHE` when cachethis + tiny ca_maxresponsesize_cached. |
 | 3.C | `8320986` | LOOKUPP RFC 5661 §18.10.4: non-directory CFH → NOTDIR, symlink CFH → SYMLINK |
 | 3.D | `c86c718` | DESTROY_CLIENTID validation (STALE_CLIENTID / CLIENTID_BUSY); SEQUENCE compound-position rules (SEQUENCE_POS for misplaced SEQUENCE, OP_NOT_IN_SESSION for v4.1 op without SEQUENCE prefix); slot table sized to negotiated ca_maxrequests (SEQUENCE BADSLOT for slot_id beyond it); ca_maxoperations enforcement (TOO_MANY_OPS) |
+| 3.E | `7262e72` | RFC 8881 §16.2.3.1.2 "current stateid" sentinel resolution: OPEN/LOCK/LOCKU/SAVEFH/RESTOREFH propagate it, PUTFH/PUTROOTFH/PUTPUBFH/LOOKUP/LOOKUPP invalidate it; FREE_STATEID op (LOCKS_HELD for open/lock state); fixed pre-existing LOCK locker4 union decode bug |
 
 ---
 
@@ -93,9 +94,8 @@ Sorted by likely effort × test count.
 
 | Bucket | Tests | What's needed |
 |---|---|---|
-| `st_current_stateid` (6) | CSID1/2/3/4/9/10 | RFC 8881 §16.2.3.1.2 "current stateid" — when seqid=1 and other=00…01, resolve to the stateid produced by the most recent state-changing op in the same COMPOUND. Add `current_stateid: Option<StateId>` to `CompoundContext`, set after OPEN/LOCK, resolve in CLOSE/WRITE/READ/LOCK. CSID9 also needs `FREE_STATEID` (currently NOTSUPP) to return LOCKS_HELD. |
 | `st_secinfo` + `st_secinfo_no_name` (4) | SECINFO/SECINFO_NO_NAME | These ops advertise which auth flavors the server accepts. Currently NOTSUPP / partial. Implementation = return `[AUTH_NONE, AUTH_SYS]` (or whatever flavors the server is built for); few hundred lines including XDR encoding. |
-| `st_courtesy` (2) | COUR2/3-ish | "Courtesy client" handling (RFC 8881 §8.4.2.4) — graceful expired-client cleanup. Likely needs lease-expiry triggering state cleanup but allowing renewal-within-grace. |
+| `st_courtesy` (1) remaining | one test | "Courtesy client" handling (RFC 8881 §8.4.2.4) — graceful expired-client cleanup. Likely needs lease-expiry triggering state cleanup but allowing renewal-within-grace. |
 | `st_reclaim_complete` (3) | RECLAIM2/3/4 | Validate reclaim-complete state machine: rejecting state-using ops before RECLAIM_COMPLETE during grace; rejecting reclaim ops outside grace. |
 | `st_verify` (1) | VERIFY1-ish | VERIFY/NVERIFY ops (compare client-supplied attrs vs server's). Currently stub. |
 | `st_open` (2) remaining | OPEN edge cases | Likely OPEN_CONFIRM (v4.0) or specific share-deny conflicts. |
@@ -289,29 +289,25 @@ spdk-csi-driver/
 
 ## Where to pick up next
 
-The single highest-leverage thing left is **`st_current_stateid` (6
-tests)** — implement RFC 8881 §16.2.3.1.2 "current stateid" resolution.
-The mechanism: many operations carry a stateid; in v4.1, the special
-value `seqid=1, other=00…01` means "the stateid produced by the most
-recent state-changing op in this COMPOUND". So a client can do
-`[OPEN file, WRITE current_stateid]` without round-tripping the
-returned stateid back into the WRITE op.
+`st_current_stateid` is now 100% (commit `7262e72`). The next biggest
+single-session win is **`st_secinfo` + `st_secinfo_no_name` (4 tests)**
+— these ops advertise which RPC auth flavors the server accepts for a
+given filehandle. Implementation:
 
-Sketch of the change:
+1. Decode SECINFO (component name) / SECINFO_NO_NAME (style: current_fh
+   or parent).
+2. Return an array of `secinfo4` results, one per supported flavor:
+   - AUTH_NONE: just the flavor number (0).
+   - AUTH_SYS: flavor + machinename + uid + gid (we already have
+     all of this on the server side).
+   - RPCSEC_GSS: flavor + oid + qop + service. We don't really
+     support GSS yet; advertise just AUTH_NONE/AUTH_SYS for now.
+3. Wire the new `OperationResult::SecInfo(...)` variant + encoder.
 
-1. Add `current_stateid: Option<StateId>` to `CompoundContext`.
-2. After OPEN / LOCK / OPEN_DOWNGRADE, set
-   `ctx.current_stateid = Some(returned_stateid)`.
-3. In WRITE/READ/CLOSE/LOCK, before validating the stateid, check if
-   it's the magic "current stateid" sentinel and substitute
-   `ctx.current_stateid` if so.
-4. Also implement `FREE_STATEID` (currently NOTSUPP). It just needs to
-   call `state_mgr.stateids.remove(&stateid)` and return Ok, with
-   LOCKS_HELD when the stateid still has live locks.
-
-After that, `st_secinfo*` (4 tests) is mechanical XDR work. Then
-`st_courtesy` and `st_reclaim_complete` need real lease-state-machine
-work which is small but fiddly.
+After that, `st_courtesy` and `st_reclaim_complete` need real
+lease-state-machine work — small but fiddly. `st_verify` is one op
+implementation. Remaining `st_*` failures are smaller clusters
+(symlink PUTFH resolution, REQ_TOO_BIG, etc.).
 
 The **pNFS work (Tasks #4/#5/#6)** doesn't move the pynfs needle — pynfs
 runs against a single non-pNFS mount — but it's the audit's biggest
