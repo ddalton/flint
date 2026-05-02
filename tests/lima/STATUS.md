@@ -2,8 +2,21 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after VERIFY/NVERIFY (1 more pynfs PASS, 153/18).
+**Last updated:** 2026-05-02, after pNFS CSI integration (PRs 1–5 of `docs/plans/pnfs-csi-integration.md`) shipped. HEAD: `0679abf`.
 **Branch:** `kind-no-spdk`.
+
+### Today in one paragraph
+
+A user can now `helm upgrade --set pnfs.enabled=true …`, `kubectl apply` a
+StorageClass with `parameters.layout: pnfs`, and a pod that mounts the
+resulting PVC writes to a real pNFS-striped volume. SPDK code paths are
+byte-identical when pNFS is disabled — the integration is opt-in via the
+`FLINT_PNFS_MDS_ENDPOINT` env var, gated by ADR 0001's "keep one driver,
+defer split" decision. End-to-end test (`make test-pnfs-csi`) exercises
+the full create → mount → write → read → delete cycle against the actual
+gRPC verbs and kernel data path. Honest single-host write win is **1.6×**
+over single-server NFS at fsync=1 (ADR 0003); the architectural claim of
+linear scaling with DS count remains untested cross-host.
 
 ### Headline
 
@@ -126,6 +139,48 @@ any one and the kernel falls back to MDS-direct I/O silently.
 The smoke now exits with `✓ PASS: data path crossed both DSes (real
 pNFS striping)`.
 
+### Phase 5 — pNFS CSI integration (this session: `ed70fe7..0679abf`)
+
+After Phase 4 the *protocol* worked; nothing wired it to Kubernetes. Phase 5
+shipped the five-PR plan in `docs/plans/pnfs-csi-integration.md`:
+
+| PR | Commit | What |
+|---|--------|------|
+| 5.1 | `ed70fe7` | MDS gRPC `CreateVolume(volume_id, size_bytes)` + `DeleteVolume(volume_id)`. Idempotent on matching size, refuses size mismatch, rejects path-traversal volume_ids. 5 unit tests. |
+| 5.2 | `9f5f94c` + `57fd7b2` | Driver-side `pnfs_csi` module — talks to MDS, returns `volume_context` with five `pnfs.flint.io/*` keys. 5 unit tests against an in-process tonic mock. Bonus: dropped the unused per-file `Mutex<File>` and made COMMIT reuse the WRITE-side cached fd (ADR 0003 cleanups). |
+| 5.3 | `1da59ab` | Wired into `main.rs`: `create_volume` / `delete_volume` / `node_publish_volume` branch on `parameters.layout: pnfs` and `volume_context["pnfs.flint.io/mds-ip"]` respectively. SPDK code paths byte-identical when `FLINT_PNFS_MDS_ENDPOINT` is unset. |
+| 5.4 | `aeb0a7e` | Helm chart `pnfs:` values section (`enabled: false` default), conditional env-var injection in `controller.yaml`, example StorageClass at `deployments/pnfs-csi-storageclass.yaml`, ClusterIP Services for MDS gRPC + NFS. |
+| 5.5 | `0679abf` | End-to-end test: `pnfs-csi-cli` test binary + `tests/lima/pnfs/csi-e2e.sh` orchestrator. 7 assertions: ctx-key shape, MDS file size, mount, sha256 round-trip, per-DS allocation, delete cleanup, re-create-after-delete. |
+
+Run `make test-pnfs-csi` for the integration test:
+- DS1: 56 MiB allocated, DS2: 64 MiB allocated, MDS: 0 bytes.
+- All 7 assertions PASS in ~5 s.
+
+### Phase 6 — perf characterization (this session: `d868e19..79cf6ef`)
+
+First head-to-head pNFS-vs-single-server fio bench, with corrected
+analysis after a deeper sweep:
+
+```
+                          single-server NFS    pNFS (2 DSes)    ratio
+WRITE (fsync=1, jobs=1)        173 MiB/s        268 MiB/s       1.55×
+WRITE (fsync=1, jobs=4)        168 MiB/s        274 MiB/s       1.63×
+WRITE (fsync=1, jobs=8)        161 MiB/s        262 MiB/s       1.62×
+WRITE (bs=4K,   jobs=4)        158 MiB/s        249 MiB/s       1.57×
+READ  (jobs=4)                 270 MiB/s        267 MiB/s       1.01×
+```
+
+**Honest claim: ~1.6× write win, block-size invariant.** ADR 0002 had a
+2.10× number from a single noisy run; ADR 0003 settled it with the sweep.
+The mechanism is "shard the server" (two DS processes give ~2× server-side
+RPC slots, narrowed by shared APFS journal), not protocol cleverness — see
+`server_v4.rs:176` for the per-TCP-serial RPC handler that's the dominant
+single-host bottleneck.
+
+Reads tie at 270 MiB/s on this hardware: loopback TCP / single-client
+saturation is the bottleneck before per-server protocol overhead kicks in.
+**Cross-host scaling remains an architectural prediction, not a measurement.**
+
 #### What's still TODO on the data path
 
 The smoke is green but the pNFS implementation has known gaps that
@@ -168,7 +223,7 @@ Sorted by likely effort × test count.
 | ~~`st_secinfo` + `st_secinfo_no_name` (4)~~ | ~~SECINFO/SECINFO_NO_NAME~~ | **Done.** Both ops now decode/encode (`[AUTH_NONE, AUTH_SYS, RPCSEC_GSS(Kerberos V5)]`), clear CFH on success per RFC 5661 §2.6.3.1.1.8, and SECINFO_NO_NAME(PARENT) of the served root returns NFS4ERR_NOENT. 6/6 secinfo tests now pass. |
 | `st_courtesy` (1) remaining | one test | "Courtesy client" handling (RFC 8881 §8.4.2.4) — graceful expired-client cleanup. Likely needs lease-expiry triggering state cleanup but allowing renewal-within-grace. |
 | `st_reclaim_complete` (3) | RECLAIM2/3/4 | Validate reclaim-complete state machine: rejecting state-using ops before RECLAIM_COMPLETE during grace; rejecting reclaim ops outside grace. |
-| `st_verify` (1) | VERIFY1-ish | VERIFY/NVERIFY ops (compare client-supplied attrs vs server's). Currently stub. |
+| ~~`st_verify` (1)~~ | ~~VERIFY1-ish~~ | **Done.** VERIFY/NVERIFY both wired against the canonical GETATTR encoding for bytewise comparison; ATTRNOTSUPP for unsupported bits per §18.30.3. 1/1 passes. |
 | `st_open` (2) remaining | OPEN edge cases | Likely OPEN_CONFIRM (v4.0) or specific share-deny conflicts. |
 
 ### Medium ROI — needs a real subsystem
@@ -387,43 +442,149 @@ spdk-csi-driver/
 
 ## Where to pick up next
 
-Two independent fronts. Pick whichever maps to current priorities.
+Three independent fronts. Pick whichever maps to current priorities.
 
-### Front A — pNFS robustness (the audit's structural gaps)
+### Front A — pNFS production-readiness (audit's structural gaps)
 
-The smoke is green but production-grade pNFS needs:
+The CSI integration ships, but the data plane has known durability and
+restart gaps that block real customer use. These are the **production
+gates**; they don't move user-visible features but they're prerequisites
+for anyone running this in prod.
 
 1. **CB_LAYOUTRECALL backchannel (Task #4).** Implement the v4.1
    callback channel: TCP back-connection negotiated via
    `BIND_CONN_TO_SESSION`, RPC encode of `CB_LAYOUTRECALL4args`,
    per-layout `CallbackManager` keyed by `(client_id, session_id)`.
-   Same machinery unlocks `st_delegation` (3 pynfs tests) once
-   delegations are extended to issue `CB_RECALL`. Estimate ~1–2
-   focused weeks; the layout owner index from commit `f502bd9` is
-   already shaped for it.
+   Without it, killing a DS leaves the kernel writing into the void
+   instead of being recalled. ~1–2 focused weeks. Same machinery
+   unlocks the 3 `st_delegation` pynfs tests as a side effect.
 2. **Layout/state persistence (Task #5).** Today instance IDs and
    layout stateids regenerate on every MDS restart. Plan: `StateBackend`
    trait with `memory` + `etcd`/`sqlite` impls, persist `(client_id,
-   session_id, layout_stateid, fsid, fh, range)`. The `LayoutOwner`
-   struct already gives the natural key.
-3. ~~**LAYOUTRETURN FSID/ALL wiring (Task #6).**~~ Done — see Phase 4.E.
+   session_id, layout_stateid, fsid, fh, range)`. ~1 week.
+3. **Cross-host fio bench.** The single-Mac-host 1.6× number is a
+   floor; the architectural prediction is N× scaling with N DSes on
+   N nodes. Until measured on a real cluster this remains a
+   prediction. ~1 week of harness + run.
 
-### Front B — pynfs core protocol score (single-mount tests)
+### Front B — pNFS feature work (beyond the perf-tier MVP)
 
-`st_current_stateid`, `st_secinfo`, and `st_secinfo_no_name` are all
-now 100%. Next single-session wins:
+The integration ships a minimal slice. Real customers will ask for:
+
+1. **Replication / HA** — see "HDFS replication factor 3 equivalent"
+   section below. FFL-mirrored layouts. Multi-week project.
+2. **Snapshots / clones for pNFS** — currently SPDK-only. Would need
+   MDS to coordinate consistent point-in-time across DSes.
+3. **`ControllerExpandVolume` for pNFS.** Today the StorageClass
+   has `allowVolumeExpansion: false`; flip it on by extending the
+   MDS file via gRPC + propagating to the client.
+4. **DS auto-discovery via DaemonSet** so adding/removing nodes
+   doesn't require operator action. The `DeviceRegistry` already
+   exists; needs a registration RPC from a DS-side bootstrap.
+5. **Locality-aware layout selection** — read k8s topology labels
+   so layouts prefer same-zone DSes. Big perf win on cross-AZ
+   clusters.
+
+### Front C — pynfs core protocol score (single-mount tests)
+
+`st_current_stateid`, `st_secinfo`, `st_secinfo_no_name`, `st_verify`
+are all now 100%. Next single-session wins:
 
 * **`st_courtesy` + `st_reclaim_complete` (4 tests)** — both want a
   real lease-expiration / grace-period state machine: lease-expired
   clients hold "courtesy" state until the next conflicting op (RFC
   8881 §8.4.2.4); reclaim ops outside grace MUST be rejected.
-* **`st_verify` (1 test)** — VERIFY/NVERIFY against server attrs.
 * **`st_exchange_id` EID9 (1 test)** — `testLeasePeriod` wants real
   lease expiry → STALE_CLIENTID (we always-renew today).
 
 Beyond those, the remaining `st_*` failures cluster around symlink
 PUTFH resolution (st_lookupp / st_rename / st_putfh tail), REQ_TOO_BIG
 (st_sequence), and CB_RECALL-blocked delegation tests.
+
+---
+
+## HDFS replication factor 3 — pNFS equivalent
+
+**Q: HDFS supports replication-factor=3 for durability. How can pNFS do
+the same?**
+
+**A: FlexFiles layout (FFLv4, RFC 8435) with mirrored DS sets.** The
+data path we ship today (FILES layout, RFC 5661 §13) is HDFS replication
+factor *1* — every stripe lives on exactly one DS, and DS death means
+data loss. To get HDFS-grade durability via pNFS, the protocol
+mechanism is FFLv4 mirroring: the MDS hands out a layout that lists N
+DSes for the same byte range as **mirrors**, and the kernel client
+writes to all N in parallel and reads from any.
+
+### What the kernel does for free (already shipped in Linux)
+
+Linux's NFSv4.1 client implements FFLv4 mirrored layouts natively:
+
+- WRITE: client fans out to every DS in the mirror set; succeeds iff
+  all DS WRITEs succeed.
+- READ: client picks any one mirror per request (load-balances across).
+- DS error: client reports it via `LAYOUTRETURN` with `ff_io_errors4`,
+  marks the layout invalid, asks for a fresh one.
+
+So the client side is solved. The work is all on the MDS.
+
+### What the MDS would need to do
+
+| Component | Effort | Status today |
+|---|---:|---|
+| FFLv4 layout encoding (mirrored variant) | ~3 days | We had FFLv4 advertised but pulled it back (commit `cdbbe21`) because layout negotiation was off; bringing it back for mirroring is real-but-tractable work. The `FfLayoutReturn4` decoder already exists. |
+| `LayoutPolicy::MirroredStripe { factor: N }` in MDS | ~2 days | Today's `LayoutManager::assign_segments_for_layout` picks one DS per stripe; needs to pick N and emit them as the mirror set. |
+| **CB_LAYOUTRECALL backchannel (Task #4)** | ~1-2 weeks | Required to revoke layouts when re-mirroring after DS failure. Already on the roadmap as a production prereq regardless. |
+| **State persistence (Task #5)** | ~1 week | Required so re-mirror progress survives MDS restart. Already on the roadmap. |
+| Re-mirror coordinator (background scrub) | ~2 weeks | When DS dies, MDS must copy bytes from a healthy mirror to a new replacement DS. This is its own subsystem — NameNode-style replication tracking, queue, throttle, retry. **No starter code today.** |
+| Topology / rack awareness | ~3 days | Bias DS selection so mirrors land on different nodes / zones (HDFS's "rack awareness"). Reads k8s topology labels. |
+
+**Total: ~5-7 weeks for honest HDFS-replication-factor-3 equivalence.**
+
+### A simpler, weaker variant (~2-3 weeks)
+
+If "auto-healing" isn't required, you can ship FFL mirroring without
+the re-mirror coordinator: writes go to N mirrors, reads survive any
+one DS failure, but rebuilding to N replicas after DS death needs
+manual operator intervention. Useful for "single-DS-failure tolerance"
+without the full coordination machinery.
+
+### A different architectural answer worth considering
+
+For ML datasets specifically (the user-stated workload), a simpler
+pattern often beats FFL mirroring on cost/complexity:
+
+- Source of truth lives in S3 (or any object store); S3 already
+  provides 11×9s durability for free.
+- DSes are *caches* — they pull lazily from S3 on first read of a
+  file, then serve from local.
+- DS death = empty cache when it comes back; next read re-pulls.
+- No re-mirror coordinator, no scrub task, no HDFS-style protocol.
+
+Trade-offs: cache-miss reads have S3 latency (10s-100s of ms) instead
+of DS latency (ms); steady-state reads after warming have full pNFS
+perf. For read-heavy training data this is fine; for write-heavy
+workloads it's a worse fit than FFL mirroring.
+
+The two answers are **complementary**, not exclusive:
+
+- ML-training tier: pNFS + S3 spillover. Cheap, durable enough
+  ("worst case I re-warm from S3"), no replication subsystem to
+  build.
+- Database / write-heavy / strict-durability tier: existing SPDK
+  NVMe-oF path. Already replicated, already shipping.
+- Future: FFL-mirrored pNFS only if a customer specifically asks for
+  "HDFS-shape" semantics (replication-factor-N at the storage layer
+  with auto-healing) and is willing to wait for the multi-week
+  effort.
+
+### Recommendation
+
+Don't build FFL mirroring speculatively. Ship the perf tier (already
+done), add Task #4 + #5 for production-readiness, then revisit
+based on actual customer requests. ADR 0001 already encodes the
+"don't speculatively build modular abstractions" principle for
+the same reasons.
 
 ---
 
