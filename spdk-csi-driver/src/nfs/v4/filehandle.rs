@@ -297,6 +297,40 @@ impl FileHandleManager {
         Ok(Nfs4FileHandle { data })
     }
 
+    /// Extract the path bytes from a version-1 filehandle **without**
+    /// checking the instance ID or recomputing the hash.
+    ///
+    /// This is the cross-instance path: a pNFS Data Server uses it to
+    /// honor filehandles minted by the *Metadata Server*, whose
+    /// `instance_id` and hash are by definition different from the DS's
+    /// own. The DS trusts the MDS as the layout authority — the I/O
+    /// caller is responsible for rebasing the returned path into the
+    /// DS's own export tree (typically by basename).
+    ///
+    /// Do not use this for normal in-process FH resolution; use
+    /// [`Self::filehandle_to_path`] which validates instance + hash.
+    pub fn parse_path_lenient(handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
+        // Layout: version(1) | instance_id(8) | hash(32) | path_len(2) | path(N)
+        if handle.data.is_empty() {
+            return Err("File handle is empty".to_string());
+        }
+        if handle.data[0] != 1 {
+            return Err(format!("Unsupported file handle version: {}", handle.data[0]));
+        }
+        if handle.data.len() < 43 {
+            return Err("File handle too short".to_string());
+        }
+        let mut len_bytes = [0u8; 2];
+        len_bytes.copy_from_slice(&handle.data[41..43]);
+        let path_len = u16::from_be_bytes(len_bytes) as usize;
+        if handle.data.len() < 43 + path_len {
+            return Err("File handle truncated".to_string());
+        }
+        let path_str = std::str::from_utf8(&handle.data[43..43 + path_len])
+            .map_err(|_| "Invalid path encoding".to_string())?;
+        Ok(PathBuf::from(path_str))
+    }
+
     /// Parse a file handle to extract the path
     fn parse_handle(&self, handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
         // Validate first

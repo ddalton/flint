@@ -265,10 +265,40 @@ impl IoOperationHandler {
             return Ok(ds_path);
         }
         
-        // Traditional filehandle: use FileHandleManager
-        self.fh_manager
-            .filehandle_to_path(&nfs_fh)
-            .map_err(|e| crate::pnfs::Error::Config(format!("Invalid filehandle: {}", e)))
+        // Traditional filehandle: try strict (own-instance) resolution
+        // first, then fall back to lenient cross-instance parsing for
+        // MDS-issued filehandles.
+        //
+        // In the pNFS file-layout data path, the *Metadata Server*
+        // mints the filehandle the client uses against this DS. The
+        // MDS bakes its own `instance_id` into the FH and hashes
+        // `path || mds_instance_id` — the DS can't reproduce either,
+        // so strict validation will always reject MDS-issued FHs.
+        //
+        // The trust model here is: the MDS is the layout authority.
+        // The DS extracts the path bytes from the MDS-issued FH and
+        // rebases by basename into its own `base_path`. Each DS
+        // therefore stores its slice of the file under
+        // `<base_path>/<basename>` and pwrites at the kernel-supplied
+        // offset; bytes the kernel routes elsewhere become sparse
+        // holes.
+        match self.fh_manager.filehandle_to_path(&nfs_fh) {
+            Ok(path) => Ok(path),
+            Err(_) => {
+                let mds_path = FileHandleManager::parse_path_lenient(&nfs_fh)
+                    .map_err(|e| crate::pnfs::Error::Config(
+                        format!("Invalid MDS-issued filehandle: {}", e)
+                    ))?;
+                let basename = mds_path.file_name().ok_or_else(|| {
+                    crate::pnfs::Error::Config(
+                        "MDS-issued filehandle path has no basename".to_string()
+                    )
+                })?;
+                let local = self.base_path.join(basename);
+                debug!("DS: MDS FH {:?} → local {:?}", mds_path, local);
+                Ok(local)
+            }
+        }
     }
     
     /// Get the file handle manager (for filehandle generation)

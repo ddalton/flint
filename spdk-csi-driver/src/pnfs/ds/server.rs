@@ -656,6 +656,18 @@ impl DataServer {
                     }
                 }
 
+                opcode::RECLAIM_COMPLETE => {
+                    // Standard NFSv4.1 client startup posts RECLAIM_COMPLETE
+                    // (RFC 8881 §18.51) on every minor-version-1 server it
+                    // talks to — including data servers reached via pNFS.
+                    // A DS holds no reclaimable open/lock state, so we
+                    // accept the op (consume the rca_one_fs bool) and
+                    // return OK. Without this, the kernel sees the DS as
+                    // unhealthy and silently falls back to MDS-direct I/O.
+                    let _rca_one_fs = decoder.decode_bool().unwrap_or(false);
+                    (Nfs4Status::Ok, Bytes::new())
+                }
+
                 opcode::DESTROY_CLIENTID => {
                     // Client is cleaning up - just acknowledge it
                     let _clientid = decoder.decode_u64().unwrap_or(0);
