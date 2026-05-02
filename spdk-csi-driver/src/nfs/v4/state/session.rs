@@ -88,7 +88,13 @@ pub struct Session {
     /// emit `NFS4ERR_REP_TOO_BIG_TO_CACHE` when `cachethis` is set and the
     /// expected reply would exceed this.
     pub fore_chan_maxresponsesize_cached: u32,
+    /// Maximum operations per COMPOUND (RFC 5661 §18.36 ca_maxoperations).
+    /// Used by the dispatcher to emit `NFS4ERR_TOO_MANY_OPS`.
     pub fore_chan_maxops: u32,
+    /// Maximum number of in-flight requests = number of slots allocated for
+    /// the session (RFC 5661 §18.36 ca_maxrequests). Slot IDs ≥ this value
+    /// are NFS4ERR_BADSLOT.
+    pub fore_chan_maxrequests: u32,
 
     /// Slots for exactly-once semantics
     pub slots: Vec<Slot>,
@@ -104,13 +110,16 @@ impl Session {
         client_id: u64,
         sequence: u32,
         flags: u32,
-        max_requests: u32,
+        max_request_size: u32,
         max_response: u32,
         max_response_cached: u32,
         max_ops: u32,
+        max_requests: u32,
     ) -> Self {
-        // Initialize slots
-        let slot_count = MAX_SLOTS.min(128);
+        // Slot table is sized to the negotiated ca_maxrequests, capped at
+        // MAX_SLOTS for sanity. Smaller tables let SEQUENCE return
+        // NFS4ERR_BADSLOT for slot_ids ≥ the negotiated count.
+        let slot_count = max_requests.max(1).min(MAX_SLOTS);
         let mut slots = Vec::with_capacity(slot_count as usize);
         for i in 0..slot_count {
             slots.push(Slot::new(i));
@@ -121,10 +130,11 @@ impl Session {
             client_id,
             sequence,
             flags,
-            fore_chan_maxrequestsize: max_requests,
+            fore_chan_maxrequestsize: max_request_size,
             fore_chan_maxresponsesize: max_response,
             fore_chan_maxresponsesize_cached: max_response_cached,
             fore_chan_maxops: max_ops,
+            fore_chan_maxrequests: slot_count,
             slots,
             highest_slotid: 0,
         }
@@ -225,10 +235,11 @@ impl SessionManager {
         client_id: u64,
         sequence: u32,
         flags: u32,
-        max_requests: u32,
+        max_request_size: u32,
         max_response: u32,
         max_response_cached: u32,
         max_ops: u32,
+        max_requests: u32,
     ) -> Session {
         // Generate session ID (lock-free atomic increment)
         let session_id_num = self.next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -242,10 +253,11 @@ impl SessionManager {
             client_id,
             sequence,
             flags,
-            max_requests,
+            max_request_size,
             max_response,
             max_response_cached,
             max_ops,
+            max_requests,
         );
 
         // LOCK-FREE: Direct DashMap inserts without global locks
@@ -336,7 +348,7 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
 
         assert_eq!(session.client_id, 1);
         assert_eq!(mgr.active_count(), 1);
@@ -345,7 +357,7 @@ mod tests {
     #[test]
     fn test_sequence_processing() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
 
         // First request on slot 0
         let result = mgr.get_session_mut(&session.session_id, |s| {
@@ -376,7 +388,7 @@ mod tests {
     #[test]
     fn test_session_destruction() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
         let session_id = session.session_id;
 
         assert_eq!(mgr.active_count(), 1);
@@ -390,9 +402,9 @@ mod tests {
     #[test]
     fn test_client_sessions() {
         let mgr = SessionManager::new();
-        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
-        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16);
-        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16);
+        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
+        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8);
+        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8);
 
         let client1_sessions = mgr.get_client_sessions(1);
         assert_eq!(client1_sessions.len(), 2);

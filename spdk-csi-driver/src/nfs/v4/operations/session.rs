@@ -420,6 +420,12 @@ impl SessionOperationHandler {
         let negotiated_max_response_cached = op.fore_chan_attrs
             .max_response_size_cached
             .min(negotiated_max_response);
+        // Slot count = ca_maxrequests, capped at our MAX_SLOTS sentinel.
+        const SERVER_MAX_REQUESTS: u32 = 128;
+        let negotiated_max_requests = op.fore_chan_attrs
+            .max_requests
+            .max(1)
+            .min(SERVER_MAX_REQUESTS);
         let session = self.state_mgr.sessions.create_session(
             op.clientid,
             op.sequence,
@@ -428,6 +434,7 @@ impl SessionOperationHandler {
             negotiated_max_response,
             negotiated_max_response_cached,
             negotiated_max_ops,
+            negotiated_max_requests,
         );
 
         info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",
@@ -511,6 +518,21 @@ impl SessionOperationHandler {
                 };
             }
         };
+
+        // RFC 5661 §18.46.3 / RFC 8881 §15.1.10.1: slot IDs must be in the
+        // range [0, ca_maxrequests). Anything outside is NFS4ERR_BADSLOT.
+        if op.slotid >= session.fore_chan_maxrequests {
+            warn!("SEQUENCE: slotid {} >= ca_maxrequests {} → BADSLOT",
+                  op.slotid, session.fore_chan_maxrequests);
+            return SequenceRes {
+                status: Nfs4Status::BadSessionId,  // wire value 10053 = NFS4ERR_BADSLOT
+                sessionid: op.sessionid,
+                sequenceid: 0,
+                slotid: 0,
+                highest_slotid: 0,
+                target_highest_slotid: 0,
+            };
+        }
 
         // RFC 8881 §18.46.3: if the client requests `cachethis` and the
         // session's negotiated `ca_maxresponsesize_cached` is too small to

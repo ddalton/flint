@@ -182,12 +182,73 @@ impl CompoundDispatcher {
             };
         }
 
+        // RFC 8881 §2.10.6.1 / §15.1.1.1: in v4.1+, SEQUENCE (or one of the
+        // sole-op ops handled above) MUST be the first op of a COMPOUND, and
+        // there MUST be at most one SEQUENCE per COMPOUND. Validate up front
+        // so the per-op responses encode `NFS4ERR_SEQUENCE_POS` /
+        // `NFS4ERR_OP_NOT_IN_SESSION` where pynfs expects them.
+        //
+        // Skip this check entirely if the COMPOUND contains an
+        // Operation::BadXdr or Operation::Unsupported — those carry their
+        // own RFC-mandated error replies (BADXDR, OP_ILLEGAL, NOTSUPP) that
+        // the per-op encoder needs to surface, and the malformed op might
+        // have been *intended* to be a SEQUENCE (it just didn't decode).
+        let has_decode_error = request.operations.iter().any(|o| {
+            matches!(o, Operation::BadXdr(_) | Operation::Unsupported(_))
+        });
+        if request.minor_version >= NFS_V4_MINOR_VERSION_1 && !has_sole && !has_decode_error {
+            let mut sequence_seen = false;
+            let mut sequence_pos_violation = false;
+            let mut op_not_in_session = false;
+            for (idx, op) in request.operations.iter().enumerate() {
+                let is_seq = matches!(op, Operation::Sequence { .. });
+                if is_seq {
+                    if idx != 0 || sequence_seen {
+                        sequence_pos_violation = true;
+                    }
+                    sequence_seen = true;
+                } else if !sequence_seen {
+                    // A non-SEQUENCE op with no preceding SEQUENCE in a
+                    // v4.1 compound is OP_NOT_IN_SESSION.
+                    op_not_in_session = true;
+                }
+            }
+            if sequence_pos_violation {
+                warn!("COMPOUND: SEQUENCE not first / duplicated → SEQUENCE_POS");
+                return CompoundResponse {
+                    status: Nfs4Status::SequencePos,
+                    tag: request.tag,
+                    results: Vec::new(),
+                    raw_reply: None,
+                    cache_slot: None,
+                };
+            }
+            if op_not_in_session && !request.operations.is_empty() {
+                warn!("COMPOUND: op without preceding SEQUENCE → OP_NOT_IN_SESSION");
+                return CompoundResponse {
+                    status: Nfs4Status::OpNotInSession,
+                    tag: request.tag,
+                    results: Vec::new(),
+                    raw_reply: None,
+                    cache_slot: None,
+                };
+            }
+        }
+
         // Create context, seeding with the RPC-level principal.
         let mut context = CompoundContext::with_principal(request.minor_version, principal);
 
         // Process operations sequentially
         let mut results = Vec::new();
         let mut final_status = Nfs4Status::Ok;
+
+        // RFC 8881 §18.36.4 ca_maxoperations enforcement. We can only check
+        // it after the SEQUENCE op identifies the session, but the spec
+        // says the violation is reported on the *first* op past the limit
+        // (typically GETATTR / PUTROOTFH following the SEQUENCE). We snapshot
+        // the limit when we see SEQUENCE and short-circuit the loop if the
+        // total op count is over.
+        let total_ops = request.operations.len();
 
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
@@ -205,6 +266,28 @@ impl CompoundDispatcher {
 
             // Dispatch operation
             let result = self.dispatch_operation(operation, &mut context).await;
+
+            // RFC 8881 §18.36.4: once SEQUENCE has bound a session, all ops
+            // beyond `ca_maxoperations` MUST yield NFS4ERR_TOO_MANY_OPS. We
+            // detect this on the (maxops+1)-th iteration after the SEQUENCE
+            // landed in the result list — meaning the prior ops up to the
+            // limit ran normally. The dispatcher fails fast on first-error,
+            // so we just push a TOO_MANY_OPS sentinel using the current op's
+            // result-slot opcode and break.
+            if let Some(sid) = context.session_id {
+                if let Some(s) = self.state_mgr.sessions.get_session(&sid) {
+                    if total_ops as u32 > s.fore_chan_maxops && i + 1 > s.fore_chan_maxops as usize {
+                        warn!("COMPOUND: total_ops {} > ca_maxoperations {} → TOO_MANY_OPS",
+                              total_ops, s.fore_chan_maxops);
+                        final_status = Nfs4Status::TooManyOps;
+                        results.push(OperationResult::Unsupported {
+                            opcode: 0,
+                            status: Nfs4Status::TooManyOps,
+                        });
+                        break;
+                    }
+                }
+            }
 
             // RFC 8881 §2.10.6.2 exactly-once: SEQUENCE detected an exact
             // resend with a cached reply on the slot. Stop touching state and
@@ -296,7 +379,7 @@ impl CompoundDispatcher {
                     back_chan_attrs: back_chan_attrs.clone(),
                     cb_program: 0,
                 };
-                let res = self.session_handler.handle_create_session(op);
+                let res = self.session_handler.handle_create_session(op, context);
                 if res.status == Nfs4Status::Ok {
                     OperationResult::CreateSession(res.status, Some(CreateSessionResult {
                         sessionid: res.sessionid,
@@ -368,10 +451,22 @@ impl CompoundDispatcher {
             }
 
             Operation::DestroyClientId(clientid) => {
-                // DESTROY_CLIENTID is used to destroy unused client IDs
-                // For now, we'll just return OK status
-                // TODO: Implement actual client cleanup in ClientManager
-                info!("DESTROY_CLIENTID: clientid={}", clientid);
+                // RFC 5661 §18.50: DESTROY_CLIENTID has two error paths.
+                //   * clientid does not exist → NFS4ERR_STALE_CLIENTID
+                //   * clientid exists but has live sessions → NFS4ERR_CLIENTID_BUSY
+                // The op is intended only to destroy *unused* client records.
+                if self.state_mgr.clients.get_client(clientid).is_none() {
+                    warn!("DESTROY_CLIENTID: unknown clientid {}", clientid);
+                    return OperationResult::DestroyClientId(Nfs4Status::StaleClientId);
+                }
+                let active_sessions = self.state_mgr.sessions.get_client_sessions(clientid);
+                if !active_sessions.is_empty() {
+                    warn!("DESTROY_CLIENTID: clientid {} has {} active session(s) → CLIENTID_BUSY",
+                          clientid, active_sessions.len());
+                    return OperationResult::DestroyClientId(Nfs4Status::ClientIdBusy);
+                }
+                self.state_mgr.clients.remove_client(clientid);
+                info!("DESTROY_CLIENTID: clientid={} destroyed", clientid);
                 OperationResult::DestroyClientId(Nfs4Status::Ok)
             }
 
@@ -1607,7 +1702,7 @@ mod tests {
         let request = CompoundRequest {
             tag: "test".to_string(),
             tag_valid: true,
-            minor_version: 2,
+            minor_version: 0, // NFSv4.0 — no SEQUENCE/session-enforcement
             operations: vec![
                 Operation::PutRootFh,
                 Operation::GetFh,
@@ -1662,7 +1757,7 @@ mod tests {
         let request = CompoundRequest {
             tag: "fileops".to_string(),
             tag_valid: true,
-            minor_version: 2,
+            minor_version: 0,
             operations: vec![
                 Operation::PutRootFh,
                 Operation::SaveFh,
@@ -1683,7 +1778,7 @@ mod tests {
         let request = CompoundRequest {
             tag: "error".to_string(),
             tag_valid: true,
-            minor_version: 2,
+            minor_version: 0,
             operations: vec![
                 Operation::GetFh,  // This will fail (no current FH)
                 Operation::PutRootFh,  // This won't execute

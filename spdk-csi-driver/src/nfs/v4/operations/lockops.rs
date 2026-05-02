@@ -604,7 +604,7 @@ mod tests {
     /// resolves client_id from the session id rather than hardcoding 1.
     fn create_test_session(handler: &LockOperationHandler, client_id: u64) -> SessionId {
         handler.state_mgr.sessions
-            .create_session(client_id, 0, 0, 1024 * 1024, 1024 * 1024, 64 * 1024, 8)
+            .create_session(client_id, 0, 0, 1024 * 1024, 1024 * 1024, 64 * 1024, 8, 8)
             .session_id
     }
 
