@@ -28,6 +28,10 @@ use tracing::{debug, error, info, warn};
 /// Metadata Server
 pub struct MetadataServer {
     config: MdsConfig,
+    /// Export root the MDS serves; passed to MdsControlService so it
+    /// can fulfill CreateVolume/DeleteVolume by manipulating files
+    /// under this directory.
+    export_path: std::path::PathBuf,
     device_registry: Arc<DeviceRegistry>,
     layout_manager: Arc<LayoutManager>,
     operation_handler: Arc<PnfsOperationHandler>,
@@ -48,7 +52,7 @@ impl MetadataServer {
         info!("📂 MDS export path: {:?}", export_path);
 
         // Initialize file handle manager with configured export path
-        let fh_manager = Arc::new(FileHandleManager::new(export_path));
+        let fh_manager = Arc::new(FileHandleManager::new(export_path.clone()));
 
         // Initialize state manager (for NFSv4 sessions, stateids)
         let state_mgr = Arc::new(StateManager::new(""));
@@ -108,6 +112,7 @@ impl MetadataServer {
 
         Ok(Self {
             config,
+            export_path,
             device_registry,
             layout_manager,
             operation_handler,
@@ -159,6 +164,7 @@ impl MetadataServer {
     fn start_grpc_server(&self) {
         let device_registry = Arc::clone(&self.device_registry);
         let bind_addr = self.config.bind.address.clone();
+        let export_path = self.export_path.clone();
         // Build the operator's `device_id → reachable endpoint` map from
         // the static config. The gRPC service uses this to override the
         // bind-address that registering DSes report (a DS only knows its
@@ -175,7 +181,9 @@ impl MetadataServer {
                 .parse()
                 .expect("Invalid gRPC address");
 
-            let control_service = MdsControlService::new(device_registry, configured_endpoints);
+            let control_service = MdsControlService::new(
+                device_registry, configured_endpoints, export_path,
+            );
             let svc = MdsControlServer::new(control_service);
 
             info!("🔧 Starting MDS gRPC control server on {}", grpc_addr);

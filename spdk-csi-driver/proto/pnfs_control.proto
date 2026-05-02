@@ -22,6 +22,55 @@ service MdsControl {
   
   // Unregister data server (clean shutdown)
   rpc UnregisterDataServer(UnregisterRequest) returns (UnregisterResponse);
+
+  // Provision a new pNFS volume — creates the metadata file under the
+  // MDS export, sized to `size_bytes`. Idempotent: a CreateVolume call
+  // with a matching size on an existing volume is a success; mismatch
+  // is an error. Called by the CSI provisioner on behalf of
+  // CreateVolume gRPC requests.
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+
+  // Delete a pNFS volume — removes the metadata file. Idempotent:
+  // DeleteVolume on an absent volume is a success.
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+}
+
+// CreateVolume request from CSI driver to MDS.
+message CreateVolumeRequest {
+  // CSI-provisioner-assigned volume ID. Becomes the file name under
+  // the MDS export. Must be safe as a filesystem path component
+  // (no slashes, no NUL).
+  string volume_id = 1;
+
+  // Total volume size in bytes. The MDS pre-allocates (sparse) to
+  // this size so kernel WRITEs at any offset within the volume succeed.
+  uint64 size_bytes = 2;
+}
+
+message CreateVolumeResponse {
+  // Whether the volume was created (or already existed with matching size).
+  bool created = 1;
+
+  // Absolute path of the MDS export root the client should mount
+  // (e.g. "/tmp/flint-pnfs-mds-exports"). The client mounts the
+  // export root, not the per-volume file.
+  string export_path = 2;
+
+  // Volume file name relative to `export_path`. Currently equal to
+  // `volume_id`, but kept separate to allow future per-tenant prefixes.
+  string volume_file = 3;
+
+  // Error message on failure (created=false). Empty on success.
+  string message = 4;
+}
+
+message DeleteVolumeRequest {
+  string volume_id = 1;
+}
+
+message DeleteVolumeResponse {
+  bool deleted = 1;
+  string message = 2;
 }
 
 // Registration request from DS to MDS
