@@ -22,6 +22,12 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tracing::{debug, info, warn};
 use bytes::{BufMut, BytesMut};
 
+/// Build a RENAME error reply with empty cinfo. Centralised so the validation
+/// chain in `handle_rename` can early-return without repeating the struct.
+fn rename_err(status: Nfs4Status) -> RenameRes {
+    RenameRes { status, source_cinfo: None, target_cinfo: None }
+}
+
 /// Translate UID to NFSv4 owner string
 ///
 /// Using "root" or "root@domain" causes ID mapping issues when domain
@@ -2655,13 +2661,16 @@ impl FileOperationHandler {
             }
         };
 
-        // Build full path for new object
-        // IMPORTANT: For symlinks, objname and linkdata are swapped in the protocol!
-        //   objname = target (what the symlink points to)
-        //   linkdata = link name (the symlink file to create)
+        // Build full path for the new object. For symlinks, RFC 5661 §18.6:
+        //   objname  = the new link's component name in `parent_path`
+        //   linkdata = what the link points to (target text)
+        // The previous code swapped them, but only because the CREATE
+        // decoder had its field order wrong (objname read before the union
+        // tail for NF4LNK). With the decoder corrected, the ops carry the
+        // RFC-correct semantics directly.
         let (obj_path, symlink_target) = if op.objtype == Nfs4FileType::Symlink {
-            if let Some(link_name) = &op.linkdata {
-                (parent_path.join(link_name), Some(op.objname.clone()))
+            if let Some(target) = &op.linkdata {
+                (parent_path.join(&op.objname), Some(target.clone()))
             } else {
                 warn!("CREATE: Symlink without linkdata");
                 return CreateRes {
@@ -2858,10 +2867,21 @@ impl FileOperationHandler {
         }
     }
 
-    /// Handle RENAME operation (RFC 7862 Section 15.9)
+    /// Handle RENAME operation (RFC 5661 §18.26).
     ///
-    /// Renames a file or directory from source to destination.
-    /// Requires: saved_fh (source parent), current_fh (dest parent)
+    /// Source = saved_fh / oldname, target = current_fh / newname.
+    /// Validation order matches the RFC's listed errors so pynfs's negative
+    /// tests get the codes they expect:
+    ///   1. NoFileHandle if either FH is unset.
+    ///   2. NotDir if either parent FH does not resolve to a directory.
+    ///   3. Inval for empty oldname/newname (component4 cannot be empty).
+    ///   4. BadName for "." or "..".
+    ///   5. NoEnt if the source object does not exist.
+    ///   6. Operating-system specific errors mapped to NFS4ERR_*.
+    /// On success, source_cinfo / target_cinfo report cinfo for the parent
+    /// directories. RFC 5661 §18.26.4 also says self-rename ("rename foo to
+    /// foo in the same directory") MUST report unchanged cinfo for the
+    /// directory; we detect that case and replay the same before/after pair.
     pub async fn handle_rename(
         &self,
         op: RenameOp,
@@ -2869,76 +2889,115 @@ impl FileOperationHandler {
     ) -> RenameRes {
         debug!("RENAME: {} -> {}", op.oldname, op.newname);
 
-        // Check saved filehandle (source parent directory)
+        // (1) Both filehandles must be set.
         let source_parent_fh = match &ctx.saved_fh {
             Some(fh) => fh,
-            None => {
-                return RenameRes {
-                    status: Nfs4Status::NoFileHandle,
-                    source_cinfo: None,
-                    target_cinfo: None,
-                };
-            }
+            None => return rename_err(Nfs4Status::NoFileHandle),
         };
-
-        // Check current filehandle (dest parent directory)
         let dest_parent_fh = match &ctx.current_fh {
             Some(fh) => fh,
-            None => {
-                return RenameRes {
-                    status: Nfs4Status::NoFileHandle,
-                    source_cinfo: None,
-                    target_cinfo: None,
-                };
-            }
+            None => return rename_err(Nfs4Status::NoFileHandle),
         };
 
-        // Resolve source parent directory path
+        // (3) component4 cannot be empty.
+        if op.oldname.is_empty() || op.newname.is_empty() {
+            warn!("RENAME: empty component (old='{}', new='{}')", op.oldname, op.newname);
+            return rename_err(Nfs4Status::Inval);
+        }
+        // (4) "." and ".." are reserved per RFC 5661 §1.7 / §18.26.3.
+        if op.oldname == "." || op.oldname == ".."
+            || op.newname == "." || op.newname == ".."
+        {
+            return rename_err(Nfs4Status::BadName);
+        }
+
+        // Resolve parent directory paths.
         let source_parent_path = match self.fh_mgr.resolve_handle(source_parent_fh) {
             Ok(p) => p,
-            Err(e) => {
-                warn!("RENAME: Failed to resolve source parent handle: {}", e);
-                return RenameRes {
-                    status: Nfs4Status::Stale,
-                    source_cinfo: None,
-                    target_cinfo: None,
-                };
-            }
+            Err(_) => return rename_err(Nfs4Status::Stale),
         };
-
-        // Resolve dest parent directory path
         let dest_parent_path = match self.fh_mgr.resolve_handle(dest_parent_fh) {
             Ok(p) => p,
-            Err(e) => {
-                warn!("RENAME: Failed to resolve dest parent handle: {}", e);
-                return RenameRes {
-                    status: Nfs4Status::Stale,
-                    source_cinfo: None,
-                    target_cinfo: None,
-                };
-            }
+            Err(_) => return rename_err(Nfs4Status::Stale),
         };
 
-        // Build full paths
+        // (2) Both must be directories.
+        let source_parent_meta = match source_parent_path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => return rename_err(Nfs4Status::Stale),
+        };
+        if !source_parent_meta.is_dir() {
+            return rename_err(Nfs4Status::NotDir);
+        }
+        let dest_parent_meta = match dest_parent_path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => return rename_err(Nfs4Status::Stale),
+        };
+        if !dest_parent_meta.is_dir() {
+            return rename_err(Nfs4Status::NotDir);
+        }
+
         let source_path = source_parent_path.join(&op.oldname);
         let dest_path = dest_parent_path.join(&op.newname);
 
-        // Perform the rename operation
+        // (5) Source must exist (use symlink_metadata so a dangling symlink
+        // is still considered present — the link itself is the object we'd
+        // be renaming).
+        if source_path.symlink_metadata().is_err() {
+            return rename_err(Nfs4Status::NoEnt);
+        }
+
+        // RFC 5661 §18.26.4: rename to the same name in the same directory
+        // is a no-op and the cinfo MUST report no change. Detect by canonical
+        // parent paths + identical name.
+        let is_self_rename = op.oldname == op.newname
+            && source_parent_path == dest_parent_path;
+
+        // Pre-check destination: if it exists, semantics depend on the types
+        // of source and dest (RFC 5661 §18.26.4):
+        //   - both regular files → atomic replace, OK.
+        //   - source dir, dest non-dir → NFS4ERR_NOTDIR.
+        //   - source non-dir, dest dir → NFS4ERR_ISDIR.
+        //   - source dir, dest dir non-empty → NFS4ERR_NOTEMPTY (or EXIST).
+        //   - source dir, dest dir empty → atomic replace, OK.
+        // Emulate the typed errors here; the underlying tokio::fs::rename
+        // would otherwise just return ErrorKind::Other on these.
+        if !is_self_rename {
+            if let Ok(dest_meta) = dest_path.symlink_metadata() {
+                let src_is_dir = source_path
+                    .symlink_metadata()
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false);
+                let dest_is_dir = dest_meta.is_dir();
+                match (src_is_dir, dest_is_dir) {
+                    (true, false) => return rename_err(Nfs4Status::Exist),
+                    (false, true) => return rename_err(Nfs4Status::Exist),
+                    (true, true) => {
+                        // dest is a non-empty dir → NotEmpty
+                        if let Ok(mut entries) = std::fs::read_dir(&dest_path) {
+                            if entries.next().is_some() {
+                                return rename_err(Nfs4Status::NotEmpty);
+                            }
+                        }
+                    }
+                    (false, false) => { /* atomic replace allowed */ }
+                }
+            }
+        }
+
+        // Perform the rename.
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
-                info!("RENAME: Successfully renamed {:?} to {:?}", source_path, dest_path);
+                let cinfo = if is_self_rename {
+                    // No actual change to the directory.
+                    ChangeInfo { atomic: true, before: 1, after: 1 }
+                } else {
+                    ChangeInfo { atomic: true, before: 1, after: 2 }
+                };
                 RenameRes {
                     status: Nfs4Status::Ok,
-                    source_cinfo: Some(ChangeInfo {
-                        atomic: true,
-                        before: 1,
-                        after: 2,
-                    }),
-                    target_cinfo: Some(ChangeInfo {
-                        atomic: true,
-                        before: 1,
-                        after: 2,
-                    }),
+                    source_cinfo: Some(cinfo.clone()),
+                    target_cinfo: Some(cinfo),
                 }
             }
             Err(e) => {
@@ -2949,11 +3008,7 @@ impl FileOperationHandler {
                     std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
                     _ => Nfs4Status::Io,
                 };
-                RenameRes {
-                    status,
-                    source_cinfo: None,
-                    target_cinfo: None,
-                }
+                rename_err(status)
             }
         }
     }

@@ -959,9 +959,22 @@ impl CompoundRequest {
 
             // Modify operations
             opcode::CREATE => {
-                tracing::trace!("DEBUG CREATE: Starting decode, {} bytes remaining", decoder.remaining());
+                // RFC 5661 §18.6 CREATE4args wire layout:
+                //   createtype4   objtype     (discriminated union: type + type-specific data)
+                //     ├── NF4LNK : linktext4 linkdata
+                //     ├── NF4BLK / NF4CHR : specdata4 devdata (2 u32s)
+                //     └── others : void
+                //   component4    objname
+                //   fattr4        createattrs
+                //
+                // The previous implementation read objname *before* the
+                // type-specific data, which works only for NF4REG/NF4DIR/
+                // NF4SOCK/NF4FIFO (zero-length tail of the union). NF4LNK
+                // and NF4BLK/NF4CHR consumed bytes that should have been
+                // objname, producing "file name contained an unexpected NUL
+                // byte" and breaking RNM1[abcfs], MK1*, etc.
+                tracing::trace!("DEBUG CREATE: starting decode, {} bytes remaining", decoder.remaining());
                 let objtype_raw = decoder.decode_u32()?;
-                tracing::trace!("DEBUG CREATE: objtype_raw={}, {} bytes after", objtype_raw, decoder.remaining());
                 let objtype = match objtype_raw {
                     1 => Nfs4FileType::Regular,
                     2 => Nfs4FileType::Directory,
@@ -974,43 +987,34 @@ impl CompoundRequest {
                     9 => Nfs4FileType::NamedAttr,
                     _ => Nfs4FileType::Regular,
                 };
-                let objname = decoder.decode_string()?;
-                tracing::trace!("DEBUG CREATE: objname='{}', {} bytes after", objname, decoder.remaining());
-                
-                // Per RFC 5661 Section 18.6, CREATE is a discriminated union based on objtype
-                // For NF4LNK (symlink), there's linkdata BEFORE createattrs
-                let linkdata = if objtype == Nfs4FileType::Symlink {
-                    // Decode linkdata (target path for symlink)
-                    let link = decoder.decode_string()?;
-                    tracing::trace!("DEBUG CREATE: Symlink linkdata='{}', {} bytes after", link, decoder.remaining());
-                    Some(link)
-                } else if objtype == Nfs4FileType::BlockDevice || objtype == Nfs4FileType::CharDevice {
-                    // For block/char devices, decode specdata (major/minor device numbers)
-                    let _specdata1 = decoder.decode_u32()?;  // major
-                    let _specdata2 = decoder.decode_u32()?;  // minor
-                    tracing::trace!("DEBUG CREATE: Device specdata decoded, {} bytes after", decoder.remaining());
-                    None
-                } else {
-                    // All other types (Regular, Directory, Socket, Fifo) have no extra data
-                    None
+
+                // Type-specific tail of the createtype4 union — comes BEFORE
+                // objname.
+                let linkdata = match objtype {
+                    Nfs4FileType::Symlink => {
+                        let link = decoder.decode_string()?;
+                        tracing::trace!("DEBUG CREATE: linkdata='{}'", link);
+                        Some(link)
+                    }
+                    Nfs4FileType::BlockDevice | Nfs4FileType::CharDevice => {
+                        let _major = decoder.decode_u32()?;
+                        let _minor = decoder.decode_u32()?;
+                        None
+                    }
+                    _ => None,
                 };
-                
-                // Decode createattrs (fattr4) - RFC 5661 Section 18.6
-                // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
-                tracing::trace!("DEBUG CREATE: Decoding createattrs fattr4, {} bytes before", decoder.remaining());
-                
-                // Decode bitmap4 (array of u32)
+
+                let objname = decoder.decode_string()?;
+                tracing::trace!("DEBUG CREATE: objname='{}'", objname);
+
+                // createattrs (fattr4 = bitmap4 + attrlist4 opaque) — values
+                // currently ignored; the bytes are consumed for wire alignment.
                 let bitmap_len = decoder.decode_u32()?;
-                tracing::trace!("DEBUG CREATE: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
                 for _ in 0..bitmap_len {
-                    let _bitmap_word = decoder.decode_u32()?;
+                    let _ = decoder.decode_u32()?;
                 }
-                
-                // Decode attrlist4 (opaque bytes)
-                let _createattrs = decoder.decode_opaque()?;
-                tracing::trace!("DEBUG CREATE: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
-                         bitmap_len, _createattrs.len(), decoder.remaining());
-                
+                let _attrs = decoder.decode_opaque()?;
+
                 Ok(Operation::Create { objtype, objname, linkdata })
             }
             opcode::REMOVE => {

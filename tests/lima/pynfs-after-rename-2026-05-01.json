@@ -1,0 +1,1927 @@
+{
+    "errors": 0,
+    "failures": 63,
+    "name": "all",
+    "skipped": 92,
+    "testcase": [
+        {
+            "classname": "st_courtesy",
+            "code": "COUR6",
+            "name": "testShareReservationDB03",
+            "time": "100.03793787956238"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR5",
+            "name": "testShareReservationDB02",
+            "time": "100.03016066551208"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR4",
+            "name": "testShareReservationDB01",
+            "time": "0.017632722854614258"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_courtesy.py\", line 115, in testShareReservation00\n    check(res, NFS4ERR_SHARE_DENIED)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_OPEN should return NFS4ERR_SHARE_DENIED, instead got NFS4_OK\n",
+                "message": "OP_OPEN should return NFS4ERR_SHARE_DENIED, instead got NFS4_OK"
+            },
+            "name": "testShareReservation00",
+            "time": "0.006633758544921875"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR1",
+            "name": "testLockSleepLockU",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_courtesy.py\", line 72, in testLockSleepLock\n    check(res, NFS4_OK)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testLockSleepLock",
+            "time": "0.005974531173706055"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR7",
+            "name": "testExpiringManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT5",
+            "name": "testUpdateOfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT7",
+            "name": "testUpdateExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT8",
+            "name": "testRemoveNonExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT9",
+            "name": "testRemoveExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT10",
+            "name": "testListNoAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT11",
+            "name": "testListAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT1",
+            "name": "testGetXattrAttribute",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT2",
+            "name": "testGetMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT6",
+            "name": "testExclusiveCreateAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT4",
+            "name": "testCreateNewIfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT3",
+            "name": "testCreateNewAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFST1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLA1",
+            "name": "testFlexLayoutTestAccess",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLG2",
+            "name": "testFlexLayoutStress",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS3",
+            "name": "testFlexLayoutStatsStraight",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS1",
+            "name": "testFlexLayoutStatsSmall",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS2",
+            "name": "testFlexLayoutStatsReset",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS4",
+            "name": "testFlexLayoutStatsOverflow",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEWRITE",
+            "name": "testFlexLayoutReturnStaleWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEREAD",
+            "name": "testFlexLayoutReturnStaleRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTWRITE",
+            "name": "testFlexLayoutReturnServerFaultWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTREAD",
+            "name": "testFlexLayoutReturnServerFaultRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOWRITE",
+            "name": "testFlexLayoutReturnNxioWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOREAD",
+            "name": "testFlexLayoutReturnNxioRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPCWRITE",
+            "name": "testFlexLayoutReturnNospcWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPC",
+            "name": "testFlexLayoutReturnNospcRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOWRITE",
+            "name": "testFlexLayoutReturnIoWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOREAD",
+            "name": "testFlexLayoutReturnIoRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR1",
+            "name": "testFlexLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIGWRITE",
+            "name": "testFlexLayoutReturnFbigWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIG",
+            "name": "testFlexLayoutReturnFbigRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYWRITE",
+            "name": "testFlexLayoutReturnDelayWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYREAD",
+            "name": "testFlexLayoutReturnDelayRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSWRITE",
+            "name": "testFlexLayoutReturnAccessWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSREAD",
+            "name": "testFlexLayoutReturnAccessRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR100",
+            "name": "testFlexLayoutReturn100",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOOS",
+            "name": "testFlexLayoutOldSeqid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFGDI1",
+            "name": "testFlexGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC1",
+            "name": "testAllocateSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC2",
+            "name": "testAllocateStateidZero",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC3",
+            "name": "testAllocateStateidOne",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 65, in testOpenWriteClose\n    check(res, NFS4_OK)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_WRITE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_WRITE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testOpenWriteClose",
+            "time": "0.005687236785888672"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID8",
+            "name": "testOpenSetattr",
+            "time": "0.013445377349853516"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID10",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 214, in testOpenSaveFHLookupRestoreFHClose\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CLOSE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_CLOSE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testOpenSaveFHLookupRestoreFHClose",
+            "time": "0.006502866744995117"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID5",
+            "name": "testOpenLookupClose",
+            "time": "0.00893712043762207"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID7",
+            "name": "testOpenLayoutGet",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID9",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 189, in testOpenFreestateidClose\n    check(res, NFS4ERR_LOCKS_HELD)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_FREE_STATEID should return NFS4ERR_LOCKS_HELD, instead got NFS4ERR_NOTSUPP\n",
+                "message": "OP_FREE_STATEID should return NFS4ERR_LOCKS_HELD, instead got NFS4ERR_NOTSUPP"
+            },
+            "name": "testOpenFreestateidClose",
+            "time": "0.005362749099731445"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID1",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 27, in testOpenAndClose\n    check(res, NFS4_OK)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CLOSE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_CLOSE should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testOpenAndClose",
+            "time": "0.004334688186645508"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 89, in testLockWriteLocku\n    check(res, NFS4_OK)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testLockWriteLocku",
+            "time": "0.005764007568359375"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_current_stateid.py\", line 48, in testLockLockU\n    check(res, NFS4_OK)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID\n",
+                "message": "OP_LOCK should return NFS4_OK, instead got NFS4ERR_BAD_STATEID"
+            },
+            "name": "testLockLockU",
+            "time": "0.00579833984375"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID6",
+            "name": "testCloseNoStateid",
+            "time": "0.015883684158325195"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK2",
+            "name": "testStateid2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK4",
+            "name": "testSplitCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK3",
+            "name": "testEmptyCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4c",
+            "name": "testRebootWithManyManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2c",
+            "name": "testRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4b",
+            "name": "testRebootWithManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2b",
+            "name": "testRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4a",
+            "name": "testRebootWithManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2a",
+            "name": "testRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT5",
+            "name": "testRebootWithLateReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT1",
+            "name": "testRebootValid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3c",
+            "name": "testDoubleRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3b",
+            "name": "testDoubleRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3a",
+            "name": "testDoubleRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1s",
+            "name": "testSocket",
+            "time": "0.004889965057373047"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_putfh.py\", line 36, in testLink\n    _try_put(t, sess, env.opts.uselink)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_putfh.py\", line 9, in _try_put\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT\n",
+                "message": "OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT"
+            },
+            "name": "testLink",
+            "time": "0.0033044815063476562"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1r",
+            "name": "testFile",
+            "time": "0.006873130798339844"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1f",
+            "name": "testFifo",
+            "time": "0.006146669387817383"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1d",
+            "name": "testDir",
+            "time": "0.005669832229614258"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1c",
+            "name": "testChar",
+            "time": "0.005370616912841797"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1b",
+            "name": "testBlock",
+            "time": "0.008598566055297852"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH2",
+            "name": "testBadHandle",
+            "time": "0.0041010379791259766"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM6",
+            "name": "testZeroLengthOldname",
+            "time": "0.00828862190246582"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM7",
+            "name": "testZeroLengthNewname",
+            "time": "0.008705377578735352"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1s",
+            "name": "testValidSocket",
+            "time": "0.012625455856323242"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1a",
+            "name": "testValidLink",
+            "time": "0.011649370193481445"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1r",
+            "name": "testValidFile",
+            "time": "0.013065576553344727"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1f",
+            "name": "testValidFifo",
+            "time": "0.011890411376953125"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1d",
+            "name": "testValidDir",
+            "time": "0.014718770980834961"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1c",
+            "name": "testValidChar",
+            "time": "0.011648893356323242"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1b",
+            "name": "testValidBlock",
+            "time": "0.011616706848144531"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM21",
+            "name": "testStaleRename",
+            "time": "0.012972116470336914"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2s",
+            "name": "testSfhSocket",
+            "time": "0.007162809371948242"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_rename.py\", line 144, in testSfhLink\n    res = rename_obj(sess, env.opts.uselink + [name], env.c1.homedir + [name])\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 672, in rename_obj\n    olddir = lookup_obj(sess, oldpath[:-1])\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 668, in lookup_obj\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT\n",
+                "message": "OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT"
+            },
+            "name": "testSfhLink",
+            "time": "0.004379987716674805"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2r",
+            "name": "testSfhFile",
+            "time": "0.009741783142089844"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2f",
+            "name": "testSfhFifo",
+            "time": "0.008239030838012695"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2c",
+            "name": "testSfhChar",
+            "time": "0.007363557815551758"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2b",
+            "name": "testSfhBlock",
+            "time": "0.00683140754699707"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM19",
+            "name": "testSelfRenameFile",
+            "time": "0.009476423263549805"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM18",
+            "name": "testSelfRenameDir",
+            "time": "0.008440017700195312"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM5",
+            "name": "testNonExistent",
+            "time": "0.009215593338012695"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM4",
+            "name": "testNoSfh",
+            "time": "0.005640745162963867"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM20",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_rename.py\", line 524, in testLinkRename\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LINK should return NFS4_OK, instead got NFS4ERR_ACCESS\n",
+                "message": "OP_LINK should return NFS4_OK, instead got NFS4ERR_ACCESS"
+            },
+            "name": "testLinkRename",
+            "time": "0.007930755615234375"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM17",
+            "name": "testFileToFullDir",
+            "time": "0.014392852783203125"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM15",
+            "name": "testFileToFile",
+            "time": "0.012459039688110352"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM14",
+            "name": "testFileToDir",
+            "time": "0.012965917587280273"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM10",
+            "name": "testDotsOldname",
+            "time": "0.014267683029174805"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM11",
+            "name": "testDotsNewname",
+            "time": "0.012907743453979492"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM12",
+            "name": "testDirToObj",
+            "time": "0.012557029724121094"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM16",
+            "name": "testDirToFullDir",
+            "time": "0.013099193572998047"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM13",
+            "name": "testDirToDir",
+            "time": "0.01180720329284668"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3s",
+            "name": "testCfhSocket",
+            "time": "0.008046627044677734"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_rename.py\", line 214, in testCfhLink\n    res = rename_obj(sess, env.c1.homedir + [name], env.opts.uselink + [name])\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 673, in rename_obj\n    newdir = lookup_obj(sess, newpath[:-1])\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 668, in lookup_obj\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT\n",
+                "message": "OP_LOOKUP should return NFS4_OK, instead got NFS4ERR_NOENT"
+            },
+            "name": "testCfhLink",
+            "time": "0.006195783615112305"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3r",
+            "name": "testCfhFile",
+            "time": "0.013139963150024414"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3f",
+            "name": "testCfhFifo",
+            "time": "0.009391307830810547"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3c",
+            "name": "testCfhChar",
+            "time": "0.00811004638671875"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3b",
+            "name": "testCfhBlock",
+            "time": "0.00866079330444336"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM8",
+            "name": "testBadutf8Oldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM9",
+            "name": "testBadutf8Newname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP4",
+            "name": "testXdev",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1s",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 97, in testSock\n    check(res, NFS4ERR_NOTDIR, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK"
+            },
+            "name": "testSock",
+            "time": "0.0035712718963623047"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP3",
+            "name": "testNoFH",
+            "time": "0.00560307502746582"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP2",
+            "name": "testLookuppRoot",
+            "time": "0.005377054214477539"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1d",
+            "name": "testLookupp",
+            "time": "0.004721641540527344"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 61, in testLink\n    check(res, NFS4ERR_SYMLINK, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_SYMLINK, instead got NFS4ERR_NOENT\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_SYMLINK, instead got NFS4ERR_NOENT"
+            },
+            "name": "testLink",
+            "time": "0.0033364295959472656"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1r",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 37, in testFile\n    check(res, NFS4ERR_NOTDIR, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK"
+            },
+            "name": "testFile",
+            "time": "0.0034775733947753906"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1f",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 49, in testFifo\n    check(res, NFS4ERR_NOTDIR, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK"
+            },
+            "name": "testFifo",
+            "time": "0.004105329513549805"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1c",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 85, in testChar\n    check(res, NFS4ERR_NOTDIR, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK"
+            },
+            "name": "testChar",
+            "time": "0.003446340560913086"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1b",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_lookupp.py\", line 73, in testBlock\n    check(res, NFS4ERR_NOTDIR, \"LOOKUPP with non-dir <cfh>\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK\n",
+                "message": "LOOKUPP with non-dir <cfh> should return NFS4ERR_NOTDIR, instead got NFS4_OK"
+            },
+            "name": "testBlock",
+            "time": "0.0033354759216308594"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET2",
+            "name": "testLayoutReturnFsid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET1",
+            "name": "testLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET3",
+            "name": "testLayoutReturnAll",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTCOMMIT1",
+            "name": "testLayoutCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT1",
+            "name": "testGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDLIST1",
+            "name": "testGetDevList",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDINFO1",
+            "name": "testGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT100",
+            "name": "testEMCGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_verify",
+            "code": "VF1r",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_verify.py\", line 65, in testMandFile\n    _try_mand(t, env, env.opts.usefile)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_verify.py\", line 15, in _try_mand\n    check(res, msg=\"Verifying mandatory attributes against getattr\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Verifying mandatory attributes against getattr should return NFS4_OK, instead got NFS4ERR_NOTSUPP\n",
+                "message": "Verifying mandatory attributes against getattr should return NFS4_OK, instead got NFS4ERR_NOTSUPP"
+            },
+            "name": "testMandFile",
+            "time": "0.012343406677246094"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG9",
+            "name": "testWriteOpenvsReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG2",
+            "name": "testWriteDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG23",
+            "name": "testServerSelfConflict3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG1",
+            "name": "testReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG4",
+            "name": "testNoDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG8",
+            "name": "testDelegRevocation",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG6",
+            "name": "testCBSecParmsNull",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG7",
+            "name": "testCBSecParmsChange",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG5",
+            "name": "testCBSecParms",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG3",
+            "name": "testAnyDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN1",
+            "name": "testSupported",
+            "time": "0.018822669982910156"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 58, in testServerStateSeqid\n    expect(res, seqid=2)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 18, in expect\n    fail(\"Expected open_stateid.seqid == %i, got %i\" % (seqid, got))\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Expected open_stateid.seqid == 2, got 1\n",
+                "message": "Expected open_stateid.seqid == 2, got 1"
+            },
+            "name": "testServerStateSeqid",
+            "time": "0.005163669586181641"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN30",
+            "name": "testReadWrite",
+            "time": "0.01519918441772461"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN7",
+            "name": "testOPENClaimFH",
+            "time": "0.014179229736328125"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 138, in testEXCLUSIVE4AtNameAttribute\n    check(res, NFS4ERR_EXIST)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_EXIST, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_EXIST, instead got NFS4_OK"
+            },
+            "name": "testEXCLUSIVE4AtNameAttribute",
+            "time": "0.004885673522949219"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN8",
+            "name": "testCloseWithZeroSeqid",
+            "time": "0.00843191146850586"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN31",
+            "name": "testAnonReadWrite",
+            "time": "0.01376652717590332"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK2",
+            "name": "testUseTwoSessions",
+            "time": "0.008713483810424805"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK1",
+            "name": "testTwoSessions",
+            "time": "0.0051116943359375"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ7",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 92, in testTooManyOps\n    check(res, NFS4ERR_TOO_MANY_OPS)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETATTR should return NFS4ERR_TOO_MANY_OPS, instead got NFS4_OK\n",
+                "message": "OP_GETATTR should return NFS4ERR_TOO_MANY_OPS, instead got NFS4_OK"
+            },
+            "name": "testTooManyOps",
+            "time": "0.004091739654541016"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ1",
+            "name": "testSupported",
+            "time": "0.0060482025146484375"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ12",
+            "name": "testSessionidSequenceidSlotid",
+            "time": "0.004438638687133789"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 68, in testRequestTooBig\n    sess1 = c1.create_session(fore_attrs = attrs)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 413, in create_session\n    nfs4lib.check(res)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_CREATE_SESSION should return NFS4_OK, instead got NFS4ERR_TOOSMALL\n",
+                "message": "nfs4lib.NFS4Error: OP_CREATE_SESSION should return NFS4_OK, instead got NFS4ERR_TOOSMALL\n"
+            },
+            "name": "testRequestTooBig",
+            "time": "0.001893758773803711"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ10b",
+            "name": "testReplayCache007",
+            "time": "0.008713006973266602"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9f",
+            "name": "testReplayCache006",
+            "time": "0.005160808563232422"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9e",
+            "name": "testReplayCache005",
+            "time": "0.005333900451660156"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9d",
+            "name": "testReplayCache004",
+            "time": "0.005994081497192383"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9c",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 160, in testReplayCache003\n    check(res1, NFS4ERR_INVAL)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOOKUP should return NFS4ERR_INVAL, instead got NFS4_OK\n",
+                "message": "OP_LOOKUP should return NFS4ERR_INVAL, instead got NFS4_OK"
+            },
+            "name": "testReplayCache003",
+            "time": "0.003390789031982422"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9b",
+            "name": "testReplayCache002",
+            "time": "0.009471416473388672"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9a",
+            "name": "testReplayCache001",
+            "time": "0.005340099334716797"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ11",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 248, in testOpNotInSession\n    check(res, NFS4ERR_OP_NOT_IN_SESSION)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_PUTROOTFH should return NFS4ERR_OP_NOT_IN_SESSION, instead got NFS4_OK\n",
+                "message": "OP_PUTROOTFH should return NFS4ERR_OP_NOT_IN_SESSION, instead got NFS4_OK"
+            },
+            "name": "testOpNotInSession",
+            "time": "0.0018463134765625"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 29, in testNotFirst\n    check(res, NFS4ERR_SEQUENCE_POS)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SEQUENCE should return NFS4ERR_SEQUENCE_POS, instead got NFS4_OK\n",
+                "message": "OP_SEQUENCE should return NFS4ERR_SEQUENCE_POS, instead got NFS4_OK"
+            },
+            "name": "testNotFirst",
+            "time": "0.003029346466064453"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ4",
+            "name": "testImplicitBind",
+            "time": "0.007645606994628906"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ8",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 106, in testBadSlot\n    check(res, NFS4ERR_BADSLOT)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SEQUENCE should return NFS4ERR_BADSLOT, instead got NFS4_OK\n",
+                "message": "OP_SEQUENCE should return NFS4ERR_BADSLOT, instead got NFS4_OK"
+            },
+            "name": "testBadSlot",
+            "time": "0.0060977935791015625"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ5",
+            "name": "testBadSession",
+            "time": "0.002538442611694336"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ13",
+            "name": "testBadSequenceidAtSlot",
+            "time": "0.0057642459869384766"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_secinfo.py\", line 64, in testSupported2\n    check(res, NFS4ERR_NOFILEHANDLE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SECINFO should return NFS4ERR_NOFILEHANDLE, instead got NFS4ERR_NOTSUPP\n",
+                "message": "OP_SECINFO should return NFS4ERR_NOFILEHANDLE, instead got NFS4ERR_NOTSUPP"
+            },
+            "name": "testSupported2",
+            "time": "0.006444692611694336"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC1",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_secinfo.py\", line 33, in testSupported\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SECINFO should return NFS4_OK, instead got NFS4ERR_NOTSUPP\n",
+                "message": "OP_SECINFO should return NFS4_OK, instead got NFS4ERR_NOTSUPP"
+            },
+            "name": "testSupported",
+            "time": "0.005782365798950195"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN4",
+            "name": "testSupported4",
+            "time": "0.007470130920410156"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_secinfo_no_name.py\", line 50, in testSupported3\n    check(res, NFS4ERR_NOENT)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SECINFO_NO_NAME should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "OP_SECINFO_NO_NAME should return NFS4ERR_NOENT, instead got NFS4_OK"
+            },
+            "name": "testSupported3",
+            "time": "0.0033347606658935547"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_secinfo_no_name.py\", line 36, in testSupported2\n    check(res, NFS4ERR_NOFILEHANDLE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_NOFILEHANDLE, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_NOFILEHANDLE, instead got NFS4_OK"
+            },
+            "name": "testSupported2",
+            "time": "0.003275156021118164"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN1",
+            "name": "testSupported",
+            "time": "0.007776021957397461"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC1",
+            "name": "testSupported",
+            "time": "0.005305290222167969"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_reclaim_complete.py\", line 48, in testReclaimAfterRECC\n    check(res, NFS4ERR_NO_GRACE, warnlist = [NFS4ERR_EXIST | NFS4ERR_RECLAIM_BAD])\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_NO_GRACE, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_NO_GRACE, instead got NFS4_OK"
+            },
+            "name": "testReclaimAfterRECC",
+            "time": "0.005207061767578125"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_reclaim_complete.py\", line 70, in testOpenBeforeRECC\n    check(res, NFS4ERR_GRACE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK"
+            },
+            "name": "testOpenBeforeRECC",
+            "time": "0.0035696029663085938"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_reclaim_complete.py\", line 88, in testDoubleRECC\n    check(res, NFS4ERR_COMPLETE_ALREADY)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_RECLAIM_COMPLETE should return NFS4ERR_COMPLETE_ALREADY, instead got NFS4_OK\n",
+                "message": "OP_RECLAIM_COMPLETE should return NFS4ERR_COMPLETE_ALREADY, instead got NFS4_OK"
+            },
+            "name": "testDoubleRECC",
+            "time": "0.003945589065551758"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID1",
+            "name": "testSupported",
+            "time": "0.007082462310791016"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID2",
+            "name": "testDestroyCIDWS",
+            "time": "0.005910634994506836"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID8",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_destroy_clientid.py\", line 99, in testDestroyCIDTwice\n    check(res, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testDestroyCIDTwice",
+            "time": "0.002765655517578125"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID5",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_destroy_clientid.py\", line 64, in testDestroyCIDSessionB\n    check(res, NFS4ERR_CLIENTID_BUSY)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_DESTROY_CLIENTID should return NFS4ERR_CLIENTID_BUSY, instead got NFS4_OK\n",
+                "message": "OP_DESTROY_CLIENTID should return NFS4ERR_CLIENTID_BUSY, instead got NFS4_OK"
+            },
+            "name": "testDestroyCIDSessionB",
+            "time": "0.0034415721893310547"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID7",
+            "name": "testDestroyCIDNotOnly",
+            "time": "0.003043651580810547"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_destroy_clientid.py\", line 76, in testDestroyCIDCSession\n    check(res, NFS4ERR_CLIENTID_BUSY)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_DESTROY_CLIENTID should return NFS4ERR_CLIENTID_BUSY, instead got NFS4_OK\n",
+                "message": "OP_DESTROY_CLIENTID should return NFS4ERR_CLIENTID_BUSY, instead got NFS4_OK"
+            },
+            "name": "testDestroyCIDCSession",
+            "time": "0.0035445690155029297"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_destroy_clientid.py\", line 40, in testDestroyBadCIDWS\n    check(res, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testDestroyBadCIDWS",
+            "time": "0.001108407974243164"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_destroy_clientid.py\", line 52, in testDestroyBadCIDIS\n    check(res, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_DESTROY_CLIENTID should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testDestroyBadCIDIS",
+            "time": "0.0030765533447265625"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9006",
+            "name": "testDestroyLockConfRace",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS1",
+            "name": "testDestroyBasic",
+            "time": "0.013090372085571289"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9003",
+            "name": "testDestroy3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9002",
+            "name": "testDestroy2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9001",
+            "name": "testDestroy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9005",
+            "name": "testDestoryNotSoleOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9004",
+            "name": "testDestoryNotFinalOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS28",
+            "name": "testTooSmallMaxReq",
+            "time": "0.002649068832397461"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS25",
+            "name": "testTooSmallMaxRS",
+            "time": "0.0023071765899658203"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2b",
+            "name": "testSupported2b",
+            "time": "0.007949590682983398"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2",
+            "name": "testSupported2",
+            "time": "0.006596088409423828"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS1",
+            "name": "testSupported1",
+            "time": "0.003637552261352539"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS6",
+            "name": "testReplay2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5b",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 162, in testReplay1b\n    fail(\"Replay results not equal\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Replay results not equal\n",
+                "message": "Replay results not equal"
+            },
+            "name": "testReplay1b",
+            "time": "0.004209995269775391"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 137, in testReplay1a\n    fail(\"Replay results not equal\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Replay results not equal\n",
+                "message": "Replay results not equal"
+            },
+            "name": "testReplay1a",
+            "time": "0.004846334457397461"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 112, in testReplay1\n    fail(\"Replay results not equal\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Replay results not equal\n",
+                "message": "Replay results not equal"
+            },
+            "name": "testReplay1",
+            "time": "0.002665281295776367"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS27",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 495, in testRepTooBigToCache\n    check(res, NFS4ERR_REP_TOO_BIG_TO_CACHE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_SEQUENCE should return NFS4ERR_REP_TOO_BIG_TO_CACHE, instead got NFS4_OK\n",
+                "message": "OP_SEQUENCE should return NFS4ERR_REP_TOO_BIG_TO_CACHE, instead got NFS4_OK"
+            },
+            "name": "testRepTooBigToCache",
+            "time": "0.0026509761810302734"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS26",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 465, in testRepTooBig\n    sess1 = c1.create_session(fore_attrs=chan_attrs)\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 413, in create_session\n    nfs4lib.check(res)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_CREATE_SESSION should return NFS4_OK, instead got NFS4ERR_TOOSMALL\n",
+                "message": "nfs4lib.NFS4Error: OP_CREATE_SESSION should return NFS4_OK, instead got NFS4ERR_TOOSMALL\n"
+            },
+            "name": "testRepTooBig",
+            "time": "0.001998424530029297"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS19",
+            "name": "testRdmaArray2",
+            "time": "0.0075359344482421875"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS18",
+            "name": "testRdmaArray1",
+            "time": "0.003999948501586914"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS17",
+            "name": "testRdmaArray0",
+            "time": "0.003541231155395508"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS10",
+            "name": "testPrincipalCollision2",
+            "time": "0.003087759017944336"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS9",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 218, in testPrincipalCollision1\n    check(res, NFS4ERR_CLID_INUSE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_CLID_INUSE, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_CLID_INUSE, instead got NFS4_OK"
+            },
+            "name": "testPrincipalCollision1",
+            "time": "0.002179861068725586"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS23",
+            "name": "testNotOnlyOp",
+            "time": "0.0023262500762939453"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS3",
+            "name": "testNoExchange",
+            "time": "0.0010035037994384766"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS22",
+            "name": "testMaxreqs",
+            "time": "0.0035686492919921875"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS200",
+            "name": "testManyClients",
+            "time": "0.04244804382324219"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS29",
+            "name": "testDRCMemLeak",
+            "time": "7.632808208465576"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS24",
+            "name": "testCsr_sequence",
+            "time": "0.0038843154907226562"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS4",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 94, in testContrivedReplay\n    check(res, NFS4ERR_SEQ_MISORDERED)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK"
+            },
+            "name": "testContrivedReplay",
+            "time": "0.001947641372680664"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16a",
+            "name": "testCbSecParmsDec",
+            "time": "0.0045354366302490234"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16",
+            "name": "testCbSecParms",
+            "time": "0.003577709197998047"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS21",
+            "name": "testCallbackVersion",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS20",
+            "name": "testCallbackProgram",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS8",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 208, in testBadSeqnum2\n    check(res2, NFS4ERR_SEQ_MISORDERED)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK"
+            },
+            "name": "testBadSeqnum2",
+            "time": "0.0027246475219726562"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS7",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_create_session.py\", line 194, in testBadSeqnum1\n    check(res2, NFS4ERR_SEQ_MISORDERED)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_SEQ_MISORDERED, instead got NFS4_OK"
+            },
+            "name": "testBadSeqnum1",
+            "time": "0.002506732940673828"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS15",
+            "name": "testBadFlag",
+            "time": "0.003927469253540039"
+        },
+        {
+            "classname": "st_copy",
+            "code": "COPY5",
+            "name": "testZeroLengthCopy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP1",
+            "name": "testZeroOps",
+            "time": "0.001058816909790039"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP5",
+            "name": "testUndefined",
+            "time": "0.003815889358520508"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4b",
+            "name": "testInvalidMinor2",
+            "time": "0.0009665489196777344"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4a",
+            "name": "testInvalidMinor",
+            "time": "0.001043558120727539"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP2",
+            "name": "testGoodTag",
+            "time": "0.001001596450805664"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP3",
+            "name": "testBadTags",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 326, in testUpdateNonexistant\n    check(res, NFS4ERR_NOENT, \"Update a non-existant record\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Update a non-existant record should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "Update a non-existant record should return NFS4ERR_NOENT, instead got NFS4_OK"
+            },
+            "name": "testUpdateNonexistant",
+            "time": "0.0021691322326660156"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6h",
+            "name": "testUpdate111",
+            "time": "0.0045015811920166016"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6g",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 424, in testUpdate110\n    c2 = env.c1.new_client(env.testname(t),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_PERM, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_PERM, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate110",
+            "time": "0.0034368038177490234"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6f",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 409, in testUpdate101\n    c2 = env.c1.new_client(env.testname(t), verf=env.new_verifier(),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOT_SAME, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOT_SAME, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate101",
+            "time": "0.006818056106567383"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6e",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 397, in testUpdate100\n    check(res, [NFS4ERR_NOT_SAME, NFS4ERR_PERM])\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_EXCHANGE_ID should return NFS4ERR_NOT_SAME or NFS4ERR_PERM, instead got NFS4_OK\n",
+                "message": "OP_EXCHANGE_ID should return NFS4ERR_NOT_SAME or NFS4ERR_PERM, instead got NFS4_OK"
+            },
+            "name": "testUpdate100",
+            "time": "0.0033555030822753906"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6d",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 379, in testUpdate011\n    c2 = env.c1.new_client(env.testname(t),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate011",
+            "time": "0.0021805763244628906"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6c",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 365, in testUpdate010\n    c2 = env.c1.new_client(env.testname(t),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate010",
+            "time": "0.002185344696044922"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6b",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 351, in testUpdate001\n    c2 = env.c1.new_client(env.testname(t), verf=env.new_verifier(),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate001",
+            "time": "0.0023331642150878906"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6a",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 337, in testUpdate000\n    c2 = env.c1.new_client(env.testname(t), verf=env.new_verifier(),\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 316, in new_client\n    nfs4lib.check(res, expect)\n  File \"/opt/pynfs/nfs4.1/nfs4lib.py\", line 624, in check\n    raise NFS4Error(res.status, check_msg=msg)\nnfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n",
+                "message": "nfs4lib.NFS4Error: OP_EXCHANGE_ID should return NFS4ERR_NOENT, instead got NFS4_OK\n"
+            },
+            "name": "testUpdate000",
+            "time": "0.0022118091583251953"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1b",
+            "name": "testSupported2",
+            "time": "0.011386871337890625"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID7",
+            "name": "testSupported1a",
+            "time": "0.001020669937133789"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1",
+            "name": "testSupported",
+            "time": "0.0011026859283447266"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID50",
+            "name": "testSSV",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID8",
+            "name": "testNotOnlyOp",
+            "time": "0.0010142326354980469"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5h",
+            "name": "testNoUpdate111",
+            "time": "0.0045948028564453125"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5g",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 292, in testNoUpdate110\n    fail(\"Record replacement should create new clientid\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Record replacement should create new clientid\n",
+                "message": "Record replacement should create new clientid"
+            },
+            "name": "testNoUpdate110",
+            "time": "0.0039136409759521484"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5fb",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 275, in testNoUpdate101b\n    check(res, NFS4ERR_BADSESSION)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK\n",
+                "message": "Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK"
+            },
+            "name": "testNoUpdate101b",
+            "time": "0.005227088928222656"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5f",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 253, in testNoUpdate101\n    check(res, NFS4ERR_BADSESSION)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK\n",
+                "message": "Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK"
+            },
+            "name": "testNoUpdate101",
+            "time": "0.005987405776977539"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5e",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 225, in testNoUpdate100\n    check(res, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testNoUpdate100",
+            "time": "0.004683971405029297"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5d",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 204, in testNoUpdate011\n    fail(\"Record replacement should create new clientid\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Record replacement should create new clientid\n",
+                "message": "Record replacement should create new clientid"
+            },
+            "name": "testNoUpdate011",
+            "time": "0.0020036697387695312"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5c",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 190, in testNoUpdate010\n    fail(\"Record replacement should create new clientid\")\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Record replacement should create new clientid\n",
+                "message": "Record replacement should create new clientid"
+            },
+            "name": "testNoUpdate010",
+            "time": "0.002047300338745117"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5b",
+            "name": "testNoUpdate001",
+            "time": "0.01435542106628418"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5a",
+            "name": "testNoUpdate000",
+            "time": "0.003696441650390625"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID2",
+            "name": "testNoImplId",
+            "time": "0.0011191368103027344"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID3",
+            "name": "testLongArray",
+            "time": "0.0007317066192626953"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID9",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 513, in testLeasePeriod\n    check(res2, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testLeasePeriod",
+            "time": "101.02050375938416"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID4",
+            "name": "testBadFlags",
+            "time": "0.0069010257720947266"
+        }
+    ],
+    "tests": 262,
+    "time": 309.7926609516144,
+    "timestamp": "2026-05-01 19:06:33.517698"
+}
