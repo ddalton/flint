@@ -166,7 +166,15 @@ async fn handle_tcp_connection(
     // Split stream for independent reading and buffered writing
     let (reader, writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
-    let mut writer = BufWriter::with_capacity(128 * 1024, writer);
+    let writer = BufWriter::with_capacity(128 * 1024, writer);
+    // Wrap the writer so the same handle can be used by:
+    //   1. The main loop below (forward replies).
+    //   2. The dispatcher (registered as a back-channel writer once
+    //      BIND_CONN_TO_SESSION arrives).
+    // The `tokio::sync::Mutex` inside `BackChannelWriter` serializes
+    // writes so RPC frames cannot interleave on the wire — required by
+    // ONC RPC framing (RFC 1831).
+    let bcw = crate::nfs::v4::back_channel::BackChannelWriter::new(writer);
 
     // Reusable buffer
     let mut buf = BytesMut::with_capacity(128 * 1024);
@@ -242,30 +250,43 @@ async fn handle_tcp_connection(
         let rpc_start = Instant::now();
         debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes", 
                conn_id, rpc_count + 1, peer, length);
-        let reply = dispatch_nfsv4(request, dispatcher.clone(), gss_manager.clone(), conn_id, rpc_count + 1).await;
+        let reply = dispatch_nfsv4(
+            request,
+            dispatcher.clone(),
+            gss_manager.clone(),
+            conn_id,
+            rpc_count + 1,
+            Arc::clone(&bcw),
+        ).await;
         let rpc_duration = rpc_start.elapsed();
-        info!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)", 
+        info!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)",
               conn_id, rpc_count + 1, rpc_duration, reply.len());
-        
+
         rpc_count += 1;
 
-        // Write reply with record marker
-        let reply_len = reply.len() as u32;
-        let reply_marker = 0x80000000 | reply_len;
-        
-        debug!("📤 Sending reply to {}: {} bytes (marker: {:08x})", peer, reply_len, reply_marker);
+        // Forward reply via the same writer the back-channel uses.
+        // `send_record` prepends the 4-byte RPC record marker
+        // (`0x80000000 | length`) and flushes; the inner Mutex
+        // serializes against any concurrent CB_LAYOUTRECALL frame so
+        // wire framing stays valid.
+        debug!("📤 Sending reply to {}: {} bytes", peer, reply.len());
         debug!("   Reply first 32 bytes: {:02x?}", &reply[..std::cmp::min(32, reply.len())]);
-        
-        writer.write_all(&reply_marker.to_be_bytes()).await?;
-        writer.write_all(&reply).await?;
-        writer.flush().await?;
-        
+        bcw.send_record(reply).await?;
         debug!("✅ Reply sent and flushed to {}", peer);
     }
 }
 
-/// Dispatch an NFSv4 RPC call
-async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>, conn_id: u64, rpc_num: u64) -> Bytes {
+/// Dispatch an NFSv4 RPC call. `back_channel` is the connection's
+/// own writer; passed through so `BIND_CONN_TO_SESSION` can register
+/// it for later callback frames.
+async fn dispatch_nfsv4(
+    request: Bytes,
+    dispatcher: Arc<CompoundDispatcher>,
+    gss_manager: Arc<RpcSecGssManager>,
+    conn_id: u64,
+    rpc_num: u64,
+    back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+) -> Bytes {
     debug!("🔍 [NFS_SERVER] Connection #{}, RPC #{}: Dispatching RPC: {} total bytes", conn_id, rpc_num, request.len());
     debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
 
@@ -292,7 +313,7 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss
     // Handle RPCSEC_GSS authentication
     if call.cred.flavor == AuthFlavor::RpcsecGss {
         info!("🔐 [NFS_SERVER] Connection #{}, RPC #{}: RPCSEC_GSS authentication detected", conn_id, rpc_num);
-        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher).await;
+        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel).await;
     }
 
     // Check program number
@@ -325,7 +346,7 @@ async fn dispatch_nfsv4(request: Bytes, dispatcher: Arc<CompoundDispatcher>, gss
         procedure::COMPOUND => {
             // COMPOUND procedure - dispatch to NFSv4.2 handler
             info!(">>> COMPOUND procedure");
-            handle_compound(call, args, dispatcher).await
+            handle_compound(call, args, dispatcher, back_channel).await
         }
 
         _ => {
@@ -340,6 +361,7 @@ async fn handle_compound(
     call: CallMessage,
     args: Bytes,
     dispatcher: Arc<CompoundDispatcher>,
+    back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
 ) -> Bytes {
     // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
@@ -368,7 +390,9 @@ async fn handle_compound(
     let principal = call.cred.principal();
 
     // Dispatch to COMPOUND handler
-    let compound_resp = dispatcher.dispatch_compound(compound_req, principal).await;
+    let compound_resp = dispatcher
+        .dispatch_compound_with_back_channel(compound_req, principal, Some(Arc::clone(&back_channel)))
+        .await;
 
     debug!("COMPOUND result: status={:?}, {} results",
            compound_resp.status,
@@ -418,6 +442,7 @@ async fn handle_rpcsec_gss_call(
     args: Bytes,
     gss_manager: Arc<RpcSecGssManager>,
     dispatcher: Arc<CompoundDispatcher>,
+    back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
 ) -> Bytes {
     // Decode RPCSEC_GSS credentials
     let gss_cred = match RpcGssCred::decode(&call.cred.body) {
@@ -455,7 +480,7 @@ async fn handle_rpcsec_gss_call(
 
             // GSS validated, proceed with normal COMPOUND processing
             info!("✅ GSS authentication successful, processing COMPOUND");
-            handle_compound(call, args, dispatcher).await
+            handle_compound(call, args, dispatcher, back_channel).await
         }
 
         gss_proc::DESTROY => {

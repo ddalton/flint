@@ -662,6 +662,17 @@ pub struct CompoundContext {
     /// WRITE, CLOSE]` in one COMPOUND without round-tripping the OPEN
     /// stateid back into the WRITE / CLOSE.
     pub current_stateid: Option<StateId>,
+    /// The connection-side writer for the TCP connection this COMPOUND
+    /// arrived on. Used by `BIND_CONN_TO_SESSION` (RFC 8881 §18.34) —
+    /// when the client requests `conn_dir = BACKCHANNEL` or `BOTH`,
+    /// the dispatcher registers this writer in the per-session
+    /// back-channel table so the server can later send
+    /// `CB_LAYOUTRECALL` / `CB_RECALL` over it.
+    ///
+    /// `None` when the dispatcher is invoked from a unit test or any
+    /// path that doesn't have a real TCP connection. Callback paths
+    /// must tolerate this.
+    pub back_channel: Option<std::sync::Arc<super::back_channel::BackChannelWriter>>,
 }
 
 /// "Current stateid" sentinel: `seqid=1, other=00…00`. RFC 8881
@@ -685,6 +696,7 @@ impl CompoundContext {
             cache_slot: None,
             principal: Vec::new(),
             current_stateid: None,
+            back_channel: None,
         }
     }
 

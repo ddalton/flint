@@ -23,6 +23,7 @@ pub mod pseudo;           // Pseudo-filesystem (RFC 7530 Section 7) - NEW
 pub mod state;            // State management (stateids, sessions, leases) - DONE
 pub mod operations;       // NFSv4 operations - DONE
 pub mod dispatcher;       // COMPOUND dispatcher - DONE
+pub mod back_channel;     // Per-connection writer for v4.1 callbacks (CB_LAYOUTRECALL etc.)
 
 pub use protocol::*;
 pub use xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder, AttrEncoder, AttrDecoder};

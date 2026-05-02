@@ -105,6 +105,45 @@ Three new tests, each catches a different failure mode:
   and the in-flight `dd` either succeeds via MDS-direct fallback or
   fails cleanly with EIO — not silently corrupts.
 
+### pynfs coverage map
+
+The pynfs suite is the public NFSv4.1 conformance harness; it lives at
+`/opt/pynfs` in the Lima VM and runs via `make test-nfs-protocol`. We
+can't add tests to pynfs (it's external code) but we *can* enable
+existing tests that today SKIP because the server doesn't yet support
+the right behavior. Phase A unlocks one whole pynfs subgroup as a
+side effect:
+
+| pynfs group | Today | After Phase A.1–.5 |
+|---|---|---|
+| `st_delegation` (10 tests: DELEG1-9, DELEG23) | All SKIP — server never grants delegations, so the test framework can't exercise the back-channel from the client side | Currently still SKIP (requires *delegation grants* on top of CB; that's its own follow-up). The CB infrastructure built in Phase A is one of the two prerequisites. |
+| pNFS `LAYOUTRECALL` flow | No public pynfs test exercises CB_LAYOUTRECALL against FILES layout (the existing pNFS pynfs tests hard-code block layout) | Same — pynfs has no FILES-layout recall test. **The verification path is the new Lima e2e test described below**, not pynfs. |
+
+This is the honest part of "make sure pynfs has tests for it": **pynfs
+covers Phase A only indirectly**. Direct verification needs:
+
+1. **A new `make test-pnfs-recall` Lima script** (built in Phase A.4
+   below). Stands up MDS+2DS, mounts, starts a `dd`, kills DS1, scans
+   the MDS log for the recall message and asserts `/proc/self/mountinfo`
+   re-acquires a fresh layout. This is the load-bearing integration
+   test for Phase A.
+
+2. **Per-piece unit tests** (already shipping with each sub-PR):
+   - A.1: `nfs::v4::back_channel::tests` (3 tests, already in tree).
+   - A.2: CB compound encode/decode round-trip.
+   - A.3: send/receive round-trip against a mock client TCP listener.
+   - A.4: `recall_layouts_for_device` fans out exactly N times for N
+     affected layouts.
+   - A.5: layout seqid increments on forced revocation.
+
+3. **Re-running pynfs after every sub-PR** as a regression gate. Score
+   must stay ≥ 153/18/91; regressions block the PR. This is what
+   protects the conformance investment we already have.
+
+If we later wire delegation *grants* (separate work, not in scope),
+Phase A's CB infrastructure unblocks the 10 `st_delegation` pynfs tests
+as a free side-effect. Worth tracking but not blocking.
+
 ### Done when
 
 - `make test-pnfs-smoke` still green.

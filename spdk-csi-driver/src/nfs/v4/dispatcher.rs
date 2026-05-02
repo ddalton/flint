@@ -42,6 +42,15 @@ pub struct CompoundDispatcher {
     /// When None: pNFS operations return NFS4ERR_NOTSUPP
     /// When Some: pNFS operations are delegated to this handler
     pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
+    /// Per-session back-channel writer registry. Populated by
+    /// `BIND_CONN_TO_SESSION` (RFC 8881 §18.34) when a client opts
+    /// the connection in as a callback path. Read by the callback
+    /// fan-out (CB_LAYOUTRECALL on DS death, CB_RECALL on
+    /// delegation timeout).
+    back_channels: Arc<dashmap::DashMap<
+        crate::nfs::v4::protocol::SessionId,
+        Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    >>,
 }
 
 impl CompoundDispatcher {
@@ -77,9 +86,24 @@ impl CompoundDispatcher {
             perf_handler,
             lock_handler,
             pnfs_handler,
+            back_channels: Arc::new(dashmap::DashMap::new()),
         }
     }
-    
+
+    /// Read-only handle to the back-channel registry. Callers (the
+    /// pNFS `CallbackManager`, future delegation recall paths) look
+    /// up `Arc<BackChannelWriter>` by session id and emit callback
+    /// frames. Returning the `Arc` keeps the lifetime decoupled from
+    /// `&self` and lets long-lived background tasks cache it.
+    pub fn back_channels(
+        &self,
+    ) -> Arc<dashmap::DashMap<
+        crate::nfs::v4::protocol::SessionId,
+        Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    >> {
+        Arc::clone(&self.back_channels)
+    }
+
     /// Check if an opcode is a pNFS operation
     #[allow(dead_code)]
     fn is_pnfs_opcode(opcode: u32) -> bool {
@@ -111,7 +135,33 @@ impl CompoundDispatcher {
     /// `principal` is the RPC-level identity of the caller (see
     /// `nfs::rpc::Auth::principal()`); EXCHANGE_ID needs it to apply the
     /// RFC 8881 §18.35.5 state machine.
+    /// Convenience wrapper used by call sites that don't have a back-
+    /// channel writer (unit tests, RPCSEC_GSS init paths). Equivalent
+    /// to `dispatch_compound_with_back_channel(.., None)`.
     pub async fn dispatch_compound(&self, request: CompoundRequest, principal: Vec<u8>) -> CompoundResponse {
+        self.dispatch_compound_with_back_channel(request, principal, None).await
+    }
+
+    /// Same as `dispatch_compound` but threads the connection's writer
+    /// into `CompoundContext::back_channel`. The `BIND_CONN_TO_SESSION`
+    /// op pulls it out and registers it in the dispatcher's per-session
+    /// back-channel registry, where the callback fan-out can find it
+    /// later.
+    pub async fn dispatch_compound_with_back_channel(
+        &self,
+        request: CompoundRequest,
+        principal: Vec<u8>,
+        back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+    ) -> CompoundResponse {
+        self.dispatch_compound_inner(request, principal, back_channel).await
+    }
+
+    async fn dispatch_compound_inner(
+        &self,
+        request: CompoundRequest,
+        principal: Vec<u8>,
+        back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+    ) -> CompoundResponse {
         info!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
         // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
@@ -237,6 +287,10 @@ impl CompoundDispatcher {
 
         // Create context, seeding with the RPC-level principal.
         let mut context = CompoundContext::with_principal(request.minor_version, principal);
+        // Stash the connection's back-channel writer so the
+        // BIND_CONN_TO_SESSION arm can register it later in the
+        // dispatcher's per-session back-channel table.
+        context.back_channel = back_channel;
 
         // Process operations sequentially
         let mut results = Vec::new();
@@ -433,6 +487,31 @@ impl CompoundDispatcher {
                 info!("BIND_CONN_TO_SESSION: sessionid={:?}, dir={}", sessionid, dir);
                 if self.state_mgr.sessions.get_session(&sessionid).is_some() {
                     info!("BIND_CONN_TO_SESSION: Session found, binding connection");
+                    // RFC 5661 §2.10.3.1 conn_dir values:
+                    //   1 = FORE (forward only — default if BCTS isn't called)
+                    //   2 = BACK (the new bit we care about: server may
+                    //       send callbacks on this connection)
+                    //   3 = BOTH (forward + back on the same connection)
+                    // Linux's NFS client uses BOTH for v4.1 mounts so a
+                    // single TCP can carry both directions. We register
+                    // the writer for BACK and BOTH; FORE leaves the
+                    // existing registration alone.
+                    const CDFC_BACK: u32 = 2;
+                    const CDFC_BOTH: u32 = 3;
+                    if dir == CDFC_BACK || dir == CDFC_BOTH {
+                        if let Some(bcw) = context.back_channel.as_ref() {
+                            self.back_channels.insert(sessionid, Arc::clone(bcw));
+                            info!(
+                                "BIND_CONN_TO_SESSION: registered back-channel writer for session {:?}",
+                                sessionid,
+                            );
+                        } else {
+                            warn!(
+                                "BIND_CONN_TO_SESSION: dir={} requested back-channel but no writer is plumbed for this connection — callbacks will silently fail",
+                                dir,
+                            );
+                        }
+                    }
                     OperationResult::BindConnToSession(
                         Nfs4Status::Ok,
                         Some(sessionid),
