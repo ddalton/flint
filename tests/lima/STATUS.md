@@ -2,16 +2,40 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-01, after commit `7262e72`.
+**Last updated:** 2026-05-01, after commit `9076e96` (pNFS data path real, end-to-end).
 **Branch:** `kind-no-spdk`.
-**Conformance score (pynfs full suite, 262 tests, 91 still skipped behind unimplemented features):**
+
+### Headline
+
+**The pNFS data path is now real, end-to-end.** A 24 MiB write from a
+Linux NFSv4.1 client mount stripes across two DSes (8 MiB / 16 MiB),
+the kernel reads it back through the layout, and the SHA-256 round-
+trips. The MDS holds metadata only (0 bytes on disk for the striped
+file).
+
+```
+                      DS1   DS2   MDS    client read-back
+─────────────────────────────────────────────────────────
+audit baseline       0     0     24M    hash matches (MDS-direct)
++ FILE-layout fixes  0     0     24M    "       (still MDS-direct)
++ DS endpoint fixes  0     0     24M    "       (kernel never connects)
++ DS RECLAIM/FH (✶)  8M    16M   0      ❌ 0-byte file (no LAYOUTCOMMIT)
++ LAYOUTCOMMIT (✶)   8M    16M   0      ✅ 24M, hash matches
+```
+
+✶ = this session.
+
+### Conformance score (pynfs full suite, 262 tests)
 
 ```
 Baseline (original audit run): 26 PASS  / 69 FAIL  / 167 SKIP   (96 runnable)
-Current head (7262e72):       148 PASS  / 23 FAIL  / 91  SKIP  (171 runnable)
+Current head (9076e96):       148 PASS  / 23 FAIL  / 91  SKIP  (171 runnable)
 ```
 
 5.7× the original pass count. Six suites at 100%; nine more above 70%.
+The pNFS work is *invisible* to pynfs (it runs against a single
+non-pNFS mount); the pNFS smoke test is the truth source for the
+data plane.
 
 ---
 
@@ -83,6 +107,50 @@ The hard parts: bringing actual RFC state machines online.
 | 3.C | `8320986` | LOOKUPP RFC 5661 §18.10.4: non-directory CFH → NOTDIR, symlink CFH → SYMLINK |
 | 3.D | `c86c718` | DESTROY_CLIENTID validation (STALE_CLIENTID / CLIENTID_BUSY); SEQUENCE compound-position rules (SEQUENCE_POS for misplaced SEQUENCE, OP_NOT_IN_SESSION for v4.1 op without SEQUENCE prefix); slot table sized to negotiated ca_maxrequests (SEQUENCE BADSLOT for slot_id beyond it); ca_maxoperations enforcement (TOO_MANY_OPS) |
 | 3.E | `7262e72` | RFC 8881 §16.2.3.1.2 "current stateid" sentinel resolution: OPEN/LOCK/LOCKU/SAVEFH/RESTOREFH propagate it, PUTFH/PUTROOTFH/PUTPUBFH/LOOKUP/LOOKUPP invalidate it; FREE_STATEID op (LOCKS_HELD for open/lock state); fixed pre-existing LOCK locker4 union decode bug |
+
+### Phase 4 — Real pNFS data path (this session: `cdbbe21..9076e96`)
+
+A 24 MiB striped write from a Linux NFSv4.1 client now actually
+traverses both DSes, and read-back through the MDS sees the right
+size and bytes. Six surgical fixes; each was load-bearing — remove
+any one and the kernel falls back to MDS-direct I/O silently.
+
+| # | Commit | What | Effect on smoke (DS1/DS2/MDS, client size) |
+|---|--------|------|-------|
+| 4.A | `cdbbe21` | `FATTR4_FS_LAYOUT_TYPES` advertise [FILES] only (was [FILES, BLOCK, FLEX_FILES]); LAYOUTGET handler emits FILE layout instead of broken FFLv4 | kernel now negotiates FILES + issues GETDEVICEINFO (was silent fallback). 0/0/24M, 24M client. |
+| 4.B | `272ceef` | `MdsControlService` overrides DS-reported endpoint with operator-configured one (DS reports its bind 0.0.0.0; client needs externally routable). `endpoint_to_uaddr` DNS-resolves hostnames so non-IPv4 DS endpoints encode to a parseable uaddr. | kernel now receives valid uaddr `192.168.5.2.80.11/.12` (was `0.0.0.0.80.11`). 0/0/24M, 24M client (still MDS-direct: kernel can't talk to DS). |
+| 4.C | `23faf5b` | DS dispatcher answers `RECLAIM_COMPLETE` (opcode 58, RFC §18.51): kernel was getting NOTSUPP and marking the DS unhealthy. DS accepts MDS-issued v1 filehandles via `FileHandleManager::parse_path_lenient` and rebases by basename — DS no longer fails strict instance/hash check. | **8M/16M/0**. Kernel writes through DSes. 0-byte client read-back (MDS doesn't know the size). |
+| 4.D | `9076e96` | **LAYOUTCOMMIT** (RFC 8881 §18.42) wired end-to-end: decoder for `LAYOUTCOMMIT4args` (offset/length/reclaim/stateid + `newoffset4` + `newtime4` + `layoutupdate4`); `OperationResult::LayoutCommit(status, Option<u64>)` with `newsize4` reply union; handler resolves CFH→path and `set_len` if `last_write_offset+1` extends EOF; best-effort `set_times` from `time_modify`. | **8M/16M/0, 24M client. PASS.** |
+
+The smoke now exits with `✓ PASS: data path crossed both DSes (real
+pNFS striping)`.
+
+#### What's still TODO on the data path
+
+The smoke is green but the pNFS implementation has known gaps that
+don't block the smoke. Tracked items (and what would surface them):
+
+- **CB_LAYOUTRECALL backchannel (Task #4)** — `pnfs/callback.rs` is a
+  stub returning `Ok(())` without sending. Without it, layout
+  revocation on DS death is impossible. Would surface in: kill a DS
+  mid-write; the kernel keeps writing into the void instead of being
+  recalled to MDS-direct.
+- **Layout/state persistence (Task #5)** — instance IDs and layout
+  stateids regenerate on MDS restart; clients see `STALE_DEVICEID` /
+  `BAD_STATEID`. Would surface in: restart MDS during a long write;
+  client errors out instead of recovering.
+- **LAYOUTRETURN FSID/ALL (Task #6)** — Linux client uses ALL during
+  unmount; we ack but don't actually free state. Would surface in:
+  long-running MDS shows growing layout count after each
+  mount/unmount cycle.
+- **Multi-client correctness** — only the smoke uses one mount on
+  one VM. Two concurrent clients writing the same file would
+  exercise stateid-per-owner code that hasn't been driven yet.
+- **Smoke-test asserts** — the smoke checks "any bytes on each DS"
+  and "client hash matches"; it doesn't yet check the per-DS slices
+  reconstruct in correct stripe order, or that the MDS-side stat
+  size matches LAYOUTCOMMIT. A scheduled agent (job `3ddeefa6`) will
+  add those on 2026-05-15.
 
 ---
 
@@ -203,16 +271,16 @@ make test-pnfs-pynfs          # pynfs `pnfs` flag set (8 conformance tests)
 make test-pnfs-all            # both
 ```
 
-Current baseline (commit `f502bd9`):
+Current baseline (commit `9076e96`):
 
-* Smoke test: **DEGRADED** — mount + checksum round-trip succeeds, but
-  all 24 MiB lands on the MDS, zero bytes on either DS. This is the
-  audit's "pNFS data path is not real" gap; the smoke test exits 0
-  in this state as a regression guard until the data path is wired.
+* Smoke test: **✓ PASS — data path crossed both DSes (real pNFS striping).**
+  24 MiB striped across DS1 (8 MiB) and DS2 (16 MiB), MDS holds 0 bytes,
+  kernel-side `ls -la` shows 24 MiB and the round-trip SHA-256 matches.
 * pynfs pNFS subset: **1 PASS / 3 FAIL / 4 SKIP** out of 8 tests.
-  CSID7 testOpenLayoutGet passes. The 3 FAILs are tests that
-  hardcode `LAYOUT4_BLOCK_VOLUME` (we're a files-layout server, not
-  block); the 4 SKIPs are dependency-chained on those.
+  CSID7 testOpenLayoutGet passes. The 3 FAILs hardcode
+  `LAYOUT4_BLOCK_VOLUME` (we're files-layout, not block); the 4 SKIPs
+  are dependency-chained on those. Score is unchanged — pynfs pNFS
+  doesn't exercise the actual data path, only layout grants.
 
 See `tests/lima/pnfs/README.md` for topology, debugging tips, and
 "what PASS/DEGRADED/FAIL mean".
@@ -315,6 +383,32 @@ spdk-csi-driver/
 
 ## Where to pick up next
 
+Two independent fronts. Pick whichever maps to current priorities.
+
+### Front A — pNFS robustness (the audit's structural gaps)
+
+The smoke is green but production-grade pNFS needs:
+
+1. **CB_LAYOUTRECALL backchannel (Task #4).** Implement the v4.1
+   callback channel: TCP back-connection negotiated via
+   `BIND_CONN_TO_SESSION`, RPC encode of `CB_LAYOUTRECALL4args`,
+   per-layout `CallbackManager` keyed by `(client_id, session_id)`.
+   Same machinery unlocks `st_delegation` (3 pynfs tests) once
+   delegations are extended to issue `CB_RECALL`. Estimate ~1–2
+   focused weeks; the layout owner index from commit `f502bd9` is
+   already shaped for it.
+2. **Layout/state persistence (Task #5).** Today instance IDs and
+   layout stateids regenerate on every MDS restart. Plan: `StateBackend`
+   trait with `memory` + `etcd`/`sqlite` impls, persist `(client_id,
+   session_id, layout_stateid, fsid, fh, range)`. The `LayoutOwner`
+   struct already gives the natural key.
+3. **LAYOUTRETURN FSID/ALL wiring (Task #6).** `layout.rs` already
+   has `return_all_for_client` / `return_fsid_for_client`; the
+   dispatcher's `handle_layoutreturn` just needs to parse the
+   `layoutreturn4` discriminator (FILE / FSID / ALL) and call them.
+
+### Front B — pynfs core protocol score (single-mount tests)
+
 `st_current_stateid` is now 100% (commit `7262e72`). The next biggest
 single-session win is **`st_secinfo` + `st_secinfo_no_name` (4 tests)**
 — these ops advertise which RPC auth flavors the server accepts for a
@@ -334,11 +428,6 @@ After that, `st_courtesy` and `st_reclaim_complete` need real
 lease-state-machine work — small but fiddly. `st_verify` is one op
 implementation. Remaining `st_*` failures are smaller clusters
 (symlink PUTFH resolution, REQ_TOO_BIG, etc.).
-
-The **pNFS work (Tasks #4/#5/#6)** doesn't move the pynfs needle — pynfs
-runs against a single non-pNFS mount — but it's the audit's biggest
-architectural gap. Worth doing before any production claim around the
-pNFS data plane.
 
 ---
 
