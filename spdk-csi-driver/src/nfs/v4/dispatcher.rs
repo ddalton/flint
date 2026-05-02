@@ -1129,6 +1129,18 @@ impl CompoundDispatcher {
                 self.handle_layoutreturn(reclaim, layout_type, iomode, layoutreturn)
             }
 
+            Operation::LayoutCommit {
+                offset, length, reclaim, stateid,
+                last_write_offset, time_modify,
+                layout_type, layoutupdate,
+            } => {
+                self.handle_layoutcommit(
+                    offset, length, reclaim, stateid,
+                    last_write_offset, time_modify,
+                    layout_type, layoutupdate, context,
+                )
+            }
+
             // Unsupported operations — RFC 5661 §15.2 distinguishes:
             //   * "illegal" opcodes (reserved 0/1/2 or out of range) MUST be
             //     reported with sentinel resop OP_ILLEGAL and status
@@ -1446,6 +1458,99 @@ impl CompoundDispatcher {
         // For now, just acknowledge the layout return
         info!("📥 LAYOUTRETURN acknowledged");
         OperationResult::LayoutReturn(Nfs4Status::Ok)
+    }
+
+    /// LAYOUTCOMMIT (RFC 8881 §18.42).
+    ///
+    /// In the file-layout pNFS data path the *client* writes through
+    /// the data servers. The MDS holds the file's metadata (size, mtime)
+    /// but never sees those WRITEs, so without LAYOUTCOMMIT every
+    /// readback through the MDS observes a 0-byte file. The client
+    /// closes the gap by issuing LAYOUTCOMMIT before CLOSE / final
+    /// LAYOUTRETURN, telling the MDS the highest offset it wrote so
+    /// the MDS can extend EOF.
+    ///
+    /// Wire (§18.42.1): offset, length, reclaim, stateid,
+    /// `last_write_offset` (Some → file ends at `last_write_offset+1`),
+    /// optional `time_modify`, layoutupdate body. We honour
+    /// `last_write_offset` and `time_modify`; the body is layout-type
+    /// specific and FILES has nothing useful in it for a striped
+    /// store, so we ignore it for now.
+    ///
+    /// We resolve CFH → on-disk path through the same FH manager the
+    /// rest of the dispatcher uses, then `set_len(new_size)` if the
+    /// file would grow. Sparse holes appear under the offsets the
+    /// client routed to *other* DSes — that's expected, the kernel
+    /// reassembles the logical extent from the layout, not from MDS
+    /// bytes.
+    fn handle_layoutcommit(
+        &self,
+        _offset: u64,
+        _length: u64,
+        _reclaim: bool,
+        _stateid: StateId,
+        last_write_offset: Option<u64>,
+        time_modify: Option<(i64, u32)>,
+        _layout_type: u32,
+        _layoutupdate: Bytes,
+        context: &CompoundContext,
+    ) -> OperationResult {
+        let cfh = match &context.current_fh {
+            Some(fh) => fh,
+            None => {
+                warn!("LAYOUTCOMMIT without current filehandle");
+                return OperationResult::LayoutCommit(Nfs4Status::NoFileHandle, None);
+            }
+        };
+
+        let path = match self.file_handler.fh_manager().resolve_handle(cfh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("LAYOUTCOMMIT: stale/invalid CFH: {}", e);
+                return OperationResult::LayoutCommit(Nfs4Status::Stale, None);
+            }
+        };
+
+        let mut new_size_reported: Option<u64> = None;
+
+        if let Some(lwo) = last_write_offset {
+            // last_write_offset is the offset of the *last byte written*
+            // (RFC 8881 §18.42.1), so EOF is one past that.
+            let candidate = lwo.saturating_add(1);
+            match std::fs::OpenOptions::new().write(true).open(&path) {
+                Ok(file) => {
+                    let cur_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    if candidate > cur_size {
+                        if let Err(e) = file.set_len(candidate) {
+                            warn!("LAYOUTCOMMIT: set_len({}, {:?}): {}", candidate, path, e);
+                            return OperationResult::LayoutCommit(Nfs4Status::Io, None);
+                        }
+                        info!("📥 LAYOUTCOMMIT: extended {:?} {} → {}", path, cur_size, candidate);
+                        new_size_reported = Some(candidate);
+                    }
+                }
+                Err(e) => {
+                    warn!("LAYOUTCOMMIT: open({:?}): {}", path, e);
+                    return OperationResult::LayoutCommit(Nfs4Status::Io, None);
+                }
+            }
+        }
+
+        if let Some((secs, nsecs)) = time_modify {
+            // Best-effort mtime update. The size update is the
+            // load-bearing thing — if mtime doesn't apply we don't
+            // fail the op.
+            let ft = std::fs::FileTimes::new()
+                .set_modified(
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::new(secs.max(0) as u64, nsecs),
+                );
+            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+                let _ = file.set_times(ft);
+            }
+        }
+
+        OperationResult::LayoutCommit(Nfs4Status::Ok, new_size_reported)
     }
     
     /// Encode FILE layout for a segment (RFC 5661/8881 Section 13.2)

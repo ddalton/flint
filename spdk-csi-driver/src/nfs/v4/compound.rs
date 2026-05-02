@@ -263,6 +263,23 @@ pub enum Operation {
         iomode: u32,
         layoutreturn: Bytes,
     },
+    /// LAYOUTCOMMIT (RFC 8881 §18.42, opcode 49). Client tells the MDS
+    /// what it actually wrote through the data path so the MDS can
+    /// update file size/mtime in its metadata. `last_write_offset` is
+    /// `Some` iff the client set `loca_last_write_offset.no_newoffset
+    /// = TRUE`; the value is the *offset* of the last byte written
+    /// (so the file's new EOF is `last_write_offset + 1`). `time_modify`
+    /// is `Some` iff `loca_time_modify.nt_timechanged = TRUE`.
+    LayoutCommit {
+        offset: u64,
+        length: u64,
+        reclaim: bool,
+        stateid: StateId,
+        last_write_offset: Option<u64>,
+        time_modify: Option<(i64, u32)>,
+        layout_type: u32,
+        layoutupdate: Bytes,
+    },
 
     // FREE_STATEID (RFC 8881 §18.38, opcode 45) — client tells the server
     // it has lost interest in a stateid. Allowed forms: lock stateid (returns
@@ -437,6 +454,11 @@ pub enum OperationResult {
     LayoutGet(Nfs4Status, Option<Bytes>),     // Encoded layout data
     GetDeviceInfo(Nfs4Status, Option<Bytes>), // Encoded device info
     LayoutReturn(Nfs4Status),
+    /// LAYOUTCOMMIT result (RFC 8881 §18.42.2). On success, optionally
+    /// reports the new file size to the client (`Some(size)` ⇔
+    /// `ns_sizechanged = TRUE`). The MDS sets it when LAYOUTCOMMIT
+    /// extended the file beyond its previously-known EOF.
+    LayoutCommit(Nfs4Status, Option<u64>),
 
     // Generic result for unsupported operations.
     // Carries the original opcode so the encoder can comply with RFC 5661
@@ -498,6 +520,7 @@ impl OperationResult {
             OperationResult::LayoutGet(s, _) => *s,
             OperationResult::GetDeviceInfo(s, _) => *s,
             OperationResult::LayoutReturn(s) => *s,
+            OperationResult::LayoutCommit(s, _) => *s,
             OperationResult::Unsupported { status, .. } => *status,
         }
     }
@@ -1468,6 +1491,42 @@ impl CompoundRequest {
                     notify_types,
                 })
             }
+            opcode::LAYOUTCOMMIT => {
+                // RFC 8881 §18.42.1 LAYOUTCOMMIT4args
+                let offset = decoder.decode_u64()?;
+                let length = decoder.decode_u64()?;
+                let reclaim = decoder.decode_bool()?;
+                let stateid = decoder.decode_stateid()?;
+                // newoffset4: discriminated bool + optional u64
+                let no_newoffset = decoder.decode_bool()?;
+                let last_write_offset = if no_newoffset {
+                    Some(decoder.decode_u64()?)
+                } else {
+                    None
+                };
+                // newtime4: discriminated bool + optional nfstime4
+                let nt_timechanged = decoder.decode_bool()?;
+                let time_modify = if nt_timechanged {
+                    let secs = decoder.decode_u64()? as i64;
+                    let nsecs = decoder.decode_u32()?;
+                    Some((secs, nsecs))
+                } else {
+                    None
+                };
+                // layoutupdate4: layouttype4 + opaque body
+                let layout_type = decoder.decode_u32()?;
+                let layoutupdate = decoder.decode_opaque()?;
+                Ok(Operation::LayoutCommit {
+                    offset,
+                    length,
+                    reclaim,
+                    stateid,
+                    last_write_offset,
+                    time_modify,
+                    layout_type,
+                    layoutupdate,
+                })
+            }
             opcode::LAYOUTRETURN => {
                 let reclaim = decoder.decode_bool()?;
                 let layout_type = decoder.decode_u32()?;
@@ -2050,6 +2109,24 @@ impl CompoundResponse {
                 // For now, return lrs_present = FALSE (no new stateid)
                 if status == Nfs4Status::Ok {
                     encoder.encode_bool(false);  // lrs_present = FALSE
+                }
+            }
+            OperationResult::LayoutCommit(status, new_size) => {
+                // RFC 8881 §18.42.2: nfsstat4 then on OK a newsize4
+                // (discriminated union of `bool ns_sizechanged` +
+                // optional `length4 ns_size`).
+                encoder.encode_u32(opcode::LAYOUTCOMMIT);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    match new_size {
+                        Some(sz) => {
+                            encoder.encode_bool(true);
+                            encoder.encode_u64(sz);
+                        }
+                        None => {
+                            encoder.encode_bool(false);
+                        }
+                    }
                 }
             }
 

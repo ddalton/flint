@@ -1577,6 +1577,14 @@ impl FileOperationHandler {
         Self { fh_mgr, pnfs_enabled }
     }
 
+    /// Borrow the underlying file-handle manager. The dispatcher uses
+    /// this to resolve filehandles in operations (LAYOUTCOMMIT) that
+    /// don't go through a `FileOperationHandler` method but still need
+    /// to walk the FH→path mapping the manager owns.
+    pub fn fh_manager(&self) -> &Arc<FileHandleManager> {
+        &self.fh_mgr
+    }
+
     /// Handle PUTROOTFH operation
     /// 
     /// RFC 5661 allows optimization: if server has a single export, it can
