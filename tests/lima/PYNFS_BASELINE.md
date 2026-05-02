@@ -1,3 +1,7 @@
+> **Superseded by `STATUS.md`.** This file captures the baseline run
+> only; everything since (including current pass count, suite breakdown,
+> remaining work, and run instructions) lives in `STATUS.md`.
+
 # pynfs baseline run — 2026-05-01
 
 First end-to-end NFSv4.1 conformance run against `flint-nfs-server` from a
