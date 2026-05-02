@@ -711,19 +711,19 @@ impl CompoundRequest {
     fn decode_operation(decoder: &mut XdrDecoder, opcode: u32) -> Result<Operation, String> {
         // Reserved/illegal opcode classes (0/1/2 reserved per RFC 5661 §15.2,
         // anything > the highest valid v4.2 op is unknown) carry no body, so
-        // they're handled before any decoder.remaining() check. The dispatcher
-        // will substitute OP_ILLEGAL.
+        // they're handled before any further decoding. The dispatcher will
+        // substitute OP_ILLEGAL.
         if opcode <= 2 || opcode > opcode::CLONE {
             warn!("Reserved/illegal operation code: {}", opcode);
             return Ok(Operation::Unsupported(opcode));
         }
 
-        // Valid-range opcodes generally take at least one u32 of args. If the
-        // wire ran out before we got there, that's a real malformation
-        // (BADXDR), not an illegal opcode.
-        if decoder.remaining() == 0 {
-            return Err(format!("No data remaining to decode operation opcode={}", opcode));
-        }
+        // No blanket "remaining > 0" check here: many valid ops (GETFH,
+        // SAVEFH, RESTOREFH, READLINK, PUTROOTFH, PUTPUBFH, LOOKUPP, …)
+        // legitimately take no arguments and live at the end of a COMPOUND
+        // with the wire fully consumed. Per-arm decode_xxx() calls below will
+        // surface a clear error if they actually need bytes that aren't
+        // there, and that error is mapped to BADXDR by the caller.
         
         match opcode {
             // File handle operations
