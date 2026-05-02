@@ -161,9 +161,9 @@ test-nfs-all: nfs-server-bg ## Run mount + protocol + frag tests, then stop serv
 # nfs-server-bg machinery above.
 
 .PHONY: build-pnfs
-build-pnfs: ## Build flint-pnfs-mds and flint-pnfs-ds (release)
+build-pnfs: ## Build flint-pnfs-mds, flint-pnfs-ds, pnfs-csi-cli (release)
 	cd $(CARGO_DIR) && $(CARGO) build --release \
-	  --bin flint-pnfs-mds --bin flint-pnfs-ds
+	  --bin flint-pnfs-mds --bin flint-pnfs-ds --bin pnfs-csi-cli
 
 .PHONY: test-pnfs-smoke
 test-pnfs-smoke: build-pnfs ## End-to-end pNFS data-path smoke test (mount + write + checksum)
@@ -173,7 +173,12 @@ test-pnfs-smoke: build-pnfs ## End-to-end pNFS data-path smoke test (mount + wri
 test-pnfs-pynfs: build-pnfs ## Run pynfs `pnfs` conformance subset against the MDS
 	tests/lima/pnfs/pynfs.sh
 
+.PHONY: test-pnfs-csi
+test-pnfs-csi: build-pnfs ## End-to-end pNFS CSI integration test (gRPC create → mount → I/O → delete)
+	tests/lima/pnfs/csi-e2e.sh
+
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs pNFS tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
+	$(MAKE) test-pnfs-csi

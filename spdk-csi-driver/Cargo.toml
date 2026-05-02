@@ -29,6 +29,13 @@ path = "src/nfs_mds_main.rs"
 name = "flint-pnfs-ds"
 path = "src/nfs_ds_main.rs"
 
+# Test-only CLI for the pNFS CSI integration; not shipped in
+# production manifests. Exercises the same MDS gRPC verbs the CSI
+# driver uses without requiring a Kubernetes cluster.
+[[bin]]
+name = "pnfs-csi-cli"
+path = "src/pnfs_csi_cli_main.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs
