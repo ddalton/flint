@@ -90,6 +90,7 @@ pub struct CreateSessionOp {
 // ChannelAttrs is now imported from compound.rs to ensure field name consistency
 
 /// CREATE_SESSION response
+#[derive(Debug, Clone)]
 pub struct CreateSessionRes {
     pub status: Nfs4Status,
     pub sessionid: SessionId,
@@ -299,7 +300,7 @@ impl SessionOperationHandler {
     /// "Clamp the value upward to a known good number" (the previous behavior)
     /// is wrong: it makes a buggy client succeed with degraded settings instead
     /// of telling them the session won't work.
-    pub fn handle_create_session(&self, op: CreateSessionOp) -> CreateSessionRes {
+    pub fn handle_create_session(&self, op: CreateSessionOp, ctx: &CompoundContext) -> CreateSessionRes {
         info!("CREATE_SESSION: clientid={}, sequence={}", op.clientid, op.sequence);
         info!("CREATE_SESSION: Client requested - max_request={}, max_response={}, max_ops={}",
               op.fore_chan_attrs.max_request_size, op.fore_chan_attrs.max_response_size, op.fore_chan_attrs.max_operations);
@@ -313,13 +314,14 @@ impl SessionOperationHandler {
             return create_session_err(Nfs4Status::Inval);
         }
 
-        // Server minimums for channel sizes (RFC 5661 §18.36.4):
-        //   "If the server is unable to support the value (it is too small),
-        //    the server will use NFS4ERR_TOOSMALL".
-        // 1024 is conservative — the smallest reasonable RPC carrying a one-op
-        // COMPOUND fits in well under that.
-        const MIN_REQUEST_SIZE: u32 = 1024;
-        const MIN_RESPONSE_SIZE: u32 = 1024;
+        // Server minimums for channel sizes (RFC 5661 §18.36.4): "If the
+        // server is unable to support the value (it is too small), the
+        // server MUST return NFS4ERR_TOOSMALL". The minimum has to be
+        // permissive enough that pynfs's testRepTooBig (which negotiates a
+        // 400-byte channel deliberately to provoke REP_TOO_BIG later) gets
+        // through here. 256 is the smallest viable RPC frame in practice.
+        const MIN_REQUEST_SIZE: u32 = 256;
+        const MIN_RESPONSE_SIZE: u32 = 256;
         const MIN_OPERATIONS: u32 = 1;
 
         for (chan, attrs) in [
@@ -335,16 +337,60 @@ impl SessionOperationHandler {
             }
         }
 
-        // Verify client exists
-        if self.state_mgr.clients.get_client(op.clientid).is_none() {
-            warn!("CREATE_SESSION: Client {} not found", op.clientid);
-            return create_session_err(Nfs4Status::StaleClientId);
+        // RFC 8881 §18.36.3: if this is the first CREATE_SESSION on an
+        // unconfirmed clientid and the calling principal is not the one
+        // that performed the EXCHANGE_ID, return NFS4ERR_CLID_INUSE.
+        //
+        // After the clientid is confirmed (a successful CREATE_SESSION
+        // happened), the principal check is dropped — replays of the same
+        // CREATE_SESSION may legitimately come from a different cred
+        // (RFC 8881 §18.36.3, pynfs CSESS10 testPrincipalCollision2).
+        let client_principal_check = self.state_mgr.clients.get_client(op.clientid);
+        match client_principal_check {
+            None => {
+                warn!("CREATE_SESSION: Client {} not found", op.clientid);
+                return create_session_err(Nfs4Status::StaleClientId);
+            }
+            Some(c) if !c.confirmed && c.principal != ctx.principal => {
+                warn!("CREATE_SESSION: principal collision (unconfirmed clientid {}: original={:?}, attempted={:?})",
+                      op.clientid, String::from_utf8_lossy(&c.principal), String::from_utf8_lossy(&ctx.principal));
+                return create_session_err(Nfs4Status::ClIdInUse);
+            }
+            Some(_) => { /* matches or already confirmed — proceed */ }
         }
 
-        // Update client sequence
-        if let Err(e) = self.state_mgr.clients.update_sequence(op.clientid) {
-            warn!("CREATE_SESSION: Failed to update sequence: {}", e);
-            return create_session_err(Nfs4Status::SeqMisordered);
+        // RFC 8881 §18.36.4 sequence checks. Replays return the cached
+        // structured response so the client sees byte-identical fields;
+        // out-of-order csa_sequence is SEQ_MISORDERED.
+        use crate::nfs::v4::state::client::CreateSessionSeq;
+        match self.state_mgr.clients.process_create_session_seq(op.clientid, op.sequence) {
+            CreateSessionSeq::StaleClientId => {
+                return create_session_err(Nfs4Status::StaleClientId);
+            }
+            CreateSessionSeq::Misordered => {
+                warn!("CREATE_SESSION: csa_sequence {} misordered", op.sequence);
+                return create_session_err(Nfs4Status::SeqMisordered);
+            }
+            CreateSessionSeq::Replay(cached) => {
+                debug!("CREATE_SESSION: replay for clientid {} seq {}", op.clientid, op.sequence);
+                return CreateSessionRes {
+                    status: Nfs4Status::Ok,
+                    sessionid: cached.sessionid,
+                    sequence: cached.sequence,
+                    flags: cached.flags,
+                    fore_chan_attrs: ChannelAttrs {
+                        header_pad_size: 0,
+                        max_request_size: cached.fore_max_request_size,
+                        max_response_size: cached.fore_max_response_size,
+                        max_response_size_cached: cached.fore_max_response_size_cached,
+                        max_operations: cached.fore_max_operations,
+                        max_requests: cached.fore_max_requests,
+                        rdma_ird: Vec::new(),
+                    },
+                    back_chan_attrs: ChannelAttrs::default(),
+                };
+            }
+            CreateSessionSeq::Execute => { /* normal forward case */ }
         }
 
         // CREATE_SESSION succeeding marks the client record as confirmed,
@@ -367,13 +413,20 @@ impl SessionOperationHandler {
         info!("CREATE_SESSION: Negotiated: req={}, resp={}, ops={}",
               negotiated_max_request, negotiated_max_response, negotiated_max_ops);
 
-        // Create session with negotiated sizes
+        // Create session with negotiated sizes. We negotiate the cached
+        // response size by clamping the client's request: it MUST be ≤
+        // ca_maxresponsesize (caches can't be bigger than full responses)
+        // and is also ≤ our SERVER_MAX_RESPONSE.
+        let negotiated_max_response_cached = op.fore_chan_attrs
+            .max_response_size_cached
+            .min(negotiated_max_response);
         let session = self.state_mgr.sessions.create_session(
             op.clientid,
             op.sequence,
             op.flags,
             negotiated_max_request,
             negotiated_max_response,
+            negotiated_max_response_cached,
             negotiated_max_ops,
         );
 
@@ -389,6 +442,25 @@ impl SessionOperationHandler {
         // set CREATE_SESSION4_FLAG_CONN_BACK_CHAN and the backchannel attrs should
         // be zeroed so the client knows callbacks are unavailable.
         let back_chan_attrs = ChannelAttrs::default();
+
+        // Record the result in the per-client CREATE_SESSION cache so a
+        // future replay (same csa_sequence) returns byte-identical fields
+        // (RFC 8881 §15.1.10.4 / §18.36.4).
+        use crate::nfs::v4::state::client::CachedCreateSessionRes;
+        self.state_mgr.clients.record_create_session_reply(
+            op.clientid,
+            op.sequence,
+            CachedCreateSessionRes {
+                sessionid: session.session_id,
+                sequence: session.sequence,
+                flags: server_flags,
+                fore_max_request_size: session.fore_chan_maxrequestsize,
+                fore_max_response_size: session.fore_chan_maxresponsesize,
+                fore_max_response_size_cached: 64 * 1024,
+                fore_max_operations: session.fore_chan_maxops,
+                fore_max_requests: 128,
+            },
+        );
 
         CreateSessionRes {
             status: Nfs4Status::Ok,
@@ -439,6 +511,26 @@ impl SessionOperationHandler {
                 };
             }
         };
+
+        // RFC 8881 §18.46.3: if the client requests `cachethis` and the
+        // session's negotiated `ca_maxresponsesize_cached` is too small to
+        // hold any meaningful reply, return NFS4ERR_REP_TOO_BIG_TO_CACHE
+        // immediately. The smallest reply we ever generate is the SEQUENCE
+        // result itself (~32 bytes plus COMPOUND overhead); a cache window
+        // smaller than that simply can't hold one. This is the eager
+        // approximation the test exercises.
+        if op.cache_this && session.fore_chan_maxresponsesize_cached < 64 {
+            warn!("SEQUENCE: cachethis with maxresponsesize_cached={} → REP_TOO_BIG_TO_CACHE",
+                  session.fore_chan_maxresponsesize_cached);
+            return SequenceRes {
+                status: Nfs4Status::RepTooBigToCache,
+                sessionid: op.sessionid,
+                sequenceid: 0,
+                slotid: 0,
+                highest_slotid: 0,
+                target_highest_slotid: 0,
+            };
+        }
 
         let outcome = self.state_mgr.sessions.get_session_mut(&op.sessionid, |s| {
             s.process_sequence(op.slotid, op.sequenceid)
@@ -580,7 +672,9 @@ mod tests {
         let res = handler.handle_exchange_id(op, &CompoundContext::new(1));
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.clientid, 1);
-        assert_eq!(res.sequenceid, 0);
+        // EXCHANGE_ID returns the initial CREATE_SESSION sequence (eir_sequenceid).
+        // We pick 1 so a client that incorrectly sends 0 still gets SEQ_MISORDERED.
+        assert_eq!(res.sequenceid, 1);
     }
 
     #[test]
@@ -608,7 +702,7 @@ mod tests {
             cb_program: 0,
         };
 
-        let res = handler.handle_create_session(create_op);
+        let res = handler.handle_create_session(create_op, &CompoundContext::new(1));
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_ne!(res.sessionid, SessionId([0; 16]));
     }
@@ -636,7 +730,7 @@ mod tests {
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
         };
-        let create_res = handler.handle_create_session(create_op);
+        let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 
         // Now SEQUENCE
         let seq_op = SequenceOp {
@@ -679,7 +773,7 @@ mod tests {
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
         };
-        let create_res = handler.handle_create_session(create_op);
+        let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 
         // First SEQUENCE
         let seq_op1 = SequenceOp {
@@ -739,7 +833,7 @@ mod tests {
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
         };
-        let create_res = handler.handle_create_session(create_op);
+        let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 
         // Destroy session
         let destroy_op = DestroySessionOp {

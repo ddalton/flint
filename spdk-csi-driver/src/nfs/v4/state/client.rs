@@ -12,10 +12,26 @@
 // We use a simple counter for client IDs (incrementing u64)
 
 use super::lease::LeaseManager;
+use super::super::protocol::SessionId;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
+
+/// Persisted bits of a CREATE_SESSION response, kept on the Client so a
+/// replay can return byte-identical fields. Held inline (not a reference
+/// to an op-level type) to avoid a state→operations module dependency.
+#[derive(Debug, Clone)]
+pub struct CachedCreateSessionRes {
+    pub sessionid: SessionId,
+    pub sequence: u32,
+    pub flags: u32,
+    pub fore_max_request_size: u32,
+    pub fore_max_response_size: u32,
+    pub fore_max_response_size_cached: u32,
+    pub fore_max_operations: u32,
+    pub fore_max_requests: u32,
+}
 
 /// EXCHANGE_ID UPD_CONFIRMED_REC_A flag (RFC 8881 §18.35.3).
 const EXCHGID4_FLAG_UPD_CONFIRMED_REC_A: u32 = 0x40000000;
@@ -85,6 +101,30 @@ pub struct Client {
     /// different §18.35.5 outcomes (always replace on duplicate
     /// EXCHANGE_ID, NOENT for UPD_CONFIRMED_REC_A).
     pub confirmed: bool,
+
+    /// `csa_sequence` of the most recently *accepted* CREATE_SESSION on
+    /// this clientid. `None` until the first CREATE_SESSION succeeds.
+    /// RFC 8881 §18.36.4: a CREATE_SESSION with the same sequence as the
+    /// last one is a replay; sequence + 1 is forward progress; anything
+    /// else is `NFS4ERR_SEQ_MISORDERED`.
+    pub last_cs_sequence: Option<u32>,
+
+    /// Cached CREATE_SESSION reply bytes for the `last_cs_sequence` slot,
+    /// returned verbatim on replay (RFC 8881 §15.1.10.4 exactly-once). Held
+    /// as raw bytes so we don't have a circular type dependency between
+    /// state::client and operations::session.
+    pub cs_cached_reply: Option<bytes::Bytes>,
+    /// Cached high-level CREATE_SESSION result for replay. Held in addition
+    /// to `cs_cached_reply` because the dispatcher expects an
+    /// `OperationResult::CreateSession` with structured fields, not raw
+    /// bytes (CREATE_SESSION sits in a sole-op COMPOUND, so the
+    /// SEQUENCE-style raw-bytes replay path doesn't apply).
+    pub cs_cached_res: Option<CachedCreateSessionRes>,
+
+    /// Initial CREATE_SESSION sequence ID. Returned by EXCHANGE_ID as
+    /// `eir_sequenceid`; the first CREATE_SESSION on this clientid must
+    /// carry exactly this value.
+    pub initial_cs_sequence: u32,
 }
 
 impl Client {
@@ -108,8 +148,31 @@ impl Client {
             flags,
             principal,
             confirmed: false,
+            last_cs_sequence: None,
+            cs_cached_reply: None,
+            cs_cached_res: None,
+            initial_cs_sequence: 0,
         }
     }
+}
+
+/// Outcome of `ClientManager::process_create_session_seq`. Lets the
+/// CREATE_SESSION op handler distinguish "execute and cache" from "this
+/// is a replay, return these fields verbatim" from "client's sequence
+/// number is out of order".
+#[derive(Debug)]
+pub enum CreateSessionSeq {
+    /// Forward-progress request — execute normally and call
+    /// `record_create_session_reply()` when done.
+    Execute,
+    /// Exact replay of the previous CREATE_SESSION; return this cached
+    /// structured response.
+    Replay(CachedCreateSessionRes),
+    /// Sequence number is neither last nor last+1 — RFC 8881 §18.36.4
+    /// requires `NFS4ERR_SEQ_MISORDERED`.
+    Misordered,
+    /// Clientid does not exist — caller should return `NFS4ERR_STALE_CLIENTID`.
+    StaleClientId,
 }
 
 /// Client manager - tracks all connected clients
@@ -333,6 +396,8 @@ impl ClientManager {
 
     /// Allocate a fresh unconfirmed client record. Internal helper used by
     /// `exchange_id` for both the "no existing record" and replacement paths.
+    /// `eir_sequenceid` is returned to the client and becomes the value the
+    /// first CREATE_SESSION on this clientid must carry as `csa_sequence`.
     fn allocate_client(
         &self,
         owner: Vec<u8>,
@@ -341,7 +406,12 @@ impl ClientManager {
         principal: Vec<u8>,
     ) -> ExchangeIdOutcome {
         let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
-        let client = Client::new(
+        // Pick a small non-zero sequence so a client that incorrectly sends
+        // 0 still hits SEQ_MISORDERED. RFC 8881 §18.35.4 only requires that
+        // we pick *some* initial value; clients echo it back on their first
+        // CREATE_SESSION.
+        let eir_sequenceid: u32 = 1;
+        let mut client = Client::new(
             client_id,
             owner.clone(),
             verifier,
@@ -350,10 +420,11 @@ impl ClientManager {
             flags,
             principal,
         );
+        client.initial_cs_sequence = eir_sequenceid;
         self.clients.insert(client_id, client);
         self.owner_to_id.insert(owner, client_id);
         self.lease_manager.create_lease(client_id);
-        ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id: 0 }
+        ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id: eir_sequenceid }
     }
 
     /// Internal client removal that doesn't touch logging / leases differently
@@ -375,7 +446,8 @@ impl ClientManager {
         self.clients.get(&client_id).map(|r| r.clone())
     }
 
-    /// Update client sequence ID
+    /// Update client sequence ID (legacy helper — retained for callers that
+    /// only need a monotonic counter, not the full §18.36.4 state machine).
     ///
     /// LOCK-FREE: Per-client locking, not global
     pub fn update_sequence(&self, client_id: u64) -> Result<u32, String> {
@@ -385,6 +457,71 @@ impl ClientManager {
         } else {
             Err("Client not found".to_string())
         }
+    }
+
+    /// Process the `csa_sequence` field of a CREATE_SESSION op, applying
+    /// the RFC 8881 §18.36.4 sequence rules:
+    ///
+    ///   Initial state (no CREATE_SESSION yet):
+    ///     csa_sequence == initial_cs_sequence  →  Execute
+    ///     anything else                        →  Misordered
+    ///
+    ///   After at least one accepted CREATE_SESSION at sequence S:
+    ///     csa_sequence == S                    →  Replay (return cached)
+    ///     csa_sequence == S + 1                →  Execute (forward)
+    ///     anything else                        →  Misordered
+    pub fn process_create_session_seq(&self, client_id: u64, csa_sequence: u32) -> CreateSessionSeq {
+        let client = match self.clients.get(&client_id) {
+            Some(c) => c,
+            None => return CreateSessionSeq::StaleClientId,
+        };
+
+        match client.last_cs_sequence {
+            None => {
+                if csa_sequence == client.initial_cs_sequence {
+                    CreateSessionSeq::Execute
+                } else {
+                    CreateSessionSeq::Misordered
+                }
+            }
+            Some(last) => {
+                if csa_sequence == last {
+                    match &client.cs_cached_res {
+                        Some(res) => CreateSessionSeq::Replay(res.clone()),
+                        // Should not happen — we only set last_cs_sequence
+                        // alongside cs_cached_res. Treat defensively as
+                        // misordered so we don't double-execute.
+                        None => CreateSessionSeq::Misordered,
+                    }
+                } else if csa_sequence == last.wrapping_add(1) {
+                    CreateSessionSeq::Execute
+                } else {
+                    CreateSessionSeq::Misordered
+                }
+            }
+        }
+    }
+
+    /// Record the result of a successful CREATE_SESSION so a future replay
+    /// at the same `csa_sequence` returns byte-identical fields.
+    pub fn record_create_session_reply(
+        &self,
+        client_id: u64,
+        csa_sequence: u32,
+        cached: CachedCreateSessionRes,
+    ) {
+        if let Some(mut client) = self.clients.get_mut(&client_id) {
+            client.last_cs_sequence = Some(csa_sequence);
+            client.cs_cached_res = Some(cached);
+        }
+    }
+
+    /// Return the principal of the client that performed the EXCHANGE_ID
+    /// for this clientid. Used by CREATE_SESSION's principal-collision
+    /// check (RFC 8881 §18.36.3 returns NFS4ERR_CLID_INUSE if a different
+    /// principal tries to create a session on this clientid).
+    pub fn get_principal(&self, client_id: u64) -> Option<Vec<u8>> {
+        self.clients.get(&client_id).map(|c| c.principal.clone())
     }
 
     /// Remove a client
@@ -440,7 +577,9 @@ mod tests {
         let client_mgr = ClientManager::new(lease_mgr, "test-vol");
 
         let outcome = client_mgr.exchange_id(b"client1".to_vec(), 12345, 0, b"princ".to_vec());
-        assert!(matches!(outcome, ExchangeIdOutcome::NewUnconfirmed { client_id: 1, sequence_id: 0 }));
+        // initial_cs_sequence is now 1 (small non-zero, so a client that
+        // sends 0 still gets SEQ_MISORDERED).
+        assert!(matches!(outcome, ExchangeIdOutcome::NewUnconfirmed { client_id: 1, sequence_id: 1 }));
         assert_eq!(client_mgr.active_count(), 1);
     }
 

@@ -82,6 +82,12 @@ pub struct Session {
     /// Fore channel attributes
     pub fore_chan_maxrequestsize: u32,
     pub fore_chan_maxresponsesize: u32,
+    /// Maximum size of a reply that the server is allowed to cache for
+    /// reply-cache replays on this session (negotiated via
+    /// ca_maxresponsesize_cached in CREATE_SESSION). Used by SEQUENCE to
+    /// emit `NFS4ERR_REP_TOO_BIG_TO_CACHE` when `cachethis` is set and the
+    /// expected reply would exceed this.
+    pub fore_chan_maxresponsesize_cached: u32,
     pub fore_chan_maxops: u32,
 
     /// Slots for exactly-once semantics
@@ -100,6 +106,7 @@ impl Session {
         flags: u32,
         max_requests: u32,
         max_response: u32,
+        max_response_cached: u32,
         max_ops: u32,
     ) -> Self {
         // Initialize slots
@@ -116,6 +123,7 @@ impl Session {
             flags,
             fore_chan_maxrequestsize: max_requests,
             fore_chan_maxresponsesize: max_response,
+            fore_chan_maxresponsesize_cached: max_response_cached,
             fore_chan_maxops: max_ops,
             slots,
             highest_slotid: 0,
@@ -219,6 +227,7 @@ impl SessionManager {
         flags: u32,
         max_requests: u32,
         max_response: u32,
+        max_response_cached: u32,
         max_ops: u32,
     ) -> Session {
         // Generate session ID (lock-free atomic increment)
@@ -235,6 +244,7 @@ impl SessionManager {
             flags,
             max_requests,
             max_response,
+            max_response_cached,
             max_ops,
         );
 
@@ -326,7 +336,7 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
 
         assert_eq!(session.client_id, 1);
         assert_eq!(mgr.active_count(), 1);
@@ -335,7 +345,7 @@ mod tests {
     #[test]
     fn test_sequence_processing() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
 
         // First request on slot 0
         let result = mgr.get_session_mut(&session.session_id, |s| {
@@ -366,7 +376,7 @@ mod tests {
     #[test]
     fn test_session_destruction() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 16);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
         let session_id = session.session_id;
 
         assert_eq!(mgr.active_count(), 1);
@@ -380,9 +390,9 @@ mod tests {
     #[test]
     fn test_client_sessions() {
         let mgr = SessionManager::new();
-        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 16);
-        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 16);
-        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 16);
+        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16);
+        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16);
+        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16);
 
         let client1_sessions = mgr.get_client_sessions(1);
         assert_eq!(client1_sessions.len(), 2);
