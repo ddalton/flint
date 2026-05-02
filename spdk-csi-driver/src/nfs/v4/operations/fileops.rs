@@ -2219,19 +2219,25 @@ impl FileOperationHandler {
             }
         };
 
-        // Verify file exists
-        if !path.exists() {
-            return SetAttrRes {
-                status: Nfs4Status::NoEnt,
-                attrsset: vec![],
-            };
-        }
+        // Verify the path exists. `Path::exists()` follows symlinks — for a
+        // dangling symlink (link points at a missing target), that returns
+        // false even though the symlink itself is a valid object we should
+        // be able to operate on. Use `symlink_metadata()` which never follows.
+        let lmeta = match path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                return SetAttrRes {
+                    status: Nfs4Status::NoEnt,
+                    attrsset: vec![],
+                };
+            }
+        };
 
         // Set file attributes
         // This is a simplified implementation - proper NFSv4 would decode
         // XDR-encoded attributes and set each requested attribute
         // For now, we handle common operations like setting permissions
-        
+
         let mut attrs_set = vec![];
         let mut errors = vec![];
 
@@ -2241,7 +2247,7 @@ impl FileOperationHandler {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            
+
             // If attribute values are provided, try to parse permissions
             if !op.obj_attributes.attr_vals.is_empty() && op.obj_attributes.attr_vals.len() >= 4 {
                 // Try to read mode from attributes (simplified)
@@ -2249,16 +2255,28 @@ impl FileOperationHandler {
                 let mode_bytes = &op.obj_attributes.attr_vals[..std::cmp::min(4, op.obj_attributes.attr_vals.len())];
                 if mode_bytes.len() == 4 {
                     let mode = u32::from_be_bytes([mode_bytes[0], mode_bytes[1], mode_bytes[2], mode_bytes[3]]);
-                    
-                    let permissions = std::fs::Permissions::from_mode(mode);
-                    match std::fs::set_permissions(&path, permissions) {
-                        Ok(_) => {
-                            debug!("SETATTR: Set permissions {:o} on {:?}", mode, path);
-                            attrs_set.extend_from_slice(&op.obj_attributes.attrmask);
-                        }
-                        Err(e) => {
-                            warn!("SETATTR: Failed to set permissions on {:?}: {}", path, e);
-                            errors.push(e);
+
+                    if lmeta.file_type().is_symlink() {
+                        // POSIX `chmod()` follows symlinks. For a dangling
+                        // symlink that fails with ENOENT, but per RFC 5661
+                        // §18.30 SETATTR on a symlink should affect the link
+                        // itself (which on most Unix is essentially a no-op
+                        // — symlinks have a fixed mode of 0777). Report Ok
+                        // so callers like pynfs's clean_dir can proceed to
+                        // the subsequent REMOVE.
+                        debug!("SETATTR: target is a symlink, treating mode change as no-op");
+                        attrs_set.extend_from_slice(&op.obj_attributes.attrmask);
+                    } else {
+                        let permissions = std::fs::Permissions::from_mode(mode);
+                        match std::fs::set_permissions(&path, permissions) {
+                            Ok(_) => {
+                                debug!("SETATTR: Set permissions {:o} on {:?}", mode, path);
+                                attrs_set.extend_from_slice(&op.obj_attributes.attrmask);
+                            }
+                            Err(e) => {
+                                warn!("SETATTR: Failed to set permissions on {:?}: {}", path, e);
+                                errors.push(e);
+                            }
                         }
                     }
                 }
