@@ -490,13 +490,19 @@ impl CompoundDispatcher {
                 OperationResult::TestStateId(Nfs4Status::Ok, Some(statuses))
             }
 
-            // File handle operations
+            // File handle operations. RFC 8881 §16.2.3.1.2: any operation
+            // that changes the current filehandle invalidates the COMPOUND's
+            // "current stateid" — a subsequent op that uses the
+            // (seqid=1, other=00…00) sentinel after a CFH change MUST fail
+            // with NFS4ERR_BAD_STATEID. Clear it whenever we replace CFH.
             Operation::PutRootFh => {
+                context.current_stateid = None;
                 let res = self.file_handler.handle_putrootfh(PutRootFhOp, context);
                 OperationResult::PutRootFh(res.status)
             }
 
             Operation::PutFh(filehandle) => {
+                context.current_stateid = None;
                 let op = PutFhOp { filehandle };
                 let res = self.file_handler.handle_putfh(op, context);
                 OperationResult::PutFh(res.status)
@@ -513,22 +519,35 @@ impl CompoundDispatcher {
             }
 
             Operation::SaveFh => {
+                // RFC 8881 §16.2.3.1.2: the current stateid is bound to the
+                // CFH, so SAVEFH copies the stateid alongside.
+                context.saved_stateid = context.current_stateid;
                 let res = self.file_handler.handle_savefh(SaveFhOp, context);
                 OperationResult::SaveFh(res.status)
             }
 
             Operation::RestoreFh => {
+                // Restore the CFH first; then bring the saved stateid back as
+                // the current stateid so a follow-up CLOSE(current_stateid)
+                // (after intervening LOOKUPs etc.) still works.
                 let res = self.file_handler.handle_restorefh(RestoreFhOp, context);
+                if res.status == Nfs4Status::Ok {
+                    context.current_stateid = context.saved_stateid;
+                } else {
+                    context.current_stateid = None;
+                }
                 OperationResult::RestoreFh(res.status)
             }
 
             Operation::Lookup(component) => {
+                context.current_stateid = None;
                 let op = LookupOp { component };
                 let res = self.file_handler.handle_lookup(op, context).await;
                 OperationResult::Lookup(res.status)
             }
 
             Operation::LookupP => {
+                context.current_stateid = None;
                 let res = self.file_handler.handle_lookupp(LookupPOp, context).await;
                 // Note: LookupP doesn't exist in OperationResult, using Lookup instead
                 OperationResult::Lookup(res.status)
@@ -734,6 +753,14 @@ impl CompoundDispatcher {
                 let res = self.io_handler.handle_open(op, context);
                 if res.status == Nfs4Status::Ok {
                     use crate::nfs::v4::compound::{OpenResult, ChangeInfo};
+                    // RFC 8881 §16.2.3.1.2: a successful state-changing op
+                    // (OPEN, LOCK, LOCKU, OPEN_DOWNGRADE) populates the
+                    // "current stateid" so a subsequent op in the same
+                    // COMPOUND can refer to it via the magic
+                    // (seqid=1, other=00…00) sentinel.
+                    if let Some(sid) = res.stateid {
+                        context.current_stateid = Some(sid);
+                    }
                     // Convert result if we have stateid and change_info
                     if let (Some(stateid), Some(change_info)) = (res.stateid, res.change_info) {
                         OperationResult::Open(res.status, Some(OpenResult {
@@ -756,6 +783,11 @@ impl CompoundDispatcher {
             }
 
             Operation::Close { seqid, stateid } => {
+                // Resolve the "current stateid" sentinel (RFC 8881 §16.2.3.1.2).
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::Close(Nfs4Status::BadStateId, None),
+                };
                 let op = CloseOp {
                     seqid,
                     stateid,
@@ -765,6 +797,10 @@ impl CompoundDispatcher {
             }
 
             Operation::Read { stateid, offset, count } => {
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::Read(Nfs4Status::BadStateId, None),
+                };
                 let op = ReadOp { stateid, offset, count };
                 let res = self.io_handler.handle_read(op, context).await;
                 if res.status == Nfs4Status::Ok {
@@ -779,6 +815,10 @@ impl CompoundDispatcher {
             }
 
             Operation::Write { stateid, offset, stable, data } => {
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::Write(Nfs4Status::BadStateId, None),
+                };
                 let op = WriteOp {
                     stateid,
                     offset,
@@ -904,6 +944,10 @@ impl CompoundDispatcher {
 
             // Locking operations
             Operation::Lock { locktype, reclaim, offset, length, stateid, owner } => {
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::Lock(Nfs4Status::BadStateId, None),
+                };
                 // Convert u32 to LockType
                 let lock_type = if locktype == 1 {
                     LockType::Read
@@ -921,6 +965,11 @@ impl CompoundDispatcher {
                     open_seqid: Some(0),
                 };
                 let res = self.lock_handler.handle_lock(op, context);
+                if res.status == Nfs4Status::Ok {
+                    if let Some(sid) = res.stateid {
+                        context.current_stateid = Some(sid);
+                    }
+                }
                 OperationResult::Lock(res.status, res.stateid)
             }
 
@@ -942,6 +991,10 @@ impl CompoundDispatcher {
             }
 
             Operation::LockU { locktype, seqid, stateid, offset, length } => {
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::LockU(Nfs4Status::BadStateId, None),
+                };
                 // Convert u32 to LockType
                 let lock_type = if locktype == 1 {
                     LockType::Read
@@ -956,7 +1009,42 @@ impl CompoundDispatcher {
                     length,
                 };
                 let res = self.lock_handler.handle_locku(op, context);
+                if res.status == Nfs4Status::Ok {
+                    if let Some(sid) = res.stateid {
+                        context.current_stateid = Some(sid);
+                    }
+                }
                 OperationResult::LockU(res.status, res.stateid)
+            }
+
+            Operation::FreeStateId(stateid) => {
+                // Resolve the "current stateid" sentinel and check the
+                // stateid type. RFC 8881 §18.38.3:
+                //  * lock stateid with locks held → NFS4ERR_LOCKS_HELD
+                //  * open stateid (any) → server MAY return LOCKS_HELD;
+                //    pynfs CSID9 expects this to indicate the stateid is
+                //    not freeable while held open.
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::FreeStateId(Nfs4Status::BadStateId),
+                };
+                use crate::nfs::v4::state::StateType;
+                let entry = self.state_mgr.stateids.get_state(&stateid);
+                match entry {
+                    None => OperationResult::FreeStateId(Nfs4Status::BadStateId),
+                    Some(e) => match e.state_type {
+                        StateType::Open | StateType::Lock => {
+                            // RFC 8881 §18.38.3: open/lock stateids that are
+                            // still in use cannot be freed. Pynfs's CSID9
+                            // exercises this immediately after OPEN.
+                            OperationResult::FreeStateId(Nfs4Status::LocksHeld)
+                        }
+                        _ => {
+                            let _ = self.state_mgr.stateids.revoke(&stateid);
+                            OperationResult::FreeStateId(Nfs4Status::Ok)
+                        }
+                    },
+                }
             }
 
             // File modification operations
@@ -1004,6 +1092,7 @@ impl CompoundDispatcher {
             }
 
             Operation::PutPubFh => {
+                context.current_stateid = None;
                 use crate::nfs::v4::operations::fileops::PutPubFhOp;
                 let op = PutPubFhOp;
                 let res = self.file_handler.handle_putpubfh(op, context);

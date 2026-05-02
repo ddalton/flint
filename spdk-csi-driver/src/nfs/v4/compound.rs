@@ -264,6 +264,12 @@ pub enum Operation {
         layoutreturn: Bytes,
     },
 
+    // FREE_STATEID (RFC 8881 §18.38, opcode 45) — client tells the server
+    // it has lost interest in a stateid. Allowed forms: lock stateid (returns
+    // LOCKS_HELD if locks remain), open stateid (server may return
+    // LOCKS_HELD per §18.38.3), delegation stateid.
+    FreeStateId(StateId),
+
     // Placeholder for unsupported operations
     Unsupported(u32),            // operation code
     /// The opcode is recognised as a valid NFSv4 op but its arguments could
@@ -417,6 +423,7 @@ pub enum OperationResult {
     ReclaimComplete(Nfs4Status),
     SecInfoNoName(Nfs4Status),
     TestStateId(Nfs4Status, Option<Vec<Nfs4Status>>),  // status per stateid
+    FreeStateId(Nfs4Status),
 
     // NFSv4.2 Performance
     Allocate(Nfs4Status),
@@ -478,6 +485,7 @@ impl OperationResult {
             OperationResult::ReclaimComplete(s) => *s,
             OperationResult::SecInfoNoName(s) => *s,
             OperationResult::TestStateId(s, _) => *s,
+            OperationResult::FreeStateId(s) => *s,
             OperationResult::Allocate(s) => *s,
             OperationResult::Deallocate(s) => *s,
             OperationResult::Seek(s, _) => *s,
@@ -556,6 +564,10 @@ pub struct WriteResult {
 pub struct CompoundContext {
     pub current_fh: Option<Nfs4FileHandle>,
     pub saved_fh: Option<Nfs4FileHandle>,
+    /// Saved "current stateid" companion to `saved_fh`. SAVEFH copies the
+    /// current stateid alongside CFH; RESTOREFH brings them back together.
+    /// (RFC 8881 §16.2.3.1.2 ties the current state ID to the CFH.)
+    pub saved_stateid: Option<StateId>,
     pub minor_version: u32,
     /// Session ID (set by SEQUENCE operation)
     /// Used to determine client_id for stateful operations
@@ -574,24 +586,56 @@ pub struct CompoundContext {
     /// changes the outcome from "renew existing client" to "evict and
     /// replace" (or NFS4ERR_PERM, depending on flags).
     pub principal: Vec<u8>,
+    /// "Current stateid" within this COMPOUND (RFC 8881 §16.2.3.1.2).
+    /// Updated after every state-changing op (OPEN, LOCK, LOCKU,
+    /// OPEN_DOWNGRADE). When a subsequent op carries the magic sentinel
+    /// stateid `(seqid=1, other=00…00)`, the dispatcher substitutes this
+    /// before the per-op handler sees it. Lets clients chain `[OPEN,
+    /// WRITE, CLOSE]` in one COMPOUND without round-tripping the OPEN
+    /// stateid back into the WRITE / CLOSE.
+    pub current_stateid: Option<StateId>,
 }
+
+/// "Current stateid" sentinel: `seqid=1, other=00…00`. RFC 8881
+/// §16.2.3.1.2. When an op carries this exact stateid, the server
+/// substitutes whatever the most recent state-changing op in this
+/// COMPOUND produced.
+pub const CURRENT_STATEID_SENTINEL: StateId = StateId {
+    seqid: 1,
+    other: [0u8; 12],
+};
 
 impl CompoundContext {
     pub fn new(minor_version: u32) -> Self {
         Self {
             current_fh: None,
             saved_fh: None,
+            saved_stateid: None,
             minor_version,
             session_id: None,
             replay_reply: None,
             cache_slot: None,
             principal: Vec::new(),
+            current_stateid: None,
         }
     }
 
     /// Build a CompoundContext seeded with the principal from an RPC call.
     pub fn with_principal(minor_version: u32, principal: Vec<u8>) -> Self {
         Self { principal, ..Self::new(minor_version) }
+    }
+
+    /// If `stateid` is the "current stateid" sentinel (RFC 8881 §16.2.3.1.2),
+    /// return the actual stateid the COMPOUND has produced so far. Otherwise
+    /// return the input unchanged. Returns `None` only when the sentinel
+    /// is sent before any state-changing op has set `current_stateid`,
+    /// which is a protocol error the caller maps to `NFS4ERR_BAD_STATEID`.
+    pub fn resolve_stateid(&self, stateid: StateId) -> Option<StateId> {
+        if stateid == CURRENT_STATEID_SENTINEL {
+            self.current_stateid
+        } else {
+            Some(stateid)
+        }
     }
 
     /// Check if current filehandle is set
@@ -1218,15 +1262,61 @@ impl CompoundRequest {
                 }
                 Ok(Operation::TestStateId(stateids))
             }
+            opcode::FREE_STATEID => {
+                // RFC 8881 §18.38: FREE_STATEID4args = stateid4
+                let stateid = decoder.decode_stateid()?;
+                Ok(Operation::FreeStateId(stateid))
+            }
 
-            // Lock operations
+            // Lock operations — RFC 5661 §18.10.1 LOCK4args:
+            //
+            //   nfs_lock_type4  locktype;
+            //   bool            reclaim;
+            //   offset4         offset;
+            //   length4         length;
+            //   locker4         locker;       /* discriminated union */
+            //
+            //   union locker4 switch (bool new_lock_owner) {
+            //     case TRUE:  open_to_lock_owner4 open_owner;
+            //     case FALSE: exist_lock_owner4   lock_owner;
+            //   };
+            //
+            //   struct open_to_lock_owner4 {
+            //     seqid4      open_seqid;
+            //     stateid4    open_stateid;
+            //     seqid4      lock_seqid;
+            //     lock_owner4 lock_owner;     /* clientid + opaque */
+            //   };
+            //
+            //   struct exist_lock_owner4 {
+            //     stateid4    lock_stateid;
+            //     seqid4      lock_seqid;
+            //   };
+            //
+            // The previous decoder treated the locker4 union as a flat
+            // (stateid + opaque) pair, which mis-aligned every byte after
+            // `length` on the new-owner path.
             opcode::LOCK => {
                 let locktype = decoder.decode_u32()?;
                 let reclaim = decoder.decode_bool()?;
                 let offset = decoder.decode_u64()?;
                 let length = decoder.decode_u64()?;
-                let stateid = decoder.decode_stateid()?;
-                let owner = decoder.decode_opaque()?.to_vec();
+                let new_lock_owner = decoder.decode_bool()?;
+                let (stateid, owner) = if new_lock_owner {
+                    let _open_seqid = decoder.decode_u32()?;
+                    let open_stateid = decoder.decode_stateid()?;
+                    let _lock_seqid = decoder.decode_u32()?;
+                    // lock_owner4 = clientid (u64) + opaque<>
+                    let _clientid = decoder.decode_u64()?;
+                    let owner = decoder.decode_opaque()?.to_vec();
+                    (open_stateid, owner)
+                } else {
+                    let lock_stateid = decoder.decode_stateid()?;
+                    let _lock_seqid = decoder.decode_u32()?;
+                    // Existing lock_owner; the wire doesn't carry the owner
+                    // bytes here (they're already associated with lock_stateid).
+                    (lock_stateid, Vec::new())
+                };
                 Ok(Operation::Lock {
                     locktype,
                     reclaim,
@@ -1842,6 +1932,11 @@ impl CompoundResponse {
                         }
                     }
                 }
+            }
+            OperationResult::FreeStateId(status) => {
+                // RFC 8881 §18.38.2: FREE_STATEID4res = nfsstat4 (status only)
+                encoder.encode_u32(opcode::FREE_STATEID);
+                encoder.encode_status(status);
             }
 
             // Lock operations
