@@ -692,26 +692,53 @@ pub fn encode_device_addr_file_layout(
     encoder.finish()
 }
 
-/// Convert IP:port to NFSv4 universal address format
+/// Convert `host:port` to NFSv4 universal address format `h1.h2.h3.h4.p1.p2`
+/// (RFC 5665 §5.2.3.4).
 ///
-/// NFSv4 uses a dotted-decimal format: "h1.h2.h3.h4.p1.p2"
-/// where h1-h4 are IP octets and p1.p2 are port high/low bytes
+/// `host` must end up as four dotted-decimal IPv4 octets — the Linux kernel
+/// pNFS client parses universal addresses strictly. If `host` is already
+/// dotted-decimal we use it as-is; otherwise we DNS-resolve it (this is
+/// what makes hostnames like `host.lima.internal` work as DS endpoints).
 ///
-/// Example: "10.0.1.1:2049" -> "10.0.1.1.8.1"
+/// Example: "10.0.1.1:2049" → "10.0.1.1.8.1".
 pub fn endpoint_to_uaddr(endpoint: &str) -> Result<String, String> {
-    let parts: Vec<&str> = endpoint.split(':').collect();
+    use std::net::ToSocketAddrs;
+
+    let parts: Vec<&str> = endpoint.rsplitn(2, ':').collect();
     if parts.len() != 2 {
         return Err(format!("Invalid endpoint format: {}", endpoint));
     }
-    
-    let ip = parts[0];
-    let port: u16 = parts[1].parse()
-        .map_err(|_| format!("Invalid port: {}", parts[1]))?;
-    
+    // rsplitn returns the parts in reverse — port first, host second.
+    let port: u16 = parts[0].parse()
+        .map_err(|_| format!("Invalid port: {}", parts[0]))?;
+    let host = parts[1];
+
+    // Try to use host directly if it's already an IPv4 dotted-decimal.
+    let ipv4_octets = if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        ip.octets()
+    } else {
+        // Resolve via the OS resolver. We only need the first IPv4 result
+        // — pNFS file-layout universal addresses require IPv4 octets.
+        // Note: this blocks the calling thread; LAYOUTGET / GETDEVICEINFO
+        // are slow paths, not the hot READ/WRITE path, so the cost is
+        // acceptable. Cache could be added later if needed.
+        let resolved = (host, 0u16).to_socket_addrs()
+            .map_err(|e| format!("Failed to resolve {}: {}", host, e))?
+            .find_map(|sa| if let std::net::SocketAddr::V4(v4) = sa {
+                Some(*v4.ip())
+            } else { None })
+            .ok_or_else(|| format!("No IPv4 address for {}", host))?;
+        resolved.octets()
+    };
+
     let port_high = (port >> 8) & 0xFF;
-    let port_low = port & 0xFF;
-    
-    Ok(format!("{}.{}.{}", ip, port_high, port_low))
+    let port_low  = port & 0xFF;
+
+    Ok(format!(
+        "{}.{}.{}.{}.{}.{}",
+        ipv4_octets[0], ipv4_octets[1], ipv4_octets[2], ipv4_octets[3],
+        port_high, port_low,
+    ))
 }
 
 #[cfg(test)]
@@ -721,15 +748,28 @@ mod tests {
 
     #[test]
     fn test_endpoint_to_uaddr() {
+        // Dotted-decimal IPv4 + port → "h1.h2.h3.h4.p1.p2"
         assert_eq!(
             endpoint_to_uaddr("10.0.1.1:2049").unwrap(),
             "10.0.1.1.8.1"
         );
-
         assert_eq!(
             endpoint_to_uaddr("192.168.1.100:2049").unwrap(),
             "192.168.1.100.8.1"
         );
+        // Hostnames are resolved via the OS resolver. localhost is
+        // guaranteed to resolve to 127.0.0.1; if not, the platform is
+        // misconfigured and the test should fail loudly.
+        // 20491 = 0x500B = (high=0x50=80, low=0x0B=11)
+        let r = endpoint_to_uaddr("localhost:20491").unwrap();
+        assert_eq!(r, "127.0.0.1.80.11", "localhost should resolve to 127.0.0.1; got {}", r);
+    }
+
+    #[test]
+    fn test_endpoint_to_uaddr_unresolvable() {
+        // A host that doesn't resolve at all → Err, not a malformed uaddr.
+        // `.invalid` is reserved by RFC 2606 specifically for this purpose.
+        assert!(endpoint_to_uaddr("nonexistent.invalid:1234").is_err());
     }
 
     #[test]

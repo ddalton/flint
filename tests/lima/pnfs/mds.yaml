@@ -23,11 +23,11 @@ mds:
   # as host.lima.internal.
   dataServers:
     - deviceId: ds-host-1
-      endpoint: "host.lima.internal:20491"
+      endpoint: "192.168.5.2:20491"
       bdevs:
         - lvol0
     - deviceId: ds-host-2
-      endpoint: "host.lima.internal:20492"
+      endpoint: "192.168.5.2:20492"
       bdevs:
         - lvol0
 

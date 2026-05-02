@@ -159,14 +159,23 @@ impl MetadataServer {
     fn start_grpc_server(&self) {
         let device_registry = Arc::clone(&self.device_registry);
         let bind_addr = self.config.bind.address.clone();
-        
+        // Build the operator's `device_id → reachable endpoint` map from
+        // the static config. The gRPC service uses this to override the
+        // bind-address that registering DSes report (a DS only knows its
+        // own bind, often 0.0.0.0; the client needs the externally
+        // routable endpoint).
+        let configured_endpoints: std::collections::HashMap<String, String> =
+            self.config.data_servers.iter()
+                .map(|ds| (ds.device_id.clone(), ds.endpoint.clone()))
+                .collect();
+
         tokio::spawn(async move {
             // gRPC server on port 50051 (standard gRPC port)
             let grpc_addr = format!("{}:50051", bind_addr)
                 .parse()
                 .expect("Invalid gRPC address");
 
-            let control_service = MdsControlService::new(device_registry);
+            let control_service = MdsControlService::new(device_registry, configured_endpoints);
             let svc = MdsControlServer::new(control_service);
 
             info!("🔧 Starting MDS gRPC control server on {}", grpc_addr);

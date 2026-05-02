@@ -24,16 +24,30 @@ pub use proto::mds_control_server::{MdsControl, MdsControlServer};
 pub use proto::mds_control_client::MdsControlClient;
 
 /// MDS Control Service Implementation
-/// 
+///
 /// This runs on the MDS and handles DS registration, heartbeats, etc.
 pub struct MdsControlService {
     device_registry: Arc<crate::pnfs::mds::device::DeviceRegistry>,
+    /// Operator-supplied DS endpoints (`device_id → client-reachable
+    /// endpoint`). When a DS registers, we *override* the endpoint it
+    /// reported with this map: a DS only knows its bind address (often
+    /// `0.0.0.0` or a pod-internal IP), but the address the *NFS client*
+    /// needs is the externally-routable one configured at MDS deploy
+    /// time. Without this, GETDEVICEINFO returns `0.0.0.0.p1.p2` which
+    /// the kernel can't reach, and the client silently falls back to
+    /// MDS-direct I/O.
+    configured_endpoints: std::collections::HashMap<String, String>,
 }
 
 impl MdsControlService {
-    /// Create a new MDS control service
-    pub fn new(device_registry: Arc<crate::pnfs::mds::device::DeviceRegistry>) -> Self {
-        Self { device_registry }
+    /// Create a new MDS control service. `configured_endpoints` is the
+    /// operator's view of `device_id → reachable endpoint` taken from
+    /// the MDS config's `dataServers` list.
+    pub fn new(
+        device_registry: Arc<crate::pnfs::mds::device::DeviceRegistry>,
+        configured_endpoints: std::collections::HashMap<String, String>,
+    ) -> Self {
+        Self { device_registry, configured_endpoints }
     }
 }
 
@@ -46,15 +60,31 @@ impl MdsControl for MdsControlService {
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
         
-        info!(
-            "📝 DS Registration: device_id={}, endpoint={}, capacity={} bytes",
-            req.device_id, req.endpoint, req.capacity
-        );
+        // Override the DS-reported endpoint with the operator-configured
+        // one for this device_id. The DS only knows its bind address
+        // (typically 0.0.0.0); the client needs the externally-reachable
+        // endpoint the operator has set up (e.g. a Service IP, an
+        // out-of-cluster IP, or in dev a hostname like host.lima.internal).
+        let effective_endpoint = self.configured_endpoints
+            .get(&req.device_id)
+            .cloned()
+            .unwrap_or_else(|| req.endpoint.clone());
+        if effective_endpoint != req.endpoint {
+            info!(
+                "📝 DS Registration: device_id={}, ds-reported endpoint={} → using configured endpoint={}",
+                req.device_id, req.endpoint, effective_endpoint,
+            );
+        } else {
+            info!(
+                "📝 DS Registration: device_id={}, endpoint={}, capacity={} bytes",
+                req.device_id, effective_endpoint, req.capacity,
+            );
+        }
 
         // Create device info
         let mut device_info = crate::pnfs::mds::device::DeviceInfo::new(
             req.device_id.clone(),
-            req.endpoint.clone(),
+            effective_endpoint,
             req.mount_points.clone(),
         );
 
