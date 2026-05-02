@@ -1,0 +1,89 @@
+# Minimal pNFS MDS config for the smoke test.
+#
+# Two data servers on the loopback host, striped layout, 8 MiB stripe.
+# State backend = memory (in-process). Test runner is responsible for
+# cleaning the export tree between runs.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: mds
+
+mds:
+  bind:
+    address: "0.0.0.0"
+    port: 20490
+
+  layout:
+    type: file
+    stripeSize: 8388608  # 8 MiB
+    policy: stripe       # interleave stripes across DSes
+
+  # Two data servers on different host ports. The mount port advertised
+  # to the client is the host port; from the Lima VM the host is reached
+  # as host.lima.internal.
+  dataServers:
+    - deviceId: ds-host-1
+      endpoint: "host.lima.internal:20491"
+      bdevs:
+        - lvol0
+    - deviceId: ds-host-2
+      endpoint: "host.lima.internal:20492"
+      bdevs:
+        - lvol0
+
+  state:
+    backend: memory
+    config: {}
+
+  ha:
+    enabled: false
+    replicas: 1
+    leaderElection: false
+    leaseDuration: 15
+    renewDeadline: 10
+    retryPeriod: 2
+
+  failover:
+    heartbeatTimeout: 30
+    policy: recall_affected
+    gracePeriod: 60
+
+exports:
+  # The MDS interprets `path` as the literal filesystem root the server
+  # serves out of (see pnfs::mds::server::MetadataServer::new at
+  # exports.first().path). We point it at a writable scratch dir on the
+  # host so OPEN/WRITE actually succeeds; the smoke script wipes and
+  # recreates this dir before each run.
+  - path: /tmp/flint-pnfs-mds-exports
+    fsid: 1
+    options: [rw, sync, no_subtree_check]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: info
+  format: text
+  components:
+    mds: info
+    layout: debug
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: false
+    port: 0
+    path: /health
+  metrics: []
+
+development:
+  debug: false
+  simulateFailures:
+    enabled: false
+    interval: 0
+    duration: 0
+  traceRpc: false
+  dumpLayouts: false

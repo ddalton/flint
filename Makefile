@@ -152,3 +152,28 @@ test-nfs-all: nfs-server-bg ## Run mount + protocol + frag tests, then stop serv
 	-$(MAKE) test-nfs-protocol
 	-$(MAKE) test-nfs-frag
 	$(MAKE) nfs-server-stop
+
+# ───────────────────────────── pNFS tests ────────────────────────────────────
+#
+# The pNFS suite spins up flint-pnfs-mds + 2× flint-pnfs-ds on the host, each
+# with config files under tests/lima/pnfs/. The test scripts manage their own
+# server lifecycle (start, run, stop), so these targets don't share the
+# nfs-server-bg machinery above.
+
+.PHONY: build-pnfs
+build-pnfs: ## Build flint-pnfs-mds and flint-pnfs-ds (release)
+	cd $(CARGO_DIR) && $(CARGO) build --release \
+	  --bin flint-pnfs-mds --bin flint-pnfs-ds
+
+.PHONY: test-pnfs-smoke
+test-pnfs-smoke: build-pnfs ## End-to-end pNFS data-path smoke test (mount + write + checksum)
+	tests/lima/pnfs/smoke.sh
+
+.PHONY: test-pnfs-pynfs
+test-pnfs-pynfs: build-pnfs ## Run pynfs `pnfs` conformance subset against the MDS
+	tests/lima/pnfs/pynfs.sh
+
+.PHONY: test-pnfs-all
+test-pnfs-all: ## Run smoke + pynfs pNFS tests in sequence
+	$(MAKE) test-pnfs-smoke
+	$(MAKE) test-pnfs-pynfs

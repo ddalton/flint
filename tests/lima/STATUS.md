@@ -191,6 +191,32 @@ make lima-shell               # interactive shell inside the test VM
 make lima-down                # tear down the VM
 ```
 
+### pNFS test targets
+
+The pNFS suite is its own thing — it brings up MDS + 2 DSes and runs
+two distinct tests:
+
+```bash
+make build-pnfs               # one-time: build flint-pnfs-{mds,ds}
+make test-pnfs-smoke          # mount + 24 MiB write/read + per-DS byte count
+make test-pnfs-pynfs          # pynfs `pnfs` flag set (8 conformance tests)
+make test-pnfs-all            # both
+```
+
+Current baseline (commit `f502bd9`):
+
+* Smoke test: **DEGRADED** — mount + checksum round-trip succeeds, but
+  all 24 MiB lands on the MDS, zero bytes on either DS. This is the
+  audit's "pNFS data path is not real" gap; the smoke test exits 0
+  in this state as a regression guard until the data path is wired.
+* pynfs pNFS subset: **1 PASS / 3 FAIL / 4 SKIP** out of 8 tests.
+  CSID7 testOpenLayoutGet passes. The 3 FAILs are tests that
+  hardcode `LAYOUT4_BLOCK_VOLUME` (we're a files-layout server, not
+  block); the 4 SKIPs are dependency-chained on those.
+
+See `tests/lima/pnfs/README.md` for topology, debugging tips, and
+"what PASS/DEGRADED/FAIL mean".
+
 ### Run a single pynfs test (debugging)
 
 ```bash

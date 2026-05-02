@@ -1,0 +1,73 @@
+# DS #1 for the pNFS smoke test. Bind on host port 20491; serves files
+# out of /tmp/flint-pnfs-ds1. Test asserts that this directory grows
+# when the client writes a striped file through the MDS.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: ds
+
+ds:
+  bind:
+    address: "0.0.0.0"
+    port: 20491
+
+  deviceId: ds-host-1
+
+  mds:
+    # MDS gRPC control endpoint. The MDS hardcodes its gRPC port to
+    # bind_addr:50051 (separate from the NFSv4 port 20490). Pointing the
+    # DS here so heartbeat/registration goes through gRPC, not NFS.
+    endpoint: "127.0.0.1:50051"
+    heartbeatInterval: 10
+    registrationRetry: 5
+    maxRetries: 0
+
+  bdevs:
+    - name: lvol0
+      mount_point: /tmp/flint-pnfs-ds1
+      spdk_volume: lvol0
+
+  resources:
+    maxConnections: 100
+    ioQueueDepth: 32
+    ioBufferSize: 1048576
+
+  performance:
+    useSpdkIo: false
+    ioThreads: 2
+    zeroCopy: false
+
+exports:
+  - path: /
+    fsid: 1
+    options: [rw, sync]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: info
+  format: text
+  components:
+    ds: info
+    io: info
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: false
+    port: 0
+    path: /health
+  metrics: []
+
+development:
+  debug: false
+  simulateFailures:
+    enabled: false
+    interval: 0
+    duration: 0
+  traceRpc: false
+  dumpLayouts: false
