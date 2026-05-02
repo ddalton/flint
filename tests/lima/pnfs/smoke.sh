@@ -83,7 +83,12 @@ chmod 0777 "$DS1_EXPORT" "$DS2_EXPORT" "$MDS_EXPORT_DIR"
 # 1. Start MDS + 2 DSes
 # ──────────────────────────────────────────────────────────────────────
 echo "▶ starting MDS"
-nohup "$BIN_DIR/flint-pnfs-mds" --config "$CFG_DIR/mds.yaml" \
+# PNFS_MODE=mds is required so ClientManager labels the server_owner as
+# "flint-pnfs", which in turn flips EXCHANGE_ID's response to set
+# EXCHGID4_FLAG_USE_PNFS_MDS. Without that bit, the Linux client treats
+# the mount as plain NFSv4.1 and never issues LAYOUTGET — the data path
+# silently falls back to MDS-direct I/O. (RFC 8881 §13.1)
+PNFS_MODE=mds nohup "$BIN_DIR/flint-pnfs-mds" --config "$CFG_DIR/mds.yaml" \
   >"$LOG_DIR/flint-pnfs-mds.log" 2>&1 &
 echo $! > "$PIDFILE_DIR/flint-pnfs-mds.pid"
 
@@ -97,7 +102,9 @@ fi
 for n in 1 2; do
   port_var=DS${n}_PORT; cfg=$CFG_DIR/ds${n}.yaml
   echo "▶ starting DS $n (port ${!port_var})"
-  nohup "$BIN_DIR/flint-pnfs-ds" --config "$cfg" \
+  # PNFS_MODE=ds for the same reason — see PNFS_MODE comment for the MDS
+  # above. The DS labels itself as USE_PNFS_DS in any direct EXCHANGE_ID.
+  PNFS_MODE=ds nohup "$BIN_DIR/flint-pnfs-ds" --config "$cfg" \
     >"$LOG_DIR/flint-pnfs-ds${n}.log" 2>&1 &
   echo $! > "$PIDFILE_DIR/flint-pnfs-ds${n}.pid"
 done

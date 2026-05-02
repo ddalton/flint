@@ -1296,48 +1296,39 @@ impl CompoundDispatcher {
                 // Each layout may contain multiple segments for striping
                 encoder.encode_u32(result.layouts.len() as u32);
                 for layout in &result.layouts {
-                    // Encode layout metadata (offset, length, iomode, layout_type)
+                    // layout4 = { offset, length, iomode, layout_content4 }
                     encoder.encode_u64(layout.offset);
                     encoder.encode_u64(layout.length);
                     encoder.encode_u32(iomode);
-                    
-                    // Use FFLv4 (type 4) for independent DS storage per RFC 8435
-                    const LAYOUT_TYPE_FLEX_FILES: u32 = 4;
-                    encoder.encode_u32(LAYOUT_TYPE_FLEX_FILES);
-                    
-                    // FFLv4 layout encoding follows
-                    // For now, encode the first segment (simple single-device case)
-                    // TODO: Support multi-device striping with multiple file handles
-                    
-                    let stripe_unit = 8 * 1024 * 1024; // 8 MB stripe unit (typical)
-                    
+
+                    // Use NFSv4.1 FILE layout (RFC 5661 §13). FFLv4 (RFC 8435)
+                    // is more flexible but has subtle ff_layout4 framing
+                    // requirements that the Linux kernel parses very strictly;
+                    // FILE layout is the most widely tested path. Smoke-test
+                    // observation: the kernel was issuing LAYOUTGET in FFLv4
+                    // mode but never following up with GETDEVICEINFO — the
+                    // body parsed cleanly, the kernel just couldn't find a
+                    // path to actual I/O and fell back to MDS-direct.
+                    const LAYOUT_TYPE_NFSV4_1_FILES: u32 = 1;
+                    encoder.encode_u32(LAYOUT_TYPE_NFSV4_1_FILES);
+
+                    let stripe_unit: u64 = 8 * 1024 * 1024; // 8 MiB stripe unit
+
                     if layout.segments.is_empty() {
                         warn!("❌ Layout has no segments!");
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
                     }
-                    
-                    // Use FFLv4 (Flexible File Layout) for independent DS storage
-                    // RFC 8435 - designed for non-shared storage architecture
-                    info!("   📤 Encoding FFLv4 layout with {} segments for independent DS storage", layout.segments.len());
-                    
-                    // Generate filename from filehandle hash for now
-                    // In production, would track filename in layout manager
-                    let file_id = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        filehandle.hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    let filename = format!("file_{:016x}", file_id);
-                    
-                    let layout_content = Self::encode_fflv4_layout(
+
+                    info!("   📤 Encoding FILE layout (RFC 5661 §13.3) with {} segments",
+                          layout.segments.len());
+
+                    let layout_content = Self::encode_file_layout_striped(
                         &layout.segments,
-                        &filename,
-                        stripe_unit
+                        &filehandle,
+                        stripe_unit,
                     );
-                    
-                    info!("   📤 FFLv4 layout content encoded: {} bytes", layout_content.len());
+
+                    info!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
                     encoder.encode_opaque(&layout_content);
                 }
                 
