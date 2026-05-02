@@ -1194,7 +1194,7 @@ impl CompoundDispatcher {
         context: &CompoundContext,
     ) -> OperationResult {
         use crate::pnfs::mds::operations::LayoutGetArgs;
-        use crate::pnfs::mds::layout::{LayoutType, IoMode};
+        use crate::pnfs::mds::layout::{LayoutOwner, LayoutType, IoMode};
         use crate::nfs::xdr::XdrEncoder;
         
         // Check if pNFS handler is available
@@ -1218,6 +1218,33 @@ impl CompoundDispatcher {
             }
         };
         
+        // Resolve the calling client and session from the COMPOUND
+        // context — RFC 8881 §12.5 ties every layout to the issuing
+        // (clientid, sessionid) so CB_LAYOUTRECALL can find the
+        // backchannel and LAYOUTRETURN ALL/FSID can filter by client.
+        let (owner_client_id, owner_session_id) = match context.session_id {
+            Some(sid) => {
+                let cid = self.state_mgr.sessions
+                    .get_session(&sid)
+                    .map(|s| s.client_id)
+                    .unwrap_or(0);
+                (cid, sid.0)
+            }
+            None => {
+                warn!("❌ LAYOUTGET without preceding SEQUENCE — no session context");
+                return OperationResult::LayoutGet(Nfs4Status::OpNotInSession, None);
+            }
+        };
+        // The fsid lives on the FH; we don't extract it yet (the FH
+        // manager only stores paths). Until that's wired, treat every
+        // layout as living in fsid=1 — it doesn't change recall routing,
+        // just makes LAYOUTRETURN FSID degenerate to LAYOUTRETURN ALL.
+        let owner = LayoutOwner {
+            client_id: owner_client_id,
+            session_id: owner_session_id,
+            fsid: 1,
+        };
+
         // Convert arguments
         let args = LayoutGetArgs {
             signal_layout_avail: _signal_layout_avail,
@@ -1249,6 +1276,7 @@ impl CompoundDispatcher {
             },
             maxcount: _maxcount,
             filehandle: filehandle.clone(),
+            owner,
         };
         
         // Call pNFS handler

@@ -15,7 +15,7 @@
 //! - RFC 8881 Section 18.44 - LAYOUTRETURN
 //! - RFC 8881 Chapter 13 - NFSv4.1 File Layout Type
 
-use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutSegment, LayoutType};
+use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutOwner, LayoutSegment, LayoutType};
 use crate::pnfs::mds::device::{DeviceId, DeviceRegistry};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -72,6 +72,7 @@ impl PnfsOperationHandler {
         // Generate layout
         let layout = self.layout_manager
             .generate_layout(
+                args.owner,
                 args.filehandle.clone(),
                 args.offset,
                 args.length,
@@ -519,6 +520,11 @@ pub struct LayoutGetArgs {
     pub stateid: [u8; 16],
     pub maxcount: u32,
     pub filehandle: Vec<u8>,
+    /// Identity of the issuing client / session / fsid (set by the
+    /// COMPOUND dispatcher from `CompoundContext`). Tracked on the
+    /// resulting layout so CB_LAYOUTRECALL can find its session and
+    /// LAYOUTRETURN with `return_type=ALL`/`FSID` can filter by client.
+    pub owner: LayoutOwner,
 }
 
 /// LAYOUTGET result (RFC 8881 Section 18.43.2)
