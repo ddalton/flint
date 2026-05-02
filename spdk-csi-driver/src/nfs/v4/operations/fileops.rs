@@ -1948,6 +1948,24 @@ impl FileOperationHandler {
             }
         };
 
+        // RFC 5661 §18.10: LOOKUPP requires the current filehandle to be a
+        // directory. A non-directory CFH MUST return NFS4ERR_NOTDIR; a
+        // symlink CFH MUST return NFS4ERR_SYMLINK (so the client knows it
+        // can READLINK to follow it). Use symlink_metadata() so we don't
+        // dereference symlinks at this step.
+        match current_path.symlink_metadata() {
+            Ok(m) if m.is_symlink() => {
+                return LookupPRes { status: Nfs4Status::SymLink };
+            }
+            Ok(m) if !m.is_dir() => {
+                return LookupPRes { status: Nfs4Status::NotDir };
+            }
+            Ok(_) => { /* directory — proceed */ }
+            Err(_) => {
+                return LookupPRes { status: Nfs4Status::Stale };
+            }
+        }
+
         // Get parent
         let parent_path = match current_path.parent() {
             Some(p) => p.to_path_buf(),
