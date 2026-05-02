@@ -2,7 +2,7 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after pNFS CSI integration (PRs 1–5 of `docs/plans/pnfs-csi-integration.md`) shipped. HEAD: `0679abf`.
+**Last updated:** 2026-05-02, after Phase A.1 of production-readiness (back-channel writer plumbing). HEAD: `1fa43dc`.
 **Branch:** `kind-no-spdk`.
 
 ### Today in one paragraph
@@ -180,6 +180,41 @@ single-host bottleneck.
 Reads tie at 270 MiB/s on this hardware: loopback TCP / single-client
 saturation is the bottleneck before per-server protocol overhead kicks in.
 **Cross-host scaling remains an architectural prediction, not a measurement.**
+
+### Phase 7 — Production-readiness foundation (this session: `1fa43dc`)
+
+The pNFS CSI integration ships, but the data plane has known gaps that
+block real customer use. ADR-style discussion landed at
+`docs/plans/pnfs-production-readiness.md` outlining Phase A
+(CB_LAYOUTRECALL backchannel, ~2 weeks) and Phase B (state persistence,
+~1 week). Phase A is broken into 5 sub-pieces; A.1 shipped this session.
+
+| Sub | Commit | What |
+|---|---|---|
+| **A.1 — connection writer plumbing** | `1fa43dc` | `BackChannelWriter` (async-mutex-serialized writer over `BufWriter<OwnedWriteHalf>`); `CompoundDispatcher::back_channels` registry keyed by `SessionId`; `BIND_CONN_TO_SESSION` honors `conn_dir=BACK/BOTH` and registers the writer; forward replies now flow through the same writer (refactor preserved behavior). Unblocks A.2-A.5. 3 unit tests cover marker framing, concurrent-non-interleave, and EPIPE on peer close. Lib: 271 → 274; smoke green; pynfs unchanged 153/18/91. |
+| A.2 — CB-side RPC encode/decode | pending | ~3 days |
+| A.3 — replace `send_callback_rpc` stub | pending | ~3 days |
+| A.4 — DS-death → recall fan-out | pending | ~2 days |
+| A.5 — layout revocation on recall timeout | pending | ~2 days |
+
+After Phase A, Phase B (state persistence — `StateBackend` trait with
+`memory` + `sqlite` impls) lands in ~1 week. Together they make pNFS
+safe to ship to a first customer; whether to build Phase C (FFL
+mirroring for HDFS-style replication) is then a demand-driven call.
+
+### pynfs coverage for Phase A
+
+Honest accounting: pynfs has **no public test for CB_LAYOUTRECALL on
+FILES layout**. The 10 `st_delegation` tests would exercise the same
+back-channel infrastructure once delegation *grants* are wired
+(separate work). Direct verification of Phase A is via:
+
+* **Lima e2e** (built in A.4): `make test-pnfs-recall` — kill a DS
+  mid-write, assert the kernel got recalled and the in-flight `dd`
+  either completes via MDS-direct fallback or fails cleanly with EIO.
+* **Per-piece unit tests** with each sub-PR.
+* **Regression gate**: pynfs stays ≥ 153 PASS / 18 FAIL / 91 SKIP
+  after every commit; smoke stays green.
 
 #### What's still TODO on the data path
 
@@ -449,23 +484,22 @@ Three independent fronts. Pick whichever maps to current priorities.
 The CSI integration ships, but the data plane has known durability and
 restart gaps that block real customer use. These are the **production
 gates**; they don't move user-visible features but they're prerequisites
-for anyone running this in prod.
+for anyone running this in prod. Plan is at
+`docs/plans/pnfs-production-readiness.md`.
 
-1. **CB_LAYOUTRECALL backchannel (Task #4).** Implement the v4.1
-   callback channel: TCP back-connection negotiated via
-   `BIND_CONN_TO_SESSION`, RPC encode of `CB_LAYOUTRECALL4args`,
-   per-layout `CallbackManager` keyed by `(client_id, session_id)`.
-   Without it, killing a DS leaves the kernel writing into the void
-   instead of being recalled. ~1–2 focused weeks. Same machinery
-   unlocks the 3 `st_delegation` pynfs tests as a side effect.
-2. **Layout/state persistence (Task #5).** Today instance IDs and
-   layout stateids regenerate on every MDS restart. Plan: `StateBackend`
-   trait with `memory` + `etcd`/`sqlite` impls, persist `(client_id,
-   session_id, layout_stateid, fsid, fh, range)`. ~1 week.
-3. **Cross-host fio bench.** The single-Mac-host 1.6× number is a
-   floor; the architectural prediction is N× scaling with N DSes on
-   N nodes. Until measured on a real cluster this remains a
-   prediction. ~1 week of harness + run.
+1. **CB_LAYOUTRECALL backchannel (Task #4) — IN PROGRESS.** Phase A.1
+   shipped at `1fa43dc` (connection writer plumbing). Four sub-PRs
+   remain: A.2 (CB RPC framing), A.3 (replace send stub), A.4
+   (DS-death → recall fan-out + Lima e2e test), A.5 (forced layout
+   revocation on recall timeout). ~10 days of remaining work.
+2. **Layout/state persistence (Task #5) — pending.** `StateBackend`
+   trait with `memory` (current) + `sqlite` (new) impls. Persist
+   client/session/stateid/layout records; slot replay cache
+   deliberately not persisted per RFC 8881 §15.1.10.4. ~1 week.
+3. **Cross-host fio bench — pending.** The single-Mac-host 1.6×
+   number is a floor; the architectural prediction is N× scaling
+   with N DSes on N nodes. Until measured on a real cluster this
+   remains a prediction. ~1 week of harness + run.
 
 ### Front B — pNFS feature work (beyond the perf-tier MVP)
 
