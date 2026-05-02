@@ -232,9 +232,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     
-    // Create minimal CSI services
+    // Create minimal CSI services. pNFS support is opt-in via the
+    // FLINT_PNFS_MDS_ENDPOINT env var: when unset, both services
+    // hold None and behave exactly as the SPDK-only driver did
+    // before this change. The Arc lets the same handle feed both
+    // controller (CreateVolume / DeleteVolume) and node
+    // (NodePublishVolume) services.
+    let pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>> =
+        spdk_csi_driver::pnfs_csi::PnfsCsi::from_env().map(Arc::new);
+    if let Some(p) = &pnfs_csi {
+        eprintln!("🔧 [pNFS] enabled — MDS endpoint: {}", p.endpoint());
+    } else {
+        eprintln!("ℹ️  [pNFS] disabled (FLINT_PNFS_MDS_ENDPOINT not set)");
+    }
+
     let identity_service = MinimalIdentityService::new();
-    let controller_service = MinimalControllerService::new(driver.clone());
+    let controller_service = MinimalControllerService::new(driver.clone(), pnfs_csi);
     let node_service = MinimalNodeService::new(driver.clone());
     
     // Build the router with services
@@ -361,11 +374,22 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
 /// Minimal Controller Service Implementation  
 struct MinimalControllerService {
     driver: Arc<SpdkCsiDriver>,
+    /// pNFS MDS handle. `Some` only when `FLINT_PNFS_MDS_ENDPOINT` is
+    /// set in the environment at startup; `None` otherwise. The
+    /// SPDK code paths never read this field — it is consulted
+    /// exclusively by the `parameters.layout: pnfs` branch in
+    /// `create_volume` (and the corresponding paths in
+    /// `delete_volume`). Keeps SPDK behaviour byte-identical when
+    /// pNFS is not configured.
+    pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>>,
 }
 
 impl MinimalControllerService {
-    fn new(driver: Arc<SpdkCsiDriver>) -> Self {
-        Self { driver }
+    fn new(
+        driver: Arc<SpdkCsiDriver>,
+        pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>>,
+    ) -> Self {
+        Self { driver, pnfs_csi }
     }
 
     /// Create volume from snapshot by cloning the snapshot
@@ -692,6 +716,76 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let volume_id = req.name.clone();
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
+        // -------------------------------------------------------------
+        // pNFS branch — runs BEFORE all SPDK / nfsEmptyDir paths so a
+        // misconfigured StorageClass can't accidentally consume SPDK
+        // resources. Selected by `parameters.layout: pnfs`.
+        //
+        // The volume_context returned here is what NodePublishVolume
+        // consumes to mount the kernel client at the MDS. We don't go
+        // through ControllerPublishVolume because pNFS doesn't need
+        // per-node attach state (unlike NVMe-oF in the SPDK path) —
+        // every node mounts the same MDS export by name.
+        // -------------------------------------------------------------
+        if req.parameters.get("layout").map(String::as_str) == Some("pnfs") {
+            let pnfs = match self.pnfs_csi.as_ref() {
+                Some(p) => p,
+                None => {
+                    return Err(tonic::Status::failed_precondition(
+                        "StorageClass requested layout: pnfs, but pNFS is not enabled \
+                         on this driver (FLINT_PNFS_MDS_ENDPOINT not set)",
+                    ));
+                }
+            };
+
+            let size_bytes = req.capacity_range.as_ref()
+                .and_then(|cr| if cr.required_bytes > 0 {
+                    Some(cr.required_bytes)
+                } else if cr.limit_bytes > 0 {
+                    Some(cr.limit_bytes)
+                } else { None })
+                .unwrap_or(1024 * 1024 * 1024) as u64;
+
+            println!(
+                "📡 [pNFS] Volume {} via MDS at {} ({} bytes)",
+                volume_id, pnfs.endpoint(), size_bytes,
+            );
+
+            let ctx = match pnfs.create_volume(&volume_id, size_bytes).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    eprintln!("❌ [pNFS] CreateVolume failed: {}", e);
+                    // Translate the typed error into a meaningful gRPC
+                    // status. MDS-level rejection (size mismatch,
+                    // bad volume_id) is FAILED_PRECONDITION; transport
+                    // failures are UNAVAILABLE so retries from the
+                    // CSI provisioner are encouraged.
+                    use spdk_csi_driver::pnfs_csi::PnfsError;
+                    let status = match e {
+                        PnfsError::Mds(msg) =>
+                            tonic::Status::failed_precondition(format!("pNFS MDS: {}", msg)),
+                        PnfsError::Transport(msg) =>
+                            tonic::Status::unavailable(format!("pNFS transport: {}", msg)),
+                        PnfsError::BadEndpoint(msg) =>
+                            tonic::Status::internal(format!("pNFS endpoint: {}", msg)),
+                    };
+                    return Err(status);
+                }
+            };
+
+            let response = spdk_csi_driver::csi::CreateVolumeResponse {
+                volume: Some(spdk_csi_driver::csi::Volume {
+                    capacity_bytes: size_bytes as i64,
+                    volume_id: volume_id.clone(),
+                    volume_context: ctx,
+                    content_source: None,
+                    accessible_topology: vec![],
+                }),
+            };
+            println!("✅ [pNFS] Volume {} created", volume_id);
+            return Ok(tonic::Response::new(response));
+        }
+
         // Check nfsEmptyDir FIRST — in emptyDir mode all volumes (including clones/snapshots)
         // are backed by ephemeral emptyDir, so we skip SPDK entirely
         let nfs_empty_dir_early = req.parameters.get("nfsEmptyDir")
@@ -924,9 +1018,59 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
     ) -> Result<tonic::Response<spdk_csi_driver::csi::DeleteVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
         let volume_id = req.volume_id.clone();
-        
+
         println!("🗑️ [CONTROLLER] Deleting volume: {}", volume_id);
-        
+
+        // -------------------------------------------------------------
+        // pNFS branch — early-exit so we don't also try to delete
+        // SPDK lvols / NFS-server pods for pNFS volumes (those don't
+        // exist on this path). We detect pNFS by the presence of
+        // `pnfs.flint.io/mds-ip` in the PV's volumeAttributes — that
+        // key is only ever written by `pnfs_csi::create_volume`.
+        // -------------------------------------------------------------
+        if let Some(pnfs) = self.pnfs_csi.as_ref() {
+            use k8s_openapi::api::core::v1::PersistentVolume;
+            use kube::Api;
+            let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+            // Best-effort lookup: if the PV is already gone (k8s
+            // garbage collection ran first), we still want to try
+            // the MDS delete in case the volume_id matches and the
+            // MDS still has the file. The MDS-side delete is itself
+            // idempotent (returns success on absent volume).
+            let is_pnfs = match pvs.list(&Default::default()).await {
+                Ok(list) => list.items.iter().any(|pv| {
+                    pv.spec.as_ref()
+                        .and_then(|s| s.csi.as_ref())
+                        .filter(|csi| csi.volume_handle == volume_id)
+                        .and_then(|csi| csi.volume_attributes.as_ref())
+                        .map(|attrs| attrs.contains_key("pnfs.flint.io/mds-ip"))
+                        .unwrap_or(false)
+                }),
+                Err(_) => false,
+            };
+            if is_pnfs {
+                println!("🗑️ [pNFS] Deleting volume {} via MDS at {}",
+                         volume_id, pnfs.endpoint());
+                if let Err(e) = pnfs.delete_volume(&volume_id).await {
+                    eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
+                    use spdk_csi_driver::pnfs_csi::PnfsError;
+                    let status = match e {
+                        PnfsError::Mds(msg) =>
+                            tonic::Status::failed_precondition(format!("pNFS MDS: {}", msg)),
+                        PnfsError::Transport(msg) =>
+                            tonic::Status::unavailable(format!("pNFS transport: {}", msg)),
+                        PnfsError::BadEndpoint(msg) =>
+                            tonic::Status::internal(format!("pNFS endpoint: {}", msg)),
+                    };
+                    return Err(status);
+                }
+                println!("✅ [pNFS] Volume {} deleted", volume_id);
+                return Ok(tonic::Response::new(
+                    spdk_csi_driver::csi::DeleteVolumeResponse {},
+                ));
+            }
+        }
+
         // Delete NFS server pod if this is an NFS-enabled volume
         // This is safe to call even if pod doesn't exist
         let _ = spdk_csi_driver::rwx_nfs::delete_nfs_server_pod(
@@ -1604,6 +1748,11 @@ struct MinimalNodeService {
 
 impl MinimalNodeService {
     fn new(driver: Arc<SpdkCsiDriver>) -> Self {
+        // The node side of pNFS doesn't need a gRPC handle to the MDS —
+        // every input it needs (mds-ip, port, export path) flows in
+        // through NodePublishVolumeRequest.volume_context. Keeping
+        // this constructor SPDK-symmetric also means the SPDK code
+        // path is byte-identical when pNFS is disabled.
         Self { driver }
     }
 }
@@ -2319,6 +2468,73 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Create target directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&target_path) {
             println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
+        }
+
+        // -------------------------------------------------------------
+        // pNFS branch — runs *before* the existing single-server-NFS
+        // path so a pNFS PV can never accidentally end up in the
+        // Backend B / rwx_nfs flow. We detect pNFS by the volume_id
+        // having `pnfs.flint.io/mds-ip` in its volume_context. These
+        // keys are written by `pnfs_csi::create_volume` and survive
+        // into NodePublishVolumeRequest.volume_context.
+        // -------------------------------------------------------------
+        if let Some(mds_ip) = req.volume_context.get("pnfs.flint.io/mds-ip") {
+            use spdk_csi_driver::pnfs_csi::ctx_keys;
+            let mds_port = req.volume_context.get(ctx_keys::MDS_PORT)
+                .map(String::as_str).unwrap_or("20490");
+            // The kernel mounts the export root, not a per-volume path
+            // — pNFS resolves the volume's stripes via LAYOUTGET against
+            // the file by name. The volume_file is informational here
+            // (used by the application inside the pod to find its data).
+            let volume_file = req.volume_context.get(ctx_keys::VOLUME_FILE)
+                .map(String::as_str).unwrap_or("");
+
+            eprintln!("📡 [pNFS] Mounting volume {} at {}", volume_id, target_path);
+            eprintln!("   MDS: {}:{}", mds_ip, mds_port);
+            eprintln!("   Volume file (under export): {}", volume_file);
+
+            let nfs_source = format!("{}:/", mds_ip);
+            // Critical mount options:
+            //   minorversion=1   — NFSv4.1 required for pNFS layout types
+            //                       (kernel won't issue LAYOUTGET on v4.0).
+            //   nconnect=4       — 4 parallel TCP streams; this is the
+            //                       knob that turned the bench-sweep
+            //                       1.6× win into the steady-state
+            //                       result. See docs/decisions/0003-...
+            //   rsize=wsize=1M   — large blocks; NFS WRITE/READ negotiate
+            //                       up to wsize, so this caps per-RPC
+            //                       payload at 1 MiB which the bench
+            //                       proved is the sweet spot.
+            //   noresvport       — required when running unprivileged
+            //                       NFS (matches the existing rwx_nfs
+            //                       path's choice).
+            let mut mount_opts = format!(
+                "minorversion=1,proto=tcp,port={},nconnect=4,rsize=1048576,wsize=1048576,noresvport",
+                mds_port,
+            );
+            if readonly {
+                mount_opts.push_str(",ro");
+            }
+
+            eprintln!("📋 [pNFS] mount -t nfs4 -o {} {} {}",
+                      mount_opts, nfs_source, target_path);
+
+            let output = std::process::Command::new("mount")
+                .args(["-t", "nfs4", "-o", &mount_opts, &nfs_source, &target_path])
+                .output()
+                .map_err(|e| tonic::Status::internal(format!("mount exec: {}", e)))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("❌ [pNFS] mount failed: {}", stderr);
+                return Err(tonic::Status::internal(format!(
+                    "pNFS mount failed: {}", stderr.trim()
+                )));
+            }
+
+            eprintln!("✅ [pNFS] mount succeeded for {}", volume_id);
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::NodePublishVolumeResponse {},
+            ));
         }
 
         // Check if this is an NFS volume (RWX)
