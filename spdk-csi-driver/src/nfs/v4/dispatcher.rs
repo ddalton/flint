@@ -1108,9 +1108,62 @@ impl CompoundDispatcher {
             }
 
             // Security operations
+            //
+            // RFC 5661 §2.6.3.1.1.8: after SECINFO and SECINFO_NO_NAME the
+            // current filehandle is left "unset", so a following GETFH must
+            // fail with NFS4ERR_NOFILEHANDLE. We clear CFH on Ok.
+            Operation::SecInfo(component) => {
+                info!("SECINFO: name={:?}", component);
+                let cfh = match &context.current_fh {
+                    Some(fh) => fh.clone(),
+                    None => return OperationResult::SecInfo(Nfs4Status::NoFileHandle),
+                };
+                // Resolve CFH → directory path; verify it's a dir and the
+                // child exists (NFS4ERR_NOTDIR / NFS4ERR_NOENT otherwise).
+                let parent_path = match self.file_handler.fh_manager().resolve_handle(&cfh) {
+                    Ok(p) => p,
+                    Err(_) => return OperationResult::SecInfo(Nfs4Status::Stale),
+                };
+                match std::fs::metadata(&parent_path) {
+                    Ok(m) if !m.is_dir() => return OperationResult::SecInfo(Nfs4Status::NotDir),
+                    Err(_) => return OperationResult::SecInfo(Nfs4Status::Stale),
+                    _ => {}
+                }
+                let child = parent_path.join(&component);
+                match std::fs::symlink_metadata(&child) {
+                    Ok(_) => {
+                        context.clear_current_fh();
+                        OperationResult::SecInfo(Nfs4Status::Ok)
+                    }
+                    Err(_) => OperationResult::SecInfo(Nfs4Status::NoEnt),
+                }
+            }
             Operation::SecInfoNoName(style) => {
-                // SECINFO_NO_NAME (opcode 52) - return supported security flavors
+                // SECINFO_NO_NAME (RFC 5661 §18.45). style:
+                //   SECINFO_STYLE4_CURRENT_FH = 0  → flavors for CFH
+                //   SECINFO_STYLE4_PARENT     = 1  → flavors for CFH's parent
                 info!("SECINFO_NO_NAME: style={}", style);
+                let cfh = match &context.current_fh {
+                    Some(fh) => fh.clone(),
+                    None => return OperationResult::SecInfoNoName(Nfs4Status::NoFileHandle),
+                };
+                if style == 1 {
+                    // SECINFO_STYLE4_PARENT of the served root has no NFS-
+                    // visible parent → NOENT (pynfs SECNN3). Two roots can
+                    // appear here: the pseudo-FS root marker, and (under
+                    // single-export "Option B" PUTROOTFH) the export root
+                    // itself. Compare CFH's resolved path to the export
+                    // root's path to catch both shapes.
+                    let mgr = self.file_handler.fh_manager();
+                    let is_root = mgr.is_pseudo_root(&cfh)
+                        || mgr.resolve_handle(&cfh)
+                            .map(|p| p == mgr.get_export_path())
+                            .unwrap_or(false);
+                    if is_root {
+                        return OperationResult::SecInfoNoName(Nfs4Status::NoEnt);
+                    }
+                }
+                context.clear_current_fh();
                 OperationResult::SecInfoNoName(Nfs4Status::Ok)
             }
 

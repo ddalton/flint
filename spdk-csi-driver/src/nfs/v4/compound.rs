@@ -196,6 +196,13 @@ pub enum Operation {
         cachethis: bool,
     },
     ReclaimComplete(bool),       // one_fs
+    /// SECINFO (RFC 5661 §18.29). Looks up `component` under the current
+    /// directory FH and returns the security flavors that may be used to
+    /// access the resulting filehandle. Like LOOKUP it sets CFH to the
+    /// child for the name-existence check, but per §2.6.3.1.1.8 the CFH
+    /// is left unset on return (so a following GETFH must error with
+    /// NFS4ERR_NOFILEHANDLE).
+    SecInfo(String),
     SecInfoNoName(u32),          // style
     TestStateId(Vec<StateId>),   // array of stateids to test
 
@@ -464,6 +471,7 @@ pub enum OperationResult {
     BindConnToSession(Nfs4Status, Option<SessionId>, u32, bool), // sessionid, dir, use_rdma
     Sequence(Nfs4Status, Option<SequenceResult>),
     ReclaimComplete(Nfs4Status),
+    SecInfo(Nfs4Status),
     SecInfoNoName(Nfs4Status),
     TestStateId(Nfs4Status, Option<Vec<Nfs4Status>>),  // status per stateid
     FreeStateId(Nfs4Status),
@@ -531,6 +539,7 @@ impl OperationResult {
             OperationResult::BindConnToSession(s, _, _, _) => *s,
             OperationResult::Sequence(s, _) => *s,
             OperationResult::ReclaimComplete(s) => *s,
+            OperationResult::SecInfo(s) => *s,
             OperationResult::SecInfoNoName(s) => *s,
             OperationResult::TestStateId(s, _) => *s,
             OperationResult::FreeStateId(s) => *s,
@@ -1468,6 +1477,11 @@ impl CompoundRequest {
             }
             
             // Security operations
+            opcode::SECINFO => {
+                // RFC 5661 §18.29.1: SECINFO4args = component4 (utf8str_cs).
+                let name = decoder.decode_string()?;
+                Ok(Operation::SecInfo(name))
+            }
             opcode::SECINFO_NO_NAME => {
                 // SECINFO_NO_NAME takes a style argument (RFC 5661 Section 18.45)
                 let style = decoder.decode_u32()?;
@@ -1603,6 +1617,21 @@ impl CompoundRequest {
             }
         }
     }
+}
+
+/// Shared body for SECINFO / SECINFO_NO_NAME success replies (RFC 5661
+/// §18.29.2 / §18.45.2): an array of `secinfo4`. We advertise AUTH_NONE,
+/// AUTH_SYS, and RPCSEC_GSS(Kerberos V5, svc=none).
+fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
+    encoder.encode_u32(3); // 3 flavors
+    encoder.encode_u32(0); // AUTH_NONE
+    encoder.encode_u32(1); // AUTH_SYS
+    encoder.encode_u32(6); // RPCSEC_GSS
+    // Kerberos V5 OID (1.2.840.113554.1.2.2)
+    let krb5_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+    encoder.encode_opaque(&krb5_oid);
+    encoder.encode_u32(0); // QOP
+    encoder.encode_u32(1); // service = rpc_gss_svc_none
 }
 
 impl CompoundResponse {
@@ -2012,27 +2041,18 @@ impl CompoundResponse {
                 encoder.encode_u32(opcode::RECLAIM_COMPLETE);
                 encoder.encode_status(status);
             }
+            OperationResult::SecInfo(status) => {
+                encoder.encode_u32(opcode::SECINFO);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    encode_secinfo_flavors(encoder);
+                }
+            }
             OperationResult::SecInfoNoName(status) => {
                 encoder.encode_u32(opcode::SECINFO_NO_NAME);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
-                    // Return array of supported security flavors
-                    // Now includes RPCSEC_GSS (Kerberos) support
-                    encoder.encode_u32(3); // Array length: 3 flavors
-
-                    // AUTH_NONE (flavor 0)
-                    encoder.encode_u32(0);
-
-                    // AUTH_SYS (flavor 1)
-                    encoder.encode_u32(1);
-
-                    // RPCSEC_GSS (flavor 6) - Kerberos
-                    encoder.encode_u32(6);
-                    // OID for Kerberos V5 (1.2.840.113554.1.2.2)
-                    let krb5_oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-                    encoder.encode_opaque(&krb5_oid);  // GSS mechanism OID
-                    encoder.encode_u32(0);  // QOP (quality of protection)
-                    encoder.encode_u32(1);  // Service: rpc_gss_svc_none (authentication only)
+                    encode_secinfo_flavors(encoder);
                 }
             }
             OperationResult::TestStateId(status, statuses) => {
@@ -2476,6 +2496,47 @@ mod tests {
             _ => panic!("wrong variant"),
         }
         assert_eq!(d.remaining(), 0);
+    }
+
+    #[test]
+    fn test_secinfo_decode_component() {
+        // SECINFO4args = component4 (utf8str_cs); on the wire that's
+        // length-prefixed, 4-byte aligned.
+        let mut buf = BytesMut::new();
+        let name = b"foo.txt";
+        buf.put_u32(name.len() as u32);
+        buf.put_slice(name);
+        buf.put_slice(&[0u8]); // pad to 8 bytes (next multiple of 4)
+        let mut d = XdrDecoder::new(buf.freeze());
+        let op = CompoundRequest::decode_operation(&mut d, opcode::SECINFO)
+            .expect("decode SECINFO");
+        match op {
+            Operation::SecInfo(s) => assert_eq!(s, "foo.txt"),
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(d.remaining(), 0);
+    }
+
+    #[test]
+    fn test_secinfo_encoded_response_carries_three_flavors() {
+        // Both SECINFO and SECINFO_NO_NAME share the same success
+        // body: array<secinfo4>. We always advertise AUTH_NONE,
+        // AUTH_SYS, RPCSEC_GSS(Kerberos V5).
+        let mut encoder = XdrEncoder::new();
+        encode_secinfo_flavors(&mut encoder);
+        let mut d = XdrDecoder::new(encoder.finish());
+        assert_eq!(d.decode_u32().unwrap(), 3, "3 flavors");
+        assert_eq!(d.decode_u32().unwrap(), 0, "AUTH_NONE");
+        assert_eq!(d.decode_u32().unwrap(), 1, "AUTH_SYS");
+        assert_eq!(d.decode_u32().unwrap(), 6, "RPCSEC_GSS");
+        let oid = d.decode_opaque().unwrap();
+        assert_eq!(
+            oid.as_ref(),
+            &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02],
+            "Kerberos V5 OID 1.2.840.113554.1.2.2",
+        );
+        assert_eq!(d.decode_u32().unwrap(), 0, "QOP");
+        assert_eq!(d.decode_u32().unwrap(), 1, "service=rpc_gss_svc_none");
     }
 
     #[test]

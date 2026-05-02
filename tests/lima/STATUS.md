@@ -2,7 +2,7 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after LAYOUTRETURN FILE/FSID/ALL wiring (Task #6).
+**Last updated:** 2026-05-02, after SECINFO + SECINFO_NO_NAME (4 new pynfs PASSes).
 **Branch:** `kind-no-spdk`.
 
 ### Headline
@@ -29,10 +29,10 @@ audit baseline       0     0     24M    hash matches (MDS-direct)
 
 ```
 Baseline (original audit run): 26 PASS  / 69 FAIL  / 167 SKIP   (96 runnable)
-Current head (9076e96):       148 PASS  / 23 FAIL  / 91  SKIP  (171 runnable)
+Current head:                 152 PASS  / 19 FAIL  / 91  SKIP  (171 runnable)
 ```
 
-5.7× the original pass count. Six suites at 100%; nine more above 70%.
+5.8× the original pass count. Six suites at 100%; nine more above 70%.
 The pNFS work is *invisible* to pynfs (it runs against a single
 non-pNFS mount); the pNFS smoke test is the truth source for the
 data plane.
@@ -55,10 +55,10 @@ st_putfh               7/8    87%
 st_sequence           14/17   82%
 st_courtesy            4/5    80%
 st_open                5/7    71%
-st_secinfo_no_name     2/4    50%
+st_secinfo_no_name     4/4   100%   ✓ ← new this session
+st_secinfo             2/2   100%   ✓ ← new this session
 st_reclaim_complete    1/4    25%
 st_verify              0/1     0%
-st_secinfo             0/2     0%
 st_delegation          0/3     0% (blocked on CB_RECALL)
 ```
 
@@ -165,7 +165,7 @@ Sorted by likely effort × test count.
 
 | Bucket | Tests | What's needed |
 |---|---|---|
-| `st_secinfo` + `st_secinfo_no_name` (4) | SECINFO/SECINFO_NO_NAME | These ops advertise which auth flavors the server accepts. Currently NOTSUPP / partial. Implementation = return `[AUTH_NONE, AUTH_SYS]` (or whatever flavors the server is built for); few hundred lines including XDR encoding. |
+| ~~`st_secinfo` + `st_secinfo_no_name` (4)~~ | ~~SECINFO/SECINFO_NO_NAME~~ | **Done.** Both ops now decode/encode (`[AUTH_NONE, AUTH_SYS, RPCSEC_GSS(Kerberos V5)]`), clear CFH on success per RFC 5661 §2.6.3.1.1.8, and SECINFO_NO_NAME(PARENT) of the served root returns NFS4ERR_NOENT. 6/6 secinfo tests now pass. |
 | `st_courtesy` (1) remaining | one test | "Courtesy client" handling (RFC 8881 §8.4.2.4) — graceful expired-client cleanup. Likely needs lease-expiry triggering state cleanup but allowing renewal-within-grace. |
 | `st_reclaim_complete` (3) | RECLAIM2/3/4 | Validate reclaim-complete state machine: rejecting state-using ops before RECLAIM_COMPLETE during grace; rejecting reclaim ops outside grace. |
 | `st_verify` (1) | VERIFY1-ish | VERIFY/NVERIFY ops (compare client-supplied attrs vs server's). Currently stub. |
@@ -410,25 +410,20 @@ The smoke is green but production-grade pNFS needs:
 
 ### Front B — pynfs core protocol score (single-mount tests)
 
-`st_current_stateid` is now 100% (commit `7262e72`). The next biggest
-single-session win is **`st_secinfo` + `st_secinfo_no_name` (4 tests)**
-— these ops advertise which RPC auth flavors the server accepts for a
-given filehandle. Implementation:
+`st_current_stateid`, `st_secinfo`, and `st_secinfo_no_name` are all
+now 100%. Next single-session wins:
 
-1. Decode SECINFO (component name) / SECINFO_NO_NAME (style: current_fh
-   or parent).
-2. Return an array of `secinfo4` results, one per supported flavor:
-   - AUTH_NONE: just the flavor number (0).
-   - AUTH_SYS: flavor + machinename + uid + gid (we already have
-     all of this on the server side).
-   - RPCSEC_GSS: flavor + oid + qop + service. We don't really
-     support GSS yet; advertise just AUTH_NONE/AUTH_SYS for now.
-3. Wire the new `OperationResult::SecInfo(...)` variant + encoder.
+* **`st_courtesy` + `st_reclaim_complete` (4 tests)** — both want a
+  real lease-expiration / grace-period state machine: lease-expired
+  clients hold "courtesy" state until the next conflicting op (RFC
+  8881 §8.4.2.4); reclaim ops outside grace MUST be rejected.
+* **`st_verify` (1 test)** — VERIFY/NVERIFY against server attrs.
+* **`st_exchange_id` EID9 (1 test)** — `testLeasePeriod` wants real
+  lease expiry → STALE_CLIENTID (we always-renew today).
 
-After that, `st_courtesy` and `st_reclaim_complete` need real
-lease-state-machine work — small but fiddly. `st_verify` is one op
-implementation. Remaining `st_*` failures are smaller clusters
-(symlink PUTFH resolution, REQ_TOO_BIG, etc.).
+Beyond those, the remaining `st_*` failures cluster around symlink
+PUTFH resolution (st_lookupp / st_rename / st_putfh tail), REQ_TOO_BIG
+(st_sequence), and CB_RECALL-blocked delegation tests.
 
 ---
 
