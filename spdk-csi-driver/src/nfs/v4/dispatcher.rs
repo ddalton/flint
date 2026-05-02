@@ -1125,8 +1125,8 @@ impl CompoundDispatcher {
                 self.handle_getdeviceinfo(device_id, layout_type, maxcount, notify_types)
             }
             
-            Operation::LayoutReturn { reclaim, layout_type, iomode, layoutreturn } => {
-                self.handle_layoutreturn(reclaim, layout_type, iomode, layoutreturn)
+            Operation::LayoutReturn { reclaim, layout_type, iomode, return_body } => {
+                self.handle_layoutreturn(reclaim, layout_type, iomode, return_body, context)
             }
 
             Operation::LayoutCommit {
@@ -1448,16 +1448,101 @@ impl CompoundDispatcher {
         }
     }
     
+    /// LAYOUTRETURN (RFC 5661 §18.4 / RFC 8881 §18.44).
+    ///
+    /// The client tells the MDS it no longer needs a layout. Three flavors:
+    /// FILE (one stateid), FSID (every layout this client holds in this
+    /// filesystem), ALL (every layout this client holds anywhere). Linux
+    /// issues ALL during unmount; without honouring it the MDS leaks
+    /// layout state across mount cycles.
+    ///
+    /// We resolve `(client_id, fsid)` from the SEQUENCE-bound session and
+    /// the CFH (currently every export shares fsid=1, matching what
+    /// `handle_layoutget` stamps onto each `LayoutOwner`), then route
+    /// through the pNFS handler.
     fn handle_layoutreturn(
         &self,
-        _reclaim: bool,
-        _layout_type: u32,
-        _iomode: u32,
-        _layoutreturn: Bytes,
+        reclaim: bool,
+        layout_type: u32,
+        iomode: u32,
+        return_body: super::compound::LayoutReturn4Body,
+        context: &CompoundContext,
     ) -> OperationResult {
-        // For now, just acknowledge the layout return
-        info!("📥 LAYOUTRETURN acknowledged");
-        OperationResult::LayoutReturn(Nfs4Status::Ok)
+        use crate::pnfs::mds::layout::{IoMode, LayoutType};
+        use crate::pnfs::mds::operations::{LayoutReturnArgs, LayoutReturnType};
+        use super::compound::LayoutReturn4Body;
+
+        let pnfs = match &self.pnfs_handler {
+            Some(h) => h,
+            None => {
+                warn!("LAYOUTRETURN received but pNFS not configured");
+                return OperationResult::LayoutReturn(Nfs4Status::NotSupp);
+            }
+        };
+
+        // FILE/FSID need a session for the (client_id, fsid) lookup; ALL
+        // strictly only needs the client_id. Require SEQUENCE for all
+        // three to keep the rule simple — RFC 8881 §2.10.5 mandates it
+        // anyway for v4.1 ops.
+        let client_id = match context.session_id {
+            Some(sid) => self.state_mgr.sessions
+                .get_session(&sid)
+                .map(|s| s.client_id)
+                .unwrap_or(0),
+            None => {
+                warn!("LAYOUTRETURN without preceding SEQUENCE");
+                return OperationResult::LayoutReturn(Nfs4Status::OpNotInSession);
+            }
+        };
+
+        let lt = match layout_type {
+            1 => LayoutType::NfsV4_1Files,
+            4 => LayoutType::FlexFiles,
+            _ => return OperationResult::LayoutReturn(Nfs4Status::UnknownLayoutType),
+        };
+        let im = match iomode {
+            1 => IoMode::Read,
+            2 => IoMode::ReadWrite,
+            3 => IoMode::Any,
+            _ => return OperationResult::LayoutReturn(Nfs4Status::BadIoMode),
+        };
+
+        let return_type = match return_body {
+            LayoutReturn4Body::File { offset, length, stateid, body } => {
+                let mut sid = [0u8; 16];
+                sid[0..4].copy_from_slice(&stateid.seqid.to_be_bytes());
+                sid[4..16].copy_from_slice(&stateid.other);
+                LayoutReturnType::File {
+                    offset,
+                    length,
+                    stateid: sid,
+                    layout_body: body.to_vec(),
+                }
+            }
+            LayoutReturn4Body::Fsid => LayoutReturnType::Fsid,
+            LayoutReturn4Body::All => LayoutReturnType::All,
+        };
+
+        let args = LayoutReturnArgs {
+            reclaim,
+            layout_type: lt,
+            iomode: im,
+            return_type,
+            client_id,
+            // Single-fsid export model — see comment on doc string.
+            fsid: 1,
+        };
+
+        match pnfs.layoutreturn(args) {
+            Ok(()) => {
+                info!("📥 LAYOUTRETURN ok (client_id={})", client_id);
+                OperationResult::LayoutReturn(Nfs4Status::Ok)
+            }
+            Err(e) => {
+                warn!("LAYOUTRETURN failed: {}", e);
+                OperationResult::LayoutReturn(Nfs4Status::ServerFault)
+            }
+        }
     }
 
     /// LAYOUTCOMMIT (RFC 8881 §18.42).

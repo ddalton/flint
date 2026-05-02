@@ -2,7 +2,7 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-01, after commit `9076e96` (pNFS data path real, end-to-end).
+**Last updated:** 2026-05-02, after LAYOUTRETURN FILE/FSID/ALL wiring (Task #6).
 **Branch:** `kind-no-spdk`.
 
 ### Headline
@@ -121,6 +121,7 @@ any one and the kernel falls back to MDS-direct I/O silently.
 | 4.B | `272ceef` | `MdsControlService` overrides DS-reported endpoint with operator-configured one (DS reports its bind 0.0.0.0; client needs externally routable). `endpoint_to_uaddr` DNS-resolves hostnames so non-IPv4 DS endpoints encode to a parseable uaddr. | kernel now receives valid uaddr `192.168.5.2.80.11/.12` (was `0.0.0.0.80.11`). 0/0/24M, 24M client (still MDS-direct: kernel can't talk to DS). |
 | 4.C | `23faf5b` | DS dispatcher answers `RECLAIM_COMPLETE` (opcode 58, RFC §18.51): kernel was getting NOTSUPP and marking the DS unhealthy. DS accepts MDS-issued v1 filehandles via `FileHandleManager::parse_path_lenient` and rebases by basename — DS no longer fails strict instance/hash check. | **8M/16M/0**. Kernel writes through DSes. 0-byte client read-back (MDS doesn't know the size). |
 | 4.D | `9076e96` | **LAYOUTCOMMIT** (RFC 8881 §18.42) wired end-to-end: decoder for `LAYOUTCOMMIT4args` (offset/length/reclaim/stateid + `newoffset4` + `newtime4` + `layoutupdate4`); `OperationResult::LayoutCommit(status, Option<u64>)` with `newsize4` reply union; handler resolves CFH→path and `set_len` if `last_write_offset+1` extends EOF; best-effort `set_times` from `time_modify`. | **8M/16M/0, 24M client. PASS.** |
+| 4.E | (this session) | **LAYOUTRETURN** (RFC 5661 §18.4 / RFC 8881 §18.44) wired end-to-end. Pre-fix the decoder treated `layoutreturn4` as a length-prefixed opaque (it's a discriminated union — discriminator was eaten as length); the dispatcher returned `Ok` without calling the pNFS handler at all, so layouts leaked across mount cycles. Now: `Operation::LayoutReturn` carries a typed `LayoutReturn4Body { File{offset,length,stateid,body}, Fsid, All }`; dispatcher resolves `(client_id,fsid)` from the SEQUENCE-bound session and calls `pnfs_handler.layoutreturn(...)`; `MdsOperations::layoutreturn` calls `LayoutManager::return_layout` (FILE) / `return_fsid_for_client` (FSID) / `return_all_for_client` (ALL). Smoke confirms `Layout returned: stateid=…` now fires per FILE return. 4 unit tests cover wire decode of all three variants + unknown-discriminator error. | smoke unchanged (8M/16M/0, 24M client, hash matches), pynfs unchanged (148/23/91), but layouts no longer leak. |
 
 The smoke now exits with `✓ PASS: data path crossed both DSes (real
 pNFS striping)`.
@@ -139,10 +140,12 @@ don't block the smoke. Tracked items (and what would surface them):
   stateids regenerate on MDS restart; clients see `STALE_DEVICEID` /
   `BAD_STATEID`. Would surface in: restart MDS during a long write;
   client errors out instead of recovering.
-- **LAYOUTRETURN FSID/ALL (Task #6)** — Linux client uses ALL during
-  unmount; we ack but don't actually free state. Would surface in:
-  long-running MDS shows growing layout count after each
-  mount/unmount cycle.
+- ~~**LAYOUTRETURN FSID/ALL (Task #6)**~~ — **done (commit 4.E above)**.
+  Layouts are now actually freed on FILE/FSID/ALL returns. Linux's
+  per-file FILE-typed returns at unmount drive the path that's
+  exercised in CI; ALL/FSID code paths are covered by unit tests but
+  not yet by an integration test (no current client sends them in
+  the smoke flow).
 - **Multi-client correctness** — only the smoke uses one mount on
   one VM. Two concurrent clients writing the same file would
   exercise stateid-per-owner code that hasn't been driven yet.
@@ -197,8 +200,9 @@ radar:
 - **Task #5 (pending)** — pNFS state persistence. Device IDs and layout
   stateids are randomly regenerated on every MDS restart, so any client
   with a layout sees `STALE_DEVICEID` / `BAD_STATEID` after a restart.
-- **Task #6 (pending)** — pNFS LAYOUTRETURN FSID/ALL paths are TODOs.
-  Linux client uses ALL during unmount — layouts leak in MDS memory.
+- ~~**Task #6**~~ — **done.** LAYOUTRETURN FILE/FSID/ALL all wired
+  through `LayoutManager::return_layout` / `return_fsid_for_client` /
+  `return_all_for_client`. Layouts no longer leak across mount cycles.
 
 `/Users/ddalton/github/flint/spdk-csi-driver/src/pnfs/` houses the
 relevant code; the original audit lives in chat history (run
@@ -402,10 +406,7 @@ The smoke is green but production-grade pNFS needs:
    trait with `memory` + `etcd`/`sqlite` impls, persist `(client_id,
    session_id, layout_stateid, fsid, fh, range)`. The `LayoutOwner`
    struct already gives the natural key.
-3. **LAYOUTRETURN FSID/ALL wiring (Task #6).** `layout.rs` already
-   has `return_all_for_client` / `return_fsid_for_client`; the
-   dispatcher's `handle_layoutreturn` just needs to parse the
-   `layoutreturn4` discriminator (FILE / FSID / ALL) and call them.
+3. ~~**LAYOUTRETURN FSID/ALL wiring (Task #6).**~~ Done — see Phase 4.E.
 
 ### Front B — pynfs core protocol score (single-mount tests)
 

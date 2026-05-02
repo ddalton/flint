@@ -68,6 +68,32 @@ impl CompoundResponse {
     }
 }
 
+/// Discriminator + body of the `layoutreturn4` union (RFC 5661 §18.4.1):
+///
+/// ```c
+/// union layoutreturn4 switch (layoutreturn_type4 lr_returntype) {
+///     case LAYOUTRETURN4_FILE: layoutreturn_file4 lr_layout;
+///     case LAYOUTRETURN4_FSID: void;
+///     case LAYOUTRETURN4_ALL:  void;
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub enum LayoutReturn4Body {
+    /// LAYOUTRETURN4_FILE = 1: bound to a single file's stateid.
+    File {
+        offset: u64,
+        length: u64,
+        stateid: StateId,
+        /// `lrf_body` — layouttype-specific opaque (FFLv4 carries
+        /// io-error / iostats reports here; FILES is empty).
+        body: Bytes,
+    },
+    /// LAYOUTRETURN4_FSID = 2: every layout this client holds in CFH's fsid.
+    Fsid,
+    /// LAYOUTRETURN4_ALL = 3: every layout this client holds, period.
+    All,
+}
+
 /// Individual operation in a COMPOUND
 #[derive(Debug)]
 pub enum Operation {
@@ -261,7 +287,7 @@ pub enum Operation {
         reclaim: bool,
         layout_type: u32,
         iomode: u32,
-        layoutreturn: Bytes,
+        return_body: LayoutReturn4Body,
     },
     /// LAYOUTCOMMIT (RFC 8881 §18.42, opcode 49). Client tells the MDS
     /// what it actually wrote through the data path so the MDS can
@@ -1528,15 +1554,45 @@ impl CompoundRequest {
                 })
             }
             opcode::LAYOUTRETURN => {
+                // RFC 5661 §18.4.1 LAYOUTRETURN4args:
+                //   bool          lora_reclaim
+                //   layouttype4   lora_layout_type
+                //   layoutiomode4 lora_iomode
+                //   layoutreturn4 lora_layoutreturn   ← discriminated union
+                //
+                // The union tail is *not* a length-prefixed opaque: it's
+                // a u32 discriminator followed by either a
+                // `layoutreturn_file4` (FILE=1) or nothing (FSID=2, ALL=3).
+                // The pre-fix decoder used `decode_opaque()` which read
+                // the discriminator as a length and then misaligned the
+                // tail of the COMPOUND.
                 let reclaim = decoder.decode_bool()?;
                 let layout_type = decoder.decode_u32()?;
                 let iomode = decoder.decode_u32()?;
-                let layoutreturn = decoder.decode_opaque()?;
+                let return_type = decoder.decode_u32()?;
+                let return_body = match return_type {
+                    1 => {
+                        // layoutreturn_file4: offset, length, stateid, opaque<>
+                        let offset = decoder.decode_u64()?;
+                        let length = decoder.decode_u64()?;
+                        let stateid = decoder.decode_stateid()?;
+                        let body = decoder.decode_opaque()?;
+                        LayoutReturn4Body::File { offset, length, stateid, body }
+                    }
+                    2 => LayoutReturn4Body::Fsid,
+                    3 => LayoutReturn4Body::All,
+                    other => {
+                        return Err(format!(
+                            "LAYOUTRETURN: unknown layoutreturn_type4 {}",
+                            other
+                        ));
+                    }
+                };
                 Ok(Operation::LayoutReturn {
                     reclaim,
                     layout_type,
                     iomode,
-                    layoutreturn,
+                    return_body,
                 })
             }
 
@@ -2322,5 +2378,118 @@ mod tests {
         assert_eq!(service, 1, "Service should be 1 (rpc_gss_svc_none)");
 
         assert_eq!(decoder.remaining(), 0, "Should have consumed all data");
+    }
+
+    /// Encode the body of a LAYOUTRETURN op (everything after the opcode):
+    /// `bool reclaim | u32 layout_type | u32 iomode | layoutreturn4`.
+    fn encode_layoutreturn_body(
+        reclaim: bool,
+        layout_type: u32,
+        iomode: u32,
+        union_tail: &[u8],
+    ) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u32(if reclaim { 1 } else { 0 });
+        buf.put_u32(layout_type);
+        buf.put_u32(iomode);
+        buf.put_slice(union_tail);
+        buf.freeze()
+    }
+
+    #[test]
+    fn test_layoutreturn_decode_all() {
+        // LAYOUTRETURN4_ALL=3 has a void body. Pre-fix the decoder used
+        // decode_opaque() and treated the discriminator as a length —
+        // for ALL that meant "read 3 more bytes" past the end of the op,
+        // either erroring out or eating into the next op.
+        let tail = {
+            let mut b = BytesMut::new();
+            b.put_u32(3); // LAYOUTRETURN4_ALL
+            b.freeze()
+        };
+        let body = encode_layoutreturn_body(false, 1, 1, &tail);
+        let mut d = XdrDecoder::new(body);
+        let op = CompoundRequest::decode_operation(&mut d, opcode::LAYOUTRETURN)
+            .expect("decode ALL");
+        match op {
+            Operation::LayoutReturn { reclaim, layout_type, iomode, return_body } => {
+                assert!(!reclaim);
+                assert_eq!(layout_type, 1);
+                assert_eq!(iomode, 1);
+                assert!(matches!(return_body, LayoutReturn4Body::All));
+            }
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(d.remaining(), 0, "ALL should consume the whole body");
+    }
+
+    #[test]
+    fn test_layoutreturn_decode_fsid() {
+        let tail = {
+            let mut b = BytesMut::new();
+            b.put_u32(2); // LAYOUTRETURN4_FSID
+            b.freeze()
+        };
+        let body = encode_layoutreturn_body(false, 1, 2, &tail);
+        let mut d = XdrDecoder::new(body);
+        let op = CompoundRequest::decode_operation(&mut d, opcode::LAYOUTRETURN)
+            .expect("decode FSID");
+        match op {
+            Operation::LayoutReturn { return_body, iomode, .. } => {
+                assert_eq!(iomode, 2);
+                assert!(matches!(return_body, LayoutReturn4Body::Fsid));
+            }
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(d.remaining(), 0);
+    }
+
+    #[test]
+    fn test_layoutreturn_decode_file() {
+        // LAYOUTRETURN4_FILE=1 carries layoutreturn_file4:
+        //   offset (u64) | length (u64) | stateid (16B) | opaque<>
+        let tail = {
+            let mut b = BytesMut::new();
+            b.put_u32(1); // LAYOUTRETURN4_FILE
+            b.put_u64(0); // offset
+            b.put_u64(u64::MAX); // length (entire file)
+            b.put_u32(7); // stateid.seqid
+            b.put_slice(&[1u8; 12]); // stateid.other
+            b.put_u32(0); // body length 0 (FILES has nothing)
+            b.freeze()
+        };
+        let body = encode_layoutreturn_body(false, 1, 1, &tail);
+        let mut d = XdrDecoder::new(body);
+        let op = CompoundRequest::decode_operation(&mut d, opcode::LAYOUTRETURN)
+            .expect("decode FILE");
+        match op {
+            Operation::LayoutReturn { return_body, .. } => match return_body {
+                LayoutReturn4Body::File { offset, length, stateid, body } => {
+                    assert_eq!(offset, 0);
+                    assert_eq!(length, u64::MAX);
+                    assert_eq!(stateid.seqid, 7);
+                    assert_eq!(stateid.other, [1u8; 12]);
+                    assert!(body.is_empty());
+                }
+                _ => panic!("expected File"),
+            },
+            _ => panic!("wrong variant"),
+        }
+        assert_eq!(d.remaining(), 0);
+    }
+
+    #[test]
+    fn test_layoutreturn_decode_unknown_returntype_errors() {
+        // RFC enumerates only 1/2/3 for layoutreturn_type4. Anything
+        // else must surface as a decode error rather than silently
+        // misaligning the COMPOUND tail.
+        let tail = {
+            let mut b = BytesMut::new();
+            b.put_u32(99);
+            b.freeze()
+        };
+        let body = encode_layoutreturn_body(false, 1, 1, &tail);
+        let mut d = XdrDecoder::new(body);
+        assert!(CompoundRequest::decode_operation(&mut d, opcode::LAYOUTRETURN).is_err());
     }
 }

@@ -211,16 +211,25 @@ impl PnfsOperationHandler {
                     })?;
             }
             LayoutReturnType::Fsid => {
-                // Return all layouts for filesystem
-                info!("LAYOUTRETURN FSID - returning all layouts for filesystem");
-                // TODO: Implement filesystem-wide layout return
-                // For now, this is a no-op
+                // Drop every layout this client holds in `fsid`. The
+                // by-client/by-fsid index lives on `LayoutOwner` so the
+                // manager filters internally; we just hand it the keys.
+                let dropped = self.layout_manager
+                    .return_fsid_for_client(args.client_id, args.fsid);
+                info!(
+                    "LAYOUTRETURN FSID: released {} layout(s) for client_id={} fsid={}",
+                    dropped.len(), args.client_id, args.fsid,
+                );
             }
             LayoutReturnType::All => {
-                // Return all layouts
-                info!("LAYOUTRETURN ALL - returning all layouts for client");
-                // TODO: Implement client-wide layout return
-                // For now, this is a no-op
+                // Linux issues this during unmount. Drop every layout
+                // owned by this client across all filesystems.
+                let dropped = self.layout_manager
+                    .return_all_for_client(args.client_id);
+                info!(
+                    "LAYOUTRETURN ALL: released {} layout(s) for client_id={}",
+                    dropped.len(), args.client_id,
+                );
             }
         }
 
@@ -587,12 +596,19 @@ pub enum GetDeviceInfoError {
 }
 
 /// LAYOUTRETURN arguments (RFC 8881 Section 18.44.1)
+///
+/// `client_id` and `fsid` are *not* on the wire — they're resolved by the
+/// dispatcher from the SEQUENCE-bound session and the CFH respectively.
+/// We need them here because FSID/ALL filter `LayoutManager.by_owner` and
+/// `LayoutOwner.fsid`.
 #[derive(Debug, Clone)]
 pub struct LayoutReturnArgs {
     pub reclaim: bool,
     pub layout_type: LayoutType,
     pub iomode: IoMode,
     pub return_type: LayoutReturnType,
+    pub client_id: u64,
+    pub fsid: u64,
 }
 
 /// Layout return type
