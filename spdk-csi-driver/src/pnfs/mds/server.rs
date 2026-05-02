@@ -429,8 +429,11 @@ impl MetadataServer {
             compound_req.operations.len()
         );
 
-        // Dispatch through base dispatcher (which handles both pNFS and regular ops)
-        let mut compound_resp = base_dispatcher.dispatch_compound(compound_req).await;
+        // Dispatch through base dispatcher (which handles both pNFS and regular ops).
+        // Pass the RPC-level principal so EXCHANGE_ID's §18.35.5 state machine
+        // can distinguish per-principal client owners.
+        let principal = call.cred.principal();
+        let mut compound_resp = base_dispatcher.dispatch_compound(compound_req, principal).await;
 
         // Post-process EXCHANGE_ID responses to set pNFS MDS flags
         // This tells clients that we're a pNFS server capable of providing layouts

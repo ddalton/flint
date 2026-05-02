@@ -179,7 +179,7 @@ impl SessionOperationHandler {
     }
 
     /// Handle EXCHANGE_ID operation
-    pub fn handle_exchange_id(&self, op: ExchangeIdOp) -> ExchangeIdRes {
+    pub fn handle_exchange_id(&self, op: ExchangeIdOp, ctx: &CompoundContext) -> ExchangeIdRes {
         info!("EXCHANGE_ID: owner={:?}, verifier={}", op.client_owner, op.verifier);
 
         use crate::nfs::v4::protocol::exchgid_flags;
@@ -205,18 +205,36 @@ impl SessionOperationHandler {
             return exchange_id_err(Nfs4Status::Inval);
         }
 
-        // Exchange client ID
-        let (clientid, sequenceid, is_new) = self.state_mgr.clients.exchange_id(
+        // RFC 8881 §18.35.5 client-record state machine. Principal is the
+        // RPC-level identity of the caller; an empty Vec for AUTH_NONE.
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        let outcome = self.state_mgr.clients.exchange_id(
             op.client_owner,
             op.verifier,
             op.flags,
+            ctx.principal.clone(),
         );
 
-        if is_new {
-            info!("EXCHANGE_ID: New client {} created", clientid);
-        } else {
-            info!("EXCHANGE_ID: Existing client {} returned", clientid);
-        }
+        let (clientid, sequenceid, is_new) = match outcome {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id } => {
+                info!("EXCHANGE_ID: new unconfirmed clientid {}", client_id);
+                (client_id, sequence_id, true)
+            }
+            ExchangeIdOutcome::ExistingConfirmed { client_id, sequence_id } => {
+                info!("EXCHANGE_ID: returning confirmed clientid {}", client_id);
+                (client_id, sequence_id, false)
+            }
+            ExchangeIdOutcome::NoEnt => {
+                warn!("EXCHANGE_ID: UPD_CONFIRMED_REC_A on missing/unconfirmed record");
+                return exchange_id_err(Nfs4Status::NoEnt);
+            }
+            ExchangeIdOutcome::NotSame => {
+                return exchange_id_err(Nfs4Status::NotSame);
+            }
+            ExchangeIdOutcome::Perm => {
+                return exchange_id_err(Nfs4Status::Perm);
+            }
+        };
 
         // Build server response flags per RFC 8881 Section 18.35
         let mut response_flags = 0u32;
@@ -328,6 +346,12 @@ impl SessionOperationHandler {
             warn!("CREATE_SESSION: Failed to update sequence: {}", e);
             return create_session_err(Nfs4Status::SeqMisordered);
         }
+
+        // CREATE_SESSION succeeding marks the client record as confirmed,
+        // which changes the EXCHANGE_ID §18.35.5 outcome for subsequent
+        // EXCHANGE_IDs on the same owner (e.g. allows UPD_CONFIRMED_REC_A
+        // to land instead of NoEnt).
+        self.state_mgr.clients.mark_confirmed(op.clientid);
 
         // Negotiate session buffer sizes. Take the *minimum* of client-requested
         // and server-maximum. We've already rejected requests below the server
@@ -553,7 +577,7 @@ mod tests {
             client_impl_id: None,
         };
 
-        let res = handler.handle_exchange_id(op);
+        let res = handler.handle_exchange_id(op, &CompoundContext::new(1));
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.clientid, 1);
         assert_eq!(res.sequenceid, 0);
@@ -572,7 +596,7 @@ mod tests {
             state_protect: 0,
             client_impl_id: None,
         };
-        let exchange_res = handler.handle_exchange_id(exchange_op);
+        let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
 
         // Now CREATE_SESSION
         let create_op = CreateSessionOp {
@@ -602,7 +626,7 @@ mod tests {
             state_protect: 0,
             client_impl_id: None,
         };
-        let exchange_res = handler.handle_exchange_id(exchange_op);
+        let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
 
         let create_op = CreateSessionOp {
             clientid: exchange_res.clientid,
@@ -645,7 +669,7 @@ mod tests {
             state_protect: 0,
             client_impl_id: None,
         };
-        let exchange_res = handler.handle_exchange_id(exchange_op);
+        let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
 
         let create_op = CreateSessionOp {
             clientid: exchange_res.clientid,
@@ -705,7 +729,7 @@ mod tests {
             state_protect: 0,
             client_impl_id: None,
         };
-        let exchange_res = handler.handle_exchange_id(exchange_op);
+        let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
 
         let create_op = CreateSessionOp {
             clientid: exchange_res.clientid,

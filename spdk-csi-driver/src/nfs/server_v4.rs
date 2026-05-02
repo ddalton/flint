@@ -363,8 +363,12 @@ async fn handle_compound(
            compound_req.minor_version,
            compound_req.operations.len());
 
+    // RPC-level principal for the EXCHANGE_ID §18.35.5 state machine.
+    // Cheap to compute and an empty Vec for AUTH_NONE.
+    let principal = call.cred.principal();
+
     // Dispatch to COMPOUND handler
-    let compound_resp = dispatcher.dispatch_compound(compound_req).await;
+    let compound_resp = dispatcher.dispatch_compound(compound_req, principal).await;
 
     debug!("COMPOUND result: status={:?}, {} results",
            compound_resp.status,

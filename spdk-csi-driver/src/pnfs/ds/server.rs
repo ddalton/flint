@@ -365,13 +365,28 @@ impl DataServer {
                     
                     // Use ClientManager to get consistent clientid
                     // CRITICAL: This ensures DS returns same clientid as MDS for same client_owner!
-                    let (clientid, sequenceid, is_new) = client_mgr.exchange_id(
+                    use crate::nfs::v4::state::client::ExchangeIdOutcome;
+                    let outcome = client_mgr.exchange_id(
                         client_owner.clone(),
                         verifier,
                         client_flags,
+                        Vec::new(), // DS doesn't currently track principal
                     );
-                    
-                    info!("DS: EXCHANGE_ID - client_owner={:?}, verifier={}, clientid={}, is_new={}", 
+                    let (clientid, sequenceid, is_new) = match outcome {
+                        ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id } =>
+                            (client_id, sequence_id, true),
+                        ExchangeIdOutcome::ExistingConfirmed { client_id, sequence_id } =>
+                            (client_id, sequence_id, false),
+                        // The DS path was historically tuple-returning and never
+                        // exercised the UPD/error branches; map them to a fresh
+                        // record for now and warn so we can revisit when the DS
+                        // grows real client identity tracking.
+                        other => {
+                            warn!("DS: EXCHANGE_ID outcome {:?}, treating as new", other);
+                            (0u64, 0u32, true)
+                        }
+                    };
+                    info!("DS: EXCHANGE_ID - client_owner={:?}, verifier={}, clientid={}, is_new={}",
                           String::from_utf8_lossy(&client_owner), verifier, clientid, is_new);
                     
                     // Build response

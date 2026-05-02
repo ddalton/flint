@@ -85,6 +85,47 @@ impl Auth {
 
         Ok(Self { flavor, body })
     }
+
+    /// Compute a principal identity from this credential.
+    ///
+    /// Used by EXCHANGE_ID's RFC 8881 §18.35.5 client-record state machine
+    /// to detect "same client owner, *different* principal" — which means
+    /// "another security principal is trying to use the same client
+    /// identifier" and changes the EXCHANGE_ID outcome.
+    ///
+    /// Encoding (designed to be stable for equality comparison only):
+    ///   * AUTH_NONE → empty Vec
+    ///   * AUTH_SYS  → "sys:<machinename>:<uid>" — derived from the
+    ///                authsys_parms struct, ignoring the per-call timestamp
+    ///                and gid list.
+    ///   * RPCSEC_GSS → "gss:<raw cred body>" — body is the GSS cred which
+    ///                already names the principal.
+    ///   * unknown   → "raw:<flavor>:<body>"
+    pub fn principal(&self) -> Vec<u8> {
+        match self.flavor {
+            AuthFlavor::Null => Vec::new(),
+            AuthFlavor::Unix => {
+                // authsys_parms = { stamp:u32, machinename:string<255>,
+                //                   uid:u32, gid:u32, gids:u32<16> }
+                let mut dec = XdrDecoder::new(self.body.clone());
+                let _stamp = dec.decode_u32().unwrap_or(0);
+                let machinename = dec.decode_opaque().unwrap_or_default();
+                let uid = dec.decode_u32().unwrap_or(0);
+                let mut p = Vec::with_capacity(machinename.len() + 16);
+                p.extend_from_slice(b"sys:");
+                p.extend_from_slice(&machinename);
+                p.extend_from_slice(b":");
+                p.extend_from_slice(uid.to_string().as_bytes());
+                p
+            }
+            AuthFlavor::RpcsecGss => {
+                let mut p = Vec::with_capacity(self.body.len() + 4);
+                p.extend_from_slice(b"gss:");
+                p.extend_from_slice(&self.body);
+                p
+            }
+        }
+    }
 }
 
 /// RPC call message

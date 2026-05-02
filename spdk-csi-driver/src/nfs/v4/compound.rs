@@ -567,6 +567,13 @@ pub struct CompoundContext {
     /// `(session_id, slot_id)` to associate the encoded reply with for
     /// future replay matching. Populated by SEQUENCE for new requests.
     pub cache_slot: Option<(SessionId, u32)>,
+    /// RPC-level principal for this COMPOUND. Computed by the RPC layer
+    /// from the call's auth credential (`Auth::principal()`). Used by
+    /// EXCHANGE_ID's RFC 8881 §18.35.5 client-record state machine to
+    /// distinguish "same client owner, different principal" — which
+    /// changes the outcome from "renew existing client" to "evict and
+    /// replace" (or NFS4ERR_PERM, depending on flags).
+    pub principal: Vec<u8>,
 }
 
 impl CompoundContext {
@@ -578,7 +585,13 @@ impl CompoundContext {
             session_id: None,
             replay_reply: None,
             cache_slot: None,
+            principal: Vec::new(),
         }
+    }
+
+    /// Build a CompoundContext seeded with the principal from an RPC call.
+    pub fn with_principal(minor_version: u32, principal: Vec<u8>) -> Self {
+        Self { principal, ..Self::new(minor_version) }
     }
 
     /// Check if current filehandle is set

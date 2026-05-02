@@ -106,8 +106,12 @@ impl CompoundDispatcher {
         });
     }
 
-    /// Process a COMPOUND request
-    pub async fn dispatch_compound(&self, request: CompoundRequest) -> CompoundResponse {
+    /// Process a COMPOUND request.
+    ///
+    /// `principal` is the RPC-level identity of the caller (see
+    /// `nfs::rpc::Auth::principal()`); EXCHANGE_ID needs it to apply the
+    /// RFC 8881 §18.35.5 state machine.
+    pub async fn dispatch_compound(&self, request: CompoundRequest, principal: Vec<u8>) -> CompoundResponse {
         info!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
         // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
@@ -178,8 +182,8 @@ impl CompoundDispatcher {
             };
         }
 
-        // Create context
-        let mut context = CompoundContext::new(request.minor_version);
+        // Create context, seeding with the RPC-level principal.
+        let mut context = CompoundContext::with_principal(request.minor_version, principal);
 
         // Process operations sequentially
         let mut results = Vec::new();
@@ -269,7 +273,7 @@ impl CompoundDispatcher {
                     state_protect,
                     client_impl_id,
                 };
-                let res = self.session_handler.handle_exchange_id(op);
+                let res = self.session_handler.handle_exchange_id(op, context);
                 if res.status == Nfs4Status::Ok {
                     OperationResult::ExchangeId(res.status, Some(ExchangeIdResult {
                         clientid: res.clientid,
@@ -1610,7 +1614,7 @@ mod tests {
             ],
         };
 
-        let response = dispatcher.dispatch_compound(request).await;
+        let response = dispatcher.dispatch_compound(request, Vec::new()).await;
         assert_eq!(response.status, Nfs4Status::Ok);
         assert_eq!(response.results.len(), 2);
     }
@@ -1636,7 +1640,7 @@ mod tests {
             ],
         };
 
-        let response = dispatcher.dispatch_compound(request).await;
+        let response = dispatcher.dispatch_compound(request, Vec::new()).await;
         assert_eq!(response.status, Nfs4Status::Ok);
         assert_eq!(response.results.len(), 1);
 
@@ -1667,7 +1671,7 @@ mod tests {
             ],
         };
 
-        let response = dispatcher.dispatch_compound(request).await;
+        let response = dispatcher.dispatch_compound(request, Vec::new()).await;
         assert_eq!(response.status, Nfs4Status::Ok);
         assert_eq!(response.results.len(), 4);
     }
@@ -1686,7 +1690,7 @@ mod tests {
             ],
         };
 
-        let response = dispatcher.dispatch_compound(request).await;
+        let response = dispatcher.dispatch_compound(request, Vec::new()).await;
         assert_ne!(response.status, Nfs4Status::Ok);
         assert_eq!(response.results.len(), 1); // Only first operation
     }
@@ -1713,7 +1717,7 @@ mod tests {
             ],
         };
 
-        dispatcher.dispatch_compound(request).await;
+        dispatcher.dispatch_compound(request, Vec::new()).await;
 
         let stats = dispatcher.get_stats();
         assert_eq!(stats.active_clients, 1);

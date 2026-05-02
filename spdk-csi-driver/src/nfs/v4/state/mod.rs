@@ -97,11 +97,11 @@ mod tests {
         let state_mgr = StateManager::new("");
 
         // Create a client and session
-        let (client_id, _seq, _is_new) = state_mgr.clients.exchange_id(
-            b"test-client".to_vec(),
-            12345,
-            0,
-        );
+        let outcome = state_mgr.clients.exchange_id(b"test-client".to_vec(), 12345, 0, Vec::new());
+        let client_id = match outcome {
+            crate::nfs::v4::state::client::ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("expected NewUnconfirmed, got {:?}", other),
+        };
 
         // Create session for this client
         let session = state_mgr.sessions.create_session(
@@ -133,11 +133,11 @@ mod tests {
         let state_mgr = StateManager::new("");
 
         // Create a client and session
-        let (client_id, _, _) = state_mgr.clients.exchange_id(
-            b"test-client".to_vec(),
-            12345,
-            0,
-        );
+        let outcome = state_mgr.clients.exchange_id(b"test-client".to_vec(), 12345, 0, Vec::new());
+        let client_id = match outcome {
+            crate::nfs::v4::state::client::ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("expected NewUnconfirmed, got {:?}", other),
+        };
 
         state_mgr.sessions.create_session(
             client_id,
@@ -161,11 +161,11 @@ mod tests {
         let state_mgr = StateManager::new("");
 
         // Create a client with active lease
-        let (client_id, _, _) = state_mgr.clients.exchange_id(
-            b"test-client".to_vec(),
-            12345,
-            0,
-        );
+        let outcome = state_mgr.clients.exchange_id(b"test-client".to_vec(), 12345, 0, Vec::new());
+        let client_id = match outcome {
+            crate::nfs::v4::state::client::ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("expected NewUnconfirmed, got {:?}", other),
+        };
 
         // Verify no expired clients
         let expired = state_mgr.leases.get_expired_clients();
