@@ -4,6 +4,7 @@
 //! It manages data server registration, layout generation, and client state.
 
 use crate::pnfs::config::MdsConfig;
+use crate::pnfs::mds::callback::CallbackManager;
 use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry};
 use crate::pnfs::mds::layout::LayoutManager;
 use crate::pnfs::mds::operations::PnfsOperationHandler;
@@ -37,6 +38,13 @@ pub struct MetadataServer {
     operation_handler: Arc<PnfsOperationHandler>,
     base_dispatcher: Arc<CompoundDispatcher>,
     gss_manager: Arc<RpcSecGssManager>,
+    /// CB_LAYOUTRECALL fan-out — wired to the dispatcher's per-
+    /// session back-channel writer registry and to `state_mgr` for
+    /// `Session.cb_program` lookups. Constructed at server startup
+    /// and shared with the heartbeat-monitor task so DS deaths
+    /// trigger recalls without needing to reach back through the
+    /// dispatcher.
+    callback_manager: Arc<CallbackManager>,
 }
 
 impl MetadataServer {
@@ -54,7 +62,9 @@ impl MetadataServer {
         // Initialize file handle manager with configured export path
         let fh_manager = Arc::new(FileHandleManager::new(export_path.clone()));
 
-        // Initialize state manager (for NFSv4 sessions, stateids)
+        // Initialize state manager (for NFSv4 sessions, stateids).
+        // Wrapped in Arc so the dispatcher and the CallbackManager
+        // (cb_program lookup) can share it.
         let state_mgr = Arc::new(StateManager::new(""));
         
         // Initialize lock manager
@@ -80,9 +90,20 @@ impl MetadataServer {
         // This handles ALL NFS and pNFS operations (LAYOUTGET, GETDEVICEINFO, etc.)
         let base_dispatcher = Arc::new(CompoundDispatcher::new_with_pnfs(
             Arc::clone(&fh_manager),
-            state_mgr,
+            Arc::clone(&state_mgr),
             lock_mgr,
             Some(operation_handler.clone() as Arc<dyn crate::pnfs::PnfsOperations>),
+        ));
+
+        // Build the callback fan-out manager once we know the
+        // dispatcher's back-channel registry exists. CallbackManager
+        // borrows the same registry the dispatcher populates from
+        // BIND_CONN_TO_SESSION, so newly-bound sessions are
+        // immediately reachable from the recall path with no extra
+        // wiring.
+        let callback_manager = Arc::new(CallbackManager::new(
+            base_dispatcher.back_channels(),
+            Arc::clone(&state_mgr),
         ));
 
         // Register initial data servers from config
@@ -118,6 +139,7 @@ impl MetadataServer {
             operation_handler,
             base_dispatcher,
             gss_manager,
+            callback_manager,
         })
     }
 
@@ -274,7 +296,28 @@ impl MetadataServer {
         // Split stream for independent reading and buffered writing
         let (reader, writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
-        let mut writer = BufWriter::with_capacity(128 * 1024, writer);
+        let writer = BufWriter::with_capacity(128 * 1024, writer);
+        // Wrap the writer so the dispatcher can register it as a
+        // back-channel when the client sends CREATE_SESSION with
+        // CONN_BACK_CHAN (or, later, BIND_CONN_TO_SESSION). The
+        // forward-reply path also goes through this writer — same
+        // mutex serializes against any concurrent CB_LAYOUTRECALL.
+        let bcw = crate::nfs::v4::back_channel::BackChannelWriter::new(writer);
+
+        // Inflight cleanup on every exit path. Without this, awaiting
+        // CB callers hang on `Timeout` instead of seeing
+        // `ConnectionClosed`. The dispatcher's back-channel registry
+        // holds another Arc to the writer, so it outlives this
+        // function — explicit cleanup is load-bearing.
+        struct InflightGuard {
+            bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        }
+        impl Drop for InflightGuard {
+            fn drop(&mut self) {
+                self.bcw.drop_all_inflight();
+            }
+        }
+        let _inflight_guard = InflightGuard { bcw: Arc::clone(&bcw) };
 
         // Reusable buffer
         let mut buf = BytesMut::with_capacity(128 * 1024);
@@ -333,27 +376,47 @@ impl MetadataServer {
 
             let request = buf.split().freeze();
 
+            // RFC 5531 §9 frame layout: [0..4]=xid, [4..8]=msg_type
+            // (0=CALL, 1=REPLY). REPLY frames coming inbound are
+            // responses to our own CB_LAYOUTRECALL CALLs — route them
+            // to the inflight registry instead of trying to parse as
+            // a forward NFS CALL.
+            if request.len() >= 8 {
+                let msg_type = u32::from_be_bytes([
+                    request[4], request[5], request[6], request[7],
+                ]);
+                if msg_type == 1 {
+                    let xid = u32::from_be_bytes([
+                        request[0], request[1], request[2], request[3],
+                    ]);
+                    if !bcw.deliver_reply(xid, request) {
+                        warn!(
+                            "📭 CB reply for unknown xid={} on conn from {} (timed out or never registered)",
+                            xid, peer,
+                        );
+                    }
+                    continue;
+                }
+            }
+
             // Process the RPC call with pNFS support
             debug!(">>> Processing pNFS/NFSv4 request from {}", peer);
             let reply = Self::dispatch_rpc_with_pnfs(
                 request,
                 Arc::clone(&base_dispatcher),
                 Arc::clone(&gss_manager),
+                Arc::clone(&bcw),
             ).await;
             debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
-            
+
             rpc_count += 1;
 
-            // Write reply with record marker
-            let reply_len = reply.len() as u32;
-            let reply_marker = 0x80000000 | reply_len;
-            
-            debug!("📤 Sending reply to {}: {} bytes", peer, reply_len);
-            
-            writer.write_all(&reply_marker.to_be_bytes()).await?;
-            writer.write_all(&reply).await?;
-            writer.flush().await?;
-            
+            // Forward replies go through the same writer the back-
+            // channel uses — `send_record` prepends the 4-byte
+            // record marker and flushes; the inner mutex serializes
+            // against any concurrent CB_LAYOUTRECALL.
+            debug!("📤 Sending reply to {}: {} bytes", peer, reply.len());
+            bcw.send_record(reply).await?;
             debug!("✅ Reply sent and flushed to {}", peer);
         }
     }
@@ -363,6 +426,7 @@ impl MetadataServer {
         request: Bytes,
         base_dispatcher: Arc<CompoundDispatcher>,
         gss_manager: Arc<RpcSecGssManager>,
+        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     ) -> Bytes {
         // Parse RPC call message
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -381,7 +445,7 @@ impl MetadataServer {
         // Handle RPCSEC_GSS authentication
         if call.cred.flavor == AuthFlavor::RpcsecGss {
             info!("🔐 RPCSEC_GSS authentication detected on MDS");
-            return Self::handle_rpcsec_gss_call(call, args, gss_manager, base_dispatcher).await;
+            return Self::handle_rpcsec_gss_call(call, args, gss_manager, base_dispatcher, back_channel).await;
         }
 
         // Check program number
@@ -410,6 +474,7 @@ impl MetadataServer {
                     call,
                     args,
                     base_dispatcher,
+                    back_channel,
                 ).await
             }
 
@@ -425,6 +490,7 @@ impl MetadataServer {
         call: CallMessage,
         args: Bytes,
         base_dispatcher: Arc<CompoundDispatcher>,
+        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     ) -> Bytes {
         use crate::nfs::v4::compound::CompoundRequest;
         use crate::nfs::xdr::XdrDecoder;
@@ -448,9 +514,15 @@ impl MetadataServer {
 
         // Dispatch through base dispatcher (which handles both pNFS and regular ops).
         // Pass the RPC-level principal so EXCHANGE_ID's §18.35.5 state machine
-        // can distinguish per-principal client owners.
+        // can distinguish per-principal client owners. The back-channel writer
+        // is plumbed through so CREATE_SESSION (CONN_BACK_CHAN flag) and
+        // BIND_CONN_TO_SESSION can register it in the dispatcher's per-session
+        // back_channels registry — that's how `CallbackManager` finds the
+        // writer for CB_LAYOUTRECALL on DS death.
         let principal = call.cred.principal();
-        let mut compound_resp = base_dispatcher.dispatch_compound(compound_req, principal).await;
+        let mut compound_resp = base_dispatcher
+            .dispatch_compound_with_back_channel(compound_req, principal, Some(back_channel))
+            .await;
 
         // Post-process EXCHANGE_ID responses to set pNFS MDS flags
         // This tells clients that we're a pNFS server capable of providing layouts
@@ -499,6 +571,7 @@ impl MetadataServer {
         args: Bytes,
         gss_manager: Arc<RpcSecGssManager>,
         dispatcher: Arc<CompoundDispatcher>,
+        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     ) -> Bytes {
         // Decode RPCSEC_GSS credentials
         let gss_cred = match RpcGssCred::decode(&call.cred.body) {
@@ -535,7 +608,7 @@ impl MetadataServer {
 
                 // GSS validated, proceed with normal COMPOUND processing
                 info!("✅ GSS authentication successful on MDS, processing COMPOUND");
-                Self::handle_compound_with_pnfs(call, args, dispatcher).await
+                Self::handle_compound_with_pnfs(call, args, dispatcher, back_channel).await
             }
 
             gss_proc::DESTROY => {
@@ -638,6 +711,7 @@ impl MetadataServer {
     fn start_heartbeat_monitor(&self, timeout: Duration) {
         let device_registry = Arc::clone(&self.device_registry);
         let layout_manager = Arc::clone(&self.layout_manager);
+        let callback_manager = Arc::clone(&self.callback_manager);
         let failover_policy = self.config.failover.policy;
 
         tokio::spawn(async move {
@@ -656,21 +730,31 @@ impl MetadataServer {
                     for device_id in stale_devices {
                         match failover_policy {
                             crate::pnfs::config::FailoverPolicy::RecallAll => {
-                                // Recall all layouts (disruptive)
-                                warn!("Recalling all layouts due to {} failure", device_id);
-                                // TODO: Implement layout recall to all clients
+                                // "Recall everything" is the same as
+                                // "recall affected" for a per-DS
+                                // failure: only layouts that touch
+                                // the dead device are at risk.
+                                // RecallAll exists for the case
+                                // where the operator wants to
+                                // forcibly drain in-flight layouts
+                                // even if multiple DSes failed at
+                                // once; we still drive the per-
+                                // device fan-out here.
+                                warn!("RecallAll policy: recalling for {} failure", device_id);
+                                Self::fan_out_recalls(
+                                    &device_id,
+                                    &layout_manager,
+                                    &callback_manager,
+                                ).await;
                             }
                             crate::pnfs::config::FailoverPolicy::RecallAffected => {
-                                // Recall only affected layouts
-                                let recalled = layout_manager.recall_layouts_for_device(&device_id);
-                                if !recalled.is_empty() {
-                                    warn!(
-                                        "Recalling {} layouts affected by {} failure",
-                                        recalled.len(),
-                                        device_id
-                                    );
-                                    // TODO: Send CB_LAYOUTRECALL to clients
-                                }
+                                // Default: recall only the layouts
+                                // that touch this device.
+                                Self::fan_out_recalls(
+                                    &device_id,
+                                    &layout_manager,
+                                    &callback_manager,
+                                ).await;
                             }
                             crate::pnfs::config::FailoverPolicy::Lazy => {
                                 // Let clients discover failure
@@ -686,6 +770,42 @@ impl MetadataServer {
         });
 
         info!("Heartbeat monitor started (timeout: {} seconds)", timeout.as_secs());
+    }
+
+    /// Compute the (session, stateid) pairs to recall for a dead
+    /// device, then drive `CallbackManager` over them. Pulled out
+    /// as an associated function so the heartbeat closure stays
+    /// readable and so the recall path is unit-testable in
+    /// isolation (see `tests::fan_out_recalls_drives_per_session`).
+    async fn fan_out_recalls(
+        device_id: &str,
+        layout_manager: &Arc<LayoutManager>,
+        callback_manager: &Arc<CallbackManager>,
+    ) {
+        let recalls = layout_manager.recall_layouts_for_device(device_id);
+        if recalls.is_empty() {
+            return;
+        }
+        let pairs: Vec<(crate::nfs::v4::protocol::SessionId, _)> = recalls
+            .into_iter()
+            .map(|(sid_bytes, stateid)| {
+                (crate::nfs::v4::protocol::SessionId(sid_bytes), stateid)
+            })
+            .collect();
+        warn!(
+            "Recalling {} layout(s) affected by {} failure",
+            pairs.len(),
+            device_id,
+        );
+        let acked = callback_manager
+            .recall_layouts_for_device(device_id, &pairs)
+            .await;
+        info!(
+            "CB_LAYOUTRECALL fan-out for {} complete: {}/{} acked",
+            device_id,
+            acked,
+            pairs.len(),
+        );
     }
 
     /// Start status reporter in background

@@ -198,54 +198,50 @@ impl CallbackManager {
         Ok(reply)
     }
 
-    /// Recall layouts for every session that has bound a back-
-    /// channel, used by the device-death path. Returns the count of
-    /// successfully-acknowledged recalls (the cluster operator can
-    /// log this; it's not load-bearing for correctness — the
-    /// LayoutManager separately revokes on timeout in A.5).
+    /// Fire one CB_LAYOUTRECALL per `(session_id, layout_stateid)`
+    /// pair. The pairs come from
+    /// [`LayoutManager::recall_layouts_for_device`], which already
+    /// scoped each layout to its issuing session — we just route
+    /// each one to the right back-channel. Returns the number of
+    /// successful CB exchanges (transport + reply parse OK; reply
+    /// status may still be `NFS4ERR_NOMATCHING_LAYOUT`, which is
+    /// counted as success because the layout is gone from the
+    /// client either way).
+    ///
+    /// `device_id` is used only for logging — the routing is fully
+    /// driven by the input pairs.
     pub async fn recall_layouts_for_device(
         &self,
         device_id: &str,
-        layout_stateids: &[LayoutStateId],
+        recalls: &[(SessionId, LayoutStateId)],
     ) -> usize {
+        if recalls.is_empty() {
+            return 0;
+        }
         info!(
-            "📢 Recalling {} layout(s) for failed device: {}",
-            layout_stateids.len(),
+            "📢 Fanning out {} CB_LAYOUTRECALL(s) for failed device: {}",
+            recalls.len(),
             device_id,
         );
 
-        // Snapshot session ids first so we don't iterate while the
-        // dispatcher is mutating the registry (BIND_CONN_TO_SESSION
-        // can register new sessions concurrently). Cheap — at most
-        // a handful of sessions per pNFS deployment.
-        let session_ids: Vec<SessionId> = self
-            .back_channels
-            .iter()
-            .map(|e| *e.key())
-            .collect();
-
         let mut acked = 0;
-        for stateid in layout_stateids {
-            for session_id in &session_ids {
-                match self
-                    .send_layoutrecall(
-                        session_id,
-                        stateid,
-                        1, // LAYOUT4_NFSV4_1_FILES
-                        3, // LAYOUTIOMODE4_ANY
-                        true,
-                    )
-                    .await
-                {
-                    Ok(_reply) => {
-                        acked += 1;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "CB_LAYOUTRECALL to session {:?} failed: {}",
-                            session_id, e,
-                        );
-                    }
+        for (session_id, stateid) in recalls {
+            match self
+                .send_layoutrecall(
+                    session_id,
+                    stateid,
+                    1, // LAYOUT4_NFSV4_1_FILES
+                    3, // LAYOUTIOMODE4_ANY
+                    true,
+                )
+                .await
+            {
+                Ok(_reply) => acked += 1,
+                Err(e) => {
+                    warn!(
+                        "CB_LAYOUTRECALL to session {:?} failed: {}",
+                        session_id, e,
+                    );
                 }
             }
         }
@@ -253,7 +249,7 @@ impl CallbackManager {
             "📊 Device {} fan-out: {}/{} recalls acked",
             device_id,
             acked,
-            layout_stateids.len() * session_ids.len(),
+            recalls.len(),
         );
         acked
     }
@@ -661,5 +657,94 @@ mod tests {
             .await
             .unwrap();
         inspect.await.unwrap();
+    }
+
+    /// Two clients on two separate back-channels, three layouts:
+    /// client A owns 2, client B owns 1. The fan-out should
+    /// produce exactly 3 CALLs — A gets two, B gets one — and
+    /// each CALL goes to the right writer (asserted by counting
+    /// the bytes that come out each socket).
+    #[tokio::test]
+    async fn recall_layouts_for_device_routes_per_session() {
+        let (writer_a, server_read_a, client_read_a, mut client_write_a) = pair().await;
+        let (writer_b, server_read_b, client_read_b, mut client_write_b) = pair().await;
+        let state_mgr = Arc::new(StateManager::new(""));
+        let session_a = state_mgr
+            .sessions
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .session_id;
+        let session_b = state_mgr
+            .sessions
+            .create_session(2, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .session_id;
+
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_a, Arc::clone(&writer_a));
+        back_channels.insert(session_b, Arc::clone(&writer_b));
+
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_secs(5));
+
+        // Read loops for both writers.
+        let _loop_a = spawn_read_loop(Arc::clone(&writer_a), server_read_a);
+        let _loop_b = spawn_read_loop(Arc::clone(&writer_b), server_read_b);
+
+        // Mock client A: respond OK to its 2 inbound calls.
+        let mock_a = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read_a);
+            let mut count = 0;
+            for _ in 0..2 {
+                let call = read_record(&mut r).await;
+                let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+                write_record(&mut client_write_a, build_reply(xid, Nfs4Status::Ok)).await;
+                count += 1;
+            }
+            count
+        });
+        // Mock client B: 1 inbound call.
+        let mock_b = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read_b);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            write_record(&mut client_write_b, build_reply(xid, Nfs4Status::Ok)).await;
+            1
+        });
+
+        let stateid_a1 = [1u8; 16];
+        let stateid_a2 = [2u8; 16];
+        let stateid_b1 = [3u8; 16];
+        let recalls = vec![
+            (session_a, stateid_a1),
+            (session_a, stateid_a2),
+            (session_b, stateid_b1),
+        ];
+
+        let acked = cb_mgr.recall_layouts_for_device("ds-dead", &recalls).await;
+        assert_eq!(acked, 3);
+
+        let count_a = mock_a.await.unwrap();
+        let count_b = mock_b.await.unwrap();
+        assert_eq!(count_a, 2, "client A should have received 2 calls");
+        assert_eq!(count_b, 1, "client B should have received 1 call");
+    }
+
+    /// Empty input is a no-op and doesn't even hit the back-channel.
+    /// Important: the heartbeat path may compute zero pairs (e.g.
+    /// the dead device had no live layouts) and we shouldn't
+    /// accidentally fan out to every registered session.
+    #[tokio::test]
+    async fn recall_layouts_for_device_empty_is_noop() {
+        let (writer, _server_read, _client_read, _client_write) = pair().await;
+        let state_mgr = Arc::new(StateManager::new(""));
+        let session_id = state_mgr
+            .sessions
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .session_id;
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr);
+
+        let acked = cb_mgr.recall_layouts_for_device("ds-dead", &[]).await;
+        assert_eq!(acked, 0);
     }
 }

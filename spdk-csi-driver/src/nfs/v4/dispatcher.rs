@@ -433,8 +433,38 @@ impl CompoundDispatcher {
                     back_chan_attrs: back_chan_attrs.clone(),
                     cb_program,
                 };
+                let csa_flags = flags;
                 let res = self.session_handler.handle_create_session(op, context);
                 if res.status == Nfs4Status::Ok {
+                    // RFC 8881 §18.36.3: if the client set
+                    // `CREATE_SESSION4_FLAG_CONN_BACK_CHAN` in
+                    // csa_flags, the same TCP connection acts as the
+                    // session's back-channel — equivalent to a
+                    // BIND_CONN_TO_SESSION(BACK) on the current
+                    // connection. Linux's NFSv4.1 client uses this
+                    // path on every fresh mount and never sends a
+                    // separate BIND_CONN_TO_SESSION, so we register
+                    // the writer here. We do *not* echo
+                    // CONN_BACK_CHAN in csr_flags or fill in
+                    // csr_back_chan_attrs — proper back-channel
+                    // negotiation (advertising max-* values, etc.)
+                    // is its own follow-up; clients reject malformed
+                    // back-channel offers. Outbound CB CALLs go out
+                    // on the registered writer regardless; if the
+                    // client doesn't have a CB program listening on
+                    // a non-advertised channel, it returns
+                    // PROG_UNAVAIL, which `CallbackManager` surfaces
+                    // as `CallbackError::Reply`.
+                    const CSF_CONN_BACK_CHAN: u32 = 0x0000_0002;
+                    if csa_flags & CSF_CONN_BACK_CHAN != 0 {
+                        if let Some(bcw) = context.back_channel.as_ref() {
+                            self.back_channels.insert(res.sessionid, Arc::clone(bcw));
+                            info!(
+                                "CREATE_SESSION: registered back-channel writer for session {:?} (CONN_BACK_CHAN requested)",
+                                res.sessionid,
+                            );
+                        }
+                    }
                     OperationResult::CreateSession(res.status, Some(CreateSessionResult {
                         sessionid: res.sessionid,
                         sequenceid: res.sequence,

@@ -451,8 +451,20 @@ impl LayoutManager {
             .unwrap_or_default()
     }
 
-    /// Recall layouts (e.g., on device failure)
-    pub fn recall_layouts_for_device(&self, device_id: &str) -> Vec<LayoutStateId> {
+    /// Find every layout whose segments touch `device_id`, paired
+    /// with the session id of the client that owns it. Used by the
+    /// CB_LAYOUTRECALL fan-out on DS-death (Phase A.4): each pair is
+    /// one CB CALL routed to a specific back-channel.
+    ///
+    /// Returns `(session_id, layout_stateid)` tuples — both are 16-
+    /// byte fixed opaques. The session id comes from `LayoutOwner`
+    /// (set on LAYOUTGET); a single layout has exactly one session.
+    /// One client with multiple layouts on the dead device produces
+    /// multiple pairs with the same session id.
+    pub fn recall_layouts_for_device(
+        &self,
+        device_id: &str,
+    ) -> Vec<(SessionIdBytes, LayoutStateId)> {
         let mut recalled = Vec::new();
 
         for entry in self.layouts.iter() {
@@ -462,13 +474,13 @@ impl LayoutManager {
                 .any(|seg| seg.device_id == device_id);
 
             if has_device {
-                recalled.push(entry.stateid);
+                recalled.push((entry.owner.session_id, entry.stateid));
             }
         }
 
         if !recalled.is_empty() {
             info!(
-                "Recalling {} layouts using device {}",
+                "Recalling {} layout(s) using device {}",
                 recalled.len(),
                 device_id
             );
@@ -657,11 +669,13 @@ mod tests {
         // Find which device was actually used
         let device_used = &layout.segments[0].device_id;
 
-        // Recall layouts for that device
+        // Recall layouts for that device. Returns (session_id,
+        // stateid) pairs for the CB fan-out path.
         let recalled = manager.recall_layouts_for_device(device_used);
 
-        // Should have recalled the layout
-        assert!(!recalled.is_empty(), "Expected to recall layout for device {}", device_used);
+        assert_eq!(recalled.len(), 1, "expected exactly one (sid, stateid) pair");
+        assert_eq!(recalled[0].1, layout.stateid);
+        assert_eq!(recalled[0].0, layout.owner.session_id);
     }
 
     #[test]

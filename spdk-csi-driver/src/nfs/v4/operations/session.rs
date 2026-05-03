@@ -441,14 +441,18 @@ impl SessionOperationHandler {
         info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",
               session.session_id, op.clientid, negotiated_max_request / 1024);
 
-        // Set server flags based on actual capabilities (RFC 5661 §18.36)
-        // We do not support persistent reply cache or backchannel callbacks yet,
-        // so advertise none to avoid client-side EINVAL during mount negotiation.
+        // Set server flags based on actual capabilities (RFC 5661 §18.36).
+        // We do not implement persistent reply cache, and we do not yet
+        // negotiate back-channel attrs, so we don't echo CONN_BACK_CHAN —
+        // even when we *do* register the connection's writer for callbacks
+        // (see the dispatcher's CREATE_SESSION arm). Linux v4.1 clients
+        // are happy to mount without CONN_BACK_CHAN echoed; they may
+        // refuse our outbound CB CALLs with PROG_UNAVAIL, which the
+        // CallbackManager surfaces cleanly.
         let server_flags = 0u32;
 
-        // If we are not offering a backchannel, RFC 5661 says csr_flags MUST NOT
-        // set CREATE_SESSION4_FLAG_CONN_BACK_CHAN and the backchannel attrs should
-        // be zeroed so the client knows callbacks are unavailable.
+        // We don't advertise back-channel attrs; clients ignore this
+        // field when csr_flags doesn't have CONN_BACK_CHAN set.
         let back_chan_attrs = ChannelAttrs::default();
 
         // Record the result in the per-client CREATE_SESSION cache so a
