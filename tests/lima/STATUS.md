@@ -2,15 +2,14 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-03 — Phase B complete (StateBackend persistence end-to-end; MDS pod rolls preserve client_id).
-**Branch:** `kind-no-spdk`. **HEAD:** `4d2f162`.
+**Last updated:** 2026-05-03 — Phase B complete *with no known gaps*; FH stability across restart shipped (`3f000bb`).
+**Branch:** `kind-no-spdk`. **HEAD:** `3f000bb`.
 
 ### Picking up next session
 
-* **Phase B is done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) landed and pushed. MDS state survives restart end-to-end: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe), a configurable `state.backend: sqlite` flag in `mds.yaml` flips production on, and `make test-pnfs-restart` proves a kernel client reaches its persisted client_id post-restart via `CREATE_SESSION sequence>=2` (the §18.36.4 forward-progress branch). Sessions are deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4, and reloading would deadlock the kernel on `NFS4ERR_SEQ_MISORDERED`. Linux's natural recovery via BADSESSION → fresh CREATE_SESSION on the same persisted client_id is what makes the mount keep working.
-* **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id + survives kernel reconnect (Phase B). Phase C (FFL mirroring) is demand-driven from here.
-* **Test gates as of HEAD:** `cargo test --lib` **305 PASS / 0 FAIL** (was 291 — +14 for `state_backend` module + `pnfs::config` tests + the StateManager reload test). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` green (8 markers). `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline as before Phase B.
-* **One known follow-up before pNFS-MDS-restart is operationally clean: file-handle instance stability.** `FileHandleManager::generate_instance_id` uses a wall-clock timestamp; after restart the new id differs from the old one, so the kernel's cached FHs from before the restart error with `NFS4ERR_BADHANDLE`. The kernel re-LOOKUPs paths and recovers, but in-flight reads/writes against pre-restart open handles fail. **Fix:** persist the instance discriminator alongside the InstanceCounter (small change — one new singleton row in the `instance_counter` table). Tracked as a Phase B follow-up; the `make test-pnfs-restart` script reports the post-restart hash check as informational rather than asserting it. Estimated effort: half a session.
+* **Phase B is fully done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) plus the FH-stability follow-up (`3f000bb`) landed and pushed. The full chain: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe); a per-deployment `server_id` lives in a `server_identity` singleton table and is stamped into every NFSv4 file handle so cached FHs survive restart; `make test-pnfs-restart` proves a kernel client's `read()` against pre-restart open handles still returns the original bytes after the MDS comes back. Sessions deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4; the kernel's natural BADSESSION → fresh CREATE_SESSION recovery handles that.
+* **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id, stateids, layouts, and file-handle stamps so an existing mount keeps working byte-for-byte (Phase B). Phase C (FFL mirroring for HDFS-style replication) is demand-driven from here.
+* **Test gates as of HEAD:** `cargo test --lib` **310 PASS / 0 FAIL** (was 291 — +19 for `state_backend` module + reload + server_id + migration + `pnfs::config` tests). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` **green with hash assertion firing** — kernel reads pre-restart bytes successfully post-restart with zero stale-handle markers. `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline.
 * **Useful files for orienting fast:**
   * `docs/plans/pnfs-production-readiness.md` — master plan (Phase A + B done, C deferred).
   * `src/state_backend/{mod,memory,sqlite}.rs` — trait + records + two impls.
@@ -20,8 +19,8 @@ Living document. Update this when a session ends or a milestone lands.
   * `src/nfs/v4/state/mod.rs::StateManager::load_from_backend` — pulls clients + sessions + stateids out of the backend at startup.
   * `src/pnfs/mds/server.rs::MetadataServer::load_persisted_state` — pNFS startup hook that calls `load_from_backend` + `layout.load_records` + bumps the persisted instance counter.
   * `src/pnfs/config.rs::PnfsConfig::build_state_backend` — config → `Arc<dyn StateBackend>` dispatch (Memory or Sqlite).
-  * `tests/lima/pnfs/restart.sh` + `mds-restart.yaml` — the e2e harness (mount, write, kill MDS, restart, assert recovery).
-  * `src/nfs/v4/filehandle.rs::FileHandleManager::generate_instance_id` — the next thing to make persistent (FH-stability follow-up).
+  * `tests/lima/pnfs/restart.sh` + `mds-restart.yaml` — the e2e harness (mount, write, kill MDS, restart, assert post-restart read returns the original bytes).
+  * `src/nfs/v4/filehandle.rs::FileHandleManager::new_with_instance_id` — receives the persisted `server_id` from `MetadataServer::new`; stamps every FH with it so cached handles survive restart.
 
 ### Today in one paragraph
 
@@ -241,14 +240,33 @@ customer.
 | **B.4 — config + InstanceCounter** | `02d3ee5` | `pnfs::config::StateBackend`: drop never-implemented `Kubernetes`/`Etcd` variants, add `Sqlite`. `PnfsConfig::build_state_backend(&StateConfig)` → `Arc<dyn StateBackend>` (path defaults to `/var/lib/flint-pnfs/state.db`). `MetadataServer::new` constructs the configured backend; new `load_persisted_state()` async hook called from `serve()` before the listener accepts: bumps + logs the instance counter, calls `state_mgr.load_from_backend()`, calls `layout_manager.load_records(backend.list_layouts().await?)`. Manual verification: counter goes 1 → 2 across MDS restarts; `state.db` + WAL appear at the configured path. 2 new config tests including round-trip and dispatch. Lib: 303 → 305. |
 | **B.5 — Lima e2e** | `4d2f162` | New `make test-pnfs-restart` Lima script with companion `mds-restart.yaml`. Phase 1 starts MDS with `state.backend: sqlite`, mounts, writes 24 MiB. Phase 2 kills MDS, restarts over the same `state.db`, asserts: counter advanced 1→2, ClientManager + SessionManager + LayoutManager load lines fired, kernel reached the persisted client_id post-restart via `CREATE_SESSION sequence>=2` (the §18.36.4 forward-progress branch — without persistence this would be `SEQ_MISORDERED`). **Phase B.5 hard lesson — encoded in `SessionManager::load_records`:** Linux NFSv4.1 clients deadlock on `NFS4ERR_SEQ_MISORDERED`. Reloading a session has slot.seqid=0; kernel's seqid=21 looks misordered; kernel retries forever. Fix: `load_records` *observes* persisted sessions (bumps `next_session_id` past their max) but does NOT put them in the live map and fire-and-forget deletes them. Kernel sees `BADSESSION`, reissues EXCHANGE_ID (finds persisted client via §18.35.5 case 1/5/6) → fresh CREATE_SESSION (sees persisted last_cs_sequence, accepts seq+1). Mount keeps working. e2e green: 8 assertion markers fire end-to-end. |
 
-**One known Phase B follow-up:** file-handle instance stability.
-`FileHandleManager::generate_instance_id` is wall-clock-derived;
-post-restart the new id differs and the kernel's cached FHs error
-with `NFS4ERR_BADHANDLE`. Kernel re-LOOKUPs paths and recovers, but
-in-flight reads against pre-restart open handles fail. The fix is to
-persist the FH instance discriminator alongside the
-`instance_counter` table — small change, half a session of work.
-Tracked at the top of this STATUS.md.
+**Phase B follow-up: persistent FH instance discriminator (`3f000bb`).**
+The first cut of Phase B left `FileHandleManager::generate_instance_id`
+wall-clock-derived, so post-restart the kernel's cached FHs would
+error with `NFS4ERR_BADHANDLE`. This commit closes the gap:
+
+* Schema bumped 1 → 2 with a clean v1→v2 migration path. New
+  `server_identity` singleton table holds a non-zero random `u64`
+  generated once at first DB creation, reused for the lifetime of
+  the state.db.
+* New `StateBackend::get_or_init_server_id()` async trait method.
+  MemoryBackend uses `OnceLock` for atomic-once init;
+  SqliteBackend uses INSERT-OR-IGNORE-then-SELECT over the
+  singleton row (atomic at the SQLite level + connection mutex
+  serialises concurrent first-callers).
+* `MetadataServer::new` is now `async`; pulls the server id from
+  the backend BEFORE constructing `FileHandleManager` and passes
+  it via `new_with_instance_id`. Logs the value at startup as an
+  operator-visible canary.
+* `make test-pnfs-restart` now asserts on the post-restart hash
+  match (was informational); the kernel's `read()` against
+  pre-restart cached FHs returns the original bytes byte-for-byte,
+  with zero stale-handle markers in the MDS log.
+* 5 new tests including the load-bearing
+  `sqlite_server_id_survives_reopen`, a 16-way concurrency check,
+  and a v1→v2 migration test. Lib: 305 → 310.
+
+Phase B is now feature-complete with no known gaps.
 
 ### pynfs coverage for Phase A
 
