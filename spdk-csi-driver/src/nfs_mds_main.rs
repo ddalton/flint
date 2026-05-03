@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and start MDS
     info!("⚙️  Initializing Metadata Server...");
-    let mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports)?;
+    let mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports).await?;
 
     info!("🚀 Starting Metadata Server...");
     info!("");

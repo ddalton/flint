@@ -54,10 +54,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Schema version persisted in the `schema_version` table. Bump when
-/// adding columns; the open path errors out if the on-disk version
-/// doesn't match (operator must run a migration or move the DB
-/// aside).
-const SCHEMA_VERSION: i64 = 1;
+/// adding columns or tables; the open path runs supported migrations
+/// and errors out on unsupported version drift (operator must move
+/// the DB aside).
+///
+/// Version history:
+///   1 → initial: clients, sessions, stateids, layouts,
+///        instance_counter.
+///   2 → add `server_identity` (singleton row with the persistent
+///        per-deployment server id used by FileHandleManager so
+///        cached FHs survive MDS restart).
+const SCHEMA_VERSION: i64 = 2;
 
 /// Single-file SQLite [`StateBackend`].
 pub struct SqliteBackend {
@@ -126,6 +133,24 @@ impl SqliteBackend {
                 })?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
+            Some(1) if SCHEMA_VERSION == 2 => {
+                // v1 → v2 migration: the new `server_identity` table
+                // was added by the schema-batch above (CREATE TABLE
+                // IF NOT EXISTS). Just bump the version row so future
+                // opens don't keep re-running the migration. The first
+                // call to `get_or_init_server_id` will populate the
+                // singleton row with a fresh random id.
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1 WHERE id = 1",
+                    params![SCHEMA_VERSION],
+                )
+                .map_err(|e| {
+                    StateBackendError::Storage(format!("schema_version migrate: {}", e))
+                })?;
+                tracing::info!(
+                    "SqliteBackend: migrated schema 1 → 2 (added server_identity table)"
+                );
+            }
             Some(v) => {
                 return Err(StateBackendError::Storage(format!(
                     "schema_version mismatch: db has {}, code expects {}; \
@@ -573,6 +598,30 @@ impl StateBackend for SqliteBackend {
             .await?;
         Ok(i64_to_u64(v))
     }
+
+    async fn get_or_init_server_id(&self) -> StateBackendResult<u64> {
+        // INSERT-OR-IGNORE-then-SELECT pattern: if the singleton row
+        // doesn't exist (first ever call), atomically inject one
+        // with a random non-zero u64; otherwise the IGNORE branch
+        // fires and the existing row's value is read on the SELECT.
+        // Both happen on the same connection mutex so concurrent
+        // first-callers serialise and observe the same value.
+        let candidate = i64::from_ne_bytes((rand::random::<u64>() | 1).to_ne_bytes());
+        let v: i64 = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO server_identity (id, server_id) VALUES (1, ?1)",
+                    params![candidate],
+                )?;
+                conn.query_row(
+                    "SELECT server_id FROM server_identity WHERE id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .await?;
+        Ok(i64_to_u64(v))
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────
@@ -754,6 +803,15 @@ CREATE TABLE IF NOT EXISTS instance_counter (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     value INTEGER NOT NULL
 );
+
+-- Schema v2: persistent per-deployment server identifier. Generated
+-- once on first start (random non-zero u64); reused for the lifetime
+-- of the state.db. FileHandleManager stamps this into every NFSv4
+-- file handle so cached FHs survive MDS restart.
+CREATE TABLE IF NOT EXISTS server_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    server_id INTEGER NOT NULL
+);
 "#;
 
 #[cfg(test)]
@@ -761,6 +819,7 @@ mod tests {
     use super::*;
     use crate::state_backend::tests::{
         instance_counter_monotonic, put_overwrites, round_trip_all,
+        server_id_stable_and_nonzero,
     };
 
     #[tokio::test]
@@ -779,6 +838,97 @@ mod tests {
     async fn sqlite_put_is_upsert() {
         let b = SqliteBackend::open_in_memory().unwrap();
         put_overwrites(&b).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_server_id_stable_within_lifetime() {
+        let b = SqliteBackend::open_in_memory().unwrap();
+        server_id_stable_and_nonzero(&b).await;
+    }
+
+    /// **The whole point of the FH-stability follow-up.** Generate
+    /// a server id, drop the backend (closing the file), reopen
+    /// over the same path, observe the same id. This is what makes
+    /// `FileHandleManager::instance_id` survive an MDS pod roll —
+    /// every NFSv4 file handle stamped with this id remains valid
+    /// after restart, so the kernel's cached FHs don't error out
+    /// with `NFS4ERR_BADHANDLE`.
+    #[tokio::test]
+    async fn sqlite_server_id_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+
+        let id_before = {
+            let b = SqliteBackend::open(&path).unwrap();
+            b.get_or_init_server_id().await.unwrap()
+        };
+        assert_ne!(id_before, 0);
+
+        // Reopen over the same file. New connection, new mutex, same
+        // row in `server_identity`.
+        let b2 = SqliteBackend::open(&path).unwrap();
+        let id_after = b2.get_or_init_server_id().await.unwrap();
+        assert_eq!(
+            id_before, id_after,
+            "server_id must survive a backend reopen — that's the point of B follow-up"
+        );
+
+        // Multiple subsequent calls also stay stable.
+        assert_eq!(b2.get_or_init_server_id().await.unwrap(), id_before);
+    }
+
+    /// Concurrent first-callers race on the singleton row. SQLite +
+    /// the connection mutex serialise the INSERT-OR-IGNORE so all
+    /// callers observe one unique value. Catches the obvious bug
+    /// where two threads each `INSERT` and end up reading different
+    /// rows.
+    #[tokio::test]
+    async fn sqlite_server_id_atomic_under_concurrency() {
+        let b = Arc::new(SqliteBackend::open_in_memory().unwrap());
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let b = Arc::clone(&b);
+            tasks.push(tokio::spawn(async move {
+                b.get_or_init_server_id().await.unwrap()
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for t in tasks {
+            seen.insert(t.await.unwrap());
+        }
+        assert_eq!(seen.len(), 1, "all callers must observe one stable id");
+    }
+
+    /// v1 → v2 migration: an on-disk DB written by an older build
+    /// (before the FH-stability follow-up) opens cleanly, gets the
+    /// `server_identity` table created, and a freshly-generated id
+    /// becomes the new stable value.
+    #[tokio::test]
+    async fn sqlite_v1_to_v2_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Forge a v1 DB: open at v2, then downgrade the version
+        // marker. (No real v1 build in tree; this is the closest
+        // approximation.) Deliberately do not pre-create the
+        // server_identity table — the migration must do that.
+        {
+            let _ = SqliteBackend::open(&path).unwrap();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = 1 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute("DROP TABLE server_identity", []).unwrap();
+        }
+        // Re-open: should run the v1→v2 migration, not error out.
+        let b = SqliteBackend::open(&path).unwrap();
+        let id = b.get_or_init_server_id().await.unwrap();
+        assert_ne!(id, 0);
+        // Subsequent re-opens see the same id.
+        drop(b);
+        let b2 = SqliteBackend::open(&path).unwrap();
+        assert_eq!(b2.get_or_init_server_id().await.unwrap(), id);
     }
 
     /// **The whole point of B.2.** Write records, drop the backend
@@ -912,15 +1062,16 @@ mod tests {
         assert_eq!(b.increment_instance_counter().await.unwrap(), 3);
     }
 
-    /// Mismatched schema_version refuses to open. Operator-visible
-    /// canary for "old-build DB hit a new MDS" rather than silent row
-    /// misreads.
+    /// Unsupported schema_version refuses to open. Operator-visible
+    /// canary for "newer-build DB hit an older MDS" or "DB from
+    /// the future". Supported migrations (e.g. v1→v2) succeed; only
+    /// values outside the supported range error out.
     #[tokio::test]
     async fn sqlite_schema_version_mismatch_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        // Create the DB normally, then forge an old version into the
-        // schema_version row to simulate a build/DB drift.
+        // Create the DB normally, then forge a future version that
+        // current code can't downgrade from.
         {
             let _ = SqliteBackend::open(&path).unwrap();
         }
@@ -928,13 +1079,13 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute(
                 "UPDATE schema_version SET version = ?1 WHERE id = 1",
-                params![SCHEMA_VERSION - 1],
+                params![SCHEMA_VERSION + 50],
             )
             .unwrap();
         }
         let err = SqliteBackend::open(&path)
             .err()
-            .expect("open must reject mismatched schema version");
+            .expect("open must reject unsupported schema version");
         match err {
             StateBackendError::Storage(msg) => {
                 assert!(msg.contains("schema_version mismatch"), "got: {}", msg);

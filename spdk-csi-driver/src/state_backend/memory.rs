@@ -17,6 +17,7 @@ use super::{
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// In-memory [`StateBackend`]. All maps shard internally so concurrent
 /// readers and writers don't contend on a global lock.
@@ -27,6 +28,10 @@ pub struct MemoryBackend {
     stateids: DashMap<[u8; 12], StateIdRecord>,
     layouts: DashMap<[u8; 16], LayoutRecord>,
     instance_counter: AtomicU64,
+    /// Lazily-initialised per-deployment server id. `OnceLock` makes
+    /// the first call atomic (no two threads observe different values)
+    /// without paying for a mutex on every read.
+    server_id: OnceLock<u64>,
 }
 
 impl MemoryBackend {
@@ -122,6 +127,15 @@ impl StateBackend for MemoryBackend {
     async fn get_instance_counter(&self) -> StateBackendResult<u64> {
         Ok(self.instance_counter.load(Ordering::SeqCst))
     }
+
+    async fn get_or_init_server_id(&self) -> StateBackendResult<u64> {
+        // `OnceLock::get_or_init` runs the closure exactly once per
+        // backend instance, even under concurrent first-call races —
+        // no dupe writes, no mutex on the steady-state read path.
+        // `rand::random::<u64>() | 1` keeps the value non-zero so a
+        // caller treating zero as "uninitialised" still works.
+        Ok(*self.server_id.get_or_init(|| rand::random::<u64>() | 1))
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +143,7 @@ mod tests {
     use super::*;
     use crate::state_backend::tests::{
         instance_counter_monotonic, put_overwrites, round_trip_all,
+        server_id_stable_and_nonzero,
     };
 
     #[tokio::test]
@@ -147,6 +162,12 @@ mod tests {
     async fn memory_put_is_upsert() {
         let b = MemoryBackend::new();
         put_overwrites(&b).await;
+    }
+
+    #[tokio::test]
+    async fn memory_server_id_stable_within_lifetime() {
+        let b = MemoryBackend::new();
+        server_id_stable_and_nonzero(&b).await;
     }
 
     /// Concurrent writers on different keys don't lose updates and

@@ -240,90 +240,59 @@ PASS=true
 echo
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. Verify the kernel sees the SAME client_id post-restart. This
-#    is the load-bearing protocol-level B.4 assertion: an
-#    EXCHANGE_ID after restart returns case 1 of RFC 8881 §18.35.5
-#    (existing confirmed record) — the persisted client survives, so
-#    the kernel doesn't get a fresh client_id allocated. This is
-#    what makes "the mount didn't fully start over" visible at the
-#    protocol level, and it's strictly broader than just hash-
-#    matching (a hash match also requires file-handle stability,
-#    which is a separate follow-up — see notes below).
+# 5. Read the file back over the surviving mount and assert the bytes
+#    match. This is the load-bearing end-to-end gate: persistence works
+#    iff a kernel client whose TCP connection just dropped + reconnected
+#    against a fresh-from-disk MDS process can still `read()` its
+#    pre-restart file via cached file handles. Pulls together:
+#
+#    * `client_id` survival (B.3 / B.4) — kernel's clientid is still
+#      valid post-restart (no STALE_CLIENTID).
+#    * Stateid survival (B.3) — open stateids round-trip through the
+#      backend.
+#    * **FH instance discriminator survival (this follow-up)** — every
+#      cached file handle on the kernel side stays valid, so the
+#      kernel's LOOKUP/READ doesn't bounce off NFS4ERR_BADHANDLE.
+#
+#    Linux's NFSv4.1 reconnect can take up to ~90s after the MDS comes
+#    back; we retry the read in a generous loop.
 # ──────────────────────────────────────────────────────────────────────
-echo "▶ verifying kernel reaches the persisted client_id post-restart"
-# Two acceptable kernel-side paths after MDS reconnect, both of which
-# prove restart survival of the client record:
-#
-#   (a) EXCHANGE_ID case 1/5/6 — kernel issues fresh EXCHANGE_ID, MDS
-#       finds the persisted (owner, verifier) and returns the same
-#       client_id (RFC 8881 §18.35.5).
-#
-#   (b) CREATE_SESSION at csa_sequence > 1 on a persisted client_id —
-#       kernel skips EXCHANGE_ID, trusts its existing client_id, and
-#       drives CREATE_SESSION forward. Linux's NFSv4.1 client picks
-#       this path when its TCP reconnect lands within the lease
-#       window. The MDS accepts it because §18.36.4's seq state
-#       machine sees `csa_sequence == last_cs_sequence + 1` —
-#       forward progress = Execute branch. Without persistence,
-#       last_cs_sequence is 0 and the kernel's seq=2 looks misordered;
-#       with persistence, it works.
-#
-# Either path is a passing signal. We grep for both.
-DEADLINE=$(($(date +%s) + 60))
-SAW_RECOVERY=false
-RECOVERY_KIND=""
+echo "▶ post-restart read: kernel sees pre-restart bytes via cached FHs"
+POST_HASH=""
+DEADLINE=$(($(date +%s) + 90))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  if grep -qE 'EXCHANGE_ID: case (1|5|6)' "$MDS_LOG"; then
-    SAW_RECOVERY=true
-    RECOVERY_KIND="EXCHANGE_ID renewal"
-    break
-  fi
-  # Phase-2 CREATE_SESSION at sequence>=2 on a known clientid means
-  # the kernel kept its pre-restart client_id and forward-stepped
-  # the cs sequence. We need to disambiguate against phase-1's
-  # CREATE_SESSION lines, so we only grep the slice after the load
-  # markers.
-  if awk '/MDS instance counter: 2/{flag=1} flag' "$MDS_LOG" |
-       grep -qE 'CREATE_SESSION: clientid=[0-9]+, sequence=[2-9]'; then
-    SAW_RECOVERY=true
-    RECOVERY_KIND="CREATE_SESSION sequence>=2 on persisted clientid"
-    break
-  fi
-  sleep 1
+  POST_HASH=$(timeout 10 limactl shell "$LIMA_VM" -- sudo bash -c "
+    sha256sum /mnt/flint-pnfs/restart.bin 2>/dev/null | awk '{print \$1}'
+  " 2>/dev/null || true)
+  if [ -n "$POST_HASH" ]; then break; fi
+  sleep 2
 done
 
-if "$SAW_RECOVERY"; then
-  echo "  ✓ kernel reached persisted client post-restart: $RECOVERY_KIND"
+if [ -z "$POST_HASH" ]; then
+  echo "  ✗ post-restart read timed out — kernel never recovered the mount"
+  PASS=false
+elif [ "$POST_HASH" = "$PRE_HASH" ]; then
+  echo "  ✓ post-restart hash matches pre-restart hash ($POST_HASH)"
 else
-  echo "  ✗ neither EXCHANGE_ID renewal nor follow-on CREATE_SESSION observed"
-  echo "    Recent post-restart events:"
-  awk '/MDS instance counter: 2/{flag=1} flag' "$MDS_LOG" |
-    grep -E 'EXCHANGE_ID|CREATE_SESSION' | head -5 | sed 's/^/      /'
+  echo "  ✗ hash mismatch: pre=$PRE_HASH post=$POST_HASH"
   PASS=false
 fi
 
-# Informational: read-back / hash check. After restart, the kernel
-# can re-establish session + reuse stateids, but FILE HANDLES are
-# stamped with a `FileHandleManager::instance_id` that's still
-# generated from the wall clock — so the kernel's cached FHs become
-# stale and the kernel issues fresh LOOKUPs. That works for fresh
-# operations but means a `read()` on a previously-opened file
-# handle errors with NFS4ERR_BADHANDLE. Stable FH instance ids
-# across restart are tracked as a Phase B follow-up; not asserted
-# here.
+# Informational: which path the kernel took to recover. With the
+# FH-stability fix, Linux often resumes against the existing session
+# and never even issues EXCHANGE_ID; that's a perfectly valid
+# outcome, so we don't assert on it. Reported here for forensics.
 echo
-echo "▶ Informational: post-restart file read (FH-stability is a separate follow-up)"
-POST_HASH=$(timeout 10 limactl shell "$LIMA_VM" -- sudo bash -c "
-  sha256sum /mnt/flint-pnfs/restart.bin 2>/dev/null | awk '{print \$1}'
-" 2>/dev/null || true)
-if [ -n "$POST_HASH" ] && [ "$POST_HASH" = "$PRE_HASH" ]; then
-  echo "  • post-restart hash matches: $POST_HASH (FH stability happens to hold)"
-elif [ -n "$POST_HASH" ]; then
-  echo "  • post-restart hash differs (pre=$PRE_HASH post=$POST_HASH) — surprising"
-else
-  echo "  • post-restart read errored or timed out — expected; FH instance discriminator changed"
-  echo "    Stale-handle markers in log: $(grep -c "Stale file handle" "$MDS_LOG" || echo 0)"
+echo "▶ Informational: kernel recovery path"
+if grep -qE 'EXCHANGE_ID: case (1|5|6)' "$MDS_LOG"; then
+  echo "  • EXCHANGE_ID renewal observed (RFC 8881 §18.35.5 case 1/5/6)"
 fi
+if awk '/MDS instance counter: 2/{flag=1} flag' "$MDS_LOG" |
+     grep -qE 'CREATE_SESSION: clientid=[0-9]+, sequence=[2-9]'; then
+  echo "  • CREATE_SESSION sequence>=2 on persisted clientid (§18.36.4 forward progress)"
+fi
+STALE_FH_COUNT=$(grep -c "Stale file handle" "$MDS_LOG" 2>/dev/null || echo 0)
+echo "  • Stale-handle markers in log: $STALE_FH_COUNT (should be 0 with FH-stability fix)"
 
 limactl shell "$LIMA_VM" -- sudo umount -lf /mnt/flint-pnfs 2>/dev/null || true
 

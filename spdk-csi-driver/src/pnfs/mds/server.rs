@@ -57,19 +57,20 @@ pub struct MetadataServer {
 }
 
 impl MetadataServer {
-    /// Create a new metadata server
-    pub fn new(config: MdsConfig, exports: Vec<crate::pnfs::config::ExportConfig>) -> Result<Self> {
+    /// Create a new metadata server. Async because the persistent
+    /// per-deployment server id (used by `FileHandleManager` so cached
+    /// FHs survive MDS restart) is read from the backend on the same
+    /// runtime tick as construction. `nfs_mds_main` already runs
+    /// under `#[tokio::main]` so this is a single `.await`.
+    pub async fn new(config: MdsConfig, exports: Vec<crate::pnfs::config::ExportConfig>) -> Result<Self> {
         info!("Initializing Metadata Server");
 
         // Get export path from first export, default to /data if not specified
         let export_path = exports.first()
             .map(|e| std::path::PathBuf::from(&e.path))
             .unwrap_or_else(|| std::path::PathBuf::from("/data"));
-        
-        info!("📂 MDS export path: {:?}", export_path);
 
-        // Initialize file handle manager with configured export path
-        let fh_manager = Arc::new(FileHandleManager::new(export_path.clone()));
+        info!("📂 MDS export path: {:?}", export_path);
 
         // Initialize state manager. The backend kind comes from
         // `config.state.backend` — `memory` for tests / dev work (no
@@ -79,6 +80,26 @@ impl MetadataServer {
         // / layout) round-trip through the same store.
         let backend = crate::pnfs::config::PnfsConfig::build_state_backend(&config.state)
             .map_err(|e| crate::pnfs::Error::Config(format!("state backend: {}", e)))?;
+
+        // Pull the persistent server id BEFORE constructing the
+        // FileHandleManager so its `instance_id` survives MDS
+        // restart. `memory` backend generates a fresh random on
+        // first call (so MemoryBackend has no restart survival,
+        // by design); `sqlite` returns the same value on every
+        // open of the same `state.db`. This is what closes the
+        // last Phase B gap: `NFS4ERR_BADHANDLE` no longer fires
+        // when a kernel client uses a pre-restart cached FH.
+        let server_id = backend.get_or_init_server_id().await
+            .map_err(|e| crate::pnfs::Error::Config(format!("server_id init: {}", e)))?;
+        info!("🔑 MDS server id (persistent): {} — FHs stamped with this survive restart", server_id);
+
+        // Initialize file handle manager with the persisted server id.
+        let fh_manager = Arc::new(FileHandleManager::new_with_instance_id(
+            export_path.clone(),
+            "volume".to_string(),
+            server_id,
+        ));
+
         let state_mgr = Arc::new(StateManager::new("", Arc::clone(&backend)));
         
         // Initialize lock manager

@@ -281,6 +281,21 @@ pub trait StateBackend: Send + Sync {
     /// Read the current persisted instance counter without mutating
     /// it. Mostly for diagnostics + tests.
     async fn get_instance_counter(&self) -> StateBackendResult<u64>;
+
+    /// Returns the persistent per-deployment server identifier.
+    /// **Distinct from `instance_counter`** — the counter increments
+    /// on every restart (so old device-id caches go stale and clients
+    /// re-fetch); this id is generated once at DB-creation time and
+    /// reused for the lifetime of the state.db. It's what
+    /// `FileHandleManager::instance_id` stamps into every NFSv4 file
+    /// handle so cached FHs SURVIVE an MDS restart instead of erroring
+    /// with `NFS4ERR_BADHANDLE`.
+    ///
+    /// First-call semantics: generate a non-zero random `u64` and
+    /// persist it atomically (INSERT-OR-IGNORE pattern in SQLite,
+    /// `OnceLock` in MemoryBackend); subsequent calls return the same
+    /// value byte-for-byte across process lifetimes.
+    async fn get_or_init_server_id(&self) -> StateBackendResult<u64>;
 }
 
 #[cfg(test)]
@@ -413,6 +428,21 @@ mod tests {
         assert_eq!(b.increment_instance_counter().await.unwrap(), 1);
         assert_eq!(b.increment_instance_counter().await.unwrap(), 2);
         assert_eq!(b.get_instance_counter().await.unwrap(), 2);
+    }
+
+    /// `get_or_init_server_id` returns a non-zero value, the same
+    /// value on every subsequent call, and (importantly) NEVER
+    /// returns 0 — `FileHandleManager` treats 0-stamped handles as
+    /// uninitialised. Generic over backend so SqliteBackend's test
+    /// reuses this; SqliteBackend's separate restart-survival test
+    /// proves the value also survives `open()` round-trips.
+    pub(crate) async fn server_id_stable_and_nonzero<B: StateBackend>(b: &B) {
+        let id1 = b.get_or_init_server_id().await.unwrap();
+        let id2 = b.get_or_init_server_id().await.unwrap();
+        let id3 = b.get_or_init_server_id().await.unwrap();
+        assert_ne!(id1, 0, "server_id must be non-zero");
+        assert_eq!(id1, id2, "server_id must be stable");
+        assert_eq!(id2, id3, "server_id must be stable");
     }
 
     /// Upserts overwrite. Important — the higher layer calls
