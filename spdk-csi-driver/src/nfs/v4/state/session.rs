@@ -133,25 +133,6 @@ impl Session {
         }
     }
 
-    /// Inverse of `to_record`. Slot table is rebuilt empty (matches
-    /// what would happen if the session was created fresh — clients
-    /// will see `NFS4ERR_RETRY_UNCACHED_REP` for any pre-restart
-    /// SEQUENCE replay, which is RFC-compliant).
-    pub(crate) fn from_record(r: SessionRecord) -> Self {
-        Self::new(
-            SessionId(r.session_id),
-            r.client_id,
-            r.sequence,
-            r.flags,
-            r.fore_chan_maxrequestsize,
-            r.fore_chan_maxresponsesize,
-            r.fore_chan_maxresponsesize_cached,
-            r.fore_chan_maxops,
-            r.fore_chan_maxrequests,
-            r.cb_program,
-        )
-    }
-
     /// Create a new session
     pub fn new(
         session_id: SessionId,
@@ -283,32 +264,57 @@ impl SessionManager {
         }
     }
 
-    /// Repopulate the in-memory DashMap from a backend snapshot.
-    /// Called once at MDS startup before the listener accepts. The
-    /// `next_session_id` counter is bumped past the highest persisted
-    /// id so freshly-created sessions never collide.
+    /// Repopulate the in-memory DashMap from a backend snapshot. Phase
+    /// B.5 hard lesson: we deliberately **DO NOT** put the loaded
+    /// sessions back in the active maps. Linux NFSv4.1's kernel
+    /// client tracks per-slot sequence numbers (e.g. seqid=21 after
+    /// 21 ops); the slot replay state is intentionally not persisted
+    /// (RFC 8881 §15.1.10.4), so a reloaded session has slot.seqid=0
+    /// and the kernel's next SEQUENCE looks misordered. The kernel
+    /// does not recover from `NFS4ERR_SEQ_MISORDERED` — it retries
+    /// with the same seqid, locking the mount up.
+    ///
+    /// The RFC-blessed restart-recovery path is for the server to
+    /// return `NFS4ERR_BADSESSION`, which Linux handles by reissuing
+    /// EXCHANGE_ID (which finds the persisted client record and
+    /// returns the same `client_id` — case 1 of §18.35.5) followed
+    /// by a fresh `CREATE_SESSION`. That gives us a new in-memory
+    /// session with empty slots that's consistent with the client's
+    /// fresh slot state. The persisted session record is kept on
+    /// disk for forensics + counter bumping but never repopulates
+    /// the live map.
+    ///
+    /// We still bump `next_session_id` past the highest persisted id
+    /// so a re-CREATE_SESSION never collides with a session id from
+    /// a previous run.
     pub fn load_records(&self, records: Vec<SessionRecord>) {
         let mut max_id: u64 = 0;
-        for r in records {
-            let session_id = SessionId(r.session_id);
-            let cid = r.client_id;
-            // Recover the numeric counter from the high 8 bytes —
-            // SessionId encodes `(session_id_num, client_id)` in the
-            // 16-byte opaque (see `create_session` below).
+        let count = records.len();
+        for r in &records {
             let mut num_buf = [0u8; 8];
             num_buf.copy_from_slice(&r.session_id[0..8]);
             max_id = max_id.max(u64::from_be_bytes(num_buf));
-            let session = Session::from_record(r);
-            self.sessions.insert(session_id, session);
-            self.client_sessions
-                .entry(cid)
-                .or_insert_with(Vec::new)
-                .push(session_id);
         }
         if max_id >= self.next_session_id.load(Ordering::SeqCst) {
             self.next_session_id.store(max_id + 1, Ordering::SeqCst);
         }
-        info!("SessionManager loaded {} records from backend", self.sessions.len());
+        // Drop the records from the backend too — once we know the
+        // counter is bumped past their ids, the persisted rows are
+        // dead weight on the durable file and could only confuse a
+        // future operator. Fire-and-forget delete; same rationale as
+        // every other persist call.
+        for r in records {
+            let backend = Arc::clone(&self.backend);
+            let sid = r.session_id;
+            spawn_persist(
+                "session_load_drop",
+                move || async move { backend.delete_session(&sid).await },
+            );
+        }
+        info!(
+            "SessionManager observed {} persisted sessions; bumped counter past max_id={}, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION",
+            count, max_id
+        );
     }
 
     fn persist(&self, s: &Session) {

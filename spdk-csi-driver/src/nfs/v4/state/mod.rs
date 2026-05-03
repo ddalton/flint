@@ -303,10 +303,10 @@ mod tests {
 
         mgr2.load_from_backend().await.expect("load must succeed");
 
-        // Post-load: client and session are back, mark_confirmed
-        // survived, session's cb_program survived, session is bound
-        // to the same client_id (so SEQUENCE → COMPOUND on the new
-        // instance still resolves the right client).
+        // Post-load: client is back with mark_confirmed intact —
+        // EXCHANGE_ID after restart will return this same client_id
+        // (case 1 of RFC 8881 §18.35.5) so the kernel keeps using
+        // its existing client_id.
         let restored = mgr2
             .clients
             .get_client(client_id)
@@ -315,13 +315,27 @@ mod tests {
         assert_eq!(restored.owner, b"alice-client");
         assert_eq!(restored.principal, b"alice@FLINT");
 
-        let sids = mgr2.sessions.get_client_sessions(client_id);
-        assert_eq!(sids, vec![session.session_id]);
-        let restored_session = mgr2
-            .sessions
-            .get_session(&session.session_id)
-            .expect("session must reload");
-        assert_eq!(restored_session.cb_program, 0xcb_aabb);
-        assert_eq!(restored_session.client_id, client_id);
+        // Sessions are deliberately NOT restored to the live map.
+        // Slot replay state can't survive restart (RFC 8881
+        // §15.1.10.4), so reloading a session would break Linux
+        // clients that send SEQUENCE with their current per-slot
+        // seqid. Instead, the kernel sees its session_id is unknown
+        // → BADSESSION → CREATE_SESSION fresh → resumes against
+        // the same persisted client_id. See
+        // `SessionManager::load_records` for the full rationale.
+        assert_eq!(
+            mgr2.sessions.active_count(),
+            0,
+            "sessions deliberately not restored — kernel re-CREATE_SESSIONs",
+        );
+        // The persisted-id counter still got bumped past `session.session_id`'s
+        // numeric component so a fresh CREATE_SESSION never collides.
+        let new_session = mgr2.sessions.create_session(
+            client_id, 0, 0, 4096, 4096, 1024, 16, 8, 0xcb_aabb,
+        );
+        assert_ne!(
+            new_session.session_id, session.session_id,
+            "post-restart CREATE_SESSION must mint a fresh session_id",
+        );
     }
 }

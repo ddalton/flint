@@ -181,9 +181,14 @@ test-pnfs-csi: build-pnfs ## End-to-end pNFS CSI integration test (gRPC create â
 test-pnfs-recall: build-pnfs ## DS-death CB_LAYOUTRECALL e2e (kill DS1, assert MDS recall fires)
 	tests/lima/pnfs/recall.sh
 
+.PHONY: test-pnfs-restart
+test-pnfs-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS, restart over same state.db, mount keeps working)
+	tests/lima/pnfs/restart.sh
+
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + recall tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + recall + restart tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
 	$(MAKE) test-pnfs-recall
+	$(MAKE) test-pnfs-restart

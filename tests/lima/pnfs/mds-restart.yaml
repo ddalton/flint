@@ -1,0 +1,91 @@
+# MDS config for the test-pnfs-restart e2e (see
+# tests/lima/pnfs/restart.sh). Phase B.5 of pnfs-production-readiness.
+#
+# Same shape as mds.yaml, with:
+#   * state.backend: sqlite — durable, single-file. The script wipes
+#     the path between runs (so the first start sees an empty DB) and
+#     between phase 1 and phase 2 we kill the MDS, drop the WAL files
+#     onto the durable DB, then re-launch against the same path so
+#     phase-2 sees phase-1's persisted records.
+#   * heartbeatTimeout: 30 (default) — the DSes stay alive across the
+#     MDS restart, no false-positive recalls.
+#
+# Path is /tmp/flint-pnfs-restart-state/state.db; the e2e script
+# `mkdir -p`'s and clears the parent before each run.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: mds
+
+mds:
+  bind:
+    address: "0.0.0.0"
+    port: 20490
+
+  layout:
+    type: file
+    stripeSize: 8388608
+    policy: stripe
+
+  dataServers:
+    - deviceId: ds-host-1
+      endpoint: "192.168.5.2:20491"
+      bdevs:
+        - lvol0
+    - deviceId: ds-host-2
+      endpoint: "192.168.5.2:20492"
+      bdevs:
+        - lvol0
+
+  state:
+    backend: sqlite
+    config:
+      path: /tmp/flint-pnfs-restart-state/state.db
+
+  ha:
+    enabled: false
+    replicas: 1
+    leaderElection: false
+    leaseDuration: 15
+    renewDeadline: 10
+    retryPeriod: 2
+
+  failover:
+    heartbeatTimeout: 30
+    policy: recall_affected
+    gracePeriod: 60
+
+exports:
+  - path: /tmp/flint-pnfs-mds-exports
+    fsid: 1
+    options: [rw, sync, no_subtree_check]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: info
+  format: text
+  components:
+    mds: info
+    layout: info
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: false
+    port: 0
+    path: /health
+  metrics: []
+
+development:
+  debug: false
+  simulateFailures:
+    enabled: false
+    interval: 0
+    duration: 0
+  traceRpc: false
+  dumpLayouts: false
