@@ -20,12 +20,68 @@
 //! across `await` without blocking the runtime. The contention rate
 //! is low: forward replies write at the natural request-cadence,
 //! callbacks fire at most once per layout change.
+//!
+//! # Inflight CB registry
+//!
+//! On top of the writer we also carry a per-connection registry of
+//! callback CALLs the server is awaiting replies for, keyed by
+//! `xid`. When a caller wants to emit a CB_COMPOUND, it registers
+//! an xid (claiming a slot), pushes the CALL via `send_record`, and
+//! awaits the returned receiver. The connection's main read loop
+//! spots inbound REPLY frames (msg_type u32 at offset 4 in the
+//! payload), looks up the xid in this registry, and resolves the
+//! receiver via `deliver_reply`. If the connection drops before a
+//! reply lands, `drop_all_inflight` is called from the loop's exit
+//! path so awaiters see a clean error instead of hanging forever.
 
+use crate::nfs::v4::cb_compound::{
+    decode_cb_reply, encode_cb_call, CbCompoundCall, CbCompoundReply, CbReplyError,
+};
 use bytes::Bytes;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
+
+/// Errors that can come out of a server-initiated CB CALL. Wraps
+/// [`CbReplyError`] so callers can route them; adds the cases that
+/// only matter at the send layer (timeout, transport, connection
+/// closed).
+#[derive(Debug)]
+pub enum CallbackError {
+    /// The peer did not send a reply within the deadline. The xid
+    /// is forgotten on this path, so a late reply just gets logged
+    /// and dropped by the read loop.
+    Timeout,
+    /// `send_record` failed (TCP closed, write error). The
+    /// connection is dead; the dispatcher's back-channel registry
+    /// entry should be removed by the caller.
+    Transport(std::io::Error),
+    /// Reply parsing failed, including XDR errors and RPC-level
+    /// rejections. See [`CbReplyError`] for the shape.
+    Reply(CbReplyError),
+    /// The connection closed before the reply arrived. Distinct
+    /// from `Transport` (which means *we* couldn't write); this
+    /// means the reply path went away after the CALL was already
+    /// in flight.
+    ConnectionClosed,
+}
+
+impl std::fmt::Display for CallbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallbackError::Timeout => write!(f, "CB call timed out"),
+            CallbackError::Transport(e) => write!(f, "CB transport error: {}", e),
+            CallbackError::Reply(e) => write!(f, "CB reply error: {}", e),
+            CallbackError::ConnectionClosed => write!(f, "CB connection closed"),
+        }
+    }
+}
+
+impl std::error::Error for CallbackError {}
 
 /// The buffered-write half of a single TCP connection, plus the
 /// minimum API anyone outside `handle_tcp_connection` needs to push
@@ -40,12 +96,27 @@ use tokio::sync::Mutex;
 /// itself is never duplicated.
 pub struct BackChannelWriter {
     inner: Mutex<tokio::io::BufWriter<OwnedWriteHalf>>,
+    /// xid → oneshot::Sender for inbound CB replies. A caller
+    /// registers an entry before `send_record` and awaits the
+    /// receiver; the read loop calls `deliver_reply` when the
+    /// matching REPLY frame arrives. DashMap so insert / remove /
+    /// lookup are all lock-free; receivers are tiny and short-lived.
+    inflight: DashMap<u32, oneshot::Sender<Bytes>>,
+    /// Per-connection xid sequencer for callback CALLs. Forward
+    /// CALLs come from the client and use the client's xid space;
+    /// our CB CALLs are independent and only need not collide with
+    /// each other within this connection's lifetime. AtomicU32
+    /// wraps without panic — 4B calls before reuse, far longer than
+    /// any TCP connection.
+    next_xid: AtomicU32,
 }
 
 impl BackChannelWriter {
     pub fn new(buf_writer: tokio::io::BufWriter<OwnedWriteHalf>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(buf_writer),
+            inflight: DashMap::new(),
+            next_xid: AtomicU32::new(1),
         })
     }
 
@@ -69,6 +140,91 @@ impl BackChannelWriter {
         w.write_all(&payload).await?;
         w.flush().await?;
         Ok(())
+    }
+
+    /// Allocate the next outgoing CB xid for this connection.
+    pub fn next_xid(&self) -> u32 {
+        self.next_xid.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Register interest in a future REPLY frame with `xid`. The
+    /// returned receiver resolves when the read loop hands the body
+    /// back via `deliver_reply`, or returns `RecvError` if the
+    /// connection drops first (see `drop_all_inflight`).
+    pub fn register_inflight(&self, xid: u32) -> oneshot::Receiver<Bytes> {
+        let (tx, rx) = oneshot::channel();
+        self.inflight.insert(xid, tx);
+        rx
+    }
+
+    /// Stop awaiting a previously-registered xid (called from the
+    /// timeout path so a late reply doesn't accumulate forever).
+    pub fn forget_inflight(&self, xid: u32) {
+        let _ = self.inflight.remove(&xid);
+    }
+
+    /// Hand a REPLY frame to the awaiter for its xid. Returns true
+    /// iff a registered awaiter consumed the body. The read loop
+    /// should log+drop frames where this returns false (stale
+    /// replies, replies for xids we already timed out on).
+    pub fn deliver_reply(&self, xid: u32, body: Bytes) -> bool {
+        match self.inflight.remove(&xid) {
+            Some((_, tx)) => tx.send(body).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Drop every pending awaiter — called from the connection's
+    /// main loop when it exits, so callers blocked on a reply see
+    /// `ConnectionClosed` rather than wait for the timeout.
+    pub fn drop_all_inflight(&self) {
+        // Collect-then-drop because DashMap's iterator borrows the
+        // shard locks; clearing under iteration would deadlock on
+        // the same shard.
+        let xids: Vec<u32> = self.inflight.iter().map(|kv| *kv.key()).collect();
+        for xid in xids {
+            self.inflight.remove(&xid);
+        }
+    }
+
+    /// Send a CB_COMPOUND CALL and await the matching REPLY.
+    ///
+    /// Combines: register inflight slot → emit RPC frame → await
+    /// receiver (with timeout) → decode reply. Errors are typed so
+    /// the caller can decide whether to retire the writer
+    /// (`Transport`, `ConnectionClosed`) vs. give up on this layout
+    /// (`Reply`, `Timeout`).
+    pub async fn send_cb_compound(
+        self: &Arc<Self>,
+        cb_program: u32,
+        args: &CbCompoundCall,
+        timeout: Duration,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        let xid = self.next_xid();
+        let frame = encode_cb_call(xid, cb_program, args);
+        let rx = self.register_inflight(xid);
+
+        // Send first; any transport error means the inflight slot
+        // is stale — drop it.
+        if let Err(e) = self.send_record(frame).await {
+            self.forget_inflight(xid);
+            return Err(CallbackError::Transport(e));
+        }
+
+        // Await the reply.
+        let body = match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => {
+                // Sender dropped — connection closed before reply.
+                return Err(CallbackError::ConnectionClosed);
+            }
+            Err(_) => {
+                self.forget_inflight(xid);
+                return Err(CallbackError::Timeout);
+            }
+        };
+
+        decode_cb_reply(body, xid).map_err(CallbackError::Reply)
     }
 }
 

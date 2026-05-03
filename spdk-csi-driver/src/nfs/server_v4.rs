@@ -181,6 +181,25 @@ async fn handle_tcp_connection(
 
     let mut rpc_count = 0;
 
+    // When the loop exits — clean EOF or any error — release any
+    // CB callers still awaiting a reply on this connection so they
+    // see `ConnectionClosed` rather than wait out the timeout. We
+    // can't rely on the writer's Drop because the dispatcher's
+    // back-channel registry holds another Arc, so the writer
+    // outlives this function. The guard runs cleanup on every
+    // return path (early Err, EOF return, panic).
+    struct InflightGuard {
+        bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    }
+    impl Drop for InflightGuard {
+        fn drop(&mut self) {
+            self.bcw.drop_all_inflight();
+        }
+    }
+    let _inflight_guard = InflightGuard {
+        bcw: Arc::clone(&bcw),
+    };
+
     loop {
         debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
         
@@ -246,9 +265,35 @@ async fn handle_tcp_connection(
 
         let request = buf.split().freeze();
 
+        // RFC 5531 §9 frame layout: [0..4]=xid, [4..8]=msg_type
+        // (0=CALL, 1=REPLY). The forward channel only ever sees
+        // CALLs — but if `BIND_CONN_TO_SESSION` registered this
+        // connection as a back-channel, the *server's* CB_COMPOUND
+        // CALLs come back as REPLYs on the same socket. Route those
+        // to the inflight registry instead of trying to parse them
+        // as a forward CALL (which would crash with "expected CALL,
+        // got REPLY").
+        if request.len() >= 8 {
+            let msg_type = u32::from_be_bytes([
+                request[4], request[5], request[6], request[7],
+            ]);
+            if msg_type == 1 {
+                let xid = u32::from_be_bytes([
+                    request[0], request[1], request[2], request[3],
+                ]);
+                if !bcw.deliver_reply(xid, request) {
+                    warn!(
+                        "📭 [NFS_SERVER] Connection #{}: CB reply for unknown xid={} (timed out or never registered)",
+                        conn_id, xid,
+                    );
+                }
+                continue;
+            }
+        }
+
         // Process the RPC call with timing
         let rpc_start = Instant::now();
-        debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes", 
+        debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes",
                conn_id, rpc_count + 1, peer, length);
         let reply = dispatch_nfsv4(
             request,

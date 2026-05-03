@@ -1,84 +1,95 @@
-//! pNFS Callback Operations
+//! pNFS callback fan-out: CB_LAYOUTRECALL over the back-channel.
 //!
-//! Implements NFSv4.1 callback operations for pNFS, specifically CB_LAYOUTRECALL
-//! which is used to recall layouts from clients when data servers fail or
-//! layouts need to be revoked.
+//! The shape of one recall today is:
 //!
-//! # Protocol References
-//! - RFC 8881 Section 20.5 - CB_LAYOUTRECALL operation
-//! - RFC 8881 Section 12.5.5 - Layout Recall
+//! ```text
+//!   look up session_id → BackChannelWriter (dispatcher's
+//!     back_channels registry, populated by BIND_CONN_TO_SESSION)
+//!   look up session_id → cb_program          (Session record,
+//!     populated by CREATE_SESSION csa_cb_program)
+//!   build CB_COMPOUND { CB_SEQUENCE, CB_LAYOUTRECALL(file) }
+//!   writer.send_cb_compound(...) → await reply (typed CbCompoundReply)
+//! ```
+//!
+//! All four of those moving parts already exist by the time A.3
+//! ships:
+//!
+//! * Phase A.1 plumbed `BackChannelWriter` and the dispatcher's
+//!   `back_channels` registry.
+//! * Phase A.2 added `Session.cb_program` and the typed
+//!   `CbCompoundCall`/`CbCompoundReply` round-trip.
+//! * `BackChannelWriter::send_cb_compound` (this PR) glues them
+//!   together with the inflight-xid registry and read-loop reply
+//!   routing.
+//!
+//! `CallbackManager` itself is the seam pNFS code uses — Phase A.4
+//! will call into it from the device heartbeat to fire recalls on
+//! DS death.
+//!
+//! # Protocol references
+//! * RFC 8881 §20.3 — CB_LAYOUTRECALL operation.
+//! * RFC 8881 §12.5.5 — Layout recall semantics.
+//! * RFC 8881 §20.9   — CB_SEQUENCE (must precede CB_LAYOUTRECALL).
 
-use crate::nfs::v4::protocol::{Nfs4Status, SessionId};
+use crate::nfs::v4::back_channel::{BackChannelWriter, CallbackError};
+use crate::nfs::v4::cb_compound::{CbCompoundCall, CbCompoundReply, CbOp, LayoutRecall};
+use crate::nfs::v4::protocol::{SessionId, StateId};
+use crate::nfs::v4::state::StateManager;
 use crate::pnfs::mds::layout::LayoutStateId;
-use bytes::Bytes;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use std::time::Duration;
+use tracing::{info, warn};
 
-/// Callback channel manager
+/// Default per-call timeout for CB CALLs. RFC 8881 §20.4 ("recall
+/// response time") doesn't mandate a value; 10s matches Linux nfsd.
+pub const DEFAULT_CB_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// pNFS callback fan-out manager.
 ///
-/// Manages callback channels to clients for sending CB_LAYOUTRECALL
-/// and other callback operations.
+/// Borrows the dispatcher's per-session back-channel writer registry
+/// and the [`StateManager`] (for `Session.cb_program` lookup); both
+/// are `Arc`-shared so the manager itself can be cheap to clone /
+/// pass around. Construction is failure-free; the actual CB send
+/// path can fail a few different ways, all surfaced as
+/// [`CallbackError`].
 pub struct CallbackManager {
-    /// Map of session ID to callback channel
-    channels: Arc<RwLock<HashMap<SessionId, CallbackChannel>>>,
-}
-
-/// Callback channel to a specific client
-struct CallbackChannel {
-    callback_addr: Option<String>,  // Client callback address (from CREATE_SESSION)
-    callback_prog: u32,              // Callback program number
+    back_channels: Arc<DashMap<SessionId, Arc<BackChannelWriter>>>,
+    state_mgr: Arc<StateManager>,
+    timeout: Duration,
 }
 
 impl CallbackManager {
-    /// Create a new callback manager
-    pub fn new() -> Self {
+    /// `back_channels` is the dispatcher's per-session writer
+    /// registry; `state_mgr` is the source of truth for `cb_program`
+    /// (stored on `Session` since A.2). Per-call timeout defaults to
+    /// [`DEFAULT_CB_TIMEOUT`]; tests can override via
+    /// [`with_timeout`].
+    pub fn new(
+        back_channels: Arc<DashMap<SessionId, Arc<BackChannelWriter>>>,
+        state_mgr: Arc<StateManager>,
+    ) -> Self {
         Self {
-            channels: Arc::new(RwLock::new(HashMap::new())),
+            back_channels,
+            state_mgr,
+            timeout: DEFAULT_CB_TIMEOUT,
         }
     }
 
-    /// Register a callback channel for a session
-    pub async fn register_channel(
-        &self,
-        session_id: SessionId,
-        callback_addr: Option<String>,
-        callback_prog: u32,
-        _callback_sec: Vec<u32>,
-    ) {
-        let mut channels = self.channels.write().await;
-        channels.insert(
-            session_id,
-            CallbackChannel {
-                callback_addr: callback_addr.clone(),
-                callback_prog,
-            },
-        );
-        info!(
-            "Registered callback channel for session {:?}, addr={:?}, prog={}",
-            session_id, callback_addr, callback_prog
-        );
+    /// Override the per-call timeout (tests).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
-    /// Unregister a callback channel
-    pub async fn unregister_channel(&self, session_id: &SessionId) {
-        let mut channels = self.channels.write().await;
-        channels.remove(session_id);
-        info!("Unregistered callback channel for session {:?}", session_id);
-    }
-
-    /// Send CB_LAYOUTRECALL to a client
+    /// Send a CB_LAYOUTRECALL for one specific layout to the client
+    /// behind `session_id`. Returns the parsed reply on success;
+    /// [`CallbackError`] otherwise.
     ///
-    /// # Arguments
-    /// * `session_id` - Client session to recall from
-    /// * `layout_stateid` - Layout to recall
-    /// * `layout_type` - Type of layout being recalled
-    /// * `iomode` - I/O mode to recall (READ, RW, or ANY)
-    /// * `changed` - Whether layout has changed
-    ///
-    /// # Returns
-    /// Ok(true) if recall was sent successfully, Ok(false) if client not found
+    /// The returned reply may itself carry a non-OK status (e.g.
+    /// `NFS4ERR_NOMATCHING_LAYOUT` when the client already returned
+    /// the layout). Callers should treat that as a successful
+    /// outcome — the layout is gone from the client either way.
     pub async fn send_layoutrecall(
         &self,
         session_id: &SessionId,
@@ -86,80 +97,42 @@ impl CallbackManager {
         layout_type: u32,
         iomode: u32,
         changed: bool,
-    ) -> Result<bool, String> {
-        let channels = self.channels.read().await;
-
-        if let Some(channel) = channels.get(session_id) {
-            info!(
-                "📢 Sending CB_LAYOUTRECALL to session {:?}, stateid={:?}",
-                session_id,
-                &layout_stateid[0..4]
-            );
-
-            // Encode CB_COMPOUND with CB_LAYOUTRECALL
-            let cb_compound = self.encode_cb_layoutrecall(
-                session_id,
-                layout_stateid,
-                layout_type,
-                iomode,
-                changed,
-            )?;
-
-            debug!("CB_LAYOUTRECALL parameters:");
-            debug!("  layout_type: {}", layout_type);
-            debug!("  iomode: {}", iomode);
-            debug!("  changed: {}", changed);
-            debug!("  encoded size: {} bytes", cb_compound.len());
-
-            // Send callback RPC
-            if let Some(addr) = &channel.callback_addr {
-                match self.send_callback_rpc(addr, channel.callback_prog, &cb_compound).await {
-                    Ok(_) => {
-                        info!("✅ CB_LAYOUTRECALL sent successfully to {}", addr);
-                        Ok(true)
-                    }
-                    Err(e) => {
-                        warn!("❌ Failed to send CB_LAYOUTRECALL to {}: {}", addr, e);
-                        // Don't fail - client might be temporarily unreachable
-                        // Server will retry or client will return layouts on next operation
-                        Ok(false)
-                    }
-                }
-            } else {
-                warn!("⚠️ No callback address for session {:?}", session_id);
-                Ok(false)
+    ) -> Result<CbCompoundReply, CallbackError> {
+        // Resolve the writer first — if the session never bound a
+        // back-channel, there's nothing to send.
+        let writer = match self.back_channels.get(session_id) {
+            Some(w) => Arc::clone(w.value()),
+            None => {
+                warn!(
+                    "CB_LAYOUTRECALL: no back-channel for session {:?}",
+                    session_id,
+                );
+                return Err(CallbackError::ConnectionClosed);
             }
-        } else {
-            warn!(
-                "⚠️ No callback channel for session {:?}, cannot send CB_LAYOUTRECALL",
-                session_id
-            );
-            Ok(false)
-        }
-    }
+        };
 
-    /// Encode CB_COMPOUND with a CB_SEQUENCE + CB_LAYOUTRECALL pair.
-    ///
-    /// Args (no RPC envelope) — Phase A.3 will wrap this in
-    /// `cb_compound::encode_cb_call(xid, cb_program, …)` and push the
-    /// result onto a back-channel writer. Keeping the args step
-    /// separate keeps the encoder side fully decoupled from the
-    /// connection lifetime.
-    fn encode_cb_layoutrecall(
-        &self,
-        session_id: &SessionId,
-        layout_stateid: &LayoutStateId,
-        layout_type: u32,
-        iomode: u32,
-        changed: bool,
-    ) -> Result<Bytes, String> {
-        use crate::nfs::v4::cb_compound::{CbCompoundCall, CbOp, LayoutRecall};
-        use crate::nfs::v4::protocol::StateId;
+        // Resolve cb_program from the session. If the client
+        // CREATE_SESSION'd with cb_program=0 ("I won't host
+        // callbacks"), bail out — sending a CALL with program=0
+        // would just bounce.
+        let cb_program = match self.state_mgr.sessions.get_session(session_id) {
+            Some(s) if s.cb_program != 0 => s.cb_program,
+            Some(_) => {
+                warn!(
+                    "CB_LAYOUTRECALL: session {:?} advertised cb_program=0",
+                    session_id,
+                );
+                return Err(CallbackError::ConnectionClosed);
+            }
+            None => {
+                warn!("CB_LAYOUTRECALL: session {:?} not found", session_id);
+                return Err(CallbackError::ConnectionClosed);
+            }
+        };
 
-        // The `LayoutStateId` alias is a 16-byte blob (seqid:4 +
-        // other:12, big-endian). Crack it back into the typed
-        // `StateId` the CB encoder takes — the wire layout is
-        // identical.
+        // Crack the 16-byte LayoutStateId blob (seqid:4 + other:12,
+        // big-endian) into the typed StateId the CB encoder takes;
+        // wire layout is identical.
         let stateid = StateId {
             seqid: u32::from_be_bytes([
                 layout_stateid[0],
@@ -181,10 +154,10 @@ impl CallbackManager {
             ops: vec![
                 CbOp::Sequence {
                     sessionid: *session_id,
-                    // Slot 0, seqid 1 — Phase A.3 will track per-
-                    // session back-channel slot state. The first
-                    // ever call uses slot=0, seqid=1 (matches what
-                    // the forward-channel SEQUENCE handler expects).
+                    // Slot 0, seqid 1 — back-channel slot tracking
+                    // is its own follow-up; for now we serialize
+                    // recalls per-session through the writer's
+                    // mutex and use a single slot.
                     sequenceid: 1,
                     slotid: 0,
                     highest_slotid: 0,
@@ -195,10 +168,11 @@ impl CallbackManager {
                     iomode,
                     changed,
                     recall: LayoutRecall::File {
-                        // Empty filehandle = "any layout for this
-                        // session." Linux's client treats it as a
-                        // session-wide return. When we recall a
-                        // specific file we'll plumb the FH through.
+                        // Empty FH = "any layout for this session"
+                        // — Linux's client treats this as a session-
+                        // wide return, which matches what we want
+                        // when a DS dies. Per-file recall is an
+                        // optimisation we can layer later.
                         fh: Vec::new(),
                         offset: 0,
                         length: u64::MAX,
@@ -208,143 +182,484 @@ impl CallbackManager {
             ],
         };
 
-        Ok(call.encode())
+        info!(
+            "📢 CB_LAYOUTRECALL → session {:?} (cb_program={}, type={}, iomode={})",
+            session_id, cb_program, layout_type, iomode,
+        );
+        let reply = writer
+            .send_cb_compound(cb_program, &call, self.timeout)
+            .await?;
+        info!(
+            "✅ CB_LAYOUTRECALL ← session {:?}: status={:?}, {} results",
+            session_id,
+            reply.status,
+            reply.results.len(),
+        );
+        Ok(reply)
     }
 
-    /// Send callback RPC to client
-    async fn send_callback_rpc(
-        &self,
-        addr: &str,
-        prog: u32,
-        compound: &Bytes,
-    ) -> Result<(), String> {
-        // For now, this is a stub. In production, this would:
-        // 1. Parse addr to get IP:port
-        // 2. Establish TCP connection
-        // 3. Send RPC with proper RPC header
-        // 4. Wait for response
-        // 5. Parse response status
-
-        info!("Would send callback RPC to {} prog={}", addr, prog);
-        info!("Payload size: {} bytes", compound.len());
-
-        // TODO: Implement actual RPC transport
-        // This requires:
-        // - TCP connection pool
-        // - RPC header encoding (XID, prog, vers, proc)
-        // - Response handling
-        // - Timeout and retry logic
-
-        Ok(())
-    }
-
-    /// Send CB_LAYOUTRECALL to all clients with layouts on a specific device
-    ///
-    /// This is used when a data server fails and all layouts using that
-    /// device need to be recalled.
+    /// Recall layouts for every session that has bound a back-
+    /// channel, used by the device-death path. Returns the count of
+    /// successfully-acknowledged recalls (the cluster operator can
+    /// log this; it's not load-bearing for correctness — the
+    /// LayoutManager separately revokes on timeout in A.5).
     pub async fn recall_layouts_for_device(
         &self,
         device_id: &str,
         layout_stateids: &[LayoutStateId],
     ) -> usize {
         info!(
-            "📢 Recalling {} layouts for failed device: {}",
+            "📢 Recalling {} layout(s) for failed device: {}",
             layout_stateids.len(),
-            device_id
+            device_id,
         );
 
-        let mut recalled_count = 0;
+        // Snapshot session ids first so we don't iterate while the
+        // dispatcher is mutating the registry (BIND_CONN_TO_SESSION
+        // can register new sessions concurrently). Cheap — at most
+        // a handful of sessions per pNFS deployment.
+        let session_ids: Vec<SessionId> = self
+            .back_channels
+            .iter()
+            .map(|e| *e.key())
+            .collect();
 
+        let mut acked = 0;
         for stateid in layout_stateids {
-            // TODO: Map stateid to session_id
-            // For now, broadcast to all sessions
-            
-            let channels = self.channels.read().await;
-            for (session_id, _channel) in channels.iter() {
-                match self.send_layoutrecall(
-                    session_id,
-                    stateid,
-                    1,  // LAYOUT4_NFSV4_1_FILES
-                    3,  // LAYOUTIOMODE4_ANY
-                    true,
-                ).await {
-                    Ok(true) => recalled_count += 1,
-                    Ok(false) => {}
+            for session_id in &session_ids {
+                match self
+                    .send_layoutrecall(
+                        session_id,
+                        stateid,
+                        1, // LAYOUT4_NFSV4_1_FILES
+                        3, // LAYOUTIOMODE4_ANY
+                        true,
+                    )
+                    .await
+                {
+                    Ok(_reply) => {
+                        acked += 1;
+                    }
                     Err(e) => {
-                        warn!("Failed to send CB_LAYOUTRECALL: {}", e);
+                        warn!(
+                            "CB_LAYOUTRECALL to session {:?} failed: {}",
+                            session_id, e,
+                        );
                     }
                 }
             }
         }
-
-        info!("✅ Sent {} CB_LAYOUTRECALL messages", recalled_count);
-        recalled_count
+        info!(
+            "📊 Device {} fan-out: {}/{} recalls acked",
+            device_id,
+            acked,
+            layout_stateids.len() * session_ids.len(),
+        );
+        acked
     }
-}
-
-impl Default for CallbackManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// CB_LAYOUTRECALL arguments (RFC 8881 Section 20.5.1)
-#[derive(Debug, Clone)]
-pub struct CbLayoutRecallArgs {
-    pub layout_type: u32,
-    pub iomode: u32,
-    pub changed: bool,
-    pub recall: LayoutRecall,
-}
-
-/// Layout recall type
-#[derive(Debug, Clone)]
-pub enum LayoutRecall {
-    /// Recall specific layout
-    File {
-        fh: Vec<u8>,
-        offset: u64,
-        length: u64,
-        stateid: LayoutStateId,
-    },
-    /// Recall all layouts for filesystem
-    Fsid {
-        fsid: u64,
-    },
-    /// Recall all layouts
-    All,
-}
-
-/// CB_LAYOUTRECALL result (RFC 8881 Section 20.5.2)
-#[derive(Debug, Clone)]
-pub struct CbLayoutRecallResult {
-    pub status: Nfs4Status,
 }
 
 #[cfg(test)]
 mod tests {
+    //! Integration-style tests against a real loopback TCP pair.
+    //! The "client" side is hand-rolled to read the CB CALL the
+    //! server emits, decode it enough to confirm shape, then write
+    //! a CB REPLY back. Drives the whole send-and-await path:
+    //! dispatcher writer → record-marker framing → mock-client
+    //! parse + reply → server read loop → inflight registry →
+    //! decoder.
+
     use super::*;
+    use crate::nfs::rpc::{AcceptStatus, AuthFlavor, MessageType, ReplyStatus};
+    use crate::nfs::v4::cb_compound::CbResult;
+    use crate::nfs::v4::protocol::{cb_opcode, Nfs4Status};
+    use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
+    use bytes::{Bytes, BytesMut};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+    use tokio::net::{TcpListener, TcpStream};
 
+    /// Make a (writer, server-read-half) pair on a loopback socket
+    /// plus the *client* halves so the test can drive both sides.
+    /// Returns:
+    ///   * `writer`   — the BackChannelWriter the server would
+    ///     normally use to push CB CALLs.
+    ///   * `server_read` — the read half on the server side, which
+    ///     a real server's `handle_tcp_connection` would consume.
+    ///   * `client_read` / `client_write` — the read/write halves
+    ///     a mock client uses to receive the CALL and emit a REPLY.
+    async fn pair() -> (
+        Arc<BackChannelWriter>,
+        tokio::net::tcp::OwnedReadHalf,
+        tokio::net::tcp::OwnedReadHalf,
+        tokio::net::tcp::OwnedWriteHalf,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (server_res, accept_res) = tokio::join!(connect, accept);
+        let server_stream = server_res.unwrap();
+        let (client_stream, _) = accept_res.unwrap();
+        let (server_read, server_write) = server_stream.into_split();
+        let (client_read, client_write) = client_stream.into_split();
+        let writer = BackChannelWriter::new(BufWriter::with_capacity(4096, server_write));
+        (writer, server_read, client_read, client_write)
+    }
+
+    /// Read one record-marker-framed message off `r`. Returns the
+    /// payload (without the 4-byte marker).
+    async fn read_record(r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> Bytes {
+        let mut marker = [0u8; 4];
+        r.read_exact(&mut marker).await.unwrap();
+        let len = (u32::from_be_bytes(marker) & 0x7FFF_FFFF) as usize;
+        let mut body = BytesMut::with_capacity(len);
+        body.resize(len, 0);
+        r.read_exact(&mut body[..]).await.unwrap();
+        body.freeze()
+    }
+
+    /// Write one record-marker-framed message onto `w`.
+    async fn write_record(w: &mut tokio::net::tcp::OwnedWriteHalf, payload: Bytes) {
+        let len = payload.len() as u32;
+        let marker = 0x8000_0000u32 | len;
+        w.write_all(&marker.to_be_bytes()).await.unwrap();
+        w.write_all(&payload).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    /// Build a synthetic CB_COMPOUND reply (RPC envelope + body)
+    /// matching `xid`. Two ops: CB_SEQUENCE OK, CB_LAYOUTRECALL
+    /// with `recall_status`. This is what a real Linux v4.1
+    /// callback handler would emit.
+    fn build_reply(xid: u32, recall_status: Nfs4Status) -> Bytes {
+        let mut enc = XdrEncoder::new();
+        enc.encode_u32(xid);
+        enc.encode_u32(MessageType::Reply as u32);
+        enc.encode_u32(ReplyStatus::Accepted as u32);
+        // verifier: AUTH_NONE, empty body
+        enc.encode_u32(AuthFlavor::Null as u32);
+        enc.encode_opaque(&[]);
+        enc.encode_u32(AcceptStatus::Success as u32);
+        // CB_COMPOUND4res
+        enc.encode_u32(recall_status.to_u32()); // top-level status mirrors last op
+        enc.encode_opaque(&[]); // tag
+        enc.encode_u32(2); // resarray<>.len
+        // CB_SEQUENCE result OK. CB_SEQUENCE4resok layout:
+        // sessionid (16 bytes = 4 u32s) + sequenceid + slotid +
+        // highest_slotid + target_highest_slotid = 8 u32s total.
+        enc.encode_u32(cb_opcode::CB_SEQUENCE);
+        enc.encode_u32(Nfs4Status::Ok.to_u32());
+        for _ in 0..8 {
+            enc.encode_u32(0);
+        }
+        // CB_LAYOUTRECALL result
+        enc.encode_u32(cb_opcode::CB_LAYOUTRECALL);
+        enc.encode_u32(recall_status.to_u32());
+        enc.finish()
+    }
+
+    /// Spawn a "server read loop" that mimics handle_tcp_connection's
+    /// REPLY routing: read records, dispatch by msg_type, deliver
+    /// REPLYs to the writer's inflight registry. Returns the join
+    /// handle so the test can cancel it on completion.
+    fn spawn_read_loop(
+        writer: Arc<BackChannelWriter>,
+        server_read: tokio::net::tcp::OwnedReadHalf,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut r = BufReader::new(server_read);
+            loop {
+                let body = match try_read_record(&mut r).await {
+                    Some(b) => b,
+                    None => break,
+                };
+                if body.len() < 8 {
+                    continue;
+                }
+                let msg_type =
+                    u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+                if msg_type == 1 {
+                    let xid =
+                        u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+                    writer.deliver_reply(xid, body);
+                }
+            }
+            writer.drop_all_inflight();
+        })
+    }
+
+    /// Like `read_record` but returns None on clean EOF instead of
+    /// panicking — the loop spawned above needs to terminate
+    /// gracefully when the test drops the client side.
+    async fn try_read_record(
+        r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> Option<Bytes> {
+        let mut marker = [0u8; 4];
+        r.read_exact(&mut marker).await.ok()?;
+        let len = (u32::from_be_bytes(marker) & 0x7FFF_FFFF) as usize;
+        let mut body = BytesMut::with_capacity(len);
+        body.resize(len, 0);
+        r.read_exact(&mut body[..]).await.ok()?;
+        Some(body.freeze())
+    }
+
+    /// Make a StateManager + Session with a known cb_program so the
+    /// CallbackManager can resolve it. SessionId is fixed so the
+    /// test can register the same id in `back_channels`.
+    fn fixture_state(cb_program: u32) -> (Arc<StateManager>, SessionId) {
+        let state_mgr = Arc::new(StateManager::new(""));
+        let session = state_mgr.sessions.create_session(
+            42,                 // client_id
+            0,                  // sequence
+            0,                  // flags
+            64 * 1024,          // max_request
+            64 * 1024,          // max_response
+            16 * 1024,          // max_response_cached
+            16,                 // max_ops
+            16,                 // max_requests
+            cb_program,
+        );
+        (state_mgr, session.session_id)
+    }
+
+    /// Happy path: send a CB_LAYOUTRECALL, mock client replies OK,
+    /// the awaiting send_layoutrecall returns the parsed reply.
+    /// Verifies end-to-end: call shape on the wire, REPLY routing,
+    /// reply parse.
     #[tokio::test]
-    async fn test_callback_manager() {
-        let manager = CallbackManager::new();
-        let session_id = SessionId([1u8; 16]);
+    async fn send_layoutrecall_round_trip() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
 
-        // Register channel
-        manager.register_channel(
-            session_id,
-            Some("10.0.0.1:2049".to_string()),
-            0x40000000,  // NFSv4 callback program
-            vec![1],     // AUTH_SYS
-        ).await;
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
 
-        // Send recall (will encode but not actually send since no real channel)
-        let stateid = [2u8; 16];
-        let result = manager.send_layoutrecall(&session_id, &stateid, 1, 3, true).await;
-        assert!(result.is_ok());
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
 
-        // Unregister
-        manager.unregister_channel(&session_id).await;
+        // Spawn the "server read loop" — routes inbound REPLYs
+        // back to the writer's inflight registry.
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        // Mock client: read the CALL, peek the xid, write a reply.
+        let mock_client = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            // First u32 of the RPC body is xid.
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            // Echo back a successful CB reply.
+            write_record(&mut client_write, build_reply(xid, Nfs4Status::Ok)).await;
+        });
+
+        let stateid = [
+            0u8, 0, 0, 1, // seqid = 1
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+        ];
+        let reply = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .expect("CB_LAYOUTRECALL succeeds");
+
+        assert_eq!(reply.status, Nfs4Status::Ok);
+        assert_eq!(reply.results.len(), 2);
+        assert_eq!(reply.results[1].status(), Nfs4Status::Ok);
+        assert!(matches!(reply.results[1], CbResult::LayoutRecall { .. }));
+
+        mock_client.await.unwrap();
+    }
+
+    /// Client returns NFS4ERR_NOMATCHING_LAYOUT — call still
+    /// succeeds (transport-wise) but the recalled-status is
+    /// surfaced via the parsed reply. This is the "client already
+    /// returned this layout" path the caller should treat as a
+    /// successful outcome.
+    #[tokio::test]
+    async fn send_layoutrecall_no_matching_layout_is_ok() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_secs(5));
+
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        let mock = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            write_record(
+                &mut client_write,
+                build_reply(xid, Nfs4Status::NoMatchingLayout),
+            )
+            .await;
+        });
+
+        let stateid = [0u8; 16];
+        let reply = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .expect("transport succeeds");
+        assert_eq!(reply.results[1].status(), Nfs4Status::NoMatchingLayout);
+        mock.await.unwrap();
+    }
+
+    /// Mock client never replies → caller times out. The xid is
+    /// forgotten on this path; a stale reply arriving later is
+    /// quietly ignored by the read loop.
+    #[tokio::test]
+    async fn send_layoutrecall_times_out_when_client_silent() {
+        let (writer, server_read, client_read, _client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_millis(150));
+
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        // Drain the CALL but never reply. Drop the read half at
+        // end of scope so the read loop terminates cleanly.
+        let drain = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let _ = read_record(&mut r).await;
+        });
+
+        let stateid = [0u8; 16];
+        let err = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CallbackError::Timeout), "got {:?}", err);
+        drain.await.unwrap();
+    }
+
+    /// No back-channel registered for this session → fail fast
+    /// with `ConnectionClosed`. Distinguishes "client opted out"
+    /// from "wire error mid-flight."
+    #[tokio::test]
+    async fn send_layoutrecall_no_back_channel() {
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr);
+
+        let stateid = [0u8; 16];
+        let err = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CallbackError::ConnectionClosed), "got {:?}", err);
+    }
+
+    /// Drives only the inflight cleanup path: when the connection's
+    /// read loop exits without delivering a reply, awaiting callers
+    /// see `ConnectionClosed`, not a hang and not a timeout.
+    /// Important because real connection drops happen when a client
+    /// goes away mid-recall.
+    #[tokio::test]
+    async fn send_layoutrecall_connection_closed_mid_call() {
+        let (writer, server_read, client_read, client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_secs(5));
+
+        let loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        // Mock client: read the CALL, *then* drop both halves —
+        // simulates the client process exiting before responding.
+        let mock = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let _ = read_record(&mut r).await;
+            drop(r);
+            drop(client_write);
+        });
+
+        let stateid = [0u8; 16];
+        let err = cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CallbackError::ConnectionClosed),
+            "got {:?}", err,
+        );
+        mock.await.unwrap();
+        let _ = loop_handle.await;
+    }
+
+    /// Decoder sanity: the call we emit on the wire is what we
+    /// said it was. Unlike A.2's tests (which exercise the encoder
+    /// against itself), this test reads bytes off a real socket
+    /// then re-decodes. Catches regressions where the writer
+    /// adds/elides framing.
+    #[tokio::test]
+    async fn emitted_call_decodes_to_layoutrecall_file() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_secs(5));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        let stateid = [
+            0u8, 0, 0, 7, // seqid = 7
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
+
+        // Mock client: read the CALL, decode the inner CB_COMPOUND
+        // args, *then* reply OK.
+        let inspect = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            // Skip RPC header: xid(4) type(4) rpcvers(4) prog(4)
+            // vers(4) proc(4) cred_flavor(4) cred_body(4 + len)
+            // verf_flavor(4) verf_body(4 + len). With AUTH_NONE
+            // both bodies are 4 bytes (length=0).
+            let mut dec = XdrDecoder::new(call.clone());
+            for _ in 0..6 {
+                dec.decode_u32().unwrap();
+            }
+            for _ in 0..2 {
+                dec.decode_u32().unwrap();
+                dec.decode_opaque().unwrap();
+            }
+            // Now CB_COMPOUND args.
+            let _tag = dec.decode_string().unwrap();
+            assert_eq!(dec.decode_u32().unwrap(), 1); // minorversion
+            assert_eq!(dec.decode_u32().unwrap(), 0); // callback_ident
+            assert_eq!(dec.decode_u32().unwrap(), 2); // ops len
+            // Op 1: CB_SEQUENCE
+            assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_SEQUENCE);
+            // Op 2 starts after CB_SEQUENCE body — we trust the
+            // A.2 round-trip test for the byte-by-byte detail and
+            // just confirm the second opcode is CB_LAYOUTRECALL.
+            // Sessionid (16 bytes) + seqid + slotid + highest_slotid
+            // + cachethis + referring_call_lists<>.len(=0).
+            for _ in 0..(16 / 4) {
+                dec.decode_u32().unwrap();
+            }
+            for _ in 0..5 {
+                dec.decode_u32().unwrap();
+            }
+            assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_LAYOUTRECALL);
+
+            write_record(&mut client_write, build_reply(xid, Nfs4Status::Ok)).await;
+        });
+
+        cb_mgr
+            .send_layoutrecall(&session_id, &stateid, 1, 3, true)
+            .await
+            .unwrap();
+        inspect.await.unwrap();
     }
 }
-
