@@ -180,18 +180,27 @@ pub struct StateConfig {
     pub config: std::collections::HashMap<String, String>,
 }
 
-/// State persistence backend
+/// State persistence backend kind for the MDS. Selects which
+/// `state_backend::StateBackend` impl `MetadataServer` constructs at
+/// startup. The `Memory` variant is the dev/test default; `Sqlite` is
+/// what production should use for restart survival (Phase B.2 +
+/// B.3 + B.4).
+///
+/// The previous `Kubernetes` and `Etcd` variants were never wired up
+/// (no impls existed in `state_backend/`); B.4 drops them rather than
+/// carrying dead config syntax. Operator-visible breaking change is
+/// intentional and gated by the schema-version canary in
+/// `state_backend::sqlite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StateBackend {
-    /// In-memory only (dev/testing)
+    /// In-memory only (dev/testing). No restart survival.
     Memory,
 
-    /// Kubernetes ConfigMap
-    Kubernetes,
-
-    /// etcd distributed consensus
-    Etcd,
+    /// Single-file SQLite, durable across restart. The DB path is
+    /// taken from `StateConfig.config["path"]`; if absent, defaults
+    /// to `/var/lib/flint-pnfs/state.db`.
+    Sqlite,
 }
 
 /// High availability configuration
@@ -565,6 +574,37 @@ impl PnfsConfig {
         })
     }
 
+    /// Construct a `StateBackend` trait object from a `StateConfig`.
+    /// Used at MDS startup; the resulting `Arc` is shared by the
+    /// `StateManager` and `LayoutManager`. Sqlite path defaults to
+    /// `/var/lib/flint-pnfs/state.db`; B.4-and-later operators
+    /// override via `state.config.path`.
+    pub fn build_state_backend(
+        cfg: &StateConfig,
+    ) -> Result<std::sync::Arc<dyn crate::state_backend::StateBackend>, String> {
+        match cfg.backend {
+            StateBackend::Memory => Ok(crate::state_backend::memory_backend()),
+            StateBackend::Sqlite => {
+                let path = cfg
+                    .config
+                    .get("path")
+                    .cloned()
+                    .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
+                let parent = std::path::Path::new(&path).parent();
+                if let Some(p) = parent {
+                    if !p.as_os_str().is_empty() {
+                        std::fs::create_dir_all(p).map_err(|e| {
+                            format!("create dir {}: {}", p.display(), e)
+                        })?;
+                    }
+                }
+                let backend = crate::state_backend::SqliteBackend::open(&path)
+                    .map_err(|e| format!("open sqlite at {}: {}", path, e))?;
+                Ok(std::sync::Arc::new(backend))
+            }
+        }
+    }
+
     /// Validate configuration
     pub fn validate(&self) -> Result<(), String> {
         match self.mode {
@@ -617,6 +657,73 @@ mode: mds
 "#;
         let config: PnfsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.mode, PnfsMode::MetadataServer);
+    }
+
+    /// Phase B.4: the new `sqlite` variant of `state.backend`
+    /// deserializes correctly from operator YAML and the path key
+    /// shows up in the config sub-map. The smoke YAML still uses
+    /// `memory`, so `Memory` must continue to round-trip too.
+    #[test]
+    fn test_state_backend_yaml_round_trip() {
+        let yaml_sqlite = r#"
+backend: sqlite
+config:
+  path: /var/lib/flint-pnfs/state.db
+"#;
+        let cfg: StateConfig = serde_yaml::from_str(yaml_sqlite).unwrap();
+        assert_eq!(cfg.backend, StateBackend::Sqlite);
+        assert_eq!(
+            cfg.config.get("path").map(String::as_str),
+            Some("/var/lib/flint-pnfs/state.db"),
+        );
+
+        let yaml_memory = r#"
+backend: memory
+config: {}
+"#;
+        let cfg: StateConfig = serde_yaml::from_str(yaml_memory).unwrap();
+        assert_eq!(cfg.backend, StateBackend::Memory);
+
+        // The Kubernetes / Etcd variants no longer parse — operator
+        // catches the breaking change at startup, not at runtime.
+        let yaml_old = r#"
+backend: kubernetes
+config: {}
+"#;
+        let parsed: Result<StateConfig, _> = serde_yaml::from_str(yaml_old);
+        assert!(parsed.is_err(), "kubernetes variant must not parse anymore");
+    }
+
+    /// Phase B.4: `build_state_backend(&cfg)` returns the right
+    /// `Arc<dyn StateBackend>` for each variant. Sqlite case writes
+    /// + reads back through a fresh tempdir to prove the path
+    /// resolution works end-to-end.
+    #[tokio::test]
+    async fn test_build_state_backend_dispatches() {
+        let mem_cfg = StateConfig {
+            backend: StateBackend::Memory,
+            config: std::collections::HashMap::new(),
+        };
+        let backend = PnfsConfig::build_state_backend(&mem_cfg).unwrap();
+        // Sanity: a freshly-built memory backend has counter=0.
+        assert_eq!(backend.get_instance_counter().await.unwrap(), 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut sqlite_cfg = StateConfig {
+            backend: StateBackend::Sqlite,
+            config: std::collections::HashMap::new(),
+        };
+        sqlite_cfg
+            .config
+            .insert("path".to_string(), path.to_string_lossy().into_owned());
+        let backend = PnfsConfig::build_state_backend(&sqlite_cfg).unwrap();
+        assert_eq!(backend.increment_instance_counter().await.unwrap(), 1);
+        // Re-open over the same path — the counter is durable.
+        drop(backend);
+        let backend2 = PnfsConfig::build_state_backend(&sqlite_cfg).unwrap();
+        assert_eq!(backend2.get_instance_counter().await.unwrap(), 1);
+        assert_eq!(backend2.increment_instance_counter().await.unwrap(), 2);
     }
 }
 

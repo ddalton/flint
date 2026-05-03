@@ -45,6 +45,15 @@ pub struct MetadataServer {
     /// trigger recalls without needing to reach back through the
     /// dispatcher.
     callback_manager: Arc<CallbackManager>,
+    /// State manager — held here so `load_persisted_state` can call
+    /// `load_from_backend` at startup before accepting any TCP
+    /// connections. The dispatcher holds its own `Arc` clone for the
+    /// hot path; this is just the same `Arc`.
+    state_mgr: Arc<StateManager>,
+    /// Shared backend — held so `load_persisted_state` can read
+    /// `LayoutRecord`s and bump the instance counter. Same `Arc` the
+    /// state managers are using.
+    backend: Arc<dyn crate::state_backend::StateBackend>,
 }
 
 impl MetadataServer {
@@ -62,10 +71,15 @@ impl MetadataServer {
         // Initialize file handle manager with configured export path
         let fh_manager = Arc::new(FileHandleManager::new(export_path.clone()));
 
-        // Initialize state manager (for NFSv4 sessions, stateids).
-        // Wrapped in Arc so the dispatcher and the CallbackManager
-        // (cb_program lookup) can share it.
-        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        // Initialize state manager. The backend kind comes from
+        // `config.state.backend` — `memory` for tests / dev work (no
+        // restart survival), `sqlite` for production. The shared
+        // `Arc<dyn StateBackend>` is also used by `LayoutManager`
+        // below so all four record kinds (client / session / stateid
+        // / layout) round-trip through the same store.
+        let backend = crate::pnfs::config::PnfsConfig::build_state_backend(&config.state)
+            .map_err(|e| crate::pnfs::Error::Config(format!("state backend: {}", e)))?;
+        let state_mgr = Arc::new(StateManager::new("", Arc::clone(&backend)));
         
         // Initialize lock manager
         let lock_mgr = Arc::new(LockManager::new());
@@ -143,7 +157,59 @@ impl MetadataServer {
             base_dispatcher,
             gss_manager,
             callback_manager,
+            state_mgr,
+            backend,
         })
+    }
+
+    /// Phase B.4 startup hook: pull every persisted record (clients,
+    /// sessions, stateids, layouts) into the in-memory caches and
+    /// bump the persisted instance counter.
+    ///
+    /// Called from `serve()` once, before the TCP listener accepts
+    /// any connections — by the time a client reconnects, its
+    /// pre-restart state is back. Errors are surfaced as
+    /// `pnfs::Error::Config` because they're typically operator-
+    /// visible (a corrupt or schema-mismatched DB file).
+    async fn load_persisted_state(&self) -> Result<()> {
+        // Bump the instance counter first so any record persisted
+        // during this run is associated with a fresh value. The
+        // counter is exposed on the wire only via device-id prefix
+        // mixing (a follow-up; B.4 just persists + logs it). Even so,
+        // observing it monotonically increasing across restarts is
+        // the operator's primary signal that durable state is
+        // working.
+        let instance = self
+            .backend
+            .increment_instance_counter()
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("instance counter: {}", e)))?;
+        info!(
+            "📈 MDS instance counter: {} (incremented at startup; persisted across restart)",
+            instance,
+        );
+
+        // Clients / sessions / stateids — `StateManager` knows how to
+        // route the records into the right sub-managers and bump the
+        // monotonic counters past the highest observed ids.
+        self.state_mgr
+            .load_from_backend()
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("load state: {}", e)))?;
+
+        // Layouts live outside `StateManager` (pNFS-specific), so
+        // pull them separately. Same backend, same records that B.2
+        // proved survive `open()` round-trips.
+        let layouts = self
+            .backend
+            .list_layouts()
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("list layouts: {}", e)))?;
+        let n = layouts.len();
+        self.layout_manager.load_records(layouts);
+        info!("📦 MDS reloaded {} persisted layouts from backend", n);
+
+        Ok(())
     }
 
     /// Start the metadata server
@@ -160,6 +226,15 @@ impl MetadataServer {
         info!("Layout Policy: {:?}", self.config.layout.policy);
         info!("Registered Data Servers: {}", self.device_registry.count());
         info!("");
+
+        // Phase B.4: pull persisted state out of the backend before
+        // accepting any TCP connections. Once this returns, a
+        // reconnecting client whose clientid / sessionid / stateid
+        // existed pre-restart finds it back in the in-memory cache —
+        // no `STALE_CLIENTID` / `BAD_STATEID`. Layout records are
+        // loaded into `LayoutManager` separately because it lives in
+        // the pNFS layer, outside `state::StateManager`.
+        self.load_persisted_state().await?;
 
         // Start heartbeat monitor in the background
         let heartbeat_timeout = Duration::from_secs(self.config.failover.heartbeat_timeout);
