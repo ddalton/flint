@@ -776,7 +776,18 @@ impl MetadataServer {
     /// device, then drive `CallbackManager` over them. Pulled out
     /// as an associated function so the heartbeat closure stays
     /// readable and so the recall path is unit-testable in
-    /// isolation (see `tests::fan_out_recalls_drives_per_session`).
+    /// isolation.
+    ///
+    /// Revocation policy (RFC 5661 §12.5.5.2 — server MAY revoke):
+    ///
+    /// * `TimedOut` / `NoChannel` / `Transport` → revoke immediately.
+    ///   The client either didn't get the recall or won't reply, so
+    ///   leaving the layout live with a dead DS in it would silently
+    ///   misroute writes.
+    /// * `Acked` → schedule a soft post-recall deadline (10s). If a
+    ///   client LAYOUTRETURN doesn't arrive by then, revoke.
+    ///   `LayoutManager::revoke_layout` is idempotent, so the race
+    ///   between LAYOUTRETURN and the timer is harmless.
     async fn fan_out_recalls(
         device_id: &str,
         layout_manager: &Arc<LayoutManager>,
@@ -797,14 +808,52 @@ impl MetadataServer {
             pairs.len(),
             device_id,
         );
-        let acked = callback_manager
+        let results = callback_manager
             .recall_layouts_for_device(device_id, &pairs)
             .await;
+
+        // Pulled out for clarity — single place where the revocation
+        // policy matrix lives. See `RecallOutcome` for the shape.
+        const POST_RECALL_DEADLINE: Duration = Duration::from_secs(10);
+        let mut acked = 0;
+        let mut revoked_now = 0;
+        let mut deferred = 0;
+        for r in &results {
+            use crate::pnfs::mds::callback::RecallOutcome;
+            match &r.outcome {
+                RecallOutcome::Acked => {
+                    acked += 1;
+                    deferred += 1;
+                    let lm = Arc::clone(layout_manager);
+                    let stateid = r.stateid;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(POST_RECALL_DEADLINE).await;
+                        if lm.revoke_layout(&stateid) {
+                            warn!(
+                                "🚫 Layout {:?} not LAYOUTRETURN'd within {:?} after recall — forcibly revoking",
+                                &stateid[0..4], POST_RECALL_DEADLINE,
+                            );
+                        }
+                    });
+                }
+                RecallOutcome::TimedOut | RecallOutcome::NoChannel | RecallOutcome::Transport(_) => {
+                    if layout_manager.revoke_layout(&r.stateid) {
+                        warn!(
+                            "🚫 Forcibly revoking layout {:?} (recall {:?})",
+                            &r.stateid[0..4], r.outcome,
+                        );
+                        revoked_now += 1;
+                    }
+                }
+            }
+        }
         info!(
-            "CB_LAYOUTRECALL fan-out for {} complete: {}/{} acked",
+            "CB_LAYOUTRECALL fan-out for {} complete: {}/{} acked, {} revoked-now, {} deferred",
             device_id,
             acked,
             pairs.len(),
+            revoked_now,
+            deferred,
         );
     }
 

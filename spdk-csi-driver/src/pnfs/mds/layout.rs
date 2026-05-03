@@ -402,6 +402,52 @@ impl LayoutManager {
         }
     }
 
+    /// Server-side forcible removal of a layout — RFC 5661 §12.5.5.2
+    /// permits the server to revoke a layout after CB_LAYOUTRECALL
+    /// when the client doesn't return it within the deadline. Same
+    /// effect as `return_layout` (drop from primary + secondary
+    /// indexes, decrement device counters) but **idempotent**: a
+    /// second call (or a race with the client's own LAYOUTRETURN)
+    /// is a no-op rather than an error.
+    ///
+    /// Returns `true` if this call removed an active layout, `false`
+    /// if it was already gone. The caller can use that to log the
+    /// distinction; functionally either outcome is fine.
+    ///
+    /// Subsequent client uses of this stateid (LAYOUTGET extension,
+    /// LAYOUTRETURN, LAYOUTCOMMIT) will see "not found" and the
+    /// dispatcher maps that to `NFS4ERR_BAD_STATEID`. We don't keep
+    /// a tombstone set — a removed entry is indistinguishable from
+    /// "never existed," and the spec doesn't distinguish them on
+    /// the wire either.
+    pub fn revoke_layout(&self, stateid: &LayoutStateId) -> bool {
+        let Some((_, layout)) = self.layouts.remove(stateid) else {
+            return false;
+        };
+        info!(
+            "🚫 Layout revoked: stateid={:?}, segments={}, client={}",
+            &stateid[0..4],
+            layout.segments.len(),
+            layout.owner.client_id,
+        );
+        // Same index cleanup as `return_layout` — keep the by_owner
+        // and device counters in sync. Logic is duplicated rather
+        // than refactored shared because the *log line* differs (and
+        // the caller cares about which one ran).
+        if let Some(mut entry) = self.by_owner.get_mut(&layout.owner.client_id) {
+            entry.retain(|s| s != stateid);
+            let now_empty = entry.is_empty();
+            drop(entry);
+            if now_empty {
+                self.by_owner.remove(&layout.owner.client_id);
+            }
+        }
+        for segment in &layout.segments {
+            let _ = self.device_registry.decrement_layout_count(&segment.device_id);
+        }
+        true
+    }
+
     /// Return all layouts held by `client_id` (RFC 8881 §18.44.3
     /// `LAYOUTRETURN4_ALL`). Returns the list of stateids that were
     /// released so the caller can cancel any in-flight CB_LAYOUTRECALL
@@ -845,6 +891,64 @@ mod tests {
         assert_eq!(LayoutType::BlockVolume as u32, 2);
         assert_eq!(LayoutType::Osd2Objects as u32, 3);
         assert_eq!(LayoutType::FlexFiles as u32, 4);
+    }
+
+    /// Phase A.5: server-side forcible revocation. Same end-state
+    /// as `return_layout` (gone from primary + by_owner index)
+    /// but idempotent on a second call. The dispatcher's
+    /// LAYOUTRETURN/LAYOUTGET arms see "not found" on a revoked
+    /// stateid and surface NFS4ERR_BAD_STATEID — no separate
+    /// tombstone is needed.
+    #[test]
+    fn test_revoke_layout_idempotent_and_clears_indexes() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(DeviceInfo::new(
+            "ds-1".to_string(),
+            "10.0.0.1:2049".to_string(),
+            vec!["nvme0n1".to_string()],
+        )).unwrap();
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+
+        let layout = mgr
+            .generate_layout(test_owner(42), vec![1], 0, 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.layout_count(), 1);
+        assert_eq!(mgr.layouts_for_client(42), vec![layout.stateid]);
+
+        // First revoke removes the layout and reports true.
+        assert!(mgr.revoke_layout(&layout.stateid));
+        assert_eq!(mgr.layout_count(), 0);
+        assert!(mgr.get_layout(&layout.stateid).is_none());
+        // by_owner index is cleared (no empty entries left behind).
+        assert!(mgr.layouts_for_client(42).is_empty());
+
+        // Second revoke is a no-op — important because the recall-
+        // deadline timer races with client LAYOUTRETURN: both must
+        // be safe to invoke.
+        assert!(!mgr.revoke_layout(&layout.stateid));
+    }
+
+    /// Multi-client safety: revoking client A's layout doesn't
+    /// touch client B's layouts on the same device.
+    #[test]
+    fn test_revoke_layout_isolates_per_client() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(DeviceInfo::new(
+            "ds-1".to_string(),
+            "10.0.0.1:2049".to_string(),
+            vec!["nvme0n1".to_string()],
+        )).unwrap();
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+
+        let l_a = mgr.generate_layout(test_owner(1), vec![1], 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_b = mgr.generate_layout(test_owner(2), vec![2], 0, 1024, IoMode::ReadWrite).unwrap();
+        assert_eq!(mgr.layout_count(), 2);
+
+        assert!(mgr.revoke_layout(&l_a.stateid));
+        assert!(mgr.get_layout(&l_a.stateid).is_none());
+        assert!(mgr.get_layout(&l_b.stateid).is_some());
+        assert!(mgr.layouts_for_client(1).is_empty());
+        assert_eq!(mgr.layouts_for_client(2), vec![l_b.stateid]);
     }
 }
 

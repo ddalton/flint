@@ -202,11 +202,18 @@ impl CallbackManager {
     /// pair. The pairs come from
     /// [`LayoutManager::recall_layouts_for_device`], which already
     /// scoped each layout to its issuing session — we just route
-    /// each one to the right back-channel. Returns the number of
-    /// successful CB exchanges (transport + reply parse OK; reply
-    /// status may still be `NFS4ERR_NOMATCHING_LAYOUT`, which is
-    /// counted as success because the layout is gone from the
-    /// client either way).
+    /// each one to the right back-channel.
+    ///
+    /// Returns one [`RecallResult`] per input pair, in the same
+    /// order. The caller (typically the heartbeat-monitor's
+    /// `fan_out_recalls`) inspects each result to decide whether
+    /// to forcibly revoke the layout server-side: a `TimedOut`,
+    /// `NoChannel`, or `Transport` outcome means the client
+    /// either didn't get the recall or won't reply, so the layout
+    /// is at risk of staying live with a dead DS — RFC 5661
+    /// §12.5.5.2 lets us revoke immediately. `Acked` outcomes get
+    /// a soft post-deadline timer instead (also handled by the
+    /// caller).
     ///
     /// `device_id` is used only for logging — the routing is fully
     /// driven by the input pairs.
@@ -214,9 +221,9 @@ impl CallbackManager {
         &self,
         device_id: &str,
         recalls: &[(SessionId, LayoutStateId)],
-    ) -> usize {
+    ) -> Vec<RecallResult> {
         if recalls.is_empty() {
-            return 0;
+            return Vec::new();
         }
         info!(
             "📢 Fanning out {} CB_LAYOUTRECALL(s) for failed device: {}",
@@ -224,9 +231,9 @@ impl CallbackManager {
             device_id,
         );
 
-        let mut acked = 0;
+        let mut results = Vec::with_capacity(recalls.len());
         for (session_id, stateid) in recalls {
-            match self
+            let outcome = match self
                 .send_layoutrecall(
                     session_id,
                     stateid,
@@ -236,23 +243,65 @@ impl CallbackManager {
                 )
                 .await
             {
-                Ok(_reply) => acked += 1,
+                Ok(_reply) => RecallOutcome::Acked,
+                Err(CallbackError::Timeout) => RecallOutcome::TimedOut,
+                Err(CallbackError::ConnectionClosed) => RecallOutcome::NoChannel,
                 Err(e) => {
+                    let msg = e.to_string();
                     warn!(
                         "CB_LAYOUTRECALL to session {:?} failed: {}",
-                        session_id, e,
+                        session_id, msg,
                     );
+                    RecallOutcome::Transport(msg)
                 }
-            }
+            };
+            results.push(RecallResult {
+                session_id: *session_id,
+                stateid: *stateid,
+                outcome,
+            });
         }
+        let acked = results.iter().filter(|r| matches!(r.outcome, RecallOutcome::Acked)).count();
         info!(
             "📊 Device {} fan-out: {}/{} recalls acked",
             device_id,
             acked,
-            recalls.len(),
+            results.len(),
         );
-        acked
+        results
     }
+}
+
+/// Outcome of one CB_LAYOUTRECALL CALL. Used by the heartbeat
+/// monitor to decide whether to forcibly revoke each layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecallOutcome {
+    /// Client replied. Either NFS4_OK or NFS4ERR_NOMATCHING_LAYOUT
+    /// — both mean "layout is gone from the client side." The
+    /// caller may still want to apply a soft post-recall deadline
+    /// for the eventual LAYOUTRETURN.
+    Acked,
+    /// `CallbackError::Timeout` — no reply within the per-call
+    /// deadline. RFC 5661 §12.5.5.2: server MAY revoke.
+    TimedOut,
+    /// No back-channel was registered for this session (or
+    /// cb_program=0). The recall couldn't even leave the server,
+    /// so the client never knew — revoke server-side rather than
+    /// leave a dangling layout.
+    NoChannel,
+    /// Some other error: transport failure, RPC rejected,
+    /// reply-decode error. Treat the same as `TimedOut` for
+    /// revocation purposes; the message is preserved for logs.
+    Transport(String),
+}
+
+/// One outcome per recall pair. Order matches the input order so
+/// the caller can re-pair with the request side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallResult {
+    pub session_id: SessionId,
+    pub stateid: LayoutStateId,
+    pub outcome: RecallOutcome,
 }
 
 #[cfg(test)]
@@ -719,8 +768,18 @@ mod tests {
             (session_b, stateid_b1),
         ];
 
-        let acked = cb_mgr.recall_layouts_for_device("ds-dead", &recalls).await;
-        assert_eq!(acked, 3);
+        let results = cb_mgr.recall_layouts_for_device("ds-dead", &recalls).await;
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert_eq!(r.outcome, RecallOutcome::Acked);
+        }
+        // Per-pair routing: the (session, stateid) pairs in `results`
+        // must match the input pairs in order so the caller can
+        // pair them with the requests they originated.
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.session_id, recalls[i].0);
+            assert_eq!(r.stateid, recalls[i].1);
+        }
 
         let count_a = mock_a.await.unwrap();
         let count_b = mock_b.await.unwrap();
@@ -744,7 +803,54 @@ mod tests {
         back_channels.insert(session_id, Arc::clone(&writer));
         let cb_mgr = CallbackManager::new(back_channels, state_mgr);
 
-        let acked = cb_mgr.recall_layouts_for_device("ds-dead", &[]).await;
-        assert_eq!(acked, 0);
+        let results = cb_mgr.recall_layouts_for_device("ds-dead", &[]).await;
+        assert!(results.is_empty());
+    }
+
+    /// Timeout outcome surfaces as RecallOutcome::TimedOut so the
+    /// heartbeat caller can revoke the layout (Phase A.5). Wires the
+    /// short-timeout fixture against a silent mock client and checks
+    /// the typed outcome.
+    #[tokio::test]
+    async fn recall_layouts_for_device_surfaces_timeout() {
+        let (writer, server_read, client_read, _client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr)
+            .with_timeout(Duration::from_millis(150));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        // Drain the CALL but never reply.
+        let drain = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let _ = read_record(&mut r).await;
+        });
+
+        let stateid = [9u8; 16];
+        let results = cb_mgr
+            .recall_layouts_for_device("ds-dead", &[(session_id, stateid)])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, RecallOutcome::TimedOut);
+        assert_eq!(results[0].stateid, stateid);
+        drain.await.unwrap();
+    }
+
+    /// No back-channel registered for the session → outcome is
+    /// `NoChannel` (the heartbeat path treats this the same as
+    /// TimedOut for revocation purposes).
+    #[tokio::test]
+    async fn recall_layouts_for_device_surfaces_no_channel() {
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        let cb_mgr = CallbackManager::new(back_channels, state_mgr);
+
+        let stateid = [42u8; 16];
+        let results = cb_mgr
+            .recall_layouts_for_device("ds-dead", &[(session_id, stateid)])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, RecallOutcome::NoChannel);
     }
 }

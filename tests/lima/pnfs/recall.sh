@@ -201,21 +201,29 @@ kill -9 "$DS1_PID" 2>/dev/null || true
 rm -f "$PIDFILE_DIR/flint-pnfs-ds1.pid"
 
 # Worst case: heartbeatTimeout=5s + check_interval=10s + DS heartbeat
-# stale slack (up to 10s) = ~25s. Wait 30s with a periodic poll.
-echo "▶ waiting up to 30s for the MDS to detect + recall…"
-DEADLINE=$(($(date +%s) + 30))
+# stale slack (up to 10s) + 10s post-recall deadline = ~35s. Wait 45s
+# so the A.5 revocation marker has time to land too.
+echo "▶ waiting up to 45s for the MDS to detect + recall + revoke…"
+DEADLINE=$(($(date +%s) + 45))
 SAW_STALE=false
 SAW_RECALL_LIST=false
 SAW_FANOUT=false
 SAW_CALL_EMITTED=false
+SAW_REVOKED=false
 
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  if ! "$SAW_STALE"        && grep -q 'stale data servers'             "$MDS_LOG"; then SAW_STALE=true;        echo "  ✓ stale DS detected"; fi
-  if ! "$SAW_RECALL_LIST"  && grep -q 'Recalling [0-9]\+ layout'        "$MDS_LOG"; then SAW_RECALL_LIST=true;  echo "  ✓ LayoutManager listed recalls"; fi
-  if ! "$SAW_FANOUT"       && grep -q 'Fanning out [0-9]\+ CB_LAYOUTRECALL' "$MDS_LOG"; then SAW_FANOUT=true; echo "  ✓ CallbackManager fan-out triggered"; fi
-  if ! "$SAW_CALL_EMITTED" && grep -q 'CB_LAYOUTRECALL → session'        "$MDS_LOG"; then SAW_CALL_EMITTED=true; echo "  ✓ CB_LAYOUTRECALL CALL emitted"; fi
+  if ! "$SAW_STALE"        && grep -q 'stale data servers'                 "$MDS_LOG"; then SAW_STALE=true;        echo "  ✓ stale DS detected"; fi
+  if ! "$SAW_RECALL_LIST"  && grep -q 'Recalling [0-9]\+ layout'            "$MDS_LOG"; then SAW_RECALL_LIST=true;  echo "  ✓ LayoutManager listed recalls"; fi
+  if ! "$SAW_FANOUT"       && grep -q 'Fanning out [0-9]\+ CB_LAYOUTRECALL' "$MDS_LOG"; then SAW_FANOUT=true;       echo "  ✓ CallbackManager fan-out triggered"; fi
+  if ! "$SAW_CALL_EMITTED" && grep -q 'CB_LAYOUTRECALL → session'           "$MDS_LOG"; then SAW_CALL_EMITTED=true; echo "  ✓ CB_LAYOUTRECALL CALL emitted"; fi
+  # Phase A.5: forced revocation. Either fires immediately on
+  # `RecallOutcome::TimedOut/NoChannel/Transport`, or after the
+  # 10s post-recall deadline if the client acked but never sent
+  # LAYOUTRETURN. Any of those paths logs "Layout revoked" via
+  # `LayoutManager::revoke_layout`.
+  if ! "$SAW_REVOKED"      && grep -q 'Layout revoked\|Forcibly revoking layout' "$MDS_LOG"; then SAW_REVOKED=true; echo "  ✓ layout forcibly revoked server-side"; fi
 
-  if "$SAW_STALE" && "$SAW_RECALL_LIST" && "$SAW_FANOUT" && "$SAW_CALL_EMITTED"; then
+  if "$SAW_STALE" && "$SAW_RECALL_LIST" && "$SAW_FANOUT" && "$SAW_CALL_EMITTED" && "$SAW_REVOKED"; then
     break
   fi
   sleep 1
@@ -228,9 +236,10 @@ PASS=true
 "$SAW_RECALL_LIST"  || { echo "  ✗ never saw 'Recalling N layout(s)' in MDS log"; PASS=false; }
 "$SAW_FANOUT"       || { echo "  ✗ never saw 'Fanning out N CB_LAYOUTRECALL' in MDS log"; PASS=false; }
 "$SAW_CALL_EMITTED" || { echo "  ✗ never saw 'CB_LAYOUTRECALL → session' in MDS log"; PASS=false; }
+"$SAW_REVOKED"      || { echo "  ✗ never saw forced layout revocation in MDS log"; PASS=false; }
 
 if "$PASS"; then
-  echo "  ✓ all four MDS-side recall markers fired"
+  echo "  ✓ all five MDS-side recall+revoke markers fired"
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -241,9 +250,9 @@ echo "▶ Client-side outcome (informational, not asserted):"
 if grep -q 'CB_LAYOUTRECALL ← session' "$MDS_LOG"; then
   echo "  • client acked the recall (CB_LAYOUTRECALL reply received)"
 elif grep -q 'CB call timed out' "$MDS_LOG"; then
-  echo "  • client did not reply within the 10s timeout (will be revoked in A.5)"
+  echo "  • client did not reply within the 10s timeout — A.5 revoke fired"
 elif grep -q 'CB_LAYOUTRECALL to session.*failed' "$MDS_LOG"; then
-  echo "  • CB_LAYOUTRECALL failed mid-flight (transport / conn-closed)"
+  echo "  • CB_LAYOUTRECALL failed mid-flight — A.5 revoke fired"
 else
   echo "  • no terminal status logged for the CB call yet"
 fi
