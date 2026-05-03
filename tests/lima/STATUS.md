@@ -2,21 +2,23 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02 — Phase A of pNFS production-readiness complete (CB_LAYOUTRECALL backchannel).
-**Branch:** `kind-no-spdk`. **HEAD:** `2ea070d`.
+**Last updated:** 2026-05-02 — Phase B sub-PRs B.1 + B.2 of pNFS production-readiness landed (StateBackend trait + MemoryBackend + SqliteBackend; not yet wired into managers).
+**Branch:** `kind-no-spdk`. **HEAD:** `a2af4e0`.
 
 ### Picking up next session
 
-* **Phase A is done.** All 5 sub-PRs (`1fa43dc`, `8bb02bc`, `a4d7255`, `f58700f`, `2ea070d`) landed and pushed. The pNFS data plane now survives DS death without silent corruption: kernel client gets recalled where the back-channel landed; within ~20s the MDS has either heard a clean ack or forcibly revoked the orphaned layout server-side. Subsequent client ops on a revoked stateid error cleanly with `NFS4ERR_BAD_STATEID`.
-* **Next: Phase B — state persistence (Task #5).** ~1 week. `StateBackend` trait + `MemoryBackend` (parity wrapper around the existing DashMaps) + `SqliteBackend` (durable `*.sqlite`). Without it, an MDS restart vapourises active client sessions — currently the last gate before pNFS is safe to ship to a first customer. Plan is at `docs/plans/pnfs-production-readiness.md` (Phase B section).
-* **Test gates as of HEAD:** `cargo test --lib` 291 PASS / 0 FAIL. `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline as before A.1.
+* **Phase B half-shipped.** B.1 (`982edc1`) and B.2 (`a2af4e0`) landed and pushed. We now have a `StateBackend` trait with two impls — `MemoryBackend` (parity, default) and `SqliteBackend` (durable, ships in production) — both passing the same trait-level test suite, and `SqliteBackend` additionally proven by the load-bearing `sqlite_state_survives_reopen` test. Neither is wired into the runtime yet; the trait code is dead at runtime and both `make test-pnfs-smoke` / `make test-pnfs-recall` are unchanged by definition.
+* **Next: B.3 — wire StateBackend into the managers.** Touches `ClientManager`, `SessionManager`, `StateIdManager`, `LayoutManager` and ~30 call sites (most in `#[cfg(test)]` modules). The hard design decision: how to bridge sync manager methods to the async `StateBackend`. Recommended pattern is fire-and-forget `tokio::spawn` from inside each mutation method — the lag bound is fine because clients retry uncached ops per RFC 8881 §15.1.10.4, and the alternative (making managers async) ripples through every dispatcher arm. Then B.4 plumbs config + InstanceCounter, B.5 lands the Lima `make test-pnfs-restart` e2e.
+* **Test gates as of HEAD:** `cargo test --lib` **302 PASS / 0 FAIL** (was 291 — +11 for the new state_backend module). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline as before B.1.
 * **Useful files for orienting fast:**
-  * `docs/plans/pnfs-production-readiness.md` — the master plan (Phase A done, Phase B + C still pending).
-  * `src/nfs/v4/back_channel.rs` — `BackChannelWriter` with inflight registry + `send_cb_compound`.
-  * `src/nfs/v4/cb_compound.rs` — typed CB_COMPOUND args + RPC framing.
-  * `src/pnfs/mds/callback.rs` — `CallbackManager` send-and-await, fan-out, typed `RecallOutcome`.
-  * `src/pnfs/mds/server.rs::fan_out_recalls` — heartbeat path that drives the recall + revocation policy.
-  * `tests/lima/pnfs/recall.sh` + `mds-recall.yaml` + `ds{1,2}-recall.yaml` — DS-death e2e.
+  * `docs/plans/pnfs-production-readiness.md` — master plan (Phase A done, B half-done, C deferred).
+  * `src/state_backend/mod.rs` — trait + record types (`ClientRecord`, `SessionRecord`, `StateIdRecord`, `LayoutRecord`, `CachedCreateSessionResRecord`, `LayoutSegmentRecord`).
+  * `src/state_backend/memory.rs` — `MemoryBackend` (DashMap + AtomicU64).
+  * `src/state_backend/sqlite.rs` — `SqliteBackend` (rusqlite bundled, WAL+NORMAL, JSON for nested types, schema_version canary).
+  * `src/nfs/v4/state/{client,session,stateid}.rs` — the three managers B.3 will retrofit. Note `lease.rs` and `delegation.rs` are intentionally NOT in scope: leases regenerate naturally, delegations aren't granted yet.
+  * `src/pnfs/mds/layout.rs::LayoutManager` — the fourth manager; primary + by_owner indexes are what the persistence has to keep in sync.
+  * `src/nfs/v4/back_channel.rs`, `src/nfs/v4/cb_compound.rs`, `src/pnfs/mds/callback.rs`, `src/pnfs/mds/server.rs::fan_out_recalls` — Phase A reference points (CB infrastructure).
+  * `tests/lima/pnfs/recall.sh` + `mds-recall.yaml` + `ds{1,2}-recall.yaml` — DS-death e2e (the model `make test-pnfs-restart` will follow in B.5).
 
 ### Today in one paragraph
 
@@ -218,6 +220,27 @@ After Phase A, Phase B (state persistence — `StateBackend` trait with
 `memory` + `sqlite` impls) lands in ~1 week. Together they make pNFS
 safe to ship to a first customer; whether to build Phase C (FFL
 mirroring for HDFS-style replication) is then a demand-driven call.
+
+### Phase 8 — State persistence foundation (this session: `982edc1..a2af4e0`)
+
+Phase B's first two sub-PRs. Together they introduce a pluggable
+persistence layer for NFSv4 / pNFS server state, ready for B.3 to
+wire into the runtime. Both committed and pushed; neither is on a
+runtime code path yet, so smoke / pynfs / recall e2e are unchanged
+by definition.
+
+| Sub | Commit | What |
+|---|---|---|
+| **B.1 — StateBackend trait + MemoryBackend** | `982edc1` | New top-level `src/state_backend/` module. Trait is async (`put_*` / `get_*` / `list_*` / `delete_*` per record kind, plus `increment_instance_counter` / `get_instance_counter`); idempotency contract is upsert + idempotent-delete so the boundary code in B.3 doesn't need a special path. Records (`ClientRecord`, `SessionRecord`, `StateIdRecord`, `LayoutRecord` + `CachedCreateSessionResRecord` + `LayoutSegmentRecord` + `StateTypeRecord` / `IoModeRecord` enums) are plain types only — `Vec<u8>`, `[u8;16]`, `u64` — so they survive byte-for-byte across process lifetimes. `MemoryBackend` is a `DashMap` per record kind plus an `AtomicU64` counter (`fetch_add` SeqCst); constant-time per op, no global lock. Deliberately **not** persisted: slot replay-cache contents (RFC 8881 §15.1.10.4 permits losing them), per-connection state, in-flight RPC futures. 5 unit tests including 64-writer concurrency and 32-incrementer atomicity. Lib: 291 → 296. |
+| **B.2 — SqliteBackend** | `a2af4e0` | `rusqlite = "0.31"` with `bundled` feature so SQLite 3.45+ statically links into the binary (no system libsqlite). `SqliteBackend::open(path)` applies a 5-table schema (clients / sessions / stateids / layouts / instance_counter) plus a `schema_version` canary that refuses to open on mismatch. Nested types (`Vec<LayoutSegmentRecord>`, `Option<CachedCreateSessionResRecord>`) are `serde_json` TEXT columns — small, stable, easy to migrate. `journal_mode=WAL` + `synchronous=NORMAL` for crash-safe atomic writes with reasonable throughput. `Arc<std::sync::Mutex<Connection>>`; every method does its work inside `tokio::task::spawn_blocking` so the guard never crosses an await. `increment_instance_counter` uses SQLite 3.35+ `UPDATE ... RETURNING` for read-and-increment in one statement; the connection mutex serializes concurrent callers so values stay distinct. **The load-bearing test is `sqlite_state_survives_reopen`**: writes one of every record kind (with a `verifier > i32::MAX` to catch sign-extension bugs), drops the backend, reopens at the same path, asserts every record came back byte-identically + the counter continued from 2 → 3 instead of restarting at 0 → 1. 6 unit tests total. Lib: 296 → 302. |
+
+What B.3 still needs to deliver (outline for next session):
+
+* Add `Arc<dyn StateBackend>` field to `ClientManager`, `SessionManager`, `StateIdManager`, `LayoutManager`. Constructors accept it; `StateManager::new` accepts it and wires through.
+* On startup, `StateManager::load_from_backend()` calls `list_*` on the backend and populates the in-memory DashMaps. After this point reads are pure-cache (no backend trips on the hot path).
+* On every mutation method (e.g. `allocate`, `revoke`, `mark_confirmed`, `record_create_session_reply`, `generate_layout`, `return_layout`, `revoke_layout`), do the sync DashMap mutation as today, then `tokio::spawn` a fire-and-forget persist of the resulting record. Acceptable lag bound is ~1s; clients retry uncached ops per RFC 8881 §15.1.10.4 so a crash-during-spawn loses at most the last op (which the client redoes).
+* Update ~30 call sites that construct managers (most in `#[cfg(test)]` modules — they should pass `Arc::new(MemoryBackend::new())` to keep test parity).
+* Don't skip the `cleanup_expired` path: lease expiry already removes clients/sessions/stateids; that flow has to call `delete_*` on the backend too, or a restart would re-load expired-but-not-yet-cleaned-up state.
 
 ### pynfs coverage for Phase A
 
@@ -516,14 +539,19 @@ for anyone running this in prod. Plan is at
    A.4 (`f58700f`) DS-death → recall fan-out + Lima e2e, A.5
    (`2ea070d`) forced revocation on timeout. `make test-pnfs-recall`
    is the truth source for the full chain.
-2. **Layout/state persistence (Task #5) — NEXT.** `StateBackend`
-   trait with `memory` (parity wrapper around current DashMaps) +
-   `sqlite` (durable, single-file `*.sqlite`) impls. Persist
-   client / session / stateid / layout records + the
-   `InstanceCounter`; slot replay cache deliberately not persisted
-   per RFC 8881 §15.1.10.4. ~1 week. Target: MDS rolling restart
-   during a long-running write doesn't fail the in-flight I/O. Plan:
-   `docs/plans/pnfs-production-readiness.md` Phase B.
+2. **Layout/state persistence (Task #5) — IN PROGRESS.** B.1
+   (`982edc1`) and B.2 (`a2af4e0`) shipped: trait + record types +
+   `MemoryBackend` (parity, default for tests) + `SqliteBackend`
+   (durable, ships in production with WAL+NORMAL crash safety).
+   `sqlite_state_survives_reopen` test proves records — including the
+   instance counter — round-trip cleanly across a process lifetime.
+   **B.3 — wire backend into the managers — NEXT.** Mechanical edit
+   across `Client/Session/StateId/LayoutManager` plus ~30 call sites;
+   key design choice is fire-and-forget `tokio::spawn` from each
+   sync mutation so the manager API doesn't go async (which would
+   ripple through every dispatcher arm). Then B.4 plumbs config +
+   InstanceCounter, B.5 lands the Lima `make test-pnfs-restart` e2e.
+   Plan: `docs/plans/pnfs-production-readiness.md` Phase B.
 3. **Cross-host fio bench — pending.** The single-Mac-host 1.6×
    number is a floor; the architectural prediction is N× scaling
    with N DSes on N nodes. Until measured on a real cluster this
