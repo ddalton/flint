@@ -195,6 +195,7 @@ mod tests {
                     last_cs_sequence: None,
                     cs_cached_res: None,
                     initial_cs_sequence: 1,
+                    reclaim_complete: false,
                 };
                 b.put_client(&c).await.unwrap();
             }));

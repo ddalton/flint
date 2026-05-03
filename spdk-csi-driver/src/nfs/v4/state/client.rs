@@ -128,6 +128,15 @@ pub struct Client {
     /// `eir_sequenceid`; the first CREATE_SESSION on this clientid must
     /// carry exactly this value.
     pub initial_cs_sequence: u32,
+
+    /// `true` after the client has issued a successful RECLAIM_COMPLETE
+    /// (RFC 8881 §18.51). Two protocol-level effects flow from this:
+    ///   * A second RECLAIM_COMPLETE must return `NFS4ERR_COMPLETE_ALREADY`.
+    ///   * Reclaim ops (OPEN with `claim=CLAIM_PREVIOUS`) must return
+    ///     `NFS4ERR_NO_GRACE` once this is set — the grace window is over.
+    /// Persisted so a post-restart client doesn't re-enter "grace mode"
+    /// just because the in-memory state evaporated.
+    pub reclaim_complete: bool,
 }
 
 impl Client {
@@ -155,8 +164,26 @@ impl Client {
             cs_cached_reply: None,
             cs_cached_res: None,
             initial_cs_sequence: 0,
+            reclaim_complete: false,
         }
     }
+}
+
+/// Outcome of `ClientManager::mark_reclaim_complete`. Mirrors the
+/// three RFC 8881 §18.51 outcomes the dispatcher's RECLAIM_COMPLETE
+/// arm has to distinguish.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReclaimCompleteOutcome {
+    /// First time the client called RECLAIM_COMPLETE — flag set,
+    /// record persisted. Reply `NFS4_OK`.
+    Set,
+    /// The client has already called RECLAIM_COMPLETE before — RFC
+    /// §18.51.4 says reply `NFS4ERR_COMPLETE_ALREADY`.
+    AlreadyComplete,
+    /// The session-bound client_id doesn't resolve to a known
+    /// client — caller should reply with `NFS4ERR_BADSESSION` or
+    /// `NFS4ERR_STALE_CLIENTID` depending on context.
+    NoSuchClient,
 }
 
 /// Outcome of `ClientManager::process_create_session_seq`. Lets the
@@ -245,6 +272,7 @@ impl Client {
                 }
             }),
             initial_cs_sequence: self.initial_cs_sequence,
+            reclaim_complete: self.reclaim_complete,
         }
     }
 
@@ -275,6 +303,7 @@ impl Client {
                 fore_max_requests: c.fore_max_requests,
             }),
             initial_cs_sequence: r.initial_cs_sequence,
+            reclaim_complete: r.reclaim_complete,
         }
     }
 }
@@ -515,6 +544,35 @@ impl ClientManager {
                 }
             }
         }
+    }
+
+    /// Outcome of `mark_reclaim_complete`. Lets the dispatcher's
+    /// RECLAIM_COMPLETE arm distinguish "first time, persist + Ok"
+    /// from RFC 8881 §18.51's `NFS4ERR_COMPLETE_ALREADY` from
+    /// "client doesn't exist".
+    pub fn mark_reclaim_complete(&self, client_id: u64) -> ReclaimCompleteOutcome {
+        let snapshot = self.clients.get_mut(&client_id).map(|mut c| {
+            if c.reclaim_complete {
+                ReclaimCompleteOutcome::AlreadyComplete
+            } else {
+                c.reclaim_complete = true;
+                let snap = c.clone();
+                drop(c);
+                self.persist(&snap);
+                ReclaimCompleteOutcome::Set
+            }
+        });
+        snapshot.unwrap_or(ReclaimCompleteOutcome::NoSuchClient)
+    }
+
+    /// Read the persisted `reclaim_complete` bit. Used by the
+    /// dispatcher's OPEN-with-CLAIM_PREVIOUS arm to gate reclaim
+    /// ops with `NFS4ERR_NO_GRACE` once grace is over.
+    pub fn is_reclaim_complete(&self, client_id: u64) -> bool {
+        self.clients
+            .get(&client_id)
+            .map(|c| c.reclaim_complete)
+            .unwrap_or(false)
     }
 
     /// Mark a clientid as confirmed (called by CREATE_SESSION when the
@@ -836,6 +894,40 @@ mod tests {
         let id = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         assert_eq!(client_mgr.update_sequence(id).unwrap(), 1);
         assert_eq!(client_mgr.update_sequence(id).unwrap(), 2);
+    }
+
+    /// RFC 8881 §18.51 + §18.16.3: RECLAIM_COMPLETE state machine.
+    /// First call sets the bit (Set); second is COMPLETE_ALREADY;
+    /// non-existent client_id is NoSuchClient. The dispatcher's
+    /// RECLAIM_COMPLETE arm + the OPEN-CLAIM_PREVIOUS gate both
+    /// rely on these three outcomes being distinct.
+    #[test]
+    fn test_mark_reclaim_complete_state_machine() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
+
+        let id = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
+        client_mgr.mark_confirmed(id);
+
+        // Pre-condition: not yet reclaim-complete.
+        assert!(!client_mgr.is_reclaim_complete(id));
+
+        // First call: Set + observable through is_reclaim_complete.
+        assert_eq!(client_mgr.mark_reclaim_complete(id), ReclaimCompleteOutcome::Set);
+        assert!(client_mgr.is_reclaim_complete(id));
+
+        // Second call: COMPLETE_ALREADY, bit stays set.
+        assert_eq!(
+            client_mgr.mark_reclaim_complete(id),
+            ReclaimCompleteOutcome::AlreadyComplete,
+        );
+        assert!(client_mgr.is_reclaim_complete(id));
+
+        // Unknown client_id → NoSuchClient (caller maps to STALE_CLIENTID).
+        assert_eq!(
+            client_mgr.mark_reclaim_complete(99999),
+            ReclaimCompleteOutcome::NoSuchClient,
+        );
     }
 
     #[test]

@@ -64,7 +64,11 @@ use std::sync::{Arc, Mutex};
 ///   2 → add `server_identity` (singleton row with the persistent
 ///        per-deployment server id used by FileHandleManager so
 ///        cached FHs survive MDS restart).
-const SCHEMA_VERSION: i64 = 2;
+///   3 → add `clients.reclaim_complete` so a post-restart MDS knows
+///        which clients have already done RECLAIM_COMPLETE — without
+///        this, a second RECLAIM_COMPLETE would silently succeed
+///        instead of returning `NFS4ERR_COMPLETE_ALREADY`.
+const SCHEMA_VERSION: i64 = 3;
 
 /// Single-file SQLite [`StateBackend`].
 pub struct SqliteBackend {
@@ -133,13 +137,51 @@ impl SqliteBackend {
                 })?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
-            Some(1) if SCHEMA_VERSION == 2 => {
-                // v1 → v2 migration: the new `server_identity` table
-                // was added by the schema-batch above (CREATE TABLE
-                // IF NOT EXISTS). Just bump the version row so future
-                // opens don't keep re-running the migration. The first
-                // call to `get_or_init_server_id` will populate the
-                // singleton row with a fresh random id.
+            Some(prev) if prev >= 1 && prev < SCHEMA_VERSION => {
+                // Stepwise migration. Each step is idempotent against
+                // the running schema-batch (CREATE TABLE IF NOT
+                // EXISTS already created any net-new tables); the
+                // ALTER steps need explicit handling because SQLite
+                // doesn't have IF NOT EXISTS for columns.
+                //
+                //  v1 → v2: server_identity table (handled by the
+                //           schema-batch's IF NOT EXISTS).
+                //  v2 → v3: clients.reclaim_complete column. ALTER
+                //           with NOT NULL DEFAULT 0 so existing rows
+                //           default to "haven't done RECLAIM_COMPLETE"
+                //           — matches the conservative interpretation
+                //           (a pre-v3 client gets to do RECLAIM_COMPLETE
+                //           one more time post-upgrade, which is a
+                //           harmless no-op).
+                if prev < 2 {
+                    tracing::info!("SqliteBackend: migrating schema → 2 (server_identity)");
+                }
+                if prev < 3 {
+                    // Idempotent ALTER TABLE: SQLite has no
+                    // "ADD COLUMN IF NOT EXISTS", so we ask
+                    // pragma_table_info whether the column is already
+                    // there. Idempotency matters because an
+                    // interrupted migration could leave the column
+                    // present but `schema_version` still at 2.
+                    let has_col: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('clients') WHERE name = 'reclaim_complete'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        StateBackendError::Storage(format!("migrate v→3 (probe column): {}", e))
+                    })?;
+                    if has_col == 0 {
+                        conn.execute(
+                            "ALTER TABLE clients ADD COLUMN reclaim_complete INTEGER NOT NULL DEFAULT 0",
+                            [],
+                        )
+                        .map_err(|e| {
+                            StateBackendError::Storage(format!("migrate v→3 (alter clients): {}", e))
+                        })?;
+                    }
+                    tracing::info!("SqliteBackend: migrating schema → 3 (clients.reclaim_complete)");
+                }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
                     params![SCHEMA_VERSION],
@@ -147,9 +189,6 @@ impl SqliteBackend {
                 .map_err(|e| {
                     StateBackendError::Storage(format!("schema_version migrate: {}", e))
                 })?;
-                tracing::info!(
-                    "SqliteBackend: migrated schema 1 → 2 (added server_identity table)"
-                );
             }
             Some(v) => {
                 return Err(StateBackendError::Storage(format!(
@@ -295,8 +334,9 @@ impl StateBackend for SqliteBackend {
                 "INSERT OR REPLACE INTO clients
                  (client_id, owner, verifier, server_owner, server_scope,
                   sequence_id, flags, principal, confirmed,
-                  last_cs_sequence, cs_cached_res, initial_cs_sequence)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  last_cs_sequence, cs_cached_res, initial_cs_sequence,
+                  reclaim_complete)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     u64_to_i64(c.client_id),
                     c.owner,
@@ -310,6 +350,7 @@ impl StateBackend for SqliteBackend {
                     c.last_cs_sequence.map(|v| v as i64),
                     cs_json,
                     c.initial_cs_sequence as i64,
+                    bool_to_i64(c.reclaim_complete),
                 ],
             )?;
             Ok(())
@@ -324,7 +365,8 @@ impl StateBackend for SqliteBackend {
                 conn.query_row(
                     "SELECT client_id, owner, verifier, server_owner, server_scope,
                             sequence_id, flags, principal, confirmed,
-                            last_cs_sequence, cs_cached_res, initial_cs_sequence
+                            last_cs_sequence, cs_cached_res, initial_cs_sequence,
+                            reclaim_complete
                      FROM clients WHERE client_id = ?1",
                     params![id],
                     decode_client_row,
@@ -341,7 +383,8 @@ impl StateBackend for SqliteBackend {
                 let mut stmt = conn.prepare(
                     "SELECT client_id, owner, verifier, server_owner, server_scope,
                             sequence_id, flags, principal, confirmed,
-                            last_cs_sequence, cs_cached_res, initial_cs_sequence
+                            last_cs_sequence, cs_cached_res, initial_cs_sequence,
+                            reclaim_complete
                      FROM clients",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> = stmt
@@ -644,6 +687,7 @@ fn decode_client_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<C
     let last_cs_sequence: Option<i64> = r.get(9)?;
     let cs_json: Option<String> = r.get(10)?;
     let initial_cs_sequence: i64 = r.get(11)?;
+    let reclaim_complete: i64 = r.get(12)?;
 
     Ok((|| -> StateBackendResult<ClientRecord> {
         let cs_cached_res = match cs_json {
@@ -665,6 +709,7 @@ fn decode_client_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<C
             last_cs_sequence: last_cs_sequence.map(|v| v as u32),
             cs_cached_res,
             initial_cs_sequence: initial_cs_sequence as u32,
+            reclaim_complete: i64_to_bool(reclaim_complete),
         })
     })())
 }
@@ -763,7 +808,9 @@ CREATE TABLE IF NOT EXISTS clients (
     confirmed INTEGER NOT NULL,
     last_cs_sequence INTEGER,
     cs_cached_res TEXT,
-    initial_cs_sequence INTEGER NOT NULL
+    initial_cs_sequence INTEGER NOT NULL,
+    -- Schema v3: see SCHEMA_VERSION docs.
+    reclaim_complete INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -967,6 +1014,7 @@ mod tests {
                 last_cs_sequence: Some(7),
                 cs_cached_res: Some(cs.clone()),
                 initial_cs_sequence: 1,
+                reclaim_complete: true,
             };
             b.put_client(&client).await.unwrap();
             b.put_session(&SessionRecord {

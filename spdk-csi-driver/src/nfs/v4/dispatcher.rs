@@ -851,6 +851,52 @@ impl CompoundDispatcher {
                     _ => crate::nfs::v4::operations::ioops::OpenHow::NoCreate,
                 };
 
+                // Grace-period gating, RFC 8881 §18.16.3 + §18.51:
+                //
+                //   * Reclaim OPENs (CLAIM_PREVIOUS=1, CLAIM_DELEGATE_PREV=3,
+                //     CLAIM_DELEG_PREV_FH=6) are only valid during the
+                //     post-restart grace window AND before the client has
+                //     issued RECLAIM_COMPLETE. Either condition violated
+                //     → NFS4ERR_NO_GRACE.
+                //
+                //   * Non-reclaim OPENs from a client that hasn't yet
+                //     issued RECLAIM_COMPLETE while the SERVER is still
+                //     in its grace window → NFS4ERR_GRACE. The client is
+                //     told to keep reclaiming first; once it sends
+                //     RECLAIM_COMPLETE(rca_one_fs=FALSE), normal opens go
+                //     through. (After grace expires, no client can
+                //     reclaim, so non-reclaim OPENs are unrestricted
+                //     regardless of whether the bit was ever flipped.)
+                //
+                // Linux kernel clients reliably RECLAIM_COMPLETE on every
+                // mount, so the GRACE gate doesn't fire for them in
+                // steady state. pynfs's RECC suite + the §18.51.3
+                // wording is what we're protecting.
+                let is_reclaim_claim = matches!(claim.claim_type, 1 | 3 | 6);
+                let client_id = context
+                    .session_id
+                    .and_then(|sid| self.state_mgr.sessions.get_session(&sid))
+                    .map(|s| s.client_id);
+                let in_grace = self.state_mgr.leases.in_grace_period();
+                let already_complete = client_id
+                    .map(|cid| self.state_mgr.clients.is_reclaim_complete(cid))
+                    .unwrap_or(false);
+                if is_reclaim_claim {
+                    if !in_grace || already_complete {
+                        warn!(
+                            "OPEN claim_type={} rejected: in_grace={}, reclaim_complete={}",
+                            claim.claim_type, in_grace, already_complete,
+                        );
+                        return OperationResult::Open(Nfs4Status::NoGrace, None);
+                    }
+                } else if in_grace && !already_complete {
+                    warn!(
+                        "OPEN claim_type={} rejected: server in grace, client hasn't done RECLAIM_COMPLETE",
+                        claim.claim_type,
+                    );
+                    return OperationResult::Open(Nfs4Status::Grace, None);
+                }
+
                 // Convert compound::OpenClaim to ioops::OpenClaim
                 let converted_claim = match claim.claim_type {
                     0 => crate::nfs::v4::operations::ioops::OpenClaim::Null(claim.file),
@@ -1217,10 +1263,55 @@ impl CompoundDispatcher {
 
             // Recovery operations
             Operation::ReclaimComplete(one_fs) => {
-                // RECLAIM_COMPLETE indicates client has finished reclaiming state
-                // For a fresh mount with no previous state, just return OK
+                // RFC 8881 §18.51: marks the client as having finished
+                // reclaiming pre-restart state. Two scopes:
+                //   * `rca_one_fs == FALSE` (whole-client) is the
+                //     scope that flips the client's "exited grace
+                //     mode" bit. A second whole-client RECLAIM_COMPLETE
+                //     returns NFS4ERR_COMPLETE_ALREADY (§18.51.4).
+                //   * `rca_one_fs == TRUE` (per-filesystem) is a
+                //     filesystem-scoped completion that does not
+                //     affect the global "is reclaiming?" state — it
+                //     can be repeated per-fs and never bumps to
+                //     COMPLETE_ALREADY. We currently don't track
+                //     per-fs reclaim state because we serve a single
+                //     fsid; just always return OK for this case.
+                //   * Session refers to an unknown client → that
+                //     would be BADSESSION at the SEQUENCE arm,
+                //     so a missing client here is "should never
+                //     happen" but we map it to STALE_CLIENTID for
+                //     defense-in-depth.
                 info!("RECLAIM_COMPLETE: one_fs={}", one_fs);
-                OperationResult::ReclaimComplete(Nfs4Status::Ok)
+                let client_id = match context.session_id
+                    .and_then(|sid| self.state_mgr.sessions.get_session(&sid))
+                    .map(|s| s.client_id)
+                {
+                    Some(cid) => cid,
+                    None => {
+                        warn!("RECLAIM_COMPLETE without preceding SEQUENCE");
+                        return OperationResult::ReclaimComplete(Nfs4Status::OpNotInSession);
+                    }
+                };
+                if one_fs {
+                    // Per-fs scope: no state mutation, just OK.
+                    debug!("RECLAIM_COMPLETE(one_fs=TRUE) on client {} — no-op (single fsid)", client_id);
+                    return OperationResult::ReclaimComplete(Nfs4Status::Ok);
+                }
+                use crate::nfs::v4::state::client::ReclaimCompleteOutcome;
+                match self.state_mgr.clients.mark_reclaim_complete(client_id) {
+                    ReclaimCompleteOutcome::Set => {
+                        info!("RECLAIM_COMPLETE: client {} now exited grace mode", client_id);
+                        OperationResult::ReclaimComplete(Nfs4Status::Ok)
+                    }
+                    ReclaimCompleteOutcome::AlreadyComplete => {
+                        warn!("RECLAIM_COMPLETE: client {} already complete", client_id);
+                        OperationResult::ReclaimComplete(Nfs4Status::CompleteAlready)
+                    }
+                    ReclaimCompleteOutcome::NoSuchClient => {
+                        warn!("RECLAIM_COMPLETE: client {} not found", client_id);
+                        OperationResult::ReclaimComplete(Nfs4Status::StaleClientId)
+                    }
+                }
             }
 
             // Security operations

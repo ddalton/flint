@@ -149,6 +149,15 @@ pub struct ClientRecord {
     pub last_cs_sequence: Option<u32>,
     pub cs_cached_res: Option<CachedCreateSessionResRecord>,
     pub initial_cs_sequence: u32,
+    /// `true` once the client has issued a successful RECLAIM_COMPLETE.
+    /// Persisted because a post-restart MDS must remember whether
+    /// pre-restart clients have already exited grace mode — otherwise
+    /// a second RECLAIM_COMPLETE would silently succeed instead of
+    /// returning `NFS4ERR_COMPLETE_ALREADY`. Default `false` (matches
+    /// the SQLite migration's column default), so older DBs migrate
+    /// cleanly.
+    #[serde(default)]
+    pub reclaim_complete: bool,
 }
 
 /// One NFSv4.1 session. Slot replay state is deliberately not
@@ -331,6 +340,7 @@ mod tests {
             last_cs_sequence: Some(7),
             cs_cached_res: Some(cs.clone()),
             initial_cs_sequence: 1,
+            reclaim_complete: false,
         };
         b.put_client(&client).await.unwrap();
         assert_eq!(b.get_client(42).await.unwrap(), Some(client.clone()));
@@ -462,6 +472,7 @@ mod tests {
             last_cs_sequence: None,
             cs_cached_res: None,
             initial_cs_sequence: 1,
+            reclaim_complete: false,
         };
         b.put_client(&c).await.unwrap();
         c.confirmed = true;
