@@ -2,8 +2,8 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-03 — Phase B complete *with no known gaps*; FH stability across restart shipped (`3f000bb`).
-**Branch:** `kind-no-spdk`. **HEAD:** `3f000bb`.
+**Last updated:** 2026-05-03 — Phase B complete *with no known gaps*; FH stability shipped (`3f000bb`); single-host nconnect sweep done (`7358c47`); cross-host bench is the only remaining perf move.
+**Branch:** `kind-no-spdk`. **HEAD:** `7358c47`.
 
 ### Picking up next session
 
@@ -22,6 +22,7 @@ Living document. Update this when a session ends or a milestone lands.
   * `src/pnfs/config.rs::PnfsConfig::build_state_backend` — config → `Arc<dyn StateBackend>` dispatch (Memory or Sqlite).
   * `tests/lima/pnfs/restart.sh` + `mds-restart.yaml` — the e2e harness (mount, write, kill MDS, restart, assert post-restart read returns the original bytes).
   * `src/nfs/v4/filehandle.rs::FileHandleManager::new_with_instance_id` — receives the persisted `server_id` from `MetadataServer::new`; stamps every FH with it so cached handles survive restart.
+  * `tests/lima/pnfs/nconnect.sh` + `nconnect-results-2026-05-03.tsv` — single-host nconnect sweep (`make test-pnfs-nconnect`) and its first-run snapshot. Result: throughput flat across nconnect; rules out per-TCP-serial RPC pipelining as the next move on this hardware.
 
 ### Today in one paragraph
 
