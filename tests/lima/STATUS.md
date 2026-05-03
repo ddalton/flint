@@ -9,6 +9,7 @@ Living document. Update this when a session ends or a milestone lands.
 
 * **Phase B is fully done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) plus the FH-stability follow-up (`3f000bb`) landed and pushed. The full chain: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe); a per-deployment `server_id` lives in a `server_identity` singleton table and is stamped into every NFSv4 file handle so cached FHs survive restart; `make test-pnfs-restart` proves a kernel client's `read()` against pre-restart open handles still returns the original bytes after the MDS comes back. Sessions deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4; the kernel's natural BADSESSION → fresh CREATE_SESSION recovery handles that.
 * **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id, stateids, layouts, and file-handle stamps so an existing mount keeps working byte-for-byte (Phase B). Phase C (FFL mirroring for HDFS-style replication) is demand-driven from here.
+* **Next focus: cross-host fio bench (Front A item 3).** The 1.6× single-host write number is a floor; the architectural promise of N× scaling with N DSes on N nodes remains *unverified*. **Every other perf optimization without this data is faith-based** — the bench picks the next work item by exposing where the bottleneck actually is. ~1 week of harness + run. Three branch-outcomes (per-TCP serial RPC handler at `server_v4.rs:176`, MDS-proxied reads, hidden serialisation point) are spelled out in the "Where to pick up next" section. Ship `make test-pnfs-cross-host` (3-VM Lima or small AWS bench, fio sweep, results-dump) *before* committing to any per-host optimization.
 * **Test gates as of HEAD:** `cargo test --lib` **310 PASS / 0 FAIL** (was 291 — +19 for `state_backend` module + reload + server_id + migration + `pnfs::config` tests). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` **green with hash assertion firing** — kernel reads pre-restart bytes successfully post-restart with zero stale-handle markers. `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline.
 * **Useful files for orienting fast:**
   * `docs/plans/pnfs-production-readiness.md` — master plan (Phase A + B done, C deferred).
@@ -577,10 +578,64 @@ for anyone running this in prod. Plan is at
    is wall-clock-derived, so cached FHs go stale across restart; fix
    is half a session of work, persists the instance discriminator
    alongside the existing `instance_counter` table.
-3. **Cross-host fio bench — pending.** The single-Mac-host 1.6×
-   number is a floor; the architectural prediction is N× scaling
-   with N DSes on N nodes. Until measured on a real cluster this
-   remains a prediction. ~1 week of harness + run.
+3. **Cross-host fio bench — NEXT (highest information value).**
+   The single-Mac-host 1.6× number is a floor; the architectural
+   prediction is N× scaling with N DSes on N nodes. Until measured
+   on a real cluster this remains a prediction, and **every later
+   perf optimization without it is faith-based**. ~1 week of harness
+   + run. Three concrete answers fall out:
+
+   * **2.5–3× at N=3** → the architecture works as designed. Ship
+     the paper, optimize from there.
+   * **1.8–2.0× regardless of N** → something bottlenecks before
+     per-DS storage. Most likely: the per-TCP-serial RPC handler at
+     `server_v4.rs:176` (every connection processes RPCs sequentially
+     read→dispatch→reply). That becomes the next concrete target —
+     pipeline within the read loop or shard above the dispatcher.
+     Estimated gain: 1.5–2× single-host write throughput.
+   * **~1× regardless of N** → the design has a hidden
+     serialisation point. Find and fix.
+
+   Suggested deliverable: `make test-pnfs-cross-host` harness — 3-VM
+   Lima setup (or small AWS bench), fio sweep covering write/read at
+   `bs={4K,1M}` × `jobs={1,4,8}`, results-dump script that lays out
+   the curve. Reusable for every later optimization.
+
+### Front A.5 — Performance scaling (after cross-host data lands)
+
+Pick exactly one based on what cross-host says:
+
+* **Per-TCP-serial RPC bottleneck** (~2 weeks) — the right target if
+  cross-host scales near-linearly to N=3 (per-host ceiling). Pipeline
+  the read loop in `server_v4.rs:176`: dispatch each frame on its
+  own task, write replies in xid-order. SEQUENCE slot semantics need
+  careful re-checking so exactly-once isn't compromised. Linux NFS
+  clients open multiple TCP connections per mount (`nconnect`), so
+  this is not a hard ceiling, but each connection's WRITEs serialize
+  even when their byte ranges don't conflict — pipelining unblocks
+  intra-connection parallelism. The Linux server kernel already does
+  this; we'd be matching that pattern.
+* **Read-from-DS instead of MDS-proxied** (~1 week) — the right
+  target if reads top out at ~270 MiB/s while cross-host writes scale
+  but reads don't. Today reads tie at single-server speed because
+  small / sub-stripe / OPEN-for-read paths land on the MDS and get
+  proxied. The FILES layout *can* serve reads directly from DSes —
+  smoke advertises layouts only on the WRITE flow. Fix is mostly
+  advertising layouts on OPEN-for-read and verifying the kernel uses
+  them. Modest perf win on its own (1.2–1.5×), but it's the path
+  that *does* scale cross-host with DS count, so it pairs with the
+  cross-host harness.
+
+**What NOT to do next** (deliberately deferred until the perf story
+is understood):
+* FFL mirroring (Phase C) — speculative durability work, blocks
+  scaling work, ~5–7 weeks. Wait for a customer ask.
+* Locality-aware layouts — real win, but only legible after
+  cross-host numbers exist.
+* Snapshots / `ControllerExpandVolume` / DS auto-discovery —
+  customer-asks, not perf-asks.
+* More pynfs conformance — the remaining 18 fails are correctness
+  polish, not perf.
 
 ### Front B — pNFS feature work (beyond the perf-tier MVP)
 
