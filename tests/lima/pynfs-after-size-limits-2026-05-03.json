@@ -1,0 +1,1714 @@
+{
+    "errors": 0,
+    "failures": 10,
+    "name": "all",
+    "skipped": 91,
+    "testcase": [
+        {
+            "classname": "st_courtesy",
+            "code": "COUR6",
+            "name": "testShareReservationDB03",
+            "time": "100.071861743927"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR5",
+            "name": "testShareReservationDB02",
+            "time": "100.06506848335266"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR4",
+            "name": "testShareReservationDB01",
+            "time": "0.0171968936920166"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_courtesy.py\", line 115, in testShareReservation00\n    check(res, NFS4ERR_SHARE_DENIED)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_OPEN should return NFS4ERR_SHARE_DENIED, instead got NFS4_OK\n",
+                "message": "OP_OPEN should return NFS4ERR_SHARE_DENIED, instead got NFS4_OK"
+            },
+            "name": "testShareReservation00",
+            "time": "0.011060714721679688"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR1",
+            "name": "testLockSleepLockU",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR2",
+            "name": "testLockSleepLock",
+            "time": "100.06745028495789"
+        },
+        {
+            "classname": "st_courtesy",
+            "code": "COUR7",
+            "name": "testExpiringManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT5",
+            "name": "testUpdateOfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT7",
+            "name": "testUpdateExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT8",
+            "name": "testRemoveNonExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT9",
+            "name": "testRemoveExistingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT10",
+            "name": "testListNoAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT11",
+            "name": "testListAttrs",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT1",
+            "name": "testGetXattrAttribute",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT2",
+            "name": "testGetMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT6",
+            "name": "testExclusiveCreateAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT4",
+            "name": "testCreateNewIfMissingAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_xattr",
+            "code": "XATT3",
+            "name": "testCreateNewAttr",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFST1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLA1",
+            "name": "testFlexLayoutTestAccess",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLG2",
+            "name": "testFlexLayoutStress",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS3",
+            "name": "testFlexLayoutStatsStraight",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS1",
+            "name": "testFlexLayoutStatsSmall",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS2",
+            "name": "testFlexLayoutStatsReset",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLS4",
+            "name": "testFlexLayoutStatsOverflow",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEWRITE",
+            "name": "testFlexLayoutReturnStaleWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSTALEREAD",
+            "name": "testFlexLayoutReturnStaleRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTWRITE",
+            "name": "testFlexLayoutReturnServerFaultWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORSERVERFAULTREAD",
+            "name": "testFlexLayoutReturnServerFaultRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOWRITE",
+            "name": "testFlexLayoutReturnNxioWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNXIOREAD",
+            "name": "testFlexLayoutReturnNxioRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPCWRITE",
+            "name": "testFlexLayoutReturnNospcWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORNOSPC",
+            "name": "testFlexLayoutReturnNospcRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOWRITE",
+            "name": "testFlexLayoutReturnIoWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORIOREAD",
+            "name": "testFlexLayoutReturnIoRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR1",
+            "name": "testFlexLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIGWRITE",
+            "name": "testFlexLayoutReturnFbigWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORFBIG",
+            "name": "testFlexLayoutReturnFbigRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYWRITE",
+            "name": "testFlexLayoutReturnDelayWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORDELAYREAD",
+            "name": "testFlexLayoutReturnDelayRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSWRITE",
+            "name": "testFlexLayoutReturnAccessWrite",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLORACCESSREAD",
+            "name": "testFlexLayoutReturnAccessRead",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOR100",
+            "name": "testFlexLayoutReturn100",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFLOOS",
+            "name": "testFlexLayoutOldSeqid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_flex",
+            "code": "FFGDI1",
+            "name": "testFlexGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC1",
+            "name": "testAllocateSupported",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC2",
+            "name": "testAllocateStateidZero",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_sparse",
+            "code": "ALLOC3",
+            "name": "testAllocateStateidOne",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID3",
+            "name": "testOpenWriteClose",
+            "time": "0.01645517349243164"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID8",
+            "name": "testOpenSetattr",
+            "time": "0.009668350219726562"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID10",
+            "name": "testOpenSaveFHLookupRestoreFHClose",
+            "time": "0.00938272476196289"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID5",
+            "name": "testOpenLookupClose",
+            "time": "0.00699305534362793"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID7",
+            "name": "testOpenLayoutGet",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID9",
+            "name": "testOpenFreestateidClose",
+            "time": "0.007895946502685547"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID1",
+            "name": "testOpenAndClose",
+            "time": "0.005362272262573242"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID4",
+            "name": "testLockWriteLocku",
+            "time": "0.012134552001953125"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID2",
+            "name": "testLockLockU",
+            "time": "0.009341955184936523"
+        },
+        {
+            "classname": "st_current_stateid",
+            "code": "CSID6",
+            "name": "testCloseNoStateid",
+            "time": "0.0077800750732421875"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK2",
+            "name": "testStateid2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK1",
+            "name": "testStateid1",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK4",
+            "name": "testSplitCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_block",
+            "code": "BLOCK3",
+            "name": "testEmptyCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4c",
+            "name": "testRebootWithManyManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2c",
+            "name": "testRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4b",
+            "name": "testRebootWithManyManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2b",
+            "name": "testRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT4a",
+            "name": "testRebootWithManyClientsDoubleReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT2a",
+            "name": "testRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT5",
+            "name": "testRebootWithLateReclaim",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT1",
+            "name": "testRebootValid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3c",
+            "name": "testDoubleRebootWithManyManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3b",
+            "name": "testDoubleRebootWithManyManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_reboot",
+            "code": "REBT3a",
+            "name": "testDoubleRebootWithManyClients",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1s",
+            "name": "testSocket",
+            "time": "0.005045652389526367"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1a",
+            "name": "testLink",
+            "time": "0.0052471160888671875"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1r",
+            "name": "testFile",
+            "time": "0.006002902984619141"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1f",
+            "name": "testFifo",
+            "time": "0.0055048465728759766"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1d",
+            "name": "testDir",
+            "time": "0.05013394355773926"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1c",
+            "name": "testChar",
+            "time": "0.006200075149536133"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH1b",
+            "name": "testBlock",
+            "time": "0.005980730056762695"
+        },
+        {
+            "classname": "st_putfh",
+            "code": "PUTFH2",
+            "name": "testBadHandle",
+            "time": "0.0047054290771484375"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM6",
+            "name": "testZeroLengthOldname",
+            "time": "0.008797168731689453"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM7",
+            "name": "testZeroLengthNewname",
+            "time": "0.008416175842285156"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1s",
+            "name": "testValidSocket",
+            "time": "0.010894775390625"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1a",
+            "name": "testValidLink",
+            "time": "0.012538909912109375"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1r",
+            "name": "testValidFile",
+            "time": "0.012739181518554688"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1f",
+            "name": "testValidFifo",
+            "time": "0.012830495834350586"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1d",
+            "name": "testValidDir",
+            "time": "0.012021064758300781"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1c",
+            "name": "testValidChar",
+            "time": "0.012079954147338867"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM1b",
+            "name": "testValidBlock",
+            "time": "0.012274980545043945"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM21",
+            "name": "testStaleRename",
+            "time": "0.013654232025146484"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2s",
+            "name": "testSfhSocket",
+            "time": "0.00764918327331543"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2a",
+            "name": "testSfhLink",
+            "time": "0.007353782653808594"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2r",
+            "name": "testSfhFile",
+            "time": "0.007542610168457031"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2f",
+            "name": "testSfhFifo",
+            "time": "0.007291555404663086"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2c",
+            "name": "testSfhChar",
+            "time": "0.007578611373901367"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM2b",
+            "name": "testSfhBlock",
+            "time": "0.007609844207763672"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM19",
+            "name": "testSelfRenameFile",
+            "time": "0.009297847747802734"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM18",
+            "name": "testSelfRenameDir",
+            "time": "0.00800180435180664"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM5",
+            "name": "testNonExistent",
+            "time": "0.007981538772583008"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM4",
+            "name": "testNoSfh",
+            "time": "0.005675554275512695"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM20",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_rename.py\", line 524, in testLinkRename\n    check(res)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LINK should return NFS4_OK, instead got NFS4ERR_ACCESS\n",
+                "message": "OP_LINK should return NFS4_OK, instead got NFS4ERR_ACCESS"
+            },
+            "name": "testLinkRename",
+            "time": "0.007639646530151367"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM17",
+            "name": "testFileToFullDir",
+            "time": "0.014306068420410156"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM15",
+            "name": "testFileToFile",
+            "time": "0.013413190841674805"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM14",
+            "name": "testFileToDir",
+            "time": "0.012378692626953125"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM10",
+            "name": "testDotsOldname",
+            "time": "0.012876033782958984"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM11",
+            "name": "testDotsNewname",
+            "time": "0.01302647590637207"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM12",
+            "name": "testDirToObj",
+            "time": "0.01148533821105957"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM16",
+            "name": "testDirToFullDir",
+            "time": "0.011563301086425781"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM13",
+            "name": "testDirToDir",
+            "time": "0.011877298355102539"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3s",
+            "name": "testCfhSocket",
+            "time": "0.010971784591674805"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3a",
+            "name": "testCfhLink",
+            "time": "0.00870203971862793"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3r",
+            "name": "testCfhFile",
+            "time": "0.008003950119018555"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3f",
+            "name": "testCfhFifo",
+            "time": "0.0076978206634521484"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3c",
+            "name": "testCfhChar",
+            "time": "0.007790803909301758"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM3b",
+            "name": "testCfhBlock",
+            "time": "0.007784128189086914"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM8",
+            "name": "testBadutf8Oldname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_rename",
+            "code": "RNM9",
+            "name": "testBadutf8Newname",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP4",
+            "name": "testXdev",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1s",
+            "name": "testSock",
+            "time": "0.005237102508544922"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP3",
+            "name": "testNoFH",
+            "time": "0.004334449768066406"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP2",
+            "name": "testLookuppRoot",
+            "time": "0.005172014236450195"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1d",
+            "name": "testLookupp",
+            "time": "0.005039691925048828"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1a",
+            "name": "testLink",
+            "time": "0.004542112350463867"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1r",
+            "name": "testFile",
+            "time": "0.005141019821166992"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1f",
+            "name": "testFifo",
+            "time": "0.00446319580078125"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1c",
+            "name": "testChar",
+            "time": "0.004708528518676758"
+        },
+        {
+            "classname": "st_lookupp",
+            "code": "LKPP1b",
+            "name": "testBlock",
+            "time": "0.004518985748291016"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET2",
+            "name": "testLayoutReturnFsid",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET1",
+            "name": "testLayoutReturnFile",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTRET3",
+            "name": "testLayoutReturnAll",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "LAYOUTCOMMIT1",
+            "name": "testLayoutCommit",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT1",
+            "name": "testGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDLIST1",
+            "name": "testGetDevList",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETDINFO1",
+            "name": "testGetDevInfo",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_getdevicelist",
+            "code": "GETLAYOUT100",
+            "name": "testEMCGetLayout",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_verify",
+            "code": "VF1r",
+            "name": "testMandFile",
+            "time": "0.007066249847412109"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG9",
+            "name": "testWriteOpenvsReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG2",
+            "name": "testWriteDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG23",
+            "name": "testServerSelfConflict3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG1",
+            "name": "testReadDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG4",
+            "name": "testNoDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG8",
+            "name": "testDelegRevocation",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG6",
+            "name": "testCBSecParmsNull",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG7",
+            "name": "testCBSecParmsChange",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG5",
+            "name": "testCBSecParms",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_delegation",
+            "code": "DELEG3",
+            "name": "testAnyDeleg",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN1",
+            "name": "testSupported",
+            "time": "0.0064699649810791016"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 58, in testServerStateSeqid\n    expect(res, seqid=2)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 18, in expect\n    fail(\"Expected open_stateid.seqid == %i, got %i\" % (seqid, got))\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 275, in fail\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Expected open_stateid.seqid == 2, got 1\n",
+                "message": "Expected open_stateid.seqid == 2, got 1"
+            },
+            "name": "testServerStateSeqid",
+            "time": "0.005181550979614258"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN30",
+            "name": "testReadWrite",
+            "time": "0.014577150344848633"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN7",
+            "name": "testOPENClaimFH",
+            "time": "0.013189315795898438"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN6",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_open.py\", line 138, in testEXCLUSIVE4AtNameAttribute\n    check(res, NFS4ERR_EXIST)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_EXIST, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_EXIST, instead got NFS4_OK"
+            },
+            "name": "testEXCLUSIVE4AtNameAttribute",
+            "time": "0.005151033401489258"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN8",
+            "name": "testCloseWithZeroSeqid",
+            "time": "0.0075185298919677734"
+        },
+        {
+            "classname": "st_open",
+            "code": "OPEN31",
+            "name": "testAnonReadWrite",
+            "time": "0.012101888656616211"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK2",
+            "name": "testUseTwoSessions",
+            "time": "0.008574247360229492"
+        },
+        {
+            "classname": "st_trunking",
+            "code": "TRUNK1",
+            "name": "testTwoSessions",
+            "time": "0.005575656890869141"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ7",
+            "name": "testTooManyOps",
+            "time": "0.005297183990478516"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ1",
+            "name": "testSupported",
+            "time": "0.004732608795166016"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ12",
+            "name": "testSessionidSequenceidSlotid",
+            "time": "0.004216432571411133"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ6",
+            "name": "testRequestTooBig",
+            "time": "0.004546403884887695"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ10b",
+            "name": "testReplayCache007",
+            "time": "0.0077288150787353516"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9f",
+            "name": "testReplayCache006",
+            "time": "0.004976749420166016"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9e",
+            "name": "testReplayCache005",
+            "time": "0.005361080169677734"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9d",
+            "name": "testReplayCache004",
+            "time": "0.005392551422119141"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9c",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 160, in testReplayCache003\n    check(res1, NFS4ERR_INVAL)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_LOOKUP should return NFS4ERR_INVAL, instead got NFS4_OK\n",
+                "message": "OP_LOOKUP should return NFS4ERR_INVAL, instead got NFS4_OK"
+            },
+            "name": "testReplayCache003",
+            "time": "0.003287792205810547"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9b",
+            "name": "testReplayCache002",
+            "time": "0.009181737899780273"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ9a",
+            "name": "testReplayCache001",
+            "time": "0.008949041366577148"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ11",
+            "name": "testOpNotInSession",
+            "time": "0.002610921859741211"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ2",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_sequence.py\", line 28, in testNotFirst\n    res = sess.compound([sess.seq_op()])\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 539, in compound\n    res = self.update_seq_state(res, slot)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/pynfs/nfs4.1/nfs4client.py\", line 552, in update_seq_state\n    seq_res = res.resarray[0]\n              ~~~~~~~~~~~~^^^\nIndexError: list index out of range\n",
+                "message": "IndexError: list index out of range\n"
+            },
+            "name": "testNotFirst",
+            "time": "0.0031251907348632812"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ4",
+            "name": "testImplicitBind",
+            "time": "0.017582416534423828"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ8",
+            "name": "testBadSlot",
+            "time": "0.004653215408325195"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ5",
+            "name": "testBadSession",
+            "time": "0.0009415149688720703"
+        },
+        {
+            "classname": "st_sequence",
+            "code": "SEQ13",
+            "name": "testBadSequenceidAtSlot",
+            "time": "0.005669355392456055"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC2",
+            "name": "testSupported2",
+            "time": "0.008267402648925781"
+        },
+        {
+            "classname": "st_secinfo",
+            "code": "SEC1",
+            "name": "testSupported",
+            "time": "0.00768733024597168"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN4",
+            "name": "testSupported4",
+            "time": "0.004986763000488281"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN3",
+            "name": "testSupported3",
+            "time": "0.004843473434448242"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN2",
+            "name": "testSupported2",
+            "time": "0.004676103591918945"
+        },
+        {
+            "classname": "st_secinfo_no_name",
+            "code": "SECNN1",
+            "name": "testSupported",
+            "time": "0.004625082015991211"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC1",
+            "name": "testSupported",
+            "time": "0.005072355270385742"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC2",
+            "name": "testReclaimAfterRECC",
+            "time": "0.007489681243896484"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC3",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_reclaim_complete.py\", line 70, in testOpenBeforeRECC\n    check(res, NFS4ERR_GRACE)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK\n",
+                "message": "OP_GETFH should return NFS4ERR_GRACE, instead got NFS4_OK"
+            },
+            "name": "testOpenBeforeRECC",
+            "time": "0.0037314891815185547"
+        },
+        {
+            "classname": "st_reclaim_complete",
+            "code": "RECC4",
+            "name": "testDoubleRECC",
+            "time": "0.0076558589935302734"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID1",
+            "name": "testSupported",
+            "time": "0.0026717185974121094"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID2",
+            "name": "testDestroyCIDWS",
+            "time": "0.006107330322265625"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID8",
+            "name": "testDestroyCIDTwice",
+            "time": "0.0030243396759033203"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID5",
+            "name": "testDestroyCIDSessionB",
+            "time": "0.004084348678588867"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID7",
+            "name": "testDestroyCIDNotOnly",
+            "time": "0.0010318756103515625"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID6",
+            "name": "testDestroyCIDCSession",
+            "time": "0.00521397590637207"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID3",
+            "name": "testDestroyBadCIDWS",
+            "time": "0.0010449886322021484"
+        },
+        {
+            "classname": "st_destroy_clientid",
+            "code": "DESCID4",
+            "name": "testDestroyBadCIDIS",
+            "time": "0.004445075988769531"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9006",
+            "name": "testDestroyLockConfRace",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS1",
+            "name": "testDestroyBasic",
+            "time": "0.00993037223815918"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9003",
+            "name": "testDestroy3",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9002",
+            "name": "testDestroy2",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9001",
+            "name": "testDestroy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9005",
+            "name": "testDestoryNotSoleOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_destroy_session",
+            "code": "DSESS9004",
+            "name": "testDestoryNotFinalOps",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS28",
+            "name": "testTooSmallMaxReq",
+            "time": "0.0029511451721191406"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS25",
+            "name": "testTooSmallMaxRS",
+            "time": "0.0025527477264404297"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2b",
+            "name": "testSupported2b",
+            "time": "0.008235931396484375"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS2",
+            "name": "testSupported2",
+            "time": "0.006585597991943359"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS1",
+            "name": "testSupported1",
+            "time": "0.003523111343383789"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS6",
+            "name": "testReplay2",
+            "time": "0.003268718719482422"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5b",
+            "name": "testReplay1b",
+            "time": "0.0052433013916015625"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5a",
+            "name": "testReplay1a",
+            "time": "0.005486965179443359"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS5",
+            "name": "testReplay1",
+            "time": "0.0031986236572265625"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS27",
+            "name": "testRepTooBigToCache",
+            "time": "0.003367900848388672"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS26",
+            "name": "testRepTooBig",
+            "time": "0.006253719329833984"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS19",
+            "name": "testRdmaArray2",
+            "time": "0.0018999576568603516"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS18",
+            "name": "testRdmaArray1",
+            "time": "0.0034742355346679688"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS17",
+            "name": "testRdmaArray0",
+            "time": "0.0038106441497802734"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS10",
+            "name": "testPrincipalCollision2",
+            "time": "0.003173828125"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS9",
+            "name": "testPrincipalCollision1",
+            "time": "0.0026085376739501953"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS23",
+            "name": "testNotOnlyOp",
+            "time": "0.0023458003997802734"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS3",
+            "name": "testNoExchange",
+            "time": "0.0009851455688476562"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS22",
+            "name": "testMaxreqs",
+            "time": "0.0036344528198242188"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS200",
+            "name": "testManyClients",
+            "time": "0.04114031791687012"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS29",
+            "name": "testDRCMemLeak",
+            "time": "7.997941732406616"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS24",
+            "name": "testCsr_sequence",
+            "time": "0.0041239261627197266"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS4",
+            "name": "testContrivedReplay",
+            "time": "0.002713441848754883"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16a",
+            "name": "testCbSecParmsDec",
+            "time": "0.0042514801025390625"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS16",
+            "name": "testCbSecParms",
+            "time": "0.003742218017578125"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS21",
+            "name": "testCallbackVersion",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS20",
+            "name": "testCallbackProgram",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS8",
+            "name": "testBadSeqnum2",
+            "time": "0.003962278366088867"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS7",
+            "name": "testBadSeqnum1",
+            "time": "0.00400853157043457"
+        },
+        {
+            "classname": "st_create_session",
+            "code": "CSESS15",
+            "name": "testBadFlag",
+            "time": "0.0027010440826416016"
+        },
+        {
+            "classname": "st_copy",
+            "code": "COPY5",
+            "name": "testZeroLengthCopy",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP1",
+            "name": "testZeroOps",
+            "time": "0.0013496875762939453"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP5",
+            "name": "testUndefined",
+            "time": "0.004839658737182617"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4b",
+            "name": "testInvalidMinor2",
+            "time": "0.0015757083892822266"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP4a",
+            "name": "testInvalidMinor",
+            "time": "0.0018284320831298828"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP2",
+            "name": "testGoodTag",
+            "time": "0.0020263195037841797"
+        },
+        {
+            "classname": "st_compound",
+            "code": "COMP3",
+            "name": "testBadTags",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6",
+            "name": "testUpdateNonexistant",
+            "time": "0.0018606185913085938"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6h",
+            "name": "testUpdate111",
+            "time": "0.004815578460693359"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6g",
+            "name": "testUpdate110",
+            "time": "0.004770755767822266"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6f",
+            "name": "testUpdate101",
+            "time": "0.005827903747558594"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6e",
+            "name": "testUpdate100",
+            "time": "0.0049021244049072266"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6d",
+            "name": "testUpdate011",
+            "time": "0.002566814422607422"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6c",
+            "name": "testUpdate010",
+            "time": "0.0025794506072998047"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6b",
+            "name": "testUpdate001",
+            "time": "0.002636432647705078"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID6a",
+            "name": "testUpdate000",
+            "time": "0.003263711929321289"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1b",
+            "name": "testSupported2",
+            "time": "0.004552602767944336"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID7",
+            "name": "testSupported1a",
+            "time": "0.0009381771087646484"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID1",
+            "name": "testSupported",
+            "time": "0.0009582042694091797"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID50",
+            "name": "testSSV",
+            "skipped": 1,
+            "time": "0"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID8",
+            "name": "testNotOnlyOp",
+            "time": "0.0010256767272949219"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5h",
+            "name": "testNoUpdate111",
+            "time": "0.005236148834228516"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5g",
+            "name": "testNoUpdate110",
+            "time": "0.0070836544036865234"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5fb",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 275, in testNoUpdate101b\n    check(res, NFS4ERR_BADSESSION)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK\n",
+                "message": "Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK"
+            },
+            "name": "testNoUpdate101b",
+            "time": "0.014086008071899414"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5f",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 253, in testNoUpdate101\n    check(res, NFS4ERR_BADSESSION)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK\n",
+                "message": "Compound should return NFS4ERR_BADSESSION, instead got NFS4_OK"
+            },
+            "name": "testNoUpdate101",
+            "time": "0.005591869354248047"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5e",
+            "name": "testNoUpdate100",
+            "time": "0.013327598571777344"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5d",
+            "name": "testNoUpdate011",
+            "time": "0.0034487247467041016"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5c",
+            "name": "testNoUpdate010",
+            "time": "0.004025936126708984"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5b",
+            "name": "testNoUpdate001",
+            "time": "0.003666400909423828"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID5a",
+            "name": "testNoUpdate000",
+            "time": "0.003914594650268555"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID2",
+            "name": "testNoImplId",
+            "time": "0.001215219497680664"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID3",
+            "name": "testLongArray",
+            "time": "0.0008237361907958984"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID9",
+            "failure": {
+                "err": "Traceback (most recent call last):\n  File \"/opt/pynfs/nfs4.1/testmod.py\", line 234, in run\n    self.runtest(self, environment)\n  File \"/opt/pynfs/nfs4.1/server41tests/st_exchange_id.py\", line 513, in testLeasePeriod\n    check(res2, NFS4ERR_STALE_CLIENTID)\n  File \"/opt/pynfs/nfs4.1/server41tests/environment.py\", line 308, in check\n    raise testmod.FailureException(msg)\ntestmod.FailureException: OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK\n",
+                "message": "OP_CREATE_SESSION should return NFS4ERR_STALE_CLIENTID, instead got NFS4_OK"
+            },
+            "name": "testLeasePeriod",
+            "time": "101.10158109664917"
+        },
+        {
+            "classname": "st_exchange_id",
+            "code": "EID4",
+            "name": "testBadFlags",
+            "time": "0.008368492126464844"
+        }
+    ],
+    "tests": 262,
+    "time": 410.44349670410156,
+    "timestamp": "2026-05-03 15:56:06.236261"
+}

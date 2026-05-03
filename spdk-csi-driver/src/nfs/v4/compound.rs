@@ -36,6 +36,14 @@ pub struct CompoundRequest {
     pub tag_valid: bool,
     pub minor_version: u32,
     pub operations: Vec<Operation>,
+    /// Original on-wire byte length of this COMPOUND's args (post-RPC-
+    /// header). Set at decode time by the entry point that has the raw
+    /// bytes; the dispatcher compares this against the session's
+    /// negotiated `ca_maxrequestsize` after SEQUENCE binds the session
+    /// and emits `NFS4ERR_REQ_TOO_BIG` if exceeded (RFC 8881 §18.46.4).
+    /// `0` means "size unknown / skip check" — kept that way so older
+    /// callers that don't set it don't accidentally trigger the gate.
+    pub wire_size: usize,
 }
 
 /// COMPOUND response
@@ -441,7 +449,7 @@ pub enum ReadPlusSegment {
 }
 
 /// Operation result
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum OperationResult {
     // File handle operations
     PutRootFh(Nfs4Status),
@@ -802,7 +810,7 @@ impl CompoundRequest {
         // that pair a bogus minor version with malformed operations
         // (pynfs COMP4b sends `version=50` with `op.illegal()`).
         if minor_version > NFS_V4_MINOR_VERSION_2 {
-            return Ok(Self { tag, tag_valid, minor_version, operations: Vec::new() });
+            return Ok(Self { tag, tag_valid, minor_version, operations: Vec::new(), wire_size: 0 });
         }
 
         // Decode operation count
@@ -846,6 +854,10 @@ impl CompoundRequest {
             tag_valid,
             minor_version,
             operations,
+            // The decoder doesn't see the original wire bytes' length;
+            // the caller (handle_compound in server_v4 / pnfs/mds/server)
+            // knows it and sets it post-decode.
+            wire_size: 0,
         })
     }
 

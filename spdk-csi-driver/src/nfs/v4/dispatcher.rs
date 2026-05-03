@@ -303,6 +303,9 @@ impl CompoundDispatcher {
         // the limit when we see SEQUENCE and short-circuit the loop if the
         // total op count is over.
         let total_ops = request.operations.len();
+        // Snapshot the original wire size for §18.46.4 REQ_TOO_BIG
+        // checking after SEQUENCE binds the session below.
+        let request_wire_size = request.wire_size;
 
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
@@ -321,13 +324,16 @@ impl CompoundDispatcher {
             // Dispatch operation
             let result = self.dispatch_operation(operation, &mut context).await;
 
-            // RFC 8881 §18.36.4: once SEQUENCE has bound a session, all ops
-            // beyond `ca_maxoperations` MUST yield NFS4ERR_TOO_MANY_OPS. We
-            // detect this on the (maxops+1)-th iteration after the SEQUENCE
-            // landed in the result list — meaning the prior ops up to the
-            // limit ran normally. The dispatcher fails fast on first-error,
-            // so we just push a TOO_MANY_OPS sentinel using the current op's
-            // result-slot opcode and break.
+            // RFC 8881 §18.36.4 + §18.46.4: per-session limits the client
+            // negotiated at CREATE_SESSION. Both fire only after SEQUENCE
+            // has bound a session.
+            //
+            //   * `ca_maxoperations` (TOO_MANY_OPS) — first op past the
+            //     limit emits the sentinel.
+            //   * `ca_maxrequestsize` (REQ_TOO_BIG) — total wire size of
+            //     this COMPOUND's args > what the session said it could
+            //     accept. `wire_size == 0` means the caller didn't plumb
+            //     the length (older test fixtures); skip the check then.
             if let Some(sid) = context.session_id {
                 if let Some(s) = self.state_mgr.sessions.get_session(&sid) {
                     if total_ops as u32 > s.fore_chan_maxops && i + 1 > s.fore_chan_maxops as usize {
@@ -339,6 +345,31 @@ impl CompoundDispatcher {
                             status: Nfs4Status::TooManyOps,
                         });
                         break;
+                    }
+                    if request_wire_size > 0
+                        && request_wire_size > s.fore_chan_maxrequestsize as usize
+                    {
+                        warn!(
+                            "COMPOUND: wire_size {} > ca_maxrequestsize {} → REQ_TOO_BIG",
+                            request_wire_size, s.fore_chan_maxrequestsize,
+                        );
+                        // Push the just-dispatched result first so the
+                        // SEQUENCE op's own result lands at results[0]
+                        // (clients index by op position to read SEQUENCE's
+                        // sr_status). Then push the REQ_TOO_BIG sentinel.
+                        results.push(result);
+                        results.push(OperationResult::Unsupported {
+                            opcode: 0,
+                            status: Nfs4Status::ReqTooBig,
+                        });
+                        final_status = Nfs4Status::ReqTooBig;
+                        return CompoundResponse {
+                            status: final_status,
+                            tag: request.tag,
+                            results,
+                            raw_reply: None,
+                            cache_slot: context.cache_slot,
+                        };
                     }
                 }
             }
@@ -370,13 +401,80 @@ impl CompoundDispatcher {
             results.push(result);
         }
 
+        // RFC 8881 §18.46.4: enforce the session's ca_maxresponsesize.
+        // We measure the actual encoded reply (cheap — one extra
+        // encode pass and only on the rare oversize path) rather than
+        // estimating per-op result sizes. If oversize, we replace
+        // raw_reply with the encoded form of a stripped-down response
+        // (status=REP_TOO_BIG plus a single REP_TOO_BIG sentinel
+        // result). Linux clients honour this and re-issue with
+        // smaller bs / fewer ops; pynfs's CSESS26 negotiates a
+        // 400-byte cap to exercise the gate.
+        // RFC 8881 §18.46.4: enforce ca_maxresponsesize. Encode-then-
+        // measure is one extra encode pass on the rare oversize case;
+        // estimating per-op result sizes up-front would be brittle for
+        // a small win.
+        if let Some(sid) = context.session_id {
+            if let Some(s) = self.state_mgr.sessions.get_session(&sid) {
+                let max = s.fore_chan_maxresponsesize as usize;
+                if max > 0 {
+                    let cache_slot = context.cache_slot;
+                    let trial = CompoundResponse {
+                        status: final_status,
+                        tag: request.tag.clone(),
+                        results: results.clone(),
+                        raw_reply: None,
+                        cache_slot,
+                    };
+                    let measured = trial.encode();
+                    if measured.len() > max {
+                        warn!(
+                            "COMPOUND: encoded reply {} > ca_maxresponsesize {} → REP_TOO_BIG",
+                            measured.len(), max,
+                        );
+                        // Keep the SEQUENCE result first so the client
+                        // can still read sr_status (pynfs CSESS26 indexes
+                        // by op position). Replace everything after with
+                        // a single REP_TOO_BIG sentinel.
+                        let mut stripped_results = Vec::new();
+                        if !results.is_empty() {
+                            stripped_results.push(results.into_iter().next().unwrap());
+                        }
+                        stripped_results.push(OperationResult::Unsupported {
+                            opcode: 0,
+                            status: Nfs4Status::RepTooBig,
+                        });
+                        let stripped = CompoundResponse {
+                            status: Nfs4Status::RepTooBig,
+                            tag: request.tag.clone(),
+                            results: stripped_results,
+                            raw_reply: None,
+                            cache_slot,
+                        };
+                        let stripped_bytes = stripped.encode();
+                        return CompoundResponse {
+                            status: Nfs4Status::RepTooBig,
+                            tag: request.tag,
+                            results: Vec::new(),
+                            raw_reply: Some(stripped_bytes),
+                            cache_slot,
+                        };
+                    }
+                    return CompoundResponse {
+                        status: final_status,
+                        tag: request.tag,
+                        results: Vec::new(),
+                        raw_reply: Some(measured),
+                        cache_slot,
+                    };
+                }
+            }
+        }
         CompoundResponse {
             status: final_status,
             tag: request.tag,
             results,
             raw_reply: None,
-            // Propagate the cache hint so the RPC layer caches the encoded
-            // reply against the slot once it has the byte representation.
             cache_slot: context.cache_slot,
         }
     }
@@ -2339,6 +2437,7 @@ mod tests {
                 Operation::PutRootFh,
                 Operation::GetFh,
             ],
+            wire_size: 0,
         };
 
         let response = dispatcher.dispatch_compound(request, Vec::new()).await;
@@ -2365,6 +2464,7 @@ mod tests {
                     impl_id: vec![],
                 },
             ],
+            wire_size: 0,
         };
 
         let response = dispatcher.dispatch_compound(request, Vec::new()).await;
@@ -2396,6 +2496,7 @@ mod tests {
                 Operation::RestoreFh,
                 Operation::GetFh,
             ],
+            wire_size: 0,
         };
 
         let response = dispatcher.dispatch_compound(request, Vec::new()).await;
@@ -2415,6 +2516,7 @@ mod tests {
                 Operation::GetFh,  // This will fail (no current FH)
                 Operation::PutRootFh,  // This won't execute
             ],
+            wire_size: 0,
         };
 
         let response = dispatcher.dispatch_compound(request, Vec::new()).await;
@@ -2442,6 +2544,7 @@ mod tests {
                     impl_id: vec![],
                 },
             ],
+            wire_size: 0,
         };
 
         dispatcher.dispatch_compound(request, Vec::new()).await;

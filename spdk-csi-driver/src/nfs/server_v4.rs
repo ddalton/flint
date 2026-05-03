@@ -413,17 +413,24 @@ async fn handle_compound(
     tracing::trace!("handle_compound: args.len()={}", args.len());
     tracing::trace!("handle_compound: First 32 bytes (hex): {:02x?}", &args[..args.len().min(32)]);
 
+    // Capture the original wire-byte length BEFORE decoding so the
+    // dispatcher can compare against the session's negotiated
+    // `ca_maxrequestsize` after SEQUENCE binds the session
+    // (RFC 8881 §18.46.4 / pynfs SEQ6).
+    let wire_size = args.len();
+
     // Create a decoder from the procedure arguments
     let decoder = XdrDecoder::new(args);
 
     // Decode COMPOUND request
-    let compound_req = match CompoundRequest::decode(decoder) {
+    let mut compound_req = match CompoundRequest::decode(decoder) {
         Ok(req) => req,
         Err(e) => {
             warn!("Failed to decode COMPOUND request: {}", e);
             return ReplyBuilder::garbage_args(call.xid);
         }
     };
+    compound_req.wire_size = wire_size;
 
     debug!("COMPOUND: tag={}, minor_version={}, {} operations",
            compound_req.tag,

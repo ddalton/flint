@@ -594,15 +594,21 @@ impl MetadataServer {
         use crate::nfs::v4::compound::CompoundRequest;
         use crate::nfs::xdr::XdrDecoder;
 
+        // Capture original wire size before decoding so the dispatcher
+        // can compare against the session's negotiated `ca_maxrequestsize`
+        // (RFC 8881 §18.46.4) after SEQUENCE binds the session.
+        let wire_size = args.len();
+
         // Decode COMPOUND request
         let decoder = XdrDecoder::new(args);
-        let compound_req = match CompoundRequest::decode(decoder) {
+        let mut compound_req = match CompoundRequest::decode(decoder) {
             Ok(req) => req,
             Err(e) => {
                 warn!("Failed to decode COMPOUND request: {}", e);
                 return ReplyBuilder::garbage_args(call.xid);
             }
         };
+        compound_req.wire_size = wire_size;
 
         debug!(
             "COMPOUND: tag={}, minor_version={}, {} operations",
