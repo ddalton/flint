@@ -65,7 +65,7 @@ impl MetadataServer {
         // Initialize state manager (for NFSv4 sessions, stateids).
         // Wrapped in Arc so the dispatcher and the CallbackManager
         // (cb_program lookup) can share it.
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         
         // Initialize lock manager
         let lock_mgr = Arc::new(LockManager::new());
@@ -73,11 +73,14 @@ impl MetadataServer {
         // Initialize device registry
         let device_registry = Arc::new(DeviceRegistry::new());
 
-        // Initialize layout manager
+        // Initialize layout manager. Shares the StateManager's
+        // backend so layout records persist alongside client /
+        // session / stateid records.
         let layout_manager = Arc::new(LayoutManager::new(
             Arc::clone(&device_registry),
             config.layout.policy,
             config.layout.stripe_size,
+            state_mgr.backend(),
         ));
 
         // Initialize pNFS operation handler

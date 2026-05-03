@@ -452,7 +452,7 @@ mod tests {
     /// CallbackManager can resolve it. SessionId is fixed so the
     /// test can register the same id in `back_channels`.
     fn fixture_state(cb_program: u32) -> (Arc<StateManager>, SessionId) {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session = state_mgr.sessions.create_session(
             42,                 // client_id
             0,                  // sequence
@@ -717,7 +717,7 @@ mod tests {
     async fn recall_layouts_for_device_routes_per_session() {
         let (writer_a, server_read_a, client_read_a, mut client_write_a) = pair().await;
         let (writer_b, server_read_b, client_read_b, mut client_write_b) = pair().await;
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_a = state_mgr
             .sessions
             .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
@@ -794,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn recall_layouts_for_device_empty_is_noop() {
         let (writer, _server_read, _client_read, _client_write) = pair().await;
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_id = state_mgr
             .sessions
             .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)

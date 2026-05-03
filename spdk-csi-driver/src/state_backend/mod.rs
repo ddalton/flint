@@ -35,6 +35,51 @@ pub mod sqlite;
 pub use memory::MemoryBackend;
 pub use sqlite::SqliteBackend;
 
+use std::future::Future;
+use std::sync::Arc;
+
+/// Fire-and-forget persistence from a sync mutation site.
+///
+/// Phase B.3's bridge between the existing sync manager APIs (which
+/// the dispatcher calls in many places) and the async [`StateBackend`].
+/// The pattern is: do the in-memory DashMap edit synchronously as
+/// today (so callers see the new state immediately), then call this
+/// helper to push the resulting record to the backend on a background
+/// task.
+///
+/// **Acceptable lag bound:** ~1s in the steady state. RFC 8881
+/// §15.1.10.4 lets clients retry uncached operations, so a crash
+/// between in-memory mutation and persist completion loses at most
+/// the last op (which the client redoes). The clientid / sessionid /
+/// stateid / layout records that survived the previous successful
+/// persist are what matter for restart survival.
+///
+/// **No-runtime fallback:** if called from a thread that's not inside
+/// a tokio runtime (most `#[test]` sync tests), the persist is
+/// silently skipped. Production always runs under tokio so this only
+/// affects unit tests, where MemoryBackend's in-memory DashMap is
+/// authoritative anyway.
+pub fn spawn_persist<F, Fut>(label: &'static str, f: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = StateBackendResult<()>> + Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(e) = f().await {
+                tracing::error!(target: "state_persist", label, error=%e, "persist failed");
+            }
+        });
+    }
+}
+
+/// Convenience: build a default in-memory backend wrapped in `Arc<dyn
+/// StateBackend>`. Used by tests and by production when the operator
+/// hasn't configured durable persistence (`state.backend: memory`).
+pub fn memory_backend() -> Arc<dyn StateBackend> {
+    Arc::new(MemoryBackend::new())
+}
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 

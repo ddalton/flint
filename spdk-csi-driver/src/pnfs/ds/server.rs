@@ -80,8 +80,16 @@ impl DataServer {
 
         // Initialize client manager for EXCHANGE_ID (server trunking)
         // MUST use the same server_owner and server_scope as MDS for trunking to work!
+        // DS state is ephemeral by design — clients reach DSes only
+        // for I/O and re-establish on every mount, so we use an
+        // in-memory backend regardless of the MDS-side persistence
+        // configuration.
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = Arc::new(ClientManager::new(lease_mgr, ""));
+        let client_mgr = Arc::new(ClientManager::new(
+            lease_mgr,
+            "",
+            crate::state_backend::memory_backend(),
+        ));
         info!("✓ Client manager initialized (same server_owner/scope as MDS)");
 
         Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr })

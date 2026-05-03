@@ -13,6 +13,9 @@
 
 use super::lease::LeaseManager;
 use super::super::protocol::SessionId;
+use crate::state_backend::{
+    spawn_persist, CachedCreateSessionResRecord, ClientRecord, StateBackend,
+};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,14 +204,98 @@ pub struct ClientManager {
 
     /// Server scope (our scope identifier)
     server_scope: Vec<u8>,
+
+    /// Persistence target. Every mutation here (`exchange_id`,
+    /// `mark_confirmed`, `record_create_session_reply`, …) fire-and-
+    /// forgets a `put_client` / `delete_client` to this backend so
+    /// the records survive MDS restart. Hot-path reads stay against
+    /// the local DashMap; the backend is only touched on writes and
+    /// on startup (`load_records`).
+    backend: Arc<dyn StateBackend>,
+}
+
+impl Client {
+    /// Snapshot the persisted bits of this client for the
+    /// [`StateBackend`]. `cs_cached_reply` is deliberately not
+    /// captured — `cs_cached_res` is the structured reply the
+    /// dispatcher returns on replay (CREATE_SESSION sits in a sole-op
+    /// COMPOUND, so the SEQUENCE-style raw-bytes path doesn't apply).
+    pub(crate) fn to_record(&self) -> ClientRecord {
+        ClientRecord {
+            client_id: self.client_id,
+            owner: self.owner.clone(),
+            verifier: self.verifier,
+            server_owner: self.server_owner.clone(),
+            server_scope: self.server_scope.clone(),
+            sequence_id: self.sequence_id,
+            flags: self.flags,
+            principal: self.principal.clone(),
+            confirmed: self.confirmed,
+            last_cs_sequence: self.last_cs_sequence,
+            cs_cached_res: self.cs_cached_res.as_ref().map(|c| {
+                CachedCreateSessionResRecord {
+                    session_id: c.sessionid.0,
+                    sequence: c.sequence,
+                    flags: c.flags,
+                    fore_max_request_size: c.fore_max_request_size,
+                    fore_max_response_size: c.fore_max_response_size,
+                    fore_max_response_size_cached: c.fore_max_response_size_cached,
+                    fore_max_operations: c.fore_max_operations,
+                    fore_max_requests: c.fore_max_requests,
+                }
+            }),
+            initial_cs_sequence: self.initial_cs_sequence,
+        }
+    }
+
+    /// Inverse of `to_record` — used at MDS startup by
+    /// [`ClientManager::load_records`] to repopulate the in-memory
+    /// DashMap from a backend that survived a restart.
+    pub(crate) fn from_record(r: ClientRecord) -> Self {
+        Self {
+            client_id: r.client_id,
+            owner: r.owner,
+            verifier: r.verifier,
+            server_owner: r.server_owner,
+            server_scope: r.server_scope,
+            sequence_id: r.sequence_id,
+            flags: r.flags,
+            principal: r.principal,
+            confirmed: r.confirmed,
+            last_cs_sequence: r.last_cs_sequence,
+            cs_cached_reply: None,
+            cs_cached_res: r.cs_cached_res.map(|c| CachedCreateSessionRes {
+                sessionid: SessionId(c.session_id),
+                sequence: c.sequence,
+                flags: c.flags,
+                fore_max_request_size: c.fore_max_request_size,
+                fore_max_response_size: c.fore_max_response_size,
+                fore_max_response_size_cached: c.fore_max_response_size_cached,
+                fore_max_operations: c.fore_max_operations,
+                fore_max_requests: c.fore_max_requests,
+            }),
+            initial_cs_sequence: r.initial_cs_sequence,
+        }
+    }
 }
 
 impl ClientManager {
-    /// Create a new client manager
+    /// Create a new client manager.
+    ///
     /// `volume_id` ensures each NFS server instance has a unique NFSv4 server_owner,
     /// preventing the Linux kernel from treating separate NFS pods as trunked paths
     /// to the same server (which causes cross-volume data corruption).
-    pub fn new(lease_manager: Arc<LeaseManager>, volume_id: &str) -> Self {
+    ///
+    /// `backend` is the persistence target — typically `MemoryBackend`
+    /// for tests/dev and `SqliteBackend` for production. Hot-path
+    /// reads still go through the local DashMap; `backend` only sees
+    /// mutations (fire-and-forget via `spawn_persist`) and the once-
+    /// per-startup `load_records`.
+    pub fn new(
+        lease_manager: Arc<LeaseManager>,
+        volume_id: &str,
+        backend: Arc<dyn StateBackend>,
+    ) -> Self {
         // Determine server mode: standalone NFS vs pNFS (MDS/DS)
         // PNFS_MODE can be: "standalone", "mds", "ds"
         // If not set, assume standalone mode (safer default for flint-nfs-server)
@@ -247,7 +334,54 @@ impl ClientManager {
             lease_manager,
             server_owner,
             server_scope,
+            backend,
         }
+    }
+
+    /// Repopulate the in-memory DashMap from a backend snapshot. Called
+    /// once at MDS startup before the TCP listener accepts connections,
+    /// so reconnecting clients find their existing records (no
+    /// `STALE_CLIENTID`). The `next_client_id` counter is bumped past
+    /// the highest id we observed so freshly-allocated clients never
+    /// collide with persisted ones.
+    pub fn load_records(&self, records: Vec<ClientRecord>) {
+        let mut max_id = 0u64;
+        for r in records {
+            max_id = max_id.max(r.client_id);
+            let owner = r.owner.clone();
+            let id = r.client_id;
+            self.clients.insert(id, Client::from_record(r));
+            self.owner_to_id.insert(owner, id);
+            // Re-create the lease so the lease manager doesn't think
+            // every persisted client is already expired.
+            self.lease_manager.create_lease(id);
+        }
+        // `fetch_max` would be cleaner but isn't stable on AtomicU64;
+        // this load is single-threaded (startup-only), so a plain
+        // store is fine.
+        if max_id >= self.next_client_id.load(Ordering::SeqCst) {
+            self.next_client_id.store(max_id + 1, Ordering::SeqCst);
+        }
+        info!("ClientManager loaded {} records from backend", self.clients.len());
+    }
+
+    /// Persist a client record to the backend on a background task.
+    /// Fire-and-forget; errors are logged. See `spawn_persist`'s docs
+    /// for the lag-bound rationale.
+    fn persist(&self, c: &Client) {
+        let backend = Arc::clone(&self.backend);
+        let record = c.to_record();
+        spawn_persist("client", move || async move { backend.put_client(&record).await });
+    }
+
+    /// Persist a client deletion. Used by `remove_client` and the
+    /// EXCHANGE_ID replacement paths.
+    fn persist_delete(&self, client_id: u64) {
+        let backend = Arc::clone(&self.backend);
+        spawn_persist(
+            "client_delete",
+            move || async move { backend.delete_client(client_id).await },
+        );
     }
 
     /// EXCHANGE_ID operation, implementing RFC 8881 §18.35.5.
@@ -386,11 +520,17 @@ impl ClientManager {
     /// Mark a clientid as confirmed (called by CREATE_SESSION when the
     /// client successfully establishes its first session).
     pub fn mark_confirmed(&self, client_id: u64) {
-        if let Some(mut c) = self.clients.get_mut(&client_id) {
+        let snapshot = self.clients.get_mut(&client_id).and_then(|mut c| {
             if !c.confirmed {
                 debug!("Client {} now confirmed", client_id);
                 c.confirmed = true;
+                Some(c.clone())
+            } else {
+                None
             }
+        });
+        if let Some(c) = snapshot {
+            self.persist(&c);
         }
     }
 
@@ -421,6 +561,7 @@ impl ClientManager {
             principal,
         );
         client.initial_cs_sequence = eir_sequenceid;
+        self.persist(&client);
         self.clients.insert(client_id, client);
         self.owner_to_id.insert(owner, client_id);
         self.lease_manager.create_lease(client_id);
@@ -433,6 +574,7 @@ impl ClientManager {
         if let Some((_, client)) = self.clients.remove(&client_id) {
             self.owner_to_id.remove(&client.owner);
             self.lease_manager.remove_lease(client_id);
+            self.persist_delete(client_id);
             Some(client)
         } else {
             None
@@ -451,12 +593,17 @@ impl ClientManager {
     ///
     /// LOCK-FREE: Per-client locking, not global
     pub fn update_sequence(&self, client_id: u64) -> Result<u32, String> {
-        if let Some(mut client) = self.clients.get_mut(&client_id) {
+        let snapshot = if let Some(mut client) = self.clients.get_mut(&client_id) {
             client.sequence_id += 1;
-            Ok(client.sequence_id)
+            let seq = client.sequence_id;
+            let snap = client.clone();
+            drop(client);
+            self.persist(&snap);
+            seq
         } else {
-            Err("Client not found".to_string())
-        }
+            return Err("Client not found".to_string());
+        };
+        Ok(snapshot)
     }
 
     /// Process the `csa_sequence` field of a CREATE_SESSION op, applying
@@ -510,9 +657,13 @@ impl ClientManager {
         csa_sequence: u32,
         cached: CachedCreateSessionRes,
     ) {
-        if let Some(mut client) = self.clients.get_mut(&client_id) {
+        let snapshot = self.clients.get_mut(&client_id).map(|mut client| {
             client.last_cs_sequence = Some(csa_sequence);
             client.cs_cached_res = Some(cached);
+            client.clone()
+        });
+        if let Some(c) = snapshot {
+            self.persist(&c);
         }
     }
 
@@ -534,6 +685,8 @@ impl ClientManager {
 
             // Remove lease
             self.lease_manager.remove_lease(client_id);
+
+            self.persist_delete(client_id);
 
             info!("Client {} removed", client_id);
         }
@@ -574,7 +727,7 @@ mod tests {
     #[test]
     fn test_exchange_id_new_client() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let outcome = client_mgr.exchange_id(b"client1".to_vec(), 12345, 0, b"princ".to_vec());
         // initial_cs_sequence is now 1 (small non-zero, so a client that
@@ -588,7 +741,7 @@ mod tests {
         // Until CREATE_SESSION confirms a client, RFC 8881 §18.35.5 case 4
         // says a duplicate EXCHANGE_ID MUST replace the record (new clientid).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         let id2 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
@@ -601,7 +754,7 @@ mod tests {
         // After CREATE_SESSION marks the client confirmed, an idempotent
         // EXCHANGE_ID returns the existing clientid (case 1).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         client_mgr.mark_confirmed(id1);
@@ -614,7 +767,7 @@ mod tests {
         // Confirmed record + same verifier but different principal →
         // replace (case 9 alt).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"alice".to_vec()));
         client_mgr.mark_confirmed(id1);
@@ -625,7 +778,7 @@ mod tests {
     #[test]
     fn test_exchange_id_upd_no_record_returns_noent() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let outcome = client_mgr.exchange_id(
             b"c".to_vec(), 1, EXCHGID4_FLAG_UPD_CONFIRMED_REC_A, b"p".to_vec()
@@ -637,7 +790,7 @@ mod tests {
     fn test_exchange_id_upd_unconfirmed_returns_noent() {
         // EXCHANGE_ID with UPD on an unconfirmed record → NoEnt (case 7).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let _ = client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec());
         let outcome = client_mgr.exchange_id(
@@ -650,7 +803,7 @@ mod tests {
     fn test_exchange_id_upd_verifier_mismatch_returns_not_same() {
         // Confirmed + UPD + different verifier → NotSame (case 8).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         client_mgr.mark_confirmed(id1);
@@ -665,7 +818,7 @@ mod tests {
         // Confirmed + UPD + same verifier + different principal → Perm
         // (case 9).
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id1 = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"alice".to_vec()));
         client_mgr.mark_confirmed(id1);
@@ -678,7 +831,7 @@ mod tests {
     #[test]
     fn test_sequence_update() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         assert_eq!(client_mgr.update_sequence(id).unwrap(), 1);
@@ -688,7 +841,7 @@ mod tests {
     #[test]
     fn test_client_removal() {
         let lease_mgr = Arc::new(LeaseManager::new());
-        let client_mgr = ClientManager::new(lease_mgr, "test-vol");
+        let client_mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
 
         let id = new_id(client_mgr.exchange_id(b"c".to_vec(), 1, 0, b"p".to_vec()));
         assert_eq!(client_mgr.active_count(), 1);

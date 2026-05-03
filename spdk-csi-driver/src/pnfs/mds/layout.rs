@@ -10,6 +10,9 @@
 
 use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry};
 use crate::pnfs::config::LayoutPolicy as ConfigLayoutPolicy;
+use crate::state_backend::{
+    spawn_persist, IoModeRecord, LayoutRecord, LayoutSegmentRecord, StateBackend,
+};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -66,6 +69,84 @@ pub struct LayoutManager {
 
     /// Stripe size in bytes
     stripe_size: u64,
+
+    /// Persistence target. Layouts surviving MDS restart prevents the
+    /// kernel from issuing fresh LAYOUTGETs (disruptive but functional)
+    /// and lets recall fan-out work correctly post-restart. See
+    /// `state_backend::mod.rs` for the lag-bound rationale.
+    backend: Arc<dyn StateBackend>,
+}
+
+impl LayoutState {
+    /// Snapshot the persisted bits of this layout for the
+    /// [`StateBackend`].
+    pub(crate) fn to_record(&self) -> LayoutRecord {
+        LayoutRecord {
+            stateid: self.stateid,
+            owner_client_id: self.owner.client_id,
+            owner_session_id: self.owner.session_id,
+            owner_fsid: self.owner.fsid,
+            filehandle: self.filehandle.clone(),
+            segments: self
+                .segments
+                .iter()
+                .map(|s| LayoutSegmentRecord {
+                    offset: s.offset,
+                    length: s.length,
+                    iomode: io_to_record(s.iomode),
+                    device_id: s.device_id.clone(),
+                    stripe_index: s.stripe_index,
+                    pattern_offset: s.pattern_offset,
+                })
+                .collect(),
+            iomode: io_to_record(self.iomode),
+            return_on_close: self.return_on_close,
+        }
+    }
+
+    /// Inverse of `to_record`. Used at startup by
+    /// [`LayoutManager::load_records`].
+    pub(crate) fn from_record(r: LayoutRecord) -> Self {
+        Self {
+            stateid: r.stateid,
+            owner: LayoutOwner {
+                client_id: r.owner_client_id,
+                session_id: r.owner_session_id,
+                fsid: r.owner_fsid,
+            },
+            filehandle: r.filehandle,
+            segments: r
+                .segments
+                .into_iter()
+                .map(|s| LayoutSegment {
+                    offset: s.offset,
+                    length: s.length,
+                    iomode: record_to_io(s.iomode),
+                    device_id: s.device_id,
+                    stripe_index: s.stripe_index,
+                    pattern_offset: s.pattern_offset,
+                })
+                .collect(),
+            iomode: record_to_io(r.iomode),
+            return_on_close: r.return_on_close,
+        }
+    }
+}
+
+fn io_to_record(m: IoMode) -> IoModeRecord {
+    match m {
+        IoMode::Read => IoModeRecord::Read,
+        IoMode::ReadWrite => IoModeRecord::ReadWrite,
+        IoMode::Any => IoModeRecord::Any,
+    }
+}
+
+fn record_to_io(m: IoModeRecord) -> IoMode {
+    match m {
+        IoModeRecord::Read => IoMode::Read,
+        IoModeRecord::ReadWrite => IoMode::ReadWrite,
+        IoModeRecord::Any => IoMode::Any,
+    }
 }
 
 /// Layout state - tracks an active layout issued to a client
@@ -158,11 +239,12 @@ enum LayoutPolicyImpl {
 }
 
 impl LayoutManager {
-    /// Create a new layout manager
+    /// Create a new layout manager backed by `backend`.
     pub fn new(
         device_registry: Arc<DeviceRegistry>,
         policy: ConfigLayoutPolicy,
         stripe_size: u64,
+        backend: Arc<dyn StateBackend>,
     ) -> Self {
         let policy_impl = match policy {
             ConfigLayoutPolicy::RoundRobin => LayoutPolicyImpl::RoundRobin,
@@ -181,7 +263,45 @@ impl LayoutManager {
             by_owner: Arc::new(DashMap::new()),
             policy: policy_impl,
             stripe_size,
+            backend,
         }
+    }
+
+    /// Repopulate the in-memory primary + by-owner maps from a backend
+    /// snapshot. Called once at MDS startup before the listener
+    /// accepts. Note: device-counter increments are NOT replayed —
+    /// device counts are observable load gauges, not load-bearing for
+    /// correctness, and re-incrementing them would require ordering
+    /// against DS re-registrations.
+    pub fn load_records(&self, records: Vec<LayoutRecord>) {
+        for r in records {
+            let stateid = r.stateid;
+            let layout = LayoutState::from_record(r);
+            let cid = layout.owner.client_id;
+            self.layouts.insert(stateid, layout);
+            self.by_owner
+                .entry(cid)
+                .or_insert_with(Vec::new)
+                .push(stateid);
+        }
+        info!("LayoutManager loaded {} records from backend", self.layouts.len());
+    }
+
+    fn persist(&self, l: &LayoutState) {
+        let backend = Arc::clone(&self.backend);
+        let record = l.to_record();
+        spawn_persist(
+            "layout",
+            move || async move { backend.put_layout(&record).await },
+        );
+    }
+
+    fn persist_delete(&self, stateid: LayoutStateId) {
+        let backend = Arc::clone(&self.backend);
+        spawn_persist(
+            "layout_delete",
+            move || async move { backend.delete_layout(&stateid).await },
+        );
     }
 
     /// Generate a new layout for a file.
@@ -238,6 +358,7 @@ impl LayoutManager {
         };
 
         // Track active layouts (primary map + secondary by-client index).
+        self.persist(&layout);
         self.layouts.insert(stateid, layout.clone());
         self.by_owner
             .entry(owner.client_id)
@@ -396,6 +517,8 @@ impl LayoutManager {
                 let _ = self.device_registry.decrement_layout_count(&segment.device_id);
             }
 
+            self.persist_delete(*stateid);
+
             Ok(())
         } else {
             Err(format!("Layout not found: {:?}", &stateid[0..4]))
@@ -445,6 +568,7 @@ impl LayoutManager {
         for segment in &layout.segments {
             let _ = self.device_registry.decrement_layout_count(&segment.device_id);
         }
+        self.persist_delete(*stateid);
         true
     }
 
@@ -560,15 +684,9 @@ impl LayoutManager {
     }
 }
 
-impl Default for LayoutManager {
-    fn default() -> Self {
-        Self::new(
-            Arc::new(DeviceRegistry::new()),
-            ConfigLayoutPolicy::RoundRobin,
-            8 * 1024 * 1024, // 8 MB default stripe size
-        )
-    }
-}
+// `LayoutManager` no longer has a `Default` impl: the type now
+// requires a backend. Construction sites (production = MDS startup,
+// tests = each #[test] fn) pass it explicitly.
 
 #[cfg(test)]
 mod tests {
@@ -600,6 +718,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::RoundRobin,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         let layout = manager
@@ -633,6 +752,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::Stripe,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         let layout = manager
@@ -662,6 +782,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::RoundRobin,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         let layout = manager
@@ -700,6 +821,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::RoundRobin,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         // Generate layout (will use available devices)
@@ -738,6 +860,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::RoundRobin,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         // Initially no layouts
@@ -794,6 +917,7 @@ mod tests {
             registry,
             ConfigLayoutPolicy::Stripe,
             8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
         );
 
         // Request 24 MB (should create 3 segments of 8 MB each)
@@ -836,7 +960,7 @@ mod tests {
             "10.0.0.1:2049".to_string(),
             vec!["nvme0n1".to_string()],
         )).unwrap();
-        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         // Two clients each get two layouts.
         let l_a1 = mgr.generate_layout(test_owner(1), vec![1], 0, 1024, IoMode::ReadWrite).unwrap();
@@ -869,7 +993,7 @@ mod tests {
             "10.0.0.1:2049".to_string(),
             vec!["nvme0n1".to_string()],
         )).unwrap();
-        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         // Same client holds layouts in two filesystems; LAYOUTRETURN FSID
         // should release only the one matching the filter.
@@ -907,7 +1031,7 @@ mod tests {
             "10.0.0.1:2049".to_string(),
             vec!["nvme0n1".to_string()],
         )).unwrap();
-        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         let layout = mgr
             .generate_layout(test_owner(42), vec![1], 0, 1024, IoMode::ReadWrite)
@@ -938,7 +1062,7 @@ mod tests {
             "10.0.0.1:2049".to_string(),
             vec!["nvme0n1".to_string()],
         )).unwrap();
-        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024);
+        let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         let l_a = mgr.generate_layout(test_owner(1), vec![1], 0, 1024, IoMode::ReadWrite).unwrap();
         let l_b = mgr.generate_layout(test_owner(2), vec![2], 0, 1024, IoMode::ReadWrite).unwrap();

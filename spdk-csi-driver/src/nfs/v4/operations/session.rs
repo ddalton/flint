@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_exchange_id() {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = SessionOperationHandler::new(state_mgr.clone());
 
         let op = ExchangeIdOp {
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_create_session() {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = SessionOperationHandler::new(state_mgr.clone());
 
         // First do EXCHANGE_ID
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn test_sequence() {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = SessionOperationHandler::new(state_mgr.clone());
 
         // Setup: EXCHANGE_ID + CREATE_SESSION
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_sequence_replay() {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = SessionOperationHandler::new(state_mgr.clone());
 
         // Setup session
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_destroy_session() {
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = SessionOperationHandler::new(state_mgr.clone());
 
         // Setup session

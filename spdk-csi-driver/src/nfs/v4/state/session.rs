@@ -14,7 +14,9 @@
 // 4. Server tracks slot state for exactly-once semantics
 
 use super::super::protocol::SessionId;
+use crate::state_backend::{spawn_persist, SessionRecord, StateBackend};
 use dashmap::DashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
@@ -112,6 +114,44 @@ pub struct Session {
 }
 
 impl Session {
+    /// Snapshot the persisted bits of this session for the
+    /// [`StateBackend`]. Slot replay-cache contents are deliberately
+    /// not captured (RFC 8881 §15.1.10.4 permits losing them on
+    /// restart; clients re-issue uncached ops).
+    pub(crate) fn to_record(&self) -> SessionRecord {
+        SessionRecord {
+            session_id: self.session_id.0,
+            client_id: self.client_id,
+            sequence: self.sequence,
+            flags: self.flags,
+            fore_chan_maxrequestsize: self.fore_chan_maxrequestsize,
+            fore_chan_maxresponsesize: self.fore_chan_maxresponsesize,
+            fore_chan_maxresponsesize_cached: self.fore_chan_maxresponsesize_cached,
+            fore_chan_maxops: self.fore_chan_maxops,
+            fore_chan_maxrequests: self.fore_chan_maxrequests,
+            cb_program: self.cb_program,
+        }
+    }
+
+    /// Inverse of `to_record`. Slot table is rebuilt empty (matches
+    /// what would happen if the session was created fresh — clients
+    /// will see `NFS4ERR_RETRY_UNCACHED_REP` for any pre-restart
+    /// SEQUENCE replay, which is RFC-compliant).
+    pub(crate) fn from_record(r: SessionRecord) -> Self {
+        Self::new(
+            SessionId(r.session_id),
+            r.client_id,
+            r.sequence,
+            r.flags,
+            r.fore_chan_maxrequestsize,
+            r.fore_chan_maxresponsesize,
+            r.fore_chan_maxresponsesize_cached,
+            r.fore_chan_maxops,
+            r.fore_chan_maxrequests,
+            r.cb_program,
+        )
+    }
+
     /// Create a new session
     pub fn new(
         session_id: SessionId,
@@ -223,18 +263,66 @@ pub struct SessionManager {
     /// Client to session mapping (client_id → session_ids)
     /// Lock-free per-client session tracking
     client_sessions: DashMap<u64, Vec<SessionId>>,
+
+    /// Persistence target. Sessions survive MDS restart so reconnecting
+    /// clients keep their existing slot tables and `cb_program`
+    /// binding. See `client.rs` for the full rationale.
+    backend: Arc<dyn StateBackend>,
 }
 
 impl SessionManager {
-    /// Create a new session manager
-    pub fn new() -> Self {
+    /// Create a new session manager backed by `backend`.
+    pub fn new(backend: Arc<dyn StateBackend>) -> Self {
         info!("SessionManager created");
 
         Self {
             next_session_id: AtomicU64::new(1),
             sessions: DashMap::new(),
             client_sessions: DashMap::new(),
+            backend,
         }
+    }
+
+    /// Repopulate the in-memory DashMap from a backend snapshot.
+    /// Called once at MDS startup before the listener accepts. The
+    /// `next_session_id` counter is bumped past the highest persisted
+    /// id so freshly-created sessions never collide.
+    pub fn load_records(&self, records: Vec<SessionRecord>) {
+        let mut max_id: u64 = 0;
+        for r in records {
+            let session_id = SessionId(r.session_id);
+            let cid = r.client_id;
+            // Recover the numeric counter from the high 8 bytes —
+            // SessionId encodes `(session_id_num, client_id)` in the
+            // 16-byte opaque (see `create_session` below).
+            let mut num_buf = [0u8; 8];
+            num_buf.copy_from_slice(&r.session_id[0..8]);
+            max_id = max_id.max(u64::from_be_bytes(num_buf));
+            let session = Session::from_record(r);
+            self.sessions.insert(session_id, session);
+            self.client_sessions
+                .entry(cid)
+                .or_insert_with(Vec::new)
+                .push(session_id);
+        }
+        if max_id >= self.next_session_id.load(Ordering::SeqCst) {
+            self.next_session_id.store(max_id + 1, Ordering::SeqCst);
+        }
+        info!("SessionManager loaded {} records from backend", self.sessions.len());
+    }
+
+    fn persist(&self, s: &Session) {
+        let backend = Arc::clone(&self.backend);
+        let record = s.to_record();
+        spawn_persist("session", move || async move { backend.put_session(&record).await });
+    }
+
+    fn persist_delete(&self, session_id: SessionId) {
+        let backend = Arc::clone(&self.backend);
+        spawn_persist(
+            "session_delete",
+            move || async move { backend.delete_session(&session_id.0).await },
+        );
     }
 
     /// Create a new session
@@ -274,6 +362,7 @@ impl SessionManager {
 
         // LOCK-FREE: Direct DashMap inserts without global locks
         // Only locks the specific shard, not entire map
+        self.persist(&session);
         self.sessions.insert(session_id, session.clone());
         self.client_sessions
             .entry(client_id)
@@ -312,6 +401,8 @@ impl SessionManager {
                 session_ids.retain(|id| id != session_id);
             }
 
+            self.persist_delete(*session_id);
+
             info!("Session destroyed: {:?}", session_id);
             Ok(())
         } else {
@@ -347,11 +438,10 @@ impl SessionManager {
     }
 }
 
-impl Default for SessionManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// `SessionManager` no longer has a `Default` impl: the type now requires
+// an `Arc<dyn StateBackend>` and there's no sensible default backend at
+// the type level. Callers either pass `MemoryBackend` for tests or the
+// configured `SqliteBackend` for production.
 
 #[cfg(test)]
 mod tests {
@@ -359,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_session_creation() {
-        let mgr = SessionManager::new();
+        let mgr = SessionManager::new(crate::state_backend::memory_backend());
         let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
 
         assert_eq!(session.client_id, 1);
@@ -368,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_sequence_processing() {
-        let mgr = SessionManager::new();
+        let mgr = SessionManager::new(crate::state_backend::memory_backend());
         let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
 
         // First request on slot 0
@@ -399,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_session_destruction() {
-        let mgr = SessionManager::new();
+        let mgr = SessionManager::new(crate::state_backend::memory_backend());
         let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
         let session_id = session.session_id;
 
@@ -413,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_client_sessions() {
-        let mgr = SessionManager::new();
+        let mgr = SessionManager::new(crate::state_backend::memory_backend());
         let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
         let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8, 0);
         let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8, 0);

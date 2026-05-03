@@ -2230,7 +2230,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let export_path = temp_dir.path().to_path_buf();
         let fh_mgr = Arc::new(FileHandleManager::new(export_path));
-        let state_mgr = Arc::new(StateManager::new(""));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)

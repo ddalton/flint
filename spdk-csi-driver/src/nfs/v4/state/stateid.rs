@@ -16,7 +16,9 @@
 // 4. Client closes → server revokes stateid
 
 use super::super::protocol::StateId;
+use crate::state_backend::{spawn_persist, StateBackend, StateIdRecord, StateTypeRecord};
 use dashmap::DashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
@@ -68,6 +70,46 @@ pub struct StateEntry {
 }
 
 impl StateEntry {
+    /// Snapshot the persisted bits of this state entry for the
+    /// [`StateBackend`].
+    pub(crate) fn to_record(&self) -> StateIdRecord {
+        StateIdRecord {
+            other: self.stateid.other,
+            seqid: self.seqid,
+            state_type: match self.state_type {
+                StateType::Open => StateTypeRecord::Open,
+                StateType::Lock => StateTypeRecord::Lock,
+                StateType::Delegation => StateTypeRecord::Delegation,
+            },
+            client_id: self.client_id,
+            filehandle: self.filehandle.clone(),
+            revoked: self.revoked,
+        }
+    }
+
+    /// Inverse of `to_record`. Used at startup by
+    /// [`StateIdManager::load_records`] to repopulate the in-memory
+    /// DashMap from a backend snapshot.
+    pub(crate) fn from_record(r: StateIdRecord) -> Self {
+        let stateid = StateId {
+            seqid: r.seqid,
+            other: r.other,
+        };
+        let state_type = match r.state_type {
+            StateTypeRecord::Open => StateType::Open,
+            StateTypeRecord::Lock => StateType::Lock,
+            StateTypeRecord::Delegation => StateType::Delegation,
+        };
+        Self {
+            stateid,
+            state_type,
+            client_id: r.client_id,
+            seqid: r.seqid,
+            filehandle: r.filehandle,
+            revoked: r.revoked,
+        }
+    }
+
     /// Create a new state entry
     pub fn new(
         stateid: StateId,
@@ -118,18 +160,70 @@ pub struct StateIdManager {
     /// Client to stateids mapping (for cleanup)
     /// Lock-free per-client state tracking
     client_states: DashMap<u64, Vec<[u8; 12]>>,
+
+    /// Persistence target. See `client.rs` for the full rationale;
+    /// stateids surviving restart is what prevents `BAD_STATEID` on
+    /// the client's next WRITE after an MDS pod roll.
+    backend: Arc<dyn StateBackend>,
 }
 
 impl StateIdManager {
-    /// Create a new stateid manager
-    pub fn new() -> Self {
+    /// Create a new stateid manager backed by `backend`.
+    pub fn new(backend: Arc<dyn StateBackend>) -> Self {
         info!("StateIdManager created");
 
         Self {
             next_stateid: AtomicU64::new(1),
             states: DashMap::new(),
             client_states: DashMap::new(),
+            backend,
         }
+    }
+
+    /// Repopulate the in-memory DashMap from a backend snapshot.
+    /// Bumps `next_stateid` past the highest persisted id so freshly
+    /// allocated stateids never collide.
+    pub fn load_records(&self, records: Vec<StateIdRecord>) {
+        let mut max_counter: u64 = 0;
+        for r in records {
+            // Recover the numeric counter from the high 8 bytes of
+            // `other` — `allocate` encodes `(counter, client_id_low)`
+            // there.
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&r.other[0..8]);
+            max_counter = max_counter.max(u64::from_be_bytes(buf));
+            let cid = r.client_id;
+            let other = r.other;
+            self.states.insert(other, StateEntry::from_record(r));
+            self.client_states
+                .entry(cid)
+                .or_insert_with(Vec::new)
+                .push(other);
+        }
+        if max_counter >= self.next_stateid.load(Ordering::SeqCst) {
+            self.next_stateid.store(max_counter + 1, Ordering::SeqCst);
+        }
+        info!(
+            "StateIdManager loaded {} records from backend",
+            self.states.len()
+        );
+    }
+
+    fn persist(&self, e: &StateEntry) {
+        let backend = Arc::clone(&self.backend);
+        let record = e.to_record();
+        spawn_persist(
+            "stateid",
+            move || async move { backend.put_stateid(&record).await },
+        );
+    }
+
+    fn persist_delete(&self, other: [u8; 12]) {
+        let backend = Arc::clone(&self.backend);
+        spawn_persist(
+            "stateid_delete",
+            move || async move { backend.delete_stateid(&other).await },
+        );
     }
 
     /// Allocate a new stateid
@@ -157,6 +251,11 @@ impl StateIdManager {
 
         // Create state entry
         let entry = StateEntry::new(stateid, state_type, client_id, filehandle);
+
+        // Persist before inserting so the boundary code in B.4 sees a
+        // consistent snapshot if list_stateids is called concurrently
+        // with allocations (it isn't today, but cheap insurance).
+        self.persist(&entry);
 
         // LOCK-FREE: Direct DashMap inserts without global locks
         self.states.insert(other, entry);
@@ -259,15 +358,19 @@ impl StateIdManager {
     ///
     /// LOCK-FREE: Per-stateid locking only, not global
     pub fn update_seqid(&self, stateid: &StateId) -> Result<StateId, String> {
-        if let Some(mut entry) = self.states.get_mut(&stateid.other) {
+        let result = if let Some(mut entry) = self.states.get_mut(&stateid.other) {
             if entry.revoked {
                 return Err("Cannot update revoked stateid".to_string());
             }
-
-            Ok(entry.increment_seqid())
+            let new_id = entry.increment_seqid();
+            let snap = entry.clone();
+            drop(entry);
+            self.persist(&snap);
+            new_id
         } else {
-            Err("StateId not found".to_string())
-        }
+            return Err("StateId not found".to_string());
+        };
+        Ok(result)
     }
 
     /// Get state entry
@@ -283,6 +386,9 @@ impl StateIdManager {
     pub fn revoke(&self, stateid: &StateId) -> Result<(), String> {
         if let Some(mut entry) = self.states.get_mut(&stateid.other) {
             entry.revoke();
+            let snap = entry.clone();
+            drop(entry);
+            self.persist(&snap);
             Ok(())
         } else {
             Err("StateId not found".to_string())
@@ -298,6 +404,8 @@ impl StateIdManager {
             if let Some(mut state_list) = self.client_states.get_mut(&entry.client_id) {
                 state_list.retain(|other| other != &stateid.other);
             }
+
+            self.persist_delete(stateid.other);
 
             info!("StateId removed: {:?}", stateid);
         }
@@ -340,6 +448,7 @@ impl StateIdManager {
             // Remove all stateids (each removal only locks its shard)
             for other in &state_list {
                 self.states.remove(other);
+                self.persist_delete(*other);
             }
 
             // Remove client mapping
@@ -367,11 +476,8 @@ impl StateIdManager {
     }
 }
 
-impl Default for StateIdManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// `StateIdManager` no longer has a `Default` impl: see `SessionManager`
+// for the rationale (constructor now requires a backend).
 
 #[cfg(test)]
 mod tests {
@@ -379,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_stateid_allocation() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         let stateid1 = mgr.allocate(StateType::Open, 1, None);
         let stateid2 = mgr.allocate(StateType::Open, 1, None);
@@ -396,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_stateid_validation() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         let stateid = mgr.allocate(StateType::Open, 1, None);
 
@@ -418,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_seqid_update() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         let stateid = mgr.allocate(StateType::Open, 1, None);
         assert_eq!(stateid.seqid, 1);
@@ -437,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_stateid_revocation() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         let stateid = mgr.allocate(StateType::Open, 1, None);
         assert!(mgr.validate(&stateid).is_ok());
@@ -454,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_stateid_removal() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         let stateid = mgr.allocate(StateType::Open, 1, None);
         assert_eq!(mgr.active_count(), 1);
@@ -467,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_client_stateids() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         // Client 1 has 2 stateids
         let _s1 = mgr.allocate(StateType::Open, 1, None);
@@ -485,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_client_cleanup() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         mgr.allocate(StateType::Open, 1, None);
         mgr.allocate(StateType::Lock, 1, None);
@@ -503,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_count_by_type() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         mgr.allocate(StateType::Open, 1, None);
         mgr.allocate(StateType::Open, 2, None);
@@ -516,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_special_stateids() {
-        let mgr = StateIdManager::new();
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
 
         // Anonymous stateid should validate
         assert!(mgr.validate(&ANONYMOUS_STATEID).is_ok());
