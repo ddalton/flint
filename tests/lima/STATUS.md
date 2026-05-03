@@ -9,7 +9,7 @@ Living document. Update this when a session ends or a milestone lands.
 
 * **Phase B is fully done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) plus the FH-stability follow-up (`3f000bb`) landed and pushed. The full chain: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe); a per-deployment `server_id` lives in a `server_identity` singleton table and is stamped into every NFSv4 file handle so cached FHs survive restart; `make test-pnfs-restart` proves a kernel client's `read()` against pre-restart open handles still returns the original bytes after the MDS comes back. Sessions deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4; the kernel's natural BADSESSION → fresh CREATE_SESSION recovery handles that.
 * **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id, stateids, layouts, and file-handle stamps so an existing mount keeps working byte-for-byte (Phase B). Phase C (FFL mirroring for HDFS-style replication) is demand-driven from here.
-* **Next focus: cross-host fio bench (Front A item 3).** The 1.6× single-host write number is a floor; the architectural promise of N× scaling with N DSes on N nodes remains *unverified*. **Every other perf optimization without this data is faith-based** — the bench picks the next work item by exposing where the bottleneck actually is. ~1 week of harness + run. Three branch-outcomes (per-TCP serial RPC handler at `server_v4.rs:176`, MDS-proxied reads, hidden serialisation point) are spelled out in the "Where to pick up next" section. Ship `make test-pnfs-cross-host` (3-VM Lima or small AWS bench, fio sweep, results-dump) *before* committing to any per-host optimization.
+* **Loopback nconnect sweep is in (`make test-pnfs-nconnect`); the data points to cross-host as the only next move.** Single-host with `nconnect={1,4,8,16}` × `bs={4K,1M}` × `{read,write}` shows **throughput essentially flat across nconnect** on this Mac/loopback hardware (snapshot in `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`). That **rules out** the per-TCP-serial RPC handler at `server_v4.rs:176` as the single-host ceiling — pipelining it would not move the number on this hardware. The bottleneck is below the per-connection layer (kernel page cache writeback, shared-APFS-journal between MDS+DS1+DS2, loopback TCP saturation, fio iodepth — can't disentangle without separating the kernels). **Next move: a real cross-host bench** (Option 1 from the original "performance scaling" branch). Estimated ~3 days harness + Terraform; ~$5–20 cloud cost; ~$0 if you have spare Linux boxes + a switch. The bench is reusable forever.
 * **Test gates as of HEAD:** `cargo test --lib` **310 PASS / 0 FAIL** (was 291 — +19 for `state_backend` module + reload + server_id + migration + `pnfs::config` tests). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` **green with hash assertion firing** — kernel reads pre-restart bytes successfully post-restart with zero stale-handle markers. `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline.
 * **Useful files for orienting fast:**
   * `docs/plans/pnfs-production-readiness.md` — master plan (Phase A + B done, C deferred).
@@ -578,56 +578,75 @@ for anyone running this in prod. Plan is at
    is wall-clock-derived, so cached FHs go stale across restart; fix
    is half a session of work, persists the instance discriminator
    alongside the existing `instance_counter` table.
-3. **Cross-host fio bench — NEXT (highest information value).**
-   The single-Mac-host 1.6× number is a floor; the architectural
-   prediction is N× scaling with N DSes on N nodes. Until measured
-   on a real cluster this remains a prediction, and **every later
-   perf optimization without it is faith-based**. ~1 week of harness
-   + run. Three concrete answers fall out:
+3. **Cross-host fio bench — NEXT.** The single-Mac-host 1.6× number
+   is a floor *and the loopback nconnect sweep landed in this
+   session has confirmed there's nothing more to learn from
+   single-host*. Snapshot at
+   `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`:
 
-   * **2.5–3× at N=3** → the architecture works as designed. Ship
-     the paper, optimize from there.
-   * **1.8–2.0× regardless of N** → something bottlenecks before
-     per-DS storage. Most likely: the per-TCP-serial RPC handler at
-     `server_v4.rs:176` (every connection processes RPCs sequentially
-     read→dispatch→reply). That becomes the next concrete target —
-     pipeline within the read loop or shard above the dispatcher.
-     Estimated gain: 1.5–2× single-host write throughput.
-   * **~1× regardless of N** → the design has a hidden
-     serialisation point. Find and fix.
+   ```
+   bs=4K                    bs=1M
+   nconn  write  read      nconn  write  read
+       1  247.2 259.4          1  324.3 299.6
+       4  187.4 214.0          4  324.5 289.3
+       8  216.1 235.9          8  217.4 285.6
+      16  291.7 285.1         16  314.3 254.6
+   ```
 
-   Suggested deliverable: `make test-pnfs-cross-host` harness — 3-VM
-   Lima setup (or small AWS bench), fio sweep covering write/read at
-   `bs={4K,1M}` × `jobs={1,4,8}`, results-dump script that lays out
-   the curve. Reusable for every later optimization.
+   Throughput is **flat across nconnect at both block sizes** —
+   noise dominates any signal. That **rules out** the per-TCP-serial
+   RPC handler at `server_v4.rs:176` as the single-host ceiling: if
+   it were, MiB/s would climb monotonically with nconnect. The
+   real single-host bottleneck lives below the per-connection
+   layer:
 
-### Front A.5 — Performance scaling (after cross-host data lands)
+   * **Server-side APFS journal contention.** MDS, DS1, DS2 all
+     write to `/tmp/flint-pnfs-{mds-exports,ds1,ds2}/` on the same
+     APFS volume; APFS journals are per-volume, so even though the
+     three processes look parallel, their fsyncs serialise on the
+     volume's journal lock. Cross-host puts each DS on a separate
+     filesystem, breaking that.
+   * **Loopback TCP saturation.** The kernel-internal loopback
+     adapter has limits well below real 25 GbE. Cross-host moves
+     the bytes onto a real NIC.
+   * **Kernel page cache writeback.** All three servers' caches
+     compete for the same Mac host's page cache.
 
-Pick exactly one based on what cross-host says:
+   None of these are fixable without separating the kernels, and
+   none of them tell us anything about whether the *architecture*
+   scales. The only honest path forward is a real cross-host bench.
 
-* **Per-TCP-serial RPC bottleneck** (~2 weeks) — the right target if
-  cross-host scales near-linearly to N=3 (per-host ceiling). Pipeline
+   **Recommended deliverable:** `make test-pnfs-cross-host` —
+   Terraform spec for 4× small AWS instances in one AZ (1 client +
+   1 MDS + 2 DSes; `c6gn.large` or similar; 25 Gbit network;
+   ephemeral nvme), the same fio sweep, results dumped to
+   `tests/lima/pnfs/cross-host-results-*.tsv`. ~3 days of
+   harness work; ~$5–20 per benchmark run; reusable forever for
+   future N=4, N=8 sweeps as customers ask "show me at scale."
+
+### Front A.5 — Performance scaling (gated on cross-host data)
+
+Once the cross-host curve is in, pick *one* of these based on what
+the data exposes:
+
+* **Per-TCP-serial RPC bottleneck** (~2 weeks) — the right target
+  *only* if cross-host scales near-linearly to N=3 *and* multi-
+  client cross-host runs show per-host plateau. **Loopback already
+  ruled this out for the single-host case**; cross-host might
+  re-expose it once APFS-journal contention is removed. Pipeline
   the read loop in `server_v4.rs:176`: dispatch each frame on its
-  own task, write replies in xid-order. SEQUENCE slot semantics need
-  careful re-checking so exactly-once isn't compromised. Linux NFS
-  clients open multiple TCP connections per mount (`nconnect`), so
-  this is not a hard ceiling, but each connection's WRITEs serialize
-  even when their byte ranges don't conflict — pipelining unblocks
-  intra-connection parallelism. The Linux server kernel already does
-  this; we'd be matching that pattern.
+  own task, write replies in xid-order. SEQUENCE slot semantics
+  need careful re-checking so exactly-once isn't compromised.
 * **Read-from-DS instead of MDS-proxied** (~1 week) — the right
-  target if reads top out at ~270 MiB/s while cross-host writes scale
-  but reads don't. Today reads tie at single-server speed because
-  small / sub-stripe / OPEN-for-read paths land on the MDS and get
-  proxied. The FILES layout *can* serve reads directly from DSes —
-  smoke advertises layouts only on the WRITE flow. Fix is mostly
-  advertising layouts on OPEN-for-read and verifying the kernel uses
-  them. Modest perf win on its own (1.2–1.5×), but it's the path
-  that *does* scale cross-host with DS count, so it pairs with the
-  cross-host harness.
+  target if cross-host writes scale but reads top out. Today
+  smoke advertises layouts only on the WRITE flow; OPEN-for-read
+  paths land on the MDS and get proxied. Closing this requires
+  advertising layouts on OPEN-for-read and verifying the kernel
+  uses them. Modest perf win on its own (1.2–1.5×) but it's the
+  path that *does* scale cross-host with DS count.
 
-**What NOT to do next** (deliberately deferred until the perf story
-is understood):
+**What NOT to do next** (deliberately deferred until cross-host
+data picks the target):
 * FFL mirroring (Phase C) — speculative durability work, blocks
   scaling work, ~5–7 weeks. Wait for a customer ask.
 * Locality-aware layouts — real win, but only legible after
