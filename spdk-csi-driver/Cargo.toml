@@ -79,6 +79,11 @@ cbc = { version = "0.1", features = ["alloc"] }  # CBC mode
 hmac = "0.12"  # HMAC for Kerberos integrity
 pbkdf2 = { version = "0.12", features = ["simple"] }  # Key derivation
 filetime = "0.2.26"
+# Pure-Rust embedded SQLite (no system libsqlite dependency); used by
+# state_backend::sqlite for durable NFSv4/pNFS state persistence.
+# `bundled` ships SQLite 3.45+ so we can rely on UPDATE ... RETURNING
+# for atomic instance-counter increments.
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation

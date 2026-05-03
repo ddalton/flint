@@ -30,8 +30,10 @@
 //! * In-flight RPC futures — they time out client-side and retry.
 
 pub mod memory;
+pub mod sqlite;
 
 pub use memory::MemoryBackend;
+pub use sqlite::SqliteBackend;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
