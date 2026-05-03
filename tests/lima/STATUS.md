@@ -2,8 +2,21 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after Phase A.5 of production-readiness (forced layout revocation on recall timeout — Phase A complete).
-**Branch:** `kind-no-spdk`.
+**Last updated:** 2026-05-02 — Phase A of pNFS production-readiness complete (CB_LAYOUTRECALL backchannel).
+**Branch:** `kind-no-spdk`. **HEAD:** `2ea070d`.
+
+### Picking up next session
+
+* **Phase A is done.** All 5 sub-PRs (`1fa43dc`, `8bb02bc`, `a4d7255`, `f58700f`, `2ea070d`) landed and pushed. The pNFS data plane now survives DS death without silent corruption: kernel client gets recalled where the back-channel landed; within ~20s the MDS has either heard a clean ack or forcibly revoked the orphaned layout server-side. Subsequent client ops on a revoked stateid error cleanly with `NFS4ERR_BAD_STATEID`.
+* **Next: Phase B — state persistence (Task #5).** ~1 week. `StateBackend` trait + `MemoryBackend` (parity wrapper around the existing DashMaps) + `SqliteBackend` (durable `*.sqlite`). Without it, an MDS restart vapourises active client sessions — currently the last gate before pNFS is safe to ship to a first customer. Plan is at `docs/plans/pnfs-production-readiness.md` (Phase B section).
+* **Test gates as of HEAD:** `cargo test --lib` 291 PASS / 0 FAIL. `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline as before A.1.
+* **Useful files for orienting fast:**
+  * `docs/plans/pnfs-production-readiness.md` — the master plan (Phase A done, Phase B + C still pending).
+  * `src/nfs/v4/back_channel.rs` — `BackChannelWriter` with inflight registry + `send_cb_compound`.
+  * `src/nfs/v4/cb_compound.rs` — typed CB_COMPOUND args + RPC framing.
+  * `src/pnfs/mds/callback.rs` — `CallbackManager` send-and-await, fan-out, typed `RecallOutcome`.
+  * `src/pnfs/mds/server.rs::fan_out_recalls` — heartbeat path that drives the recall + revocation policy.
+  * `tests/lima/pnfs/recall.sh` + `mds-recall.yaml` + `ds{1,2}-recall.yaml` — DS-death e2e.
 
 ### Today in one paragraph
 
@@ -16,7 +29,11 @@ defer split" decision. End-to-end test (`make test-pnfs-csi`) exercises
 the full create → mount → write → read → delete cycle against the actual
 gRPC verbs and kernel data path. Honest single-host write win is **1.6×**
 over single-server NFS at fsync=1 (ADR 0003); the architectural claim of
-linear scaling with DS count remains untested cross-host.
+linear scaling with DS count remains untested cross-host. With Phase A
+shipped, DS death triggers a server-initiated CB_LAYOUTRECALL via the
+back-channel and forced revocation if the client doesn't return the
+layout within the deadline — `make test-pnfs-recall` is the truth
+source for that path.
 
 ### Headline
 
@@ -221,15 +238,18 @@ back-channel infrastructure once delegation *grants* are wired
 The smoke is green but the pNFS implementation has known gaps that
 don't block the smoke. Tracked items (and what would surface them):
 
-- **CB_LAYOUTRECALL backchannel (Task #4)** — `pnfs/callback.rs` is a
-  stub returning `Ok(())` without sending. Without it, layout
-  revocation on DS death is impossible. Would surface in: kill a DS
-  mid-write; the kernel keeps writing into the void instead of being
-  recalled to MDS-direct.
+- ~~**CB_LAYOUTRECALL backchannel (Task #4)**~~ — **done.** Phase A
+  (sub-PRs A.1 through A.5) shipped in this branch. DS death triggers
+  `CB_LAYOUTRECALL` over the same TCP connection the client uses for
+  forward channel; if the client doesn't `LAYOUTRETURN` within ~10s,
+  the MDS forcibly revokes the layout server-side so subsequent
+  client uses error with `BAD_STATEID` rather than misroute writes.
+  Verified end-to-end by `make test-pnfs-recall`.
 - **Layout/state persistence (Task #5)** — instance IDs and layout
   stateids regenerate on MDS restart; clients see `STALE_DEVICEID` /
   `BAD_STATEID`. Would surface in: restart MDS during a long write;
-  client errors out instead of recovering.
+  client errors out instead of recovering. Last gate before pNFS is
+  shippable to a real customer.
 - ~~**LAYOUTRETURN FSID/ALL (Task #6)**~~ — **done (commit 4.E above)**.
   Layouts are now actually freed on FILE/FSID/ALL returns. Linux's
   per-file FILE-typed returns at unmount drive the path that's
@@ -283,13 +303,16 @@ radar:
   size cap is in (4 MiB), but the multi-fragment accumulation path is
   not. Linux NFS v4.1 clients don't fragment so this hasn't bitten, but
   any client that does will hit silent corruption.
-- **Task #4 (pending)** — pNFS CB_LAYOUTRECALL backchannel. Currently a
-  stub that returns `Ok(())` without sending. Without this, layout
-  revocation on DS death is impossible. Same machinery unlocks the
-  delegation tests above.
+- ~~**Task #4**~~ — **done.** pNFS CB_LAYOUTRECALL backchannel
+  shipped end-to-end across A.1–A.5. The CB infrastructure is also
+  the prerequisite for the `st_delegation` pynfs tests (which still
+  need delegation *grants* on top of CB — separate work).
 - **Task #5 (pending)** — pNFS state persistence. Device IDs and layout
   stateids are randomly regenerated on every MDS restart, so any client
   with a layout sees `STALE_DEVICEID` / `BAD_STATEID` after a restart.
+  Plan: `StateBackend` trait with `MemoryBackend` (parity, default) +
+  `SqliteBackend` (durable, production). ~1 week. See
+  `docs/plans/pnfs-production-readiness.md` Phase B.
 - ~~**Task #6**~~ — **done.** LAYOUTRETURN FILE/FSID/ALL all wired
   through `LayoutManager::return_layout` / `return_fsid_for_client` /
   `return_all_for_client`. Layouts no longer leak across mount cycles.
@@ -426,7 +449,7 @@ for code in sorted(set(old) | set(new)):
 
 ```bash
 cd spdk-csi-driver
-cargo test --release --lib nfs::v4         # 104 tests, all passing as of c86c718
+cargo test --lib                            # 291 tests, all passing as of 2ea070d
 ```
 
 ---
@@ -487,15 +510,20 @@ gates**; they don't move user-visible features but they're prerequisites
 for anyone running this in prod. Plan is at
 `docs/plans/pnfs-production-readiness.md`.
 
-1. **CB_LAYOUTRECALL backchannel (Task #4) — IN PROGRESS.** Phase A.1
-   shipped at `1fa43dc` (connection writer plumbing). Four sub-PRs
-   remain: A.2 (CB RPC framing), A.3 (replace send stub), A.4
-   (DS-death → recall fan-out + Lima e2e test), A.5 (forced layout
-   revocation on recall timeout). ~10 days of remaining work.
-2. **Layout/state persistence (Task #5) — pending.** `StateBackend`
-   trait with `memory` (current) + `sqlite` (new) impls. Persist
-   client/session/stateid/layout records; slot replay cache
-   deliberately not persisted per RFC 8881 §15.1.10.4. ~1 week.
+1. ~~**CB_LAYOUTRECALL backchannel (Task #4)**~~ — **done.** All five
+   sub-PRs shipped: A.1 (`1fa43dc`) connection writer plumbing, A.2
+   (`8bb02bc`) CB RPC framing, A.3 (`a4d7255`) real send-and-await,
+   A.4 (`f58700f`) DS-death → recall fan-out + Lima e2e, A.5
+   (`2ea070d`) forced revocation on timeout. `make test-pnfs-recall`
+   is the truth source for the full chain.
+2. **Layout/state persistence (Task #5) — NEXT.** `StateBackend`
+   trait with `memory` (parity wrapper around current DashMaps) +
+   `sqlite` (durable, single-file `*.sqlite`) impls. Persist
+   client / session / stateid / layout records + the
+   `InstanceCounter`; slot replay cache deliberately not persisted
+   per RFC 8881 §15.1.10.4. ~1 week. Target: MDS rolling restart
+   during a long-running write doesn't fail the in-flight I/O. Plan:
+   `docs/plans/pnfs-production-readiness.md` Phase B.
 3. **Cross-host fio bench — pending.** The single-Mac-host 1.6×
    number is a floor; the architectural prediction is N× scaling
    with N DSes on N nodes. Until measured on a real cluster this
