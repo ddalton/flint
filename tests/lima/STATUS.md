@@ -2,7 +2,7 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-02, after Phase A.1 of production-readiness (back-channel writer plumbing). HEAD: `1fa43dc`.
+**Last updated:** 2026-05-02, after Phase A.2 of production-readiness (CB_COMPOUND XDR + RPC framing).
 **Branch:** `kind-no-spdk`.
 
 ### Today in one paragraph
@@ -192,7 +192,7 @@ block real customer use. ADR-style discussion landed at
 | Sub | Commit | What |
 |---|---|---|
 | **A.1 — connection writer plumbing** | `1fa43dc` | `BackChannelWriter` (async-mutex-serialized writer over `BufWriter<OwnedWriteHalf>`); `CompoundDispatcher::back_channels` registry keyed by `SessionId`; `BIND_CONN_TO_SESSION` honors `conn_dir=BACK/BOTH` and registers the writer; forward replies now flow through the same writer (refactor preserved behavior). Unblocks A.2-A.5. 3 unit tests cover marker framing, concurrent-non-interleave, and EPIPE on peer close. Lib: 271 → 274; smoke green; pynfs unchanged 153/18/91. |
-| A.2 — CB-side RPC encode/decode | pending | ~3 days |
+| **A.2 — CB-side RPC encode/decode** | (this session) | New `nfs::v4::cb_compound` module with typed `CbCompoundCall` / `CbResult` / `CbCompoundReply`, plus `encode_cb_call(xid, cb_program, args)` for full RPC CALL framing and `decode_cb_reply(bytes, expected_xid)` for the response (typed `CbReplyError` separates XDR errors, RPC rejections, RPC accept-status failures, and xid mismatches). Pulled `csa_cb_program` out of `CREATE_SESSION` (was discarded as `_`) and persisted it on `Session` so the back-channel call can address `program=cb_program, version=1, proc=CB_COMPOUND`. Refactored `pnfs::mds::callback::encode_cb_layoutrecall` to use the new typed encoder — fixes a pre-existing wire bug where `CB_SEQUENCE` omitted the trailing `referring_call_lists<>` length-prefix (every byte after it would have mis-framed). 6 unit tests: args round-trip, RPC CALL header shape, success-reply decode, `NFS4ERR_NOMATCHING_LAYOUT` reply decode, xid-mismatch refusal, `PROG_UNAVAIL` accept-error surfacing. Lib: 274 → 280; smoke green; pynfs unchanged 153/18/91. |
 | A.3 — replace `send_callback_rpc` stub | pending | ~3 days |
 | A.4 — DS-death → recall fan-out | pending | ~2 days |
 | A.5 — layout revocation on recall timeout | pending | ~2 days |

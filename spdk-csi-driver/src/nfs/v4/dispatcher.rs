@@ -424,14 +424,14 @@ impl CompoundDispatcher {
                 }
             }
 
-            Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs } => {
+            Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs, cb_program } => {
                 let op = CreateSessionOp {
                     clientid,
                     sequence,
                     flags,
                     fore_chan_attrs: fore_chan_attrs.clone(),
                     back_chan_attrs: back_chan_attrs.clone(),
-                    cb_program: 0,
+                    cb_program,
                 };
                 let res = self.session_handler.handle_create_session(op, context);
                 if res.status == Nfs4Status::Ok {

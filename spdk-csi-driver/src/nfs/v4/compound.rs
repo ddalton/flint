@@ -186,6 +186,11 @@ pub enum Operation {
         flags: u32,
         fore_chan_attrs: ChannelAttrs,
         back_chan_attrs: ChannelAttrs,
+        /// `csa_cb_program` from RFC 5661 §18.36 — the RPC program
+        /// number the *client* will accept callback CALLs on. Stored
+        /// on the session so the back-channel writer's call frame can
+        /// address `program=cb_program, version=1, proc=CB_COMPOUND`.
+        cb_program: u32,
     },
     DestroySession(SessionId),
     DestroyClientId(u64),        // clientid
@@ -1301,18 +1306,22 @@ impl CompoundRequest {
                 let fore_chan_attrs = decode_channel_attrs(decoder)?;
                 let back_chan_attrs = decode_channel_attrs(decoder)?;
 
-                // csa_cb_program is a u32 we don't need yet (no backchannel).
-                let _csa_cb_program = decoder.decode_u32()?;
+                // csa_cb_program: the program number the client expects
+                // callback CALLs to be addressed to. We persist it on the
+                // Session so the CB-side RPC framing in callback.rs can
+                // emit a well-formed CALL header.
+                let cb_program = decoder.decode_u32()?;
 
                 // csa_sec_parms<> is a discriminated union on auth_flavor4 —
                 // it has variable, flavor-specific body sizes, NOT a uniform
-                // length prefix per element. We don't currently support a
-                // back channel, so we don't act on it at all. CREATE_SESSION
-                // is universally the last op in the COMPOUND, so leaving the
-                // remaining bytes unconsumed does not desync the next op.
-                // Implementing a proper backchannel will require decoding
-                // each flavor's body explicitly (AUTH_NONE = 0 bytes,
-                // AUTH_SYS = authsys_parms, RPCSEC_GSS = gss_cb_handles4).
+                // length prefix per element. AUTH_NONE has 0 bytes, AUTH_SYS
+                // carries authsys_parms, RPCSEC_GSS carries gss_cb_handles4.
+                // We currently emit callbacks with AUTH_NONE creds (matches
+                // Linux client behaviour for v4.1 mounts), so we don't yet
+                // need to act on the parms; we leave them unconsumed.
+                // CREATE_SESSION is universally the last op in the COMPOUND,
+                // so leaving the remaining bytes unconsumed does not desync
+                // the next op.
 
                 Ok(Operation::CreateSession {
                     clientid,
@@ -1320,6 +1329,7 @@ impl CompoundRequest {
                     flags,
                     fore_chan_attrs,
                     back_chan_attrs,
+                    cb_program,
                 })
             }
             opcode::DESTROY_SESSION => {

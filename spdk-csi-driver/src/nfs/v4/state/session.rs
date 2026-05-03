@@ -96,6 +96,14 @@ pub struct Session {
     /// are NFS4ERR_BADSLOT.
     pub fore_chan_maxrequests: u32,
 
+    /// Callback program number advertised by the client at CREATE_SESSION
+    /// (`csa_cb_program`, RFC 5661 §18.36). Used as the RPC `program` for
+    /// every callback CALL the server emits on this session's
+    /// back-channel. 0 means "client did not advertise a callback
+    /// program" — typically because back-channel binding hasn't happened
+    /// yet (or never will).
+    pub cb_program: u32,
+
     /// Slots for exactly-once semantics
     pub slots: Vec<Slot>,
 
@@ -115,6 +123,7 @@ impl Session {
         max_response_cached: u32,
         max_ops: u32,
         max_requests: u32,
+        cb_program: u32,
     ) -> Self {
         // Slot table is sized to the negotiated ca_maxrequests, capped at
         // MAX_SLOTS for sanity. Smaller tables let SEQUENCE return
@@ -135,6 +144,7 @@ impl Session {
             fore_chan_maxresponsesize_cached: max_response_cached,
             fore_chan_maxops: max_ops,
             fore_chan_maxrequests: slot_count,
+            cb_program,
             slots,
             highest_slotid: 0,
         }
@@ -240,6 +250,7 @@ impl SessionManager {
         max_response_cached: u32,
         max_ops: u32,
         max_requests: u32,
+        cb_program: u32,
     ) -> Session {
         // Generate session ID (lock-free atomic increment)
         let session_id_num = self.next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -258,6 +269,7 @@ impl SessionManager {
             max_response_cached,
             max_ops,
             max_requests,
+            cb_program,
         );
 
         // LOCK-FREE: Direct DashMap inserts without global locks
@@ -348,7 +360,7 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
 
         assert_eq!(session.client_id, 1);
         assert_eq!(mgr.active_count(), 1);
@@ -357,7 +369,7 @@ mod tests {
     #[test]
     fn test_sequence_processing() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
 
         // First request on slot 0
         let result = mgr.get_session_mut(&session.session_id, |s| {
@@ -388,7 +400,7 @@ mod tests {
     #[test]
     fn test_session_destruction() {
         let mgr = SessionManager::new();
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
         let session_id = session.session_id;
 
         assert_eq!(mgr.active_count(), 1);
@@ -402,9 +414,9 @@ mod tests {
     #[test]
     fn test_client_sessions() {
         let mgr = SessionManager::new();
-        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8);
-        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8);
-        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8);
+        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0);
+        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8, 0);
+        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8, 0);
 
         let client1_sessions = mgr.get_client_sessions(1);
         assert_eq!(client1_sessions.len(), 2);

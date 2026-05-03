@@ -138,7 +138,13 @@ impl CallbackManager {
         }
     }
 
-    /// Encode CB_COMPOUND with CB_LAYOUTRECALL operation
+    /// Encode CB_COMPOUND with a CB_SEQUENCE + CB_LAYOUTRECALL pair.
+    ///
+    /// Args (no RPC envelope) — Phase A.3 will wrap this in
+    /// `cb_compound::encode_cb_call(xid, cb_program, …)` and push the
+    /// result onto a back-channel writer. Keeping the args step
+    /// separate keeps the encoder side fully decoupled from the
+    /// connection lifetime.
     fn encode_cb_layoutrecall(
         &self,
         session_id: &SessionId,
@@ -147,42 +153,62 @@ impl CallbackManager {
         iomode: u32,
         changed: bool,
     ) -> Result<Bytes, String> {
-        use crate::nfs::xdr::XdrEncoder;
+        use crate::nfs::v4::cb_compound::{CbCompoundCall, CbOp, LayoutRecall};
+        use crate::nfs::v4::protocol::StateId;
 
-        let mut encoder = XdrEncoder::new();
+        // The `LayoutStateId` alias is a 16-byte blob (seqid:4 +
+        // other:12, big-endian). Crack it back into the typed
+        // `StateId` the CB encoder takes — the wire layout is
+        // identical.
+        let stateid = StateId {
+            seqid: u32::from_be_bytes([
+                layout_stateid[0],
+                layout_stateid[1],
+                layout_stateid[2],
+                layout_stateid[3],
+            ]),
+            other: {
+                let mut o = [0u8; 12];
+                o.copy_from_slice(&layout_stateid[4..16]);
+                o
+            },
+        };
 
-        // CB_COMPOUND header
-        encoder.encode_string(""); // tag (empty)
-        encoder.encode_u32(1);     // minorversion (NFSv4.1)
-        encoder.encode_u32(0);     // callback_ident
-        encoder.encode_u32(2);     // 2 operations: CB_SEQUENCE + CB_LAYOUTRECALL
+        let call = CbCompoundCall {
+            tag: String::new(),
+            minorversion: 1,
+            callback_ident: 0,
+            ops: vec![
+                CbOp::Sequence {
+                    sessionid: *session_id,
+                    // Slot 0, seqid 1 — Phase A.3 will track per-
+                    // session back-channel slot state. The first
+                    // ever call uses slot=0, seqid=1 (matches what
+                    // the forward-channel SEQUENCE handler expects).
+                    sequenceid: 1,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    cachethis: false,
+                },
+                CbOp::LayoutRecall {
+                    layout_type,
+                    iomode,
+                    changed,
+                    recall: LayoutRecall::File {
+                        // Empty filehandle = "any layout for this
+                        // session." Linux's client treats it as a
+                        // session-wide return. When we recall a
+                        // specific file we'll plumb the FH through.
+                        fh: Vec::new(),
+                        offset: 0,
+                        length: u64::MAX,
+                        stateid,
+                    },
+                },
+            ],
+        };
 
-        // Operation 1: CB_SEQUENCE (opcode 11)
-        encoder.encode_u32(11); // CB_SEQUENCE
-        encoder.encode_fixed_opaque(&session_id.0); // sessionid
-        encoder.encode_u32(1);     // sequenceid (simplified - should track per session)
-        encoder.encode_u32(0);     // slotid
-        encoder.encode_u32(1);     // highest_slotid
-        encoder.encode_bool(false); // cachethis
-
-        // Operation 2: CB_LAYOUTRECALL (opcode 5)
-        encoder.encode_u32(5);     // CB_LAYOUTRECALL
-        encoder.encode_u32(layout_type);
-        encoder.encode_u32(iomode);
-        encoder.encode_bool(changed);
-
-        // Layout recall body (LAYOUTRECALL4_FILE)
-        encoder.encode_u32(1);     // LAYOUTRECALL4_FILE
-        // For FILE recall, encode fh + offset + length + stateid
-        encoder.encode_opaque(&[]); // filehandle (empty for all files)
-        encoder.encode_u64(0);     // offset
-        encoder.encode_u64(u64::MAX); // length (all)
-
-        // stateid
-        encoder.encode_u32(0);     // seqid
-        encoder.encode_fixed_opaque(&layout_stateid[0..12]); // other[12]
-
-        Ok(encoder.finish())
+        Ok(call.encode())
     }
 
     /// Send callback RPC to client

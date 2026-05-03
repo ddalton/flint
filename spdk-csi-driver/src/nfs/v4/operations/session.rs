@@ -435,6 +435,7 @@ impl SessionOperationHandler {
             negotiated_max_response_cached,
             negotiated_max_ops,
             negotiated_max_requests,
+            op.cb_program,
         );
 
         info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",

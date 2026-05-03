@@ -111,6 +111,7 @@ mod tests {
             10,
             4096, 4096, 8,
             10,
+            0,
         );
 
         // Verify client and session exist
@@ -146,6 +147,7 @@ mod tests {
             10,
             4096, 4096, 8,
             10,
+            0,
         );
 
         // Run cleanup (no leases have expired)

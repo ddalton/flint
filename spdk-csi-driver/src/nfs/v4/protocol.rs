@@ -99,6 +99,49 @@ pub mod opcode {
     pub const ILLEGAL: u32 = 10044;
 }
 
+/// NFSv4.1 callback channel opcodes (RFC 8881 §20).
+///
+/// The callback channel runs the same XDR / RPC framing as the forward
+/// channel but with `program = cb_program` (advertised by the client at
+/// CREATE_SESSION time) and a separate opcode space. The client side
+/// of an NFSv4.1 mount registers a CB compound handler at
+/// `cb_program/version=1/proc=1` and waits for the server to call it.
+pub mod cb_opcode {
+    pub const CB_GETATTR: u32 = 3;
+    pub const CB_RECALL: u32 = 4;
+    pub const CB_LAYOUTRECALL: u32 = 5;
+    pub const CB_NOTIFY: u32 = 6;
+    pub const CB_PUSH_DELEG: u32 = 7;
+    pub const CB_RECALL_ANY: u32 = 8;
+    pub const CB_RECALLABLE_OBJ_AVAIL: u32 = 9;
+    pub const CB_RECALL_SLOT: u32 = 10;
+    pub const CB_SEQUENCE: u32 = 11;
+    pub const CB_WANTS_CANCELLED: u32 = 12;
+    pub const CB_NOTIFY_LOCK: u32 = 13;
+    pub const CB_NOTIFY_DEVICEID: u32 = 14;
+    pub const CB_ILLEGAL: u32 = 10044;
+}
+
+/// NFSv4.1 callback procedure numbers (RFC 8881 §20.1). Like the
+/// forward channel, the only meaningful procedure is CB_COMPOUND;
+/// CB_NULL is a connectivity probe.
+pub mod cb_procedure {
+    pub const CB_NULL: u32 = 0;
+    pub const CB_COMPOUND: u32 = 1;
+}
+
+/// CB program version (RFC 8881 §20.1). NFSv4.1 callbacks always use
+/// version 1; v4.0's separate program is not used by this server.
+pub const CB_VERSION: u32 = 1;
+
+/// `layoutrecall_type4` discriminator values for `CB_LAYOUTRECALL`
+/// (RFC 8881 §20.3.1).
+pub mod layoutrecall_type {
+    pub const FILE: u32 = 1;
+    pub const FSID: u32 = 2;
+    pub const ALL: u32 = 3;
+}
+
 /// EXCHANGE_ID Flags (RFC 8881 Section 18.35)
 pub mod exchgid_flags {
     // Client can support moved/referred filesystems

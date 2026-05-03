@@ -24,6 +24,7 @@ pub mod state;            // State management (stateids, sessions, leases) - DON
 pub mod operations;       // NFSv4 operations - DONE
 pub mod dispatcher;       // COMPOUND dispatcher - DONE
 pub mod back_channel;     // Per-connection writer for v4.1 callbacks (CB_LAYOUTRECALL etc.)
+pub mod cb_compound;      // CB_COMPOUND XDR + ONC RPC framing for the v4.1 callback channel
 
 pub use protocol::*;
 pub use xdr::{Nfs4XdrEncoder, Nfs4XdrDecoder, AttrEncoder, AttrDecoder};
