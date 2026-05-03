@@ -1873,8 +1873,18 @@ impl FileOperationHandler {
             current_path.join(&op.component)
         };
 
-        // Check if the target path exists
-        let metadata = match tokio::fs::metadata(&target_path).await {
+        // Check if the target path exists.
+        //
+        // **Use `symlink_metadata` (not `metadata`) so we don't
+        // dereference a trailing symlink.** RFC 5661 §16.10.5: LOOKUP
+        // returns the filehandle of the named object, even if that
+        // object is a symbolic link — the client follows it via
+        // READLINK if it wants to. Following at LOOKUP time is wrong
+        // and breaks any path with a dangling symlink as a leaf
+        // (which pynfs's --maketree creates explicitly to test the
+        // SYMLINK error class — st_lookupp / st_putfh / st_rename
+        // tests all expected NOENT vs SYMLINK splits hinge on this).
+        let metadata = match tokio::fs::symlink_metadata(&target_path).await {
             Ok(m) => m,
             Err(e) => {
                 debug!("LOOKUP: Path {:?} does not exist: {}", target_path, e);
