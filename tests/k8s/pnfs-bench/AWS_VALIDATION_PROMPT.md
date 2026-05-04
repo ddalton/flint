@@ -367,14 +367,29 @@ A Kubernetes cluster on AWS with **5 nodes** (1 control + 4 workers, all `i3en.x
 - Per-DS allocation is approximately balanced (each DS holds roughly half the written data; tolerance per the bench README).
 - Pass criterion in `tests/k8s/pnfs-bench/README.md` is met.
 
-### What to leave alone
+### What to leave alone, and what's OK to fix in-session
 
-- Don't run `git tag`, `git push --tags`, or `gh release create`.
+**Hard prohibitions** (never do these — they irreversibly publish the release):
+
+- Don't run `git tag v1.0.0`, `git push --tags`, or `gh release create`. Tagging is the release-prep session's job once **both** phases pass.
 - Don't bump versions in `Cargo.toml`, `Chart.yaml`, or `CHANGELOG.md`.
-- Don't push to a `:1.0.0` image tag (only `:1.0.0-rc<N>` is OK).
-- Don't modify `tests/k8s/pnfs-bench/*` to make the harness pass. If the harness has a real bug, file it as a separate finding.
-- Don't push to `origin/main`. If you find a bug that needs fixing, surface it as a finding for the user to decide on, don't fix-and-merge silently.
+- Don't push to the immutable `:1.0.0` image tag. Only `:1.0.0-rc<N>` tags are OK during validation.
 - Don't run Phase 2 work — no Helm install, no KUTTL tests, no SPDK setup. The user runs Phase 2 separately after Phase 1 reports green.
+
+**OK to fix in-session, with discipline** (lesson from the rc3 cycle: small blocker fixes don't need to wait for a session handoff — but they have to be done cleanly):
+
+A small, well-scoped fix to a real release-blocker bug found during the bench may be committed directly to `main` if **all four** are true:
+
+1. The fix is **localized** (a few files; not an architectural change).
+2. The fix has a **regression test** that fails before the change and passes after — the test pins the fix so the bug can't silently recur.
+3. The fix bumps the **rc tag** — push a new image at `:1.0.0-rc<N+1>` (e.g., `:1.0.0-rc2` after `:1.0.0-rc1`), so each rc is bound to a specific source state. Don't reuse an existing rc tag.
+4. The bench is **re-run against the new rc** to confirm the fix passes validation. Report the rc number that produced the green run.
+
+Anything that does *not* meet all four — architectural changes, behavioral changes, anything where you'd reasonably want a second opinion, or fixes you don't have time to write a regression test for — must be surfaced as a finding in the report, not silent-merged. The release-prep session decides whether to apply.
+
+The rc3 fix in main's history (commit `6bcff55`) is the canonical example of an in-session fix done right: three localized fixes, three new unit tests pinning the regressions, image rebuilt at `:1.0.0-rc3`, bench re-run with passing scaling numbers, all documented in the commit message.
+
+**Bench harness fixes** (`tests/k8s/pnfs-bench/*`) follow the same rule: small fixes for real harness bugs (e.g., the rc3 `sync` D-state hang) are OK with the same four-condition test. Don't modify the harness to mask a real failure.
 
 ### Reference docs in the repo
 
@@ -562,9 +577,9 @@ Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must p
 - No Flint controller or node-pod restarts during either run.
 - No leftover orphan resources after each suite completes (KUTTL cleans up between tests).
 
-### What to leave alone
+### What to leave alone, and what's OK to fix in-session
 
-(Same as Phase 1.) Don't tag, don't release, don't bump versions, don't push to `:1.0.0`, don't fix-and-merge silently. Surface findings; let the release-prep session decide.
+Same rules as Phase 1: hard prohibitions on tag, release, version bump, and pushing to the immutable `:1.0.0` image tag. **Small, well-scoped fixes that turn a red KUTTL test green ARE OK to commit to `main`** if they meet the same four-condition test as Phase 1: localized, regression-tested, rc bumped (e.g., `:1.0.0-rc4`), and the test re-run against the new rc reports green. See the Phase 1 "What to leave alone" section for the full text. Anything bigger surfaces as a finding for the release-prep session.
 
 ### Reference docs in the repo
 
@@ -596,10 +611,18 @@ Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must p
 - The NVMe IOPS check catches "wrong instance type" early — the
   failure mode it prevents is "the bench worked, but the numbers
   came from EBS, not NVMe."
-- "Don't fix-and-merge silently" matters: if a validation session
-  finds a real bug, it should come back to the release-prep session
-  as the next problem to fix on `main`, not be patched in isolation
-  and lose context.
+- "Don't fix-and-merge silently" was the original guard, but the
+  rc3 cycle (commit `6bcff55`) showed it was too strict for blocker
+  bugs found mid-bench. The guard now allows small, well-scoped,
+  regression-tested fixes with an rc bump — and forbids anything
+  bigger. The four-condition test in the "What to leave alone"
+  sections is the load-bearing rule. Architectural changes,
+  behavioral changes, and anything that needs a second opinion
+  still come back to the release-prep session as a finding.
+- The rc tag must bump on every fix that ships back through the
+  bench (`:1.0.0-rc1` → `:1.0.0-rc2` → ...). Reusing an rc tag
+  defeats the immutability guarantee that lets you say "the bench
+  passed against this exact source state."
 
 ## Outcome paths
 
