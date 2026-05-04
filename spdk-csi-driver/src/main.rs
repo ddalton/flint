@@ -180,7 +180,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
     })?;
     println!("✅ [MAIN] CSI driver initialization complete");
-    
+
+    // Snapshot CRD preflight — controller mode only (snapshot RPCs are
+    // controller-side). Reports whether the cluster's snapshot CRDs are
+    // installed and surfaces the install commands if not. Non-fatal:
+    // non-snapshot CSI operations work without snapshot CRDs, so the
+    // pod must continue running regardless of the result.
+    if mode == "controller" || mode == "all" {
+        let preflight =
+            spdk_csi_driver::snapshot::preflight::check_snapshot_crds(&kube_client).await;
+        spdk_csi_driver::snapshot::preflight::log_preflight_result(&preflight);
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;
