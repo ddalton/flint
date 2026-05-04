@@ -14,7 +14,75 @@ TSV + markdown table + log excerpts.
 
 ## Pre-cluster setup (do this before pasting the prompt)
 
-Flint expects three things on each worker node:
+Three things must be ready before the validation Claude session runs:
+
+* The pNFS bench container image must exist on a registry the cluster
+  can pull from — see **(0) Build and publish the rc image** below.
+* The cluster's worker nodes must have `ublk_drv` loaded and hugepages
+  reserved — see **(1) and (2) Node bootstrap** below.
+* The local NVMe must be visible inside pods — automatic on `i3en.xlarge`
+  (no configuration); verified at the end of this section.
+
+### (0) Build and publish the rc image
+
+The bench harness consumes a single env var, `PNFS_IMAGE`, pointing at
+a pNFS image that bundles the `flint-pnfs-mds` and `flint-pnfs-ds`
+binaries (the dedicated Dockerfile is at
+`spdk-csi-driver/docker/Dockerfile.pnfs`). For v1.0.0 validation, build
+and push that image to Docker Hub at the **release-candidate tag**
+`1.0.0-rc1`, **not `latest`**. The rc tag is immutable; `latest` would
+let a concurrent push silently change the artifact between push and
+bench, making "what was actually tested?" a forensic question.
+
+You can run this from any x86-64 machine with Docker (your dev
+laptop is fine). It does not have to be the validation machine; the
+image just has to be pullable from Docker Hub by the time the bench
+runs.
+
+```bash
+# From the repo root, on an x86-64 machine with Docker:
+git checkout main
+git pull origin main
+
+# Build and push linux/amd64 only (per the v1.0.0 release plan).
+# buildx is required for --platform; if missing:
+#   docker buildx create --use
+docker buildx build \
+  --platform linux/amd64 \
+  --tag dilipdalton/flint-pnfs:1.0.0-rc1 \
+  --file spdk-csi-driver/docker/Dockerfile.pnfs \
+  --push \
+  spdk-csi-driver
+
+# Optional: also push :latest as a moving alias (free; same SHA).
+docker buildx build \
+  --platform linux/amd64 \
+  --tag dilipdalton/flint-pnfs:latest \
+  --file spdk-csi-driver/docker/Dockerfile.pnfs \
+  --push \
+  spdk-csi-driver
+```
+
+If `docker login` for `dilipdalton` isn't set up on the build
+machine: `docker login -u dilipdalton` first. Use a Docker Hub
+access token, not your account password.
+
+After the push, verify the image is pullable:
+
+```bash
+docker pull dilipdalton/flint-pnfs:1.0.0-rc1
+docker inspect dilipdalton/flint-pnfs:1.0.0-rc1 --format '{{.Architecture}}'
+# Expect: amd64
+```
+
+If validation fails (bench doesn't pass), fix on `main`, build
+`:1.0.0-rc2` from the new SHA, repeat. Don't reuse the `:1.0.0-rc1`
+tag — each rc tag is immutable so the bench history stays
+unambiguous.
+
+### (1) and (2) Node bootstrap
+
+Flint expects on each worker:
 
 1. **`ublk_drv` kernel module loaded** — required by SPDK's CSI plugin
    to expose userspace block devices to pods.
@@ -156,6 +224,13 @@ kubectl run nvme-check --rm -it --image=busybox --restart=Never \
 
 ### Cluster install order
 
+These can run in parallel — image build and cluster bring-up are
+independent. Order is "all of this must be done before pasting the
+prompt":
+
+0. Build and push `dilipdalton/flint-pnfs:1.0.0-rc1` (step (0) above).
+   Doable from any x86-64 machine with Docker; doesn't need to be
+   the validation machine.
 1. Create cluster + nodegroup (Option A bakes node-init into the
    nodegroup; Option B adds it after).
 2. Run the three verification checks above.
@@ -163,6 +238,12 @@ kubectl run nvme-check --rm -it --image=busybox --restart=Never \
    from the Flint chart):
    ```bash
    kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+   ```
+4. Confirm the rc image is pullable from inside the cluster:
+   ```bash
+   kubectl run image-check --rm -it --image=dilipdalton/flint-pnfs:1.0.0-rc1 \
+     --command --restart=Never -- /bin/true
+   # If this returns 0 the image pulled successfully on a worker node.
    ```
 4. Now paste the prompt below into a fresh Claude Code session.
 
@@ -186,12 +267,16 @@ A Kubernetes cluster on AWS with **5 nodes** (1 control + 4 workers, all `i3en.x
 
 1. **Confirm the cluster meets the bench prerequisites** documented in `tests/k8s/pnfs-bench/README.md`. Run `kubectl get nodes`, verify there are ≥4 worker nodes, and confirm `ublk_drv` is loaded on each worker (`kubectl debug node/<name> -it --image=busybox -- chroot /host lsmod | grep ublk`, or equivalent). If `ublk_drv` is missing, log it and stop — don't try to install kernel modules from this session; the user has to fix that on their AMI bootstrap.
 
-2. **Build the v1.0.0 release-candidate container image** from the current `main` checkout. Tag it `dilipdalton/flint-csi-driver:1.0.0-rc1` (a release candidate — not the final `:1.0.0` tag, since this validation has to pass first). Push to Docker Hub. (If the user's `docker login` for `dilipdalton` is set up, this works directly. If not, ask the user to `docker login` first.) For this validation, build `linux/amd64` only.
+2. **Confirm the rc container image exists on Docker Hub.** The user has built and pushed `dilipdalton/flint-pnfs:1.0.0-rc1` from `spdk-csi-driver/docker/Dockerfile.pnfs` per the pre-cluster-setup step in `tests/k8s/pnfs-bench/AWS_VALIDATION_PROMPT.md`. Verify the image exists and is reachable from your shell with:
+   ```bash
+   docker manifest inspect dilipdalton/flint-pnfs:1.0.0-rc1
+   ```
+   If this fails, stop and ask the user to complete the pre-cluster image-build step. **Do not build the image from this session.** The build is intentionally a separate concern from the bench; rebuilding here would diverge the artifact-under-test from what the user signed off on.
 
 3. **Run the cross-host pNFS bench**:
    ```bash
    KUBECONFIG=$KUBECONFIG \
-     PNFS_IMAGE=dilipdalton/flint-csi-driver:1.0.0-rc1 \
+     PNFS_IMAGE=dilipdalton/flint-pnfs:1.0.0-rc1 \
      MDS_NODE=<worker-1-name> \
      DS_NODES="<worker-2-name> <worker-3-name>" \
      CLIENT_NODE=<worker-4-name> \
