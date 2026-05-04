@@ -37,6 +37,11 @@ pub struct CompoundDispatcher {
     io_handler: IoOperationHandler,
     perf_handler: PerfOperationHandler,
     lock_handler: LockOperationHandler,
+    /// Held alongside `lock_handler` so the dispatcher can drive
+    /// courtesy-release of expired clients' locks at COMPOUND entry
+    /// (RFC 8881 §8.4.2.4). The handler keeps its own `Arc` clone
+    /// for the LOCK / LOCKU / LOCKT op paths.
+    lock_mgr: Arc<LockManager>,
     
     /// Optional pNFS handler (only set for pNFS MDS mode)
     /// When None: pNFS operations return NFS4ERR_NOTSUPP
@@ -85,6 +90,7 @@ impl CompoundDispatcher {
             io_handler,
             perf_handler,
             lock_handler,
+            lock_mgr,
             pnfs_handler,
             back_channels: Arc::new(dashmap::DashMap::new()),
         }
@@ -163,6 +169,29 @@ impl CompoundDispatcher {
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     ) -> CompoundResponse {
         info!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
+
+        // RFC 8881 §8.4.2.4 courtesy-release. Run a quick lease-
+        // expiration sweep at the top of every COMPOUND so that any
+        // dead client's locks / share-reservations / open-state are
+        // gone before this compound's gates evaluate. Conflict checks
+        // (LOCK, share-deny, EXCLUSIVE4 retry, etc.) become
+        // self-healing instead of leaking a dead client's state
+        // forever. Cost is one O(n_clients) pass on `leases.iter()`
+        // per COMPOUND — negligible at typical client counts.
+        //
+        // The state managers live in two places: `StateManager`
+        // (clients / sessions / stateids / delegations / leases) has
+        // its own `cleanup_expired()` cascade; `LockManager` is owned
+        // by the dispatcher, so we drive its lock-release pass from
+        // here using the same expired-client list before the
+        // StateManager cascade nukes the lease records.
+        let expired = self.state_mgr.leases.get_expired_clients();
+        for cid in &expired {
+            self.lock_mgr.remove_client_locks(*cid);
+        }
+        if !expired.is_empty() {
+            self.state_mgr.cleanup_expired();
+        }
 
         // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
         // versions before doing any work. Only 0 (v4.0), 1 (v4.1) and 2 (v4.2)

@@ -601,7 +601,13 @@ impl StateIdManager {
         info!("All stateids revoked for client {}", client_id);
     }
 
-    /// Remove all stateids for a client (cleanup)
+    /// Remove all stateids for a client (cleanup). Also drops the
+    /// client's open-state records and removes them from the
+    /// `opens_by_fh` index so a fresh conflicting OPEN can succeed
+    /// (RFC 8881 §8.4.2.4 courtesy-release semantics: when a
+    /// client's lease expires, its share-reservations become
+    /// courtesy state and MUST be released on conflict from another
+    /// client).
     ///
     /// LOCK-FREE: Uses lock-free removal operations
     pub fn remove_client_stateids(&self, client_id: u64) {
@@ -618,6 +624,33 @@ impl StateIdManager {
             self.client_states.remove(&client_id);
 
             info!("Removed {} stateids for client {}", count, client_id);
+        }
+
+        // Open-state cleanup: every (client_id, owner, fh) entry
+        // belonging to this client AND its index entries in
+        // `opens_by_fh`. Iterating once and rebuilding is cheaper
+        // than retain() since we touch both maps.
+        let to_drop: Vec<(u64, Vec<u8>, Vec<u8>)> = self
+            .open_states
+            .iter()
+            .filter(|e| e.key().0 == client_id)
+            .map(|e| e.key().clone())
+            .collect();
+        for key in &to_drop {
+            self.open_states.remove(key);
+        }
+        // Strip the client out of the by-fh index. If the resulting
+        // entry is empty, drop the fh key too.
+        let touched_fhs: Vec<Vec<u8>> = to_drop.iter().map(|k| k.2.clone()).collect();
+        for fh in touched_fhs {
+            if let Some(mut entry) = self.opens_by_fh.get_mut(&fh) {
+                entry.retain(|(cid, _)| *cid != client_id);
+                let now_empty = entry.is_empty();
+                drop(entry);
+                if now_empty {
+                    self.opens_by_fh.remove(&fh);
+                }
+            }
         }
     }
 

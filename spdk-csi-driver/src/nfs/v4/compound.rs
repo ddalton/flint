@@ -1039,18 +1039,32 @@ impl CompoundRequest {
                             OpenHow { createmode, attrs: Some(verf) }
                         }
                         3 => {
-                            // EXCLUSIVE4_1 (NFSv4.1) - decode verifier + createattrs (fattr4)
-                            let _verf = decoder.decode_fixed_opaque(8)?;
-                            
+                            // EXCLUSIVE4_1 (NFSv4.1) - createverf4 (8 bytes)
+                            // followed by createattrs (bitmap + fattr4).
+                            // Pack `[verifier8 || attrs]` into the
+                            // OpenHow.attrs Bytes so the dispatcher's
+                            // first-8-bytes-are-verifier convention
+                            // (see ioops.rs OpenHow::Exclusive4_1
+                            // decode in dispatcher.rs) actually finds
+                            // the verifier. Without this, two
+                            // EXCLUSIVE4_1 retries with different
+                            // verifiers look identical to us and
+                            // pynfs OPEN6's mismatch-→-EXIST contract
+                            // breaks.
+                            let verf = decoder.decode_fixed_opaque(8)?;
+
                             // Decode bitmap4
                             let bitmap_len = decoder.decode_u32()?;
                             for _ in 0..bitmap_len {
                                 let _bitmap_word = decoder.decode_u32()?;
                             }
-                            
+
                             // Decode attrlist4
                             let attrs = decoder.decode_opaque()?;
-                            OpenHow { createmode, attrs: Some(attrs) }
+                            let mut combined = Vec::with_capacity(8 + attrs.len());
+                            combined.extend_from_slice(&verf);
+                            combined.extend_from_slice(&attrs);
+                            OpenHow { createmode, attrs: Some(combined.into()) }
                         }
                         _ => OpenHow { createmode: 0, attrs: None },
                     }

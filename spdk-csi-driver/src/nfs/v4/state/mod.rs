@@ -127,6 +127,16 @@ impl StateManager {
             // Destroy all sessions for this client
             self.sessions.destroy_client_sessions(client_id);
 
+            // RFC 8881 §8.4.2.4 courtesy-release: a client whose
+            // lease has expired forfeits its share-reservations and
+            // open state to the next conflicting op. Wiping the
+            // stateids + open-state records here lets that next op
+            // proceed instead of getting blocked on a phantom
+            // conflict. Locks held by this client are released by
+            // the dispatcher's courtesy-cleanup hook (since
+            // `LockManager` lives outside `StateManager`).
+            self.stateids.remove_client_stateids(client_id);
+
             // Remove the client itself
             self.clients.remove_client(client_id);
 

@@ -378,18 +378,35 @@ impl IoOperationHandler {
                             // Get client ID from session (set by SEQUENCE operation)
                             let client_id = self.get_client_id_from_context(ctx);
 
+                            // RFC 8881 §9.7 share-deny conflict on the
+                            // create path. Courtesy-cleanup at the top
+                            // of dispatch_compound has already swept
+                            // expired clients' open-state, so this gate
+                            // now only fires on live conflicts.
+                            if self.state_mgr.stateids.share_conflict(
+                                &new_fh.data,
+                                client_id,
+                                &op.owner,
+                                op.share_access,
+                                op.share_deny,
+                            ) {
+                                warn!(
+                                    "OPEN(create): share-deny conflict on {:?} → SHARE_DENIED",
+                                    new_fh.data
+                                );
+                                return OpenRes {
+                                    status: Nfs4Status::ShareDenied,
+                                    stateid: None,
+                                    change_info: None,
+                                    result_flags: 0,
+                                    delegation: OpenDelegationType::None,
+                                    attrset: vec![],
+                                };
+                            }
+
                             // Record the open (RFC 7530 §16.16 — same
                             // (client, owner, fh) on a follow-on OPEN
                             // bumps seqid and merges share-masks).
-                            //
-                            // Cross-owner share-deny conflict checks are
-                            // intentionally NOT enforced here yet:
-                            // courtesy-release on lease expiry (RFC 8881
-                            // §8.4.2) is the prerequisite, and without it
-                            // SHARE_DENIED checks fire forever against
-                            // long-dead opens, breaking COUR2/3/5/6. The
-                            // full share-mask gate goes in alongside
-                            // courtesy semantics.
                             let stateid = self.state_mgr.stateids.record_open(
                                 client_id,
                                 op.owner.clone(),
@@ -503,13 +520,27 @@ impl IoOperationHandler {
             }
         }
 
-        // RFC 8881 §9.7 cross-owner share-deny enforcement is
-        // **intentionally omitted** until courtesy-release on lease
-        // expiry (RFC 8881 §8.4.2) lands — without that prerequisite
-        // we'd reject legitimate reopens after dead clients' opens
-        // were never cleaned up, which broke pynfs COUR2/3/5/6.
-        // Same-(client, owner) reopens still go through `record_open`
-        // below to get the seqid-bump RFC 7530 §16.16 mandates.
+        // RFC 8881 §9.7 cross-owner share-deny conflict. Courtesy-
+        // cleanup ran at the top of dispatch_compound, so any
+        // expired client's open-state has already been swept;
+        // surviving conflicts are real.
+        if self.state_mgr.stateids.share_conflict(
+            &target_fh_data,
+            client_id,
+            &op.owner,
+            op.share_access,
+            op.share_deny,
+        ) {
+            warn!("OPEN(no-create): share-deny conflict → SHARE_DENIED");
+            return OpenRes {
+                status: Nfs4Status::ShareDenied,
+                stateid: None,
+                change_info: None,
+                result_flags: 0,
+                delegation: OpenDelegationType::None,
+                attrset: vec![],
+            };
+        }
 
         // Record-or-bump the open (RFC 7530 §16.16: same (client,
         // owner, fh) gets the SAME stateid.other with seqid bumped,
