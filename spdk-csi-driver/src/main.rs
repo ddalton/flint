@@ -567,7 +567,22 @@ impl MinimalControllerService {
             .and_then(|spec| spec.csi.as_ref())
             .and_then(|csi| csi.volume_attributes.as_ref())
             .ok_or_else(|| tonic::Status::internal("Source volume missing CSI volume attributes"))?;
-        
+
+        // Reject pNFS source volumes with FAILED_PRECONDITION (final,
+        // non-retryable). PVC-to-PVC clone uses an internal SPDK snapshot
+        // of the source; pNFS volumes have no snapshot path, so without
+        // this guard the clone falls through to the SPDK metadata
+        // extraction below and fails with `Status::internal("Source volume
+        // missing node metadata")` — which external-provisioner classifies
+        // as transient and retries indefinitely.
+        if spdk_csi_driver::snapshot::snapshot_csi::is_pnfs_volume_attrs(volume_attributes) {
+            return Err(tonic::Status::failed_precondition(
+                "PVC clone source is a pNFS volume; cloning pNFS volumes is not \
+                 supported. Use a non-pNFS StorageClass for clonable volumes, \
+                 or enable SPDK on this cluster",
+            ));
+        }
+
         let source_node = volume_attributes.get("flint.csi.storage.io/node-name")
             .ok_or_else(|| tonic::Status::internal("Source volume missing node metadata"))?
             .clone();
@@ -728,6 +743,20 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // every node mounts the same MDS export by name.
         // -------------------------------------------------------------
         if req.parameters.get("layout").map(String::as_str) == Some("pnfs") {
+            // pNFS volumes do not support creation from a snapshot or PVC
+            // source. Without this guard the pNFS branch silently ignores
+            // volume_content_source and returns an empty volume, masking
+            // the user error and producing data loss in the dataSource
+            // contract. FAILED_PRECONDITION (final, non-retryable) tells
+            // external-provisioner to record the error and stop retrying.
+            if req.volume_content_source.is_some() {
+                return Err(tonic::Status::failed_precondition(
+                    "pNFS volumes do not support creation from snapshot or PVC source \
+                     (volume_content_source); pNFS-with-snapshots requires SPDK. \
+                     Use a non-pNFS StorageClass for clonable volumes",
+                ));
+            }
+
             let pnfs = match self.pnfs_csi.as_ref() {
                 Some(p) => p,
                 None => {

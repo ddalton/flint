@@ -9,6 +9,17 @@ use std::collections::BTreeMap;
 use crate::csi::*;
 use crate::driver::SpdkCsiDriver;
 
+/// Detect whether a PV's volumeAttributes describe a pNFS volume.
+/// pNFS volumes are tagged at create time with pnfs.flint.io/* keys
+/// (see pnfs_csi::create_volume). Detection is by namespace prefix so
+/// future pnfs.flint.io/* attributes are caught automatically.
+///
+/// Exposed `pub` so the binary crate (main.rs) can reuse it for the
+/// CreateVolume-from-snapshot and CreateVolume-from-PVC guards.
+pub fn is_pnfs_volume_attrs(volume_attrs: &BTreeMap<String, String>) -> bool {
+    volume_attrs.keys().any(|k| k.starts_with("pnfs.flint.io/"))
+}
+
 /// Reject CreateSnapshot for source volumes whose deployment mode does
 /// not support snapshots. Today the only such case is pNFS volumes:
 /// snapshots require either SPDK blobstore COW (single-server volumes)
@@ -24,10 +35,7 @@ use crate::driver::SpdkCsiDriver;
 pub(crate) fn validate_snapshot_source(
     volume_attrs: &BTreeMap<String, String>,
 ) -> Result<(), Status> {
-    // pNFS volumes are tagged at create time with `pnfs.flint.io/mds-ip`
-    // (see pnfs_csi::create_volume). Detect by namespace prefix so the
-    // guard catches future pnfs.flint.io/* attributes too.
-    if volume_attrs.keys().any(|k| k.starts_with("pnfs.flint.io/")) {
+    if is_pnfs_volume_attrs(volume_attrs) {
         return Err(Status::failed_precondition(
             "snapshots are not supported for pNFS volumes; \
              use a StorageClass without `layout: pnfs` for snapshotted volumes, \
@@ -453,6 +461,33 @@ mod tests {
         // beyond its scope.
         let attrs = BTreeMap::new();
         assert!(validate_snapshot_source(&attrs).is_ok());
+    }
+
+    // ----- is_pnfs_volume_attrs (used by main.rs CreateVolume guards) ----
+
+    #[test]
+    fn is_pnfs_volume_attrs_detects_pnfs() {
+        assert!(is_pnfs_volume_attrs(&pnfs_volume_attrs()));
+    }
+
+    #[test]
+    fn is_pnfs_volume_attrs_returns_false_for_spdk() {
+        assert!(!is_pnfs_volume_attrs(&spdk_volume_attrs()));
+    }
+
+    #[test]
+    fn is_pnfs_volume_attrs_returns_false_for_empty() {
+        assert!(!is_pnfs_volume_attrs(&BTreeMap::new()));
+    }
+
+    #[test]
+    fn is_pnfs_volume_attrs_matches_namespace_prefix_only() {
+        // A key that contains "pnfs" but isn't in the pnfs.flint.io/
+        // namespace must NOT trigger detection (e.g. user labels).
+        let mut attrs = BTreeMap::new();
+        attrs.insert("user.example.com/pnfs-tag".to_string(), "x".to_string());
+        attrs.insert("flint.csi.storage.io/node-name".to_string(), "n1".to_string());
+        assert!(!is_pnfs_volume_attrs(&attrs));
     }
 
     // ----- preserved existing test -----------------------------------
