@@ -6,12 +6,12 @@
 #
 # Runtime: Select MDS or DS via entrypoint
 
-FROM docker-private.infra.cloudera.com/cloudera_base/hardened/cloudera-rust:1.85 AS builder
+FROM rust:1.90-slim-bookworm AS builder
 
 # --- System-level setup ---
 USER root
-# Pure Rust build - only need protobuf compiler, no OpenSSL!
-RUN apk add --no-cache perl protobuf-dev pkgconf
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl protobuf-compiler libprotobuf-dev pkg-config && rm -rf /var/lib/apt/lists/*
 
 USER 65532
 
