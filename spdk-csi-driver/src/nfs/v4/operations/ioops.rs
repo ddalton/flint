@@ -206,9 +206,10 @@ pub struct IoOperationHandler {
     state_mgr: Arc<StateManager>,
     fh_mgr: Arc<FileHandleManager>,
     write_verifier: u64,
-    /// File descriptor cache: stateid → open file
-    /// Eliminates open/close overhead for every write
-    fd_cache: Arc<DashMap<StateId, CachedFile>>,
+    /// File descriptor cache: stateid.other → open file
+    /// Keyed on the stable 12-byte `other` field (not seqid) so
+    /// entries survive seqid bumps from share-mask upgrades.
+    fd_cache: Arc<DashMap<[u8; 12], CachedFile>>,
 }
 
 impl IoOperationHandler {
@@ -665,22 +666,14 @@ impl IoOperationHandler {
         }
 
         // Remove file descriptor from cache (file closes on drop)
-        if let Some((_, cached)) = self.fd_cache.remove(&op.stateid) {
+        if let Some((_, cached)) = self.fd_cache.remove(&op.stateid.other) {
             info!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
         } else {
             info!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
         }
 
-        // Revoke the stateid
-        if let Err(e) = self.state_mgr.stateids.revoke(&op.stateid) {
-            warn!("CLOSE: Failed to revoke stateid: {}", e);
-            return CloseRes {
-                status: Nfs4Status::BadStateId,
-                stateid: None,
-            };
-        }
-
-        info!("CLOSE: Revoked stateid {:?}", op.stateid);
+        self.state_mgr.stateids.close_open_state(&op.stateid.other);
+        info!("CLOSE: Removed open state for {:?}", op.stateid);
 
         // Return final stateid (with seqid incremented)
         let final_stateid = StateId {
@@ -869,7 +862,7 @@ impl IoOperationHandler {
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
         // Try to get cached file descriptor first
-        let cached_entry = self.fd_cache.get(&op.stateid);
+        let cached_entry = self.fd_cache.get(&op.stateid.other);
         
         let file_arc = if let Some(entry) = cached_entry {
             // Found in cache - reuse existing FD!
@@ -913,7 +906,7 @@ impl IoOperationHandler {
             let file_arc = Arc::new(file);
 
             // Cache the file descriptor
-            self.fd_cache.insert(op.stateid.clone(), CachedFile {
+            self.fd_cache.insert(op.stateid.other, CachedFile {
                 file: Arc::clone(&file_arc),
                 path: path.clone(),
             });

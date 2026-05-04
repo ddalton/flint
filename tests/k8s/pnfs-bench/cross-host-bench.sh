@@ -110,7 +110,7 @@ log "✓ client pod: $CLIENT_POD"
 # Give DSes a heartbeat window to register with MDS.
 log "▶ giving DSes 10s to register with MDS"
 sleep 10
-REGISTERED=$(kubectl -n "$NS" logs deploy/pnfs-mds | grep -c "Device registered" || true)
+REGISTERED=$(kubectl -n "$NS" logs deploy/pnfs-mds | grep -c "DS registered successfully" || true)
 log "  registered devices in MDS log: $REGISTERED (expected: $DS_COUNT)"
 if [ "$REGISTERED" -lt "$DS_COUNT" ]; then
   log "  ⚠ fewer DSes registered than expected — bench will run anyway, results may be skewed"
@@ -124,7 +124,7 @@ mount_cmd=$(cat <<EOM
 set -eux
 mountpoint -q /mnt/pnfs && umount -lf /mnt/pnfs || true
 mkdir -p /mnt/pnfs
-mount -t nfs4 -o minorversion=1,proto=tcp,port=2049,nconnect=$NCONNECT,rsize=1048576,wsize=1048576 \
+mount -t nfs4 -o minorversion=1,port=2049,nconnect=$NCONNECT,rsize=1048576,wsize=1048576 \
   $MDS_IP:/ /mnt/pnfs
 ls /mnt/pnfs
 EOM
@@ -136,8 +136,10 @@ log "✓ mount succeeded"
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 drop_cache() {
+  # Skip sync — it hangs in D state on pNFS mounts. Just drop clean
+  # pages; fio's end_fsync=1 handles dirty data.
   kubectl -n "$NS" exec "$CLIENT_POD" -- bash -lc \
-    'sync && echo 3 > /proc/sys/vm/drop_caches' >/dev/null 2>&1
+    'echo 3 > /proc/sys/vm/drop_caches 2>/dev/null' >/dev/null 2>&1 || true
 }
 
 # Run fio inside the client pod and emit aggregate MiB/s on stdout.

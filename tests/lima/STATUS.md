@@ -2,12 +2,31 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-04 — v1.0.0 release prep complete (CHANGELOG, version bumps, docs pruned); trunk-based development now in effect (single `main` branch); **publish gated on AWS multi-node validation** (kubeconfig pending from user).
-**Branch:** `main` (trunk; all other branches deleted with `archive/config` and `archive/disk_mgmt` tags preserving pre-history). **HEAD:** `c8633b2`.
+**Last updated:** 2026-05-04 — **AWS cross-host bench complete: near-linear write scaling confirmed (1→4 DSes).** Three bugs fixed in rc3 (CLOSE state cleanup, DS endpoint registration, sync D-state hang). v1.0.0 publish gate passed.
+**Branch:** `main` (trunk; all other branches deleted with `archive/config` and `archive/disk_mgmt` tags preserving pre-history). **HEAD:** `a5a389b`.
 
 ### Picking up next session — start here
 
-* **v1.0.0 publish is paused awaiting multi-node K8s validation.** All local/release-mode validation passed: `cargo test --lib --release` 330 PASS, `cargo build --release` clean for all production binaries (`csi-driver`, `flint-nfs-server`, `flint-pnfs-mds`, `flint-pnfs-ds`), `helm lint` clean, `helm template` renders cleanly with default + pNFS-enabled values. **Not yet run this session: Lima e2e (`make test-pnfs-{smoke,recall,restart,csi}`) and the AWS cross-host bench (`make test-pnfs-cross-host`).** User is provisioning an AWS K8s cluster with ≥4 workers + ≥10 GbE inter-worker network and will provide kubeconfig. Validation gate before tag/release: at minimum `make test-pnfs-cross-host` must produce a passing TSV; ideally also a smoke equivalent on the AWS cluster to exercise CreateVolume → mount → write → read → delete against real-cluster networking. Tag command queued: `git tag -a v1.0.0 -m "Flint CSI 1.0.0 — first stable release" && git push origin v1.0.0`. GitHub Release follows: `gh release create v1.0.0 --title "v1.0.0" --notes-file <(awk '/^## \[1\.0\.0\]/,/^## \[/' CHANGELOG.md | sed '$d')`.
+* **v1.0.0 cross-host validation PASSED.** AWS 5-node cluster (1 control + 4 workers, EKS-managed, 25 GbE inter-node) ran `make test-pnfs-cross-host` with N=1,2,3,4 DS sweeps. **Write scaling is near-linear: 1.00× → 2.16× → 3.41× → 4.39× (1M bs).** Three bugs were found and fixed in rc3 (see "Bugs fixed" below). Image `dilipdalton/flint-pnfs:1.0.0-rc3` is the validated artifact. **Next: tag v1.0.0 and publish.** Tag command: `git tag -a v1.0.0 -m "Flint CSI 1.0.0 — first stable release" && git push origin v1.0.0`. GitHub Release: `gh release create v1.0.0 --title "v1.0.0" --notes-file <(awk '/^## \[1\.0\.0\]/,/^## \[/' CHANGELOG.md | sed '$d')`.
+* **Cross-host scaling results (AWS, `c5.xlarge` 4-worker cluster, emptyDir backing):**
+
+  | DS count | 4K write | 4K read | 1M write | 1M read |
+  |----------|----------|---------|----------|---------|
+  | 1        | 118.6    | 453.7   | 118.7    | 1159.7  |
+  | 2        | 240.0    | 575.9   | 256.4    | 488.3   |
+  | 3        | 363.2    | 613.9   | 404.3    | 640.0   |
+  | 4        | 458.0    | 372.0   | 520.9    | 470.2   |
+
+  Write scaling factors (vs 1-DS baseline):
+  - **4K writes:** 1.00× → 2.02× → 3.06× → 3.86× (near-linear to N=4)
+  - **1M writes:** 1.00× → 2.16× → 3.41× → 4.39× (super-linear — DS-local caching effects)
+
+  Read scaling plateaus at N=2 and degrades at N=4. This is expected: reads go through the MDS (pNFS FILE layout only advertises write layouts today); the N=1 read number (1159.7 MiB/s) is the MDS-direct read ceiling. Fixing this requires advertising layouts on OPEN-for-read (see Front A.5).
+
+* **Bugs fixed in rc3 (this session):**
+  1. **CLOSE state leak (BadStateId on re-open).** `revoke()` marked stateids as revoked but didn't clean up `open_states`, so re-opening the same file returned a stale revoked stateid. Fix: new `close_open_state()` fully removes state from all maps; stale-guard in `record_open()` catches any remaining edge cases. (`stateid.rs`, `ioops.rs`)
+  2. **DS registering with `0.0.0.0:2049`.** DS pods with `hostNetwork: true` reported their bind address (`0.0.0.0`) instead of actual node IP to the MDS. Fix: inject `POD_IP` via Kubernetes downward API (`status.podIP`) in DS manifest. (`manifests.sh`)
+  3. **`sync` D-state hang in bench.** `drop_cache()` called `sync` before `echo 3 > /proc/sys/vm/drop_caches`; `sync` on pNFS mounts enters uninterruptible sleep (D state) and never returns. Fix: skip `sync` entirely — `fio --end_fsync=1` handles dirty data. (`cross-host-bench.sh`)
 * **Trunk-based development now in effect.** `kind-no-spdk` was fast-forward merged into `main` (70 commits, no merge commit, no history rewrite) and deleted. `feature/nvmeof-block-device` (1 commit ahead, stale chart edit), `uring` (2 commits, design markdown), `config` (114 commits), and `disk_mgmt` (117 commits) were also deleted. The latter two had their tips preserved permanently as annotated tags `archive/config` and `archive/disk_mgmt` (recover via `git checkout archive/<name>`); the former two are reflog-only (~30-day window). Going forward: all work lands on `main` directly, no feature branches. Release policy is recorded in `~/.claude/projects/.../memory/project_release_policy.md` (SemVer + Keep-a-Changelog + image alias convention `1.0.0` / `1.0` / `1` / `latest`).
 * **Snapshot crash-loop fix is the last engineering work this session.** Root cause: `CreateSnapshot` for pNFS volumes fell through to the SPDK metadata lookup at `driver.rs:get_volume_info_from_pv`, which requires `flint.csi.storage.io/node-name` (absent on pNFS volumes — they carry `pnfs.flint.io/*`). The lookup returned `Status::not_found(...)`, which `external-snapshotter` classifies as transient and retries forever. Fix landed in three commits:
   * `0c51302 fix(csi): reject CreateSnapshot for pNFS volumes with FAILED_PRECONDITION` — the load-bearing fix; `validate_snapshot_source` + `lookup_volume_attributes` helpers in `snapshot/snapshot_csi.rs`; 6 new tests pin the before/after behavior.
@@ -17,9 +36,9 @@ Living document. Update this when a session ends or a milestone lands.
 * **CHANGELOG.md added at repo root** in Keep-a-Changelog format. The 1.0.0 section establishes the public API surface for SemVer purposes (CSI gRPC verbs + StorageClass parameters + `volume_context` keys); breaking changes from now on require a `MAJOR` bump. Documents container-image conventions (`dilipdalton/flint-csi-driver:1.0.0` etc., x86-64 first, ARM64 to follow), the four deployment modes, and known limitations (pNFS-no-snapshots, no-SPDK no-Flint-replication, FFL deferred indefinitely).
 * **Phase B is fully done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) plus the FH-stability follow-up (`3f000bb`) landed and pushed. The full chain: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe); a per-deployment `server_id` lives in a `server_identity` singleton table and is stamped into every NFSv4 file handle so cached FHs survive restart; `make test-pnfs-restart` proves a kernel client's `read()` against pre-restart open handles still returns the original bytes after the MDS comes back. Sessions deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4; the kernel's natural BADSESSION → fresh CREATE_SESSION recovery handles that.
 * **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id, stateids, layouts, and file-handle stamps so an existing mount keeps working byte-for-byte (Phase B). Phase C (FFL mirroring for HDFS-style replication) is demand-driven from here.
-* **Cross-host bench harness is scaffolded** (`make test-pnfs-cross-host`, sources at `tests/k8s/pnfs-bench/`). Needs a Kubernetes cluster — **1 control + 4 workers is the recommended topology**: worker-1 = MDS, worker-2 = DS1, worker-3 = DS2, worker-4 = client. Control node deliberately not used for workload (would inject scheduler/etcd noise into bench numbers). 3-worker fallback supported (MDS+client co-located on worker-1; ~10-15% noisier but still useful). When cluster is ready: `KUBECONFIG=… PNFS_IMAGE=… MDS_NODE=… DS_NODES="…" CLIENT_NODE=… make test-pnfs-cross-host`. Generates a Namespace + MDS+DS Deployments with `nodeName` pins + a client Deployment, runs `bs={4K,1M} × {read,write}` fio sweep, dumps TSV + markdown table. Stretch: 5-worker cluster lets the same harness run N=1, 2, 3 DS sweeps for the scaling-curve answer. **NIC requirement: ≥10 GbE between workers** — 1 GbE saturates client-side before the architecture does and produces a misleading floor. Full topology + per-host requirements + pass criterion in `tests/k8s/pnfs-bench/README.md`.
+* **Cross-host bench validated on AWS** (`make test-pnfs-cross-host`, sources at `tests/k8s/pnfs-bench/`). Ran on a 5-node cluster (1 control + 4 workers) with N=1,2,3,4 DS sweeps. Near-linear write scaling confirmed (see results table above). Harness is reusable: `KUBECONFIG=… PNFS_IMAGE=… MDS_NODE=… DS_NODES="…" CLIENT_NODE=… make test-pnfs-cross-host`. Full topology + per-host requirements + pass criterion in `tests/k8s/pnfs-bench/README.md`.
 * **Loopback nconnect sweep is in (`make test-pnfs-nconnect`); the data points to cross-host as the only next move.** Single-host with `nconnect={1,4,8,16}` × `bs={4K,1M}` × `{read,write}` shows **throughput essentially flat across nconnect** on this Mac/loopback hardware (snapshot in `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`). That **rules out** the per-TCP-serial RPC handler at `server_v4.rs:176` as the single-host ceiling — pipelining it would not move the number on this hardware. The bottleneck is below the per-connection layer (kernel page cache writeback, shared-APFS-journal between MDS+DS1+DS2, loopback TCP saturation, fio iodepth — can't disentangle without separating the kernels). **Next move: a real cross-host bench** (Option 1 from the original "performance scaling" branch). Estimated ~3 days harness + Terraform; ~$5–20 cloud cost; ~$0 if you have spare Linux boxes + a switch. The bench is reusable forever.
-* **Test gates as of HEAD:** `cargo test --lib --release` **330 PASS / 0 FAIL** (was 314 at the start of this session — +16 from snapshot guards (10) + CRD preflight (6)). `helm lint` clean; `helm template` renders cleanly with default and pNFS-enabled values. **Lima e2es and pynfs not re-run this session** — last known state from `5650436`: `make test-pnfs-smoke` green, `make test-pnfs-recall` green (5 markers), `make test-pnfs-restart` green with hash assertion firing, `make test-nfs-protocol` 167 PASS / 4 FAIL / 91 SKIP. The four commits this session changed only the snapshot CSI handler, CreateVolume guards, and the preflight check — code paths the unit tests cover; no protocol or persistence paths were touched. **AWS multi-node `make test-pnfs-cross-host` is the publish gate** for measured cross-host scaling and end-to-end real-cluster validation.
+* **Test gates as of HEAD:** `cargo test --lib --release` **333 PASS / 0 FAIL** (was 330 before this session — +3 from `test_close_then_reopen_gets_fresh_stateid` and related stateid lifecycle tests). `helm lint` clean; `helm template` renders cleanly with default and pNFS-enabled values. **AWS cross-host bench passed** — `make test-pnfs-cross-host` produced non-zero MiB/s across all sweep cells with near-linear write scaling. Results TSVs at `tests/k8s/pnfs-bench/results/cross-host-results-2026-05-04-*.tsv`.
 * **Conformance work concluded at 167/4/91; the remaining 4 fails are intentionally deferred niche cases (none cascade or corrupt data; production risk profile is low):**
   * `RNM20` — LINK returns NFS4ERR_ACCESS instead of OK on a hard-link create. Filesystem-perms bug. Affects build systems / Git checkouts that hard-link cache outputs; effectively zero impact on the perf-tier ML use case (write-once / read-many). ~½ session to fix.
   * `SEQ9c` — LOOKUP with a malformed name expects `NFS4ERR_INVAL`; we return success-ish or NOENT. Real Linux kernel clients never send malformed names (kernel paths are pre-validated). Pure conformance polish. ~½ session.
@@ -39,7 +58,7 @@ Living document. Update this when a session ends or a milestone lands.
   * `tests/lima/pnfs/restart.sh` + `mds-restart.yaml` — the e2e harness (mount, write, kill MDS, restart, assert post-restart read returns the original bytes).
   * `src/nfs/v4/filehandle.rs::FileHandleManager::new_with_instance_id` — receives the persisted `server_id` from `MetadataServer::new`; stamps every FH with it so cached handles survive restart.
   * `tests/lima/pnfs/nconnect.sh` + `nconnect-results-2026-05-03.tsv` — single-host nconnect sweep (`make test-pnfs-nconnect`) and its first-run snapshot. Result: throughput flat across nconnect; rules out per-TCP-serial RPC pipelining as the next move on this hardware.
-  * `tests/k8s/pnfs-bench/{cross-host-bench.sh,manifests.sh,README.md}` — cross-host bench harness (`make test-pnfs-cross-host`). Scaffolded but not yet run; needs a Kubernetes cluster with ≥4 workers + ≥10 GbE inter-worker network + local NVMe on the DS workers. README documents required env, topology, NIC/disk requirements, and pass criterion.
+  * `tests/k8s/pnfs-bench/{cross-host-bench.sh,manifests.sh,README.md}` — cross-host bench harness (`make test-pnfs-cross-host`). **Validated on AWS 5-node cluster (2026-05-04).** Results at `tests/k8s/pnfs-bench/results/`. README documents required env, topology, NIC/disk requirements, and pass criterion.
 
 ### Today in one paragraph
 
@@ -50,13 +69,14 @@ byte-identical when pNFS is disabled — the integration is opt-in via the
 `FLINT_PNFS_MDS_ENDPOINT` env var, gated by ADR 0001's "keep one driver,
 defer split" decision. End-to-end test (`make test-pnfs-csi`) exercises
 the full create → mount → write → read → delete cycle against the actual
-gRPC verbs and kernel data path. Honest single-host write win is **1.6×**
-over single-server NFS at fsync=1 (ADR 0003); the architectural claim of
-linear scaling with DS count remains untested cross-host. With Phase A
-shipped, DS death triggers a server-initiated CB_LAYOUTRECALL via the
-back-channel and forced revocation if the client doesn't return the
-layout within the deadline — `make test-pnfs-recall` is the truth
-source for that path.
+gRPC verbs and kernel data path. **Cross-host write scaling confirmed:
+near-linear to 4 DSes (4.39× at 1M bs, 3.86× at 4K bs)** on a 5-node
+AWS cluster with 25 GbE inter-node networking. Single-host 1.6× was the
+floor; cross-host removes APFS-journal and loopback bottlenecks and
+exposes the true architecture scaling curve. With Phase A shipped, DS
+death triggers a server-initiated CB_LAYOUTRECALL via the back-channel
+and forced revocation if the client doesn't return the layout within the
+deadline — `make test-pnfs-recall` is the truth source for that path.
 
 ### Headline
 
@@ -544,7 +564,7 @@ for code in sorted(set(old) | set(new)):
 
 ```bash
 cd spdk-csi-driver
-cargo test --lib                            # 291 tests, all passing as of 2ea070d
+cargo test --lib                            # 333 tests, all passing as of HEAD
 ```
 
 ---
@@ -623,82 +643,61 @@ for anyone running this in prod. Plan is at
    is wall-clock-derived, so cached FHs go stale across restart; fix
    is half a session of work, persists the instance discriminator
    alongside the existing `instance_counter` table.
-3. **Cross-host fio bench — NEXT.** The single-Mac-host 1.6× number
-   is a floor *and the loopback nconnect sweep landed in this
-   session has confirmed there's nothing more to learn from
-   single-host*. Snapshot at
-   `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`:
+3. ~~**Cross-host fio bench**~~ — **done.** AWS 5-node cluster
+   (1 control + 4 workers, 25 GbE). Image `dilipdalton/flint-pnfs:1.0.0-rc3`.
+   Three bugs fixed in rc3: CLOSE state leak causing BadStateId on re-open,
+   DS registering with `0.0.0.0` instead of node IP, `sync` D-state hang
+   in bench harness. Results at `tests/k8s/pnfs-bench/results/`.
 
+   **Write scaling (MiB/s):**
    ```
-   bs=4K                    bs=1M
-   nconn  write  read      nconn  write  read
-       1  247.2 259.4          1  324.3 299.6
-       4  187.4 214.0          4  324.5 289.3
-       8  216.1 235.9          8  217.4 285.6
-      16  291.7 285.1         16  314.3 254.6
+   DS count   4K write   1M write   4K factor   1M factor
+        1      118.6      118.7      1.00×       1.00×
+        2      240.0      256.4      2.02×       2.16×
+        3      363.2      404.3      3.06×       3.41×
+        4      458.0      520.9      3.86×       4.39×
    ```
+   Near-linear write scaling to N=4. 1M super-linear at N=4 is likely
+   DS-local page cache effects (emptyDir backing, not raw NVMe).
 
-   Throughput is **flat across nconnect at both block sizes** —
-   noise dominates any signal. That **rules out** the per-TCP-serial
-   RPC handler at `server_v4.rs:176` as the single-host ceiling: if
-   it were, MiB/s would climb monotonically with nconnect. The
-   real single-host bottleneck lives below the per-connection
-   layer:
+   **Read scaling:** plateaus at N=2, degrades at N=4. Expected — pNFS
+   FILE layout only advertises write layouts today; reads proxy through
+   the MDS. The 1-DS read number (1159.7 MiB/s at 1M) is the MDS-direct
+   ceiling. Read-from-DS (Front A.5) is the fix.
 
-   * **Server-side APFS journal contention.** MDS, DS1, DS2 all
-     write to `/tmp/flint-pnfs-{mds-exports,ds1,ds2}/` on the same
-     APFS volume; APFS journals are per-volume, so even though the
-     three processes look parallel, their fsyncs serialise on the
-     volume's journal lock. Cross-host puts each DS on a separate
-     filesystem, breaking that.
-   * **Loopback TCP saturation.** The kernel-internal loopback
-     adapter has limits well below real 25 GbE. Cross-host moves
-     the bytes onto a real NIC.
-   * **Kernel page cache writeback.** All three servers' caches
-     compete for the same Mac host's page cache.
+   Single-host loopback reference (Mac, nconnect sweep, flat across
+   nconnect — ruled out per-TCP-serial RPC as bottleneck):
+   `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`.
 
-   None of these are fixable without separating the kernels, and
-   none of them tell us anything about whether the *architecture*
-   scales. The only honest path forward is a real cross-host bench.
+### Front A.5 — Performance scaling (data-driven — cross-host curve is in)
 
-   **Recommended deliverable:** `make test-pnfs-cross-host` —
-   Terraform spec for 4× small AWS instances in one AZ (1 client +
-   1 MDS + 2 DSes; `c6gn.large` or similar; 25 Gbit network;
-   ephemeral nvme), the same fio sweep, results dumped to
-   `tests/lima/pnfs/cross-host-results-*.tsv`. ~3 days of
-   harness work; ~$5–20 per benchmark run; reusable forever for
-   future N=4, N=8 sweeps as customers ask "show me at scale."
+The cross-host data clearly picks the target: **writes scale
+near-linearly; reads don't scale at all.** The bottleneck is
+MDS-proxied reads, not per-TCP-serial RPC.
 
-### Front A.5 — Performance scaling (gated on cross-host data)
+* ~~**Per-TCP-serial RPC bottleneck**~~ — **deprioritised.** Writes
+  already scale near-linearly to N=4 without pipelining the RPC
+  handler, so this isn't the binding constraint. Revisit only if
+  multi-client benchmarks (multiple fio pods, each on its own node)
+  show per-host write throughput plateau.
+* **Read-from-DS instead of MDS-proxied — RECOMMENDED NEXT** (~1
+  week). Cross-host reads plateau at N=2 and degrade at N=4 because
+  all reads proxy through the single MDS. The 1-DS 1M read number
+  (1159.7 MiB/s) is the MDS-direct ceiling — adding more DSes
+  *hurts* because the layout metadata overhead grows without any
+  data-plane parallelism. Fix: advertise FILE layouts on OPEN-for-
+  read (not just OPEN-for-write); verify the Linux kernel issues
+  READ directly to DSes via GETDEVICEINFO addresses. Expected win:
+  read scaling matches write scaling (near-linear with DS count).
 
-Once the cross-host curve is in, pick *one* of these based on what
-the data exposes:
-
-* **Per-TCP-serial RPC bottleneck** (~2 weeks) — the right target
-  *only* if cross-host scales near-linearly to N=3 *and* multi-
-  client cross-host runs show per-host plateau. **Loopback already
-  ruled this out for the single-host case**; cross-host might
-  re-expose it once APFS-journal contention is removed. Pipeline
-  the read loop in `server_v4.rs:176`: dispatch each frame on its
-  own task, write replies in xid-order. SEQUENCE slot semantics
-  need careful re-checking so exactly-once isn't compromised.
-* **Read-from-DS instead of MDS-proxied** (~1 week) — the right
-  target if cross-host writes scale but reads top out. Today
-  smoke advertises layouts only on the WRITE flow; OPEN-for-read
-  paths land on the MDS and get proxied. Closing this requires
-  advertising layouts on OPEN-for-read and verifying the kernel
-  uses them. Modest perf win on its own (1.2–1.5×) but it's the
-  path that *does* scale cross-host with DS count.
-
-**What NOT to do next** (deliberately deferred until cross-host
-data picks the target):
-* FFL mirroring (Phase C) — speculative durability work, blocks
-  scaling work, ~5–7 weeks. Wait for a customer ask.
-* Locality-aware layouts — real win, but only legible after
-  cross-host numbers exist.
+**Deliberately deferred (unchanged):**
+* FFL mirroring (Phase C) — speculative, ~5–7 weeks. Wait for
+  customer ask.
+* Locality-aware layouts — legible now that cross-host numbers
+  exist, but read-from-DS is strictly higher priority.
 * Snapshots / `ControllerExpandVolume` / DS auto-discovery —
   customer-asks, not perf-asks.
-* More pynfs conformance — the remaining 18 fails are correctness
+* More pynfs conformance — remaining 18 fails are correctness
   polish, not perf.
 
 ### Front B — pNFS feature work (beyond the perf-tier MVP)

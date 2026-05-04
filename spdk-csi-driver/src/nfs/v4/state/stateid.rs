@@ -269,10 +269,12 @@ impl StateIdManager {
     }
 
     /// Record-or-update an open. If an existing entry exists for the
-    /// `(client_id, owner, fh)` triple, bump its seqid and merge the
-    /// new share-mask in (RFC 7530 §16.16: subsequent OPENs upgrade
-    /// the share semantics). Otherwise allocate a fresh stateid via
-    /// the normal `allocate` path and stamp it into `open_states`.
+    /// `(client_id, owner, fh)` triple and the new share-mask differs,
+    /// bump its seqid and merge the mask (RFC 7530 §16.16). If the
+    /// mask is unchanged, return the existing stateid without bumping
+    /// (RFC 8881 §18.16.4: seqid increments only on state change).
+    /// Otherwise allocate a fresh stateid via the normal `allocate`
+    /// path and stamp it into `open_states`.
     /// Returns the up-to-date `StateId` to send to the client.
     pub fn record_open(
         &self,
@@ -284,18 +286,35 @@ impl StateIdManager {
         verifier: Option<u64>,
     ) -> StateId {
         let key = (client_id, owner.clone(), fh.clone());
+        // Guard: if a previous CLOSE revoked/removed the underlying state
+        // but left a stale open_states entry, clean it up so we fall
+        // through to fresh allocation.
+        if let Some(entry) = self.open_states.get(&key) {
+            let is_stale = self.states.get(&entry.stateid_other)
+                .map_or(true, |s| s.revoked);
+            if is_stale {
+                drop(entry);
+                self.open_states.remove(&key);
+            }
+        }
         if let Some(mut entry) = self.open_states.get_mut(&key) {
+            let new_access = entry.share_access | share_access;
+            let new_deny = entry.share_deny | share_deny;
+
+            if new_access == entry.share_access && new_deny == entry.share_deny {
+                return StateId {
+                    seqid: entry.seqid,
+                    other: entry.stateid_other,
+                };
+            }
+
             entry.seqid = entry.seqid.wrapping_add(1);
-            entry.share_access |= share_access;
-            entry.share_deny |= share_deny;
-            // Verifier on a follow-on open is preserved from the
-            // original create; we only set it on first-create paths.
+            entry.share_access = new_access;
+            entry.share_deny = new_deny;
             let stateid = StateId {
                 seqid: entry.seqid,
                 other: entry.stateid_other,
             };
-            // Mirror the seqid bump onto the master state map so
-            // validate() agrees about the current seqid.
             if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
                 master.seqid = entry.seqid;
                 master.stateid.seqid = entry.seqid;
@@ -574,6 +593,35 @@ impl StateIdManager {
         }
     }
 
+    /// CLOSE cleanup: fully remove the open stateid and all associated
+    /// bookkeeping (states, client_states, open_states, opens_by_fh).
+    /// Unlike `revoke()` which just flags the entry, this deallocates it
+    /// so a subsequent OPEN for the same (client, owner, fh) allocates
+    /// a fresh stateid.
+    pub fn close_open_state(&self, other: &[u8; 12]) {
+        if let Some((_, entry)) = self.states.remove(other) {
+            if let Some(mut state_list) = self.client_states.get_mut(&entry.client_id) {
+                state_list.retain(|o| o != other);
+            }
+            self.persist_delete(*other);
+        }
+
+        let key = self.open_states.iter()
+            .find(|e| &e.value().stateid_other == other)
+            .map(|e| e.key().clone());
+        if let Some(key) = key {
+            let (_client_id, ref owner, ref fh) = key;
+            if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
+                owners.retain(|(cid, own)| *cid != key.0 || own != owner);
+                if owners.is_empty() {
+                    drop(owners);
+                    self.opens_by_fh.remove(fh);
+                }
+            }
+            self.open_states.remove(&key);
+        }
+    }
+
     /// Get all stateids for a client
     ///
     /// LOCK-FREE: Concurrent reads without blocking
@@ -764,10 +812,55 @@ mod tests {
         assert!(mgr.validate(&s1).is_err());
     }
 
-    /// RFC 8881 §9.7: an OPEN whose access bits collide with a
-    /// concurrent owner's deny mask (or vice versa) returns
-    /// SHARE_DENIED. Same (client, owner) is exempt — they upgrade
-    /// their own share-mask. Pynfs COUR3 covers this.
+    #[test]
+    fn test_record_open_no_seqid_bump_for_identical_masks() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"fio-worker".to_vec();
+        let fh = b"/bench/file0".to_vec();
+
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
+        assert_eq!(s1.seqid, 1);
+
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
+        assert_eq!(s2.seqid, 1, "seqid must not bump when masks unchanged");
+        assert_eq!(s2.other, s1.other);
+
+        assert!(mgr.validate(&s1).is_ok());
+    }
+
+    #[test]
+    fn test_multi_worker_same_owner_fh_no_seqid_advance() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"linux-open-owner".to_vec();
+        let fh = b"/bench/testfile".to_vec();
+
+        let ids: Vec<_> = (0..4)
+            .map(|_| mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None))
+            .collect();
+
+        for sid in &ids {
+            assert_eq!(sid.seqid, 1);
+            assert!(mgr.validate(sid).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_close_then_reopen_gets_fresh_stateid() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"linux-owner".to_vec();
+        let fh = b"/tmp/testfile".to_vec();
+
+        let sid1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        assert!(mgr.validate(&sid1).is_ok());
+
+        mgr.close_open_state(&sid1.other);
+        assert!(mgr.validate(&sid1).is_err());
+
+        let sid2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        assert_ne!(sid1.other, sid2.other);
+        assert!(mgr.validate(&sid2).is_ok());
+    }
+
     #[test]
     fn test_share_conflict_detection() {
         let mgr = StateIdManager::new(crate::state_backend::memory_backend());

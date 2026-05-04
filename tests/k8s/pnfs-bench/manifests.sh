@@ -164,6 +164,7 @@ spec:
       hostNetwork: true   # DS reports its bind address; hostNetwork
                           # gives a cluster-routable address out of the
                           # box without Service-level NodePort work.
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: ds
           image: $IMG
@@ -172,6 +173,10 @@ spec:
           args: ["--config", "/etc/flint/pnfs.yaml"]
           env:
             - { name: PNFS_SERVER_SCOPE, value: "flint-pnfs-ds" }
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           volumeMounts:
             - { name: config, mountPath: /etc/flint }
             - { name: data, mountPath: /var/lib/flint-pnfs/exports }
@@ -205,20 +210,18 @@ spec:
       hostNetwork: true   # NFSv4.1 mount hits the MDS Service IP
                           # directly; hostNetwork sidesteps CNI hops
                           # the bench would otherwise be measuring.
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: client
-          image: ubuntu:22.04
-          command: ["bash", "-lc"]
-          args:
-            - |
-              set -eux
-              apt-get update -qq
-              apt-get install -y -qq nfs-common fio jq dnsutils >/dev/null
-              mkdir -p /mnt/pnfs
-              # Sleep until the orchestrator kubectl-execs the sweep.
-              sleep infinity
+          image: dilipdalton/flint-pnfs-bench-client:latest
+          imagePullPolicy: Always
+          command: ["sleep", "infinity"]
           securityContext:
             privileged: true   # mount(8) needs CAP_SYS_ADMIN
+          readinessProbe:
+            exec:
+              command: ["test", "-x", "/usr/bin/fio"]
+            periodSeconds: 5
           volumeMounts:
             - { name: results, mountPath: /results }
       volumes:
