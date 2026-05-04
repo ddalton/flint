@@ -412,10 +412,74 @@ SPDK prerequisites and runs the KUTTL system test suite.
 
 These are required for SPDK volumes (Phase 1 didn't need them):
 
+0. **Three additional `dilipdalton/*` images built and pushed** — the
+   chart's pods reference them.
 1. **`ublk_drv` kernel module loaded** on each worker.
 2. **Hugepages reserved** — at least 2 GB (1024 × 2 MB) per worker.
 3. **VolumeSnapshot CRDs installed** cluster-wide.
-4. **Flint installed via Helm** with SPDK enabled (the default).
+4. **Flint installed via Helm** with the rc image tags overridden.
+
+### (P2-0) Build and push the chart's images
+
+Phase 1 only needed `flint-pnfs` (used by the bench harness directly).
+Phase 2 installs the full Flint Helm chart, which references three
+additional images. Build them at the **same rc tag** as the
+Phase-1-validated `flint-pnfs` image so the source state under test
+is unambiguous (i.e., if Phase 1 validated against `:1.0.0-rc3`,
+Phase 2 validates `flint-driver:1.0.0-rc3`, `spdk-tgt:1.0.0-rc3`,
+and `spdk-dashboard-frontend:1.0.0-rc3` — all from the same `main`
+SHA).
+
+| Image | Dockerfile | Approx build time |
+|---|---|---|
+| `dilipdalton/flint-driver` | `spdk-csi-driver/docker/Dockerfile.csi` | ~5–10 min cold, <2 min cached |
+| `dilipdalton/spdk-tgt` | `spdk-csi-driver/docker/Dockerfile.spdk` | ~30–60 min cold, ~5 min cached (ubuntu:24.04 + SPDK from source — slow) |
+| `dilipdalton/spdk-dashboard-frontend` | `spdk-dashboard/Dockerfile.frontend` | ~2–3 min |
+
+```bash
+# From repo root, on the same x86-64 build machine you used for flint-pnfs:
+git checkout main && git pull origin main
+
+# Replace 1.0.0-rc3 with the actual rc number Phase 1 validated against.
+RC_TAG=1.0.0-rc3
+
+docker buildx build \
+  --platform linux/amd64 \
+  --tag dilipdalton/flint-driver:$RC_TAG \
+  --file spdk-csi-driver/docker/Dockerfile.csi \
+  --push \
+  spdk-csi-driver
+
+docker buildx build \
+  --platform linux/amd64 \
+  --tag dilipdalton/spdk-tgt:$RC_TAG \
+  --file spdk-csi-driver/docker/Dockerfile.spdk \
+  --push \
+  spdk-csi-driver
+
+docker buildx build \
+  --platform linux/amd64 \
+  --tag dilipdalton/spdk-dashboard-frontend:$RC_TAG \
+  --file spdk-dashboard/Dockerfile.frontend \
+  --push \
+  spdk-dashboard
+```
+
+Verify all three are pullable before proceeding:
+
+```bash
+for img in flint-driver spdk-tgt spdk-dashboard-frontend; do
+  echo "─── $img ───"
+  docker manifest inspect dilipdalton/$img:$RC_TAG > /dev/null \
+    && echo "✓ pullable" \
+    || echo "✗ MISSING — re-run the build above"
+done
+```
+
+CSI sidecars (external-provisioner / external-attacher / external-
+resizer / external-snapshotter / csi-node-driver-registrar /
+livenessprobe) are pulled from `registry.k8s.io/sig-storage/*` at
+versions pinned in `values.yaml`. They are not built by Flint.
 
 ### (P2-1) Load `ublk_drv` and reserve hugepages
 
@@ -501,12 +565,31 @@ kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/c
 
 ### (P2-4) Install Flint
 
+The chart's `values.yaml` defaults to `tag: latest` for each image —
+fine for dev, wrong for release validation. Override the tags at
+install time to pin to the rc validated in Phase 1 (replace
+`1.0.0-rc3` with the actual rc number if it's different):
+
 ```bash
+RC_TAG=1.0.0-rc3
+
 helm install flint-csi ./flint-csi-driver-chart \
   --namespace flint-system \
-  --create-namespace
+  --create-namespace \
+  --set images.flintCsiDriver.tag=$RC_TAG \
+  --set images.spdkTarget.tag=$RC_TAG \
+  --set dashboard.frontend.tag=$RC_TAG
+
 kubectl rollout status -n flint-system ds/flint-csi-node --timeout=5m
 kubectl rollout status -n flint-system deploy/flint-csi-controller --timeout=5m
+```
+
+Confirm the running pods are using the rc image (not `latest`):
+
+```bash
+kubectl get pods -n flint-system -o jsonpath='{range .items[*]}{.metadata.name}{": "}{range .spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+# Every flintCsiDriver / spdkTarget / dashboard image should end in :1.0.0-rc3
+# (or your actual rc tag). Any :latest is a sign the --set didn't take.
 ```
 
 Then initialize the local NVMe disks via the dashboard:
