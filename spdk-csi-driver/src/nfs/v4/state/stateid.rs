@@ -161,10 +161,41 @@ pub struct StateIdManager {
     /// Lock-free per-client state tracking
     client_states: DashMap<u64, Vec<[u8; 12]>>,
 
+    /// Per-(client, owner, filehandle) open state (RFC 7530 §16.16):
+    /// repeated OPENs by the same owner on the same file return the
+    /// SAME `stateid.other` with `seqid` bumped, and the share-mask
+    /// is updated. Keyed by `(client_id, owner_bytes, fh_bytes)`.
+    /// **In-memory only** — not persisted because (a) restart drops
+    /// in-flight open state anyway, (b) Linux clients reissue OPEN
+    /// after restart via the BADSESSION recovery path, and (c)
+    /// persisting open-owner records would require schema bump +
+    /// boundary plumbing that's heavier than the win.
+    open_states: DashMap<(u64, Vec<u8>, Vec<u8>), OpenState>,
+
+    /// Index from filehandle bytes → list of `(client_id, owner)`
+    /// pairs that have an open on it. Used by share-deny conflict
+    /// detection (RFC 8881 §9.7) to scan all conflicting opens
+    /// without iterating the full `open_states` map.
+    opens_by_fh: DashMap<Vec<u8>, Vec<(u64, Vec<u8>)>>,
+
     /// Persistence target. See `client.rs` for the full rationale;
     /// stateids surviving restart is what prevents `BAD_STATEID` on
     /// the client's next WRITE after an MDS pod roll.
     backend: Arc<dyn StateBackend>,
+}
+
+/// Per-(client, owner, fh) open state. `share_access` /
+/// `share_deny` are the bitmasks the client passed; `verifier` is
+/// the EXCLUSIVE4 / EXCLUSIVE4_1 verifier captured on the original
+/// create so a retry with a matching verifier returns the same
+/// stateid (RFC 8881 §18.16.5).
+#[derive(Debug, Clone)]
+pub struct OpenState {
+    pub stateid_other: [u8; 12],
+    pub seqid: u32,
+    pub share_access: u32,
+    pub share_deny: u32,
+    pub verifier: Option<u64>,
 }
 
 impl StateIdManager {
@@ -176,8 +207,140 @@ impl StateIdManager {
             next_stateid: AtomicU64::new(1),
             states: DashMap::new(),
             client_states: DashMap::new(),
+            open_states: DashMap::new(),
+            opens_by_fh: DashMap::new(),
             backend,
         }
+    }
+
+    /// Look up an existing open by (client, owner, fh). RFC 7530
+    /// §16.16: returns Some when this open-owner already has state
+    /// for this file; the dispatcher then bumps the existing
+    /// stateid's seqid instead of allocating a new one.
+    pub fn find_open(
+        &self,
+        client_id: u64,
+        owner: &[u8],
+        fh: &[u8],
+    ) -> Option<OpenState> {
+        self.open_states
+            .get(&(client_id, owner.to_vec(), fh.to_vec()))
+            .map(|e| e.clone())
+    }
+
+    /// RFC 8881 §9.7 share-reservation conflict check. Returns true
+    /// if any *other* open on this filehandle has a deny mask that
+    /// conflicts with `requested_access`, or holds an access bit
+    /// that this caller's deny mask would prohibit.
+    ///
+    /// "Same (client, owner)" is exempt — repeated OPENs by the
+    /// same owner upgrade their own share-mask without conflicting.
+    pub fn share_conflict(
+        &self,
+        fh: &[u8],
+        client_id: u64,
+        owner: &[u8],
+        requested_access: u32,
+        requested_deny: u32,
+    ) -> bool {
+        let entries = match self.opens_by_fh.get(&fh.to_vec()) {
+            Some(e) => e.clone(),
+            None => return false,
+        };
+        for (other_cid, other_owner) in entries {
+            if other_cid == client_id && other_owner.as_slice() == owner {
+                continue; // same owner — no conflict
+            }
+            if let Some(state) = self
+                .open_states
+                .get(&(other_cid, other_owner.clone(), fh.to_vec()))
+            {
+                // existing's deny vs requested access:
+                if state.share_deny & requested_access != 0 {
+                    return true;
+                }
+                // existing's access vs our deny:
+                if state.share_access & requested_deny != 0 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Record-or-update an open. If an existing entry exists for the
+    /// `(client_id, owner, fh)` triple, bump its seqid and merge the
+    /// new share-mask in (RFC 7530 §16.16: subsequent OPENs upgrade
+    /// the share semantics). Otherwise allocate a fresh stateid via
+    /// the normal `allocate` path and stamp it into `open_states`.
+    /// Returns the up-to-date `StateId` to send to the client.
+    pub fn record_open(
+        &self,
+        client_id: u64,
+        owner: Vec<u8>,
+        fh: Vec<u8>,
+        share_access: u32,
+        share_deny: u32,
+        verifier: Option<u64>,
+    ) -> StateId {
+        let key = (client_id, owner.clone(), fh.clone());
+        if let Some(mut entry) = self.open_states.get_mut(&key) {
+            entry.seqid = entry.seqid.wrapping_add(1);
+            entry.share_access |= share_access;
+            entry.share_deny |= share_deny;
+            // Verifier on a follow-on open is preserved from the
+            // original create; we only set it on first-create paths.
+            let stateid = StateId {
+                seqid: entry.seqid,
+                other: entry.stateid_other,
+            };
+            // Mirror the seqid bump onto the master state map so
+            // validate() agrees about the current seqid.
+            if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
+                master.seqid = entry.seqid;
+                master.stateid.seqid = entry.seqid;
+            }
+            return stateid;
+        }
+        // Fresh allocation. Reuses the existing `allocate` path so
+        // the master `states` map and `client_states` index stay
+        // consistent with everything else.
+        let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
+        self.open_states.insert(
+            key,
+            OpenState {
+                stateid_other: stateid.other,
+                seqid: stateid.seqid,
+                share_access,
+                share_deny,
+                verifier,
+            },
+        );
+        self.opens_by_fh
+            .entry(fh)
+            .or_insert_with(Vec::new)
+            .push((client_id, owner));
+        stateid
+    }
+
+    /// EXCLUSIVE4 / EXCLUSIVE4_1 retry semantics: if any prior open
+    /// on this filehandle was an exclusive create with `verifier`,
+    /// return its OpenState. RFC 8881 §18.16.5: a retry with the
+    /// same verifier returns the existing stateid; a different
+    /// verifier on an existing file returns `NFS4ERR_EXIST`.
+    pub fn find_exclusive_match(&self, fh: &[u8], verifier: u64) -> Option<OpenState> {
+        let entries = self.opens_by_fh.get(&fh.to_vec()).map(|e| e.clone()).unwrap_or_default();
+        for (cid, owner) in entries {
+            if let Some(state) = self
+                .open_states
+                .get(&(cid, owner, fh.to_vec()))
+            {
+                if state.verifier == Some(verifier) {
+                    return Some(state.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Repopulate the in-memory DashMap from a backend snapshot.
@@ -539,6 +702,76 @@ mod tests {
 
         // New seqid should pass
         assert!(mgr.validate(&new_stateid).is_ok());
+    }
+
+    /// RFC 7530 §16.16: a follow-on OPEN by the same (client, owner)
+    /// on the same filehandle returns the SAME `stateid.other` with
+    /// `seqid` bumped, and merges the share-mask. Pynfs OPEN2
+    /// asserts seqid=2 on the second OPEN.
+    #[test]
+    fn test_record_open_bumps_seqid_for_same_owner() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"alice".to_vec();
+        let fh = b"/path/to/file".to_vec();
+
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2 /*WRITE*/, 0, None);
+        assert_eq!(s1.seqid, 1);
+
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 1 /*READ*/, 0, None);
+        assert_eq!(s2.seqid, 2);
+        assert_eq!(s2.other, s1.other, "same owner+fh must reuse stateid.other");
+
+        // The merged share-access should be WRITE | READ = BOTH (3).
+        let st = mgr.find_open(1, &owner, &fh).unwrap();
+        assert_eq!(st.share_access, 3);
+
+        // validate() agrees about the latest seqid.
+        assert!(mgr.validate(&s2).is_ok());
+        // The old seqid is stale.
+        assert!(mgr.validate(&s1).is_err());
+    }
+
+    /// RFC 8881 §9.7: an OPEN whose access bits collide with a
+    /// concurrent owner's deny mask (or vice versa) returns
+    /// SHARE_DENIED. Same (client, owner) is exempt — they upgrade
+    /// their own share-mask. Pynfs COUR3 covers this.
+    #[test]
+    fn test_share_conflict_detection() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let fh = b"/path/to/file".to_vec();
+
+        // Owner A opens with deny=WRITE.
+        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 1, 2, None);
+
+        // Different (client, owner) trying to access WRITE — conflicts.
+        assert!(mgr.share_conflict(&fh, 2, b"bob", 2 /*WRITE*/, 0));
+        // Different owner accessing READ only — no conflict (deny mask
+        // only covers WRITE).
+        assert!(!mgr.share_conflict(&fh, 2, b"bob", 1 /*READ*/, 0));
+        // Same (client, owner) is always exempt.
+        assert!(!mgr.share_conflict(&fh, 1, b"alice", 2 /*WRITE*/, 0));
+
+        // Symmetric conflict: a new owner deny=READ vs existing
+        // access=READ is also a conflict.
+        assert!(mgr.share_conflict(&fh, 2, b"bob", 0, 1 /*deny READ*/));
+    }
+
+    /// RFC 8881 §18.16.5: EXCLUSIVE4 retry with a matching verifier
+    /// finds the existing open (idempotent retry). Different
+    /// verifier on existing file → caller maps to EXIST.
+    #[test]
+    fn test_find_exclusive_match() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let fh = b"/excl/file".to_vec();
+
+        mgr.record_open(1, b"alice".to_vec(), fh.clone(), 3, 0, Some(0xdead_beef));
+
+        // Same verifier → matches.
+        assert!(mgr.find_exclusive_match(&fh, 0xdead_beef).is_some());
+        // Different verifier → no match (caller returns EXIST).
+        assert!(mgr.find_exclusive_match(&fh, 0xc0ffee).is_none());
+        // No prior exclusive open on a different fh.
+        assert!(mgr.find_exclusive_match(b"/other", 0xdead_beef).is_none());
     }
 
     #[test]

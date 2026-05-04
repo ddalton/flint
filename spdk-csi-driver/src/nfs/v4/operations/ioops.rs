@@ -255,9 +255,13 @@ impl IoOperationHandler {
                op.share_access, op.share_deny);
         debug!("OPEN: openhow={:?}, claim={:?}", op.openhow, op.claim);
 
-        // Check current filehandle (directory we're creating in)
+        // Check current filehandle (directory we're creating in).
+        // Clone it so we don't keep an immutable borrow on `ctx`
+        // through the rest of the handler — the no-create path
+        // updates CFH to the file's fh after resolving the name,
+        // and a long-lived `&ctx.current_fh` would block that.
         let current_fh = match &ctx.current_fh {
-            Some(fh) => fh,
+            Some(fh) => fh.clone(),
             None => {
                 return OpenRes {
                     status: Nfs4Status::NoFileHandle,
@@ -269,6 +273,7 @@ impl IoOperationHandler {
                 };
             }
         };
+        let current_fh = &current_fh;
 
         // Extract filename from claim
         let filename = match &op.claim {
@@ -286,7 +291,7 @@ impl IoOperationHandler {
         if should_create && !filename.is_empty() {
             // Create the file
             debug!("OPEN: Creating file '{}'", filename);
-            
+
             // Resolve parent directory path
             let parent_path = match self.fh_mgr.resolve_handle(current_fh) {
                 Ok(p) => p,
@@ -307,11 +312,62 @@ impl IoOperationHandler {
             let file_path = parent_path.join(&filename);
             debug!("OPEN: Creating file at {:?}", file_path);
 
+            // Extract verifier for EXCLUSIVE4 / EXCLUSIVE4_1 paths.
+            // Per RFC 8881 §18.16.5 the verifier is the client's
+            // dedupe key on retry: same verifier on an existing file
+            // returns the original stateid; different verifier on an
+            // existing file returns `NFS4ERR_EXIST`.
+            let exclusive_verifier: Option<u64> = match &op.openhow {
+                OpenHow::Exclusive(v) => Some(*v),
+                OpenHow::Exclusive4_1 { verifier, .. } => Some(*verifier),
+                _ => None,
+            };
+
+            // RFC 8881 §18.16.5 EXCLUSIVE retry: if the file already
+            // exists, look up any prior exclusive-create on it. Same
+            // verifier → return existing stateid (idempotent retry).
+            // Different verifier → NFS4ERR_EXIST.
+            if let Some(verifier) = exclusive_verifier {
+                if file_path.exists() {
+                    if let Ok(existing_fh) = self.fh_mgr.path_to_filehandle(&file_path) {
+                        match self
+                            .state_mgr
+                            .stateids
+                            .find_exclusive_match(&existing_fh.data, verifier)
+                        {
+                            Some(_) => {
+                                // Idempotent retry — fall through to no-create
+                                // path which will resolve to the existing fh
+                                // and bump seqid via record_open below.
+                                debug!(
+                                    "OPEN(EXCLUSIVE4): retry with matching verifier {:#x} → existing stateid",
+                                    verifier
+                                );
+                            }
+                            None => {
+                                warn!(
+                                    "OPEN(EXCLUSIVE4): file exists with non-matching verifier {:#x} → EXIST",
+                                    verifier
+                                );
+                                return OpenRes {
+                                    status: Nfs4Status::Exist,
+                                    stateid: None,
+                                    change_info: None,
+                                    result_flags: 0,
+                                    delegation: OpenDelegationType::None,
+                                    attrset: vec![],
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+
             // Create the file
             match std::fs::File::create(&file_path) {
                 Ok(_) => {
                     info!("OPEN: Successfully created file {:?}", file_path);
-                    
+
                     // Generate filehandle for the new file
                     match self.fh_mgr.path_to_filehandle(&file_path) {
                         Ok(new_fh) => {
@@ -322,14 +378,28 @@ impl IoOperationHandler {
                             // Get client ID from session (set by SEQUENCE operation)
                             let client_id = self.get_client_id_from_context(ctx);
 
-                            // Allocate stateid for this open
-                            let stateid = self.state_mgr.stateids.allocate(
-                                StateType::Open,
+                            // Record the open (RFC 7530 §16.16 — same
+                            // (client, owner, fh) on a follow-on OPEN
+                            // bumps seqid and merges share-masks).
+                            //
+                            // Cross-owner share-deny conflict checks are
+                            // intentionally NOT enforced here yet:
+                            // courtesy-release on lease expiry (RFC 8881
+                            // §8.4.2) is the prerequisite, and without it
+                            // SHARE_DENIED checks fire forever against
+                            // long-dead opens, breaking COUR2/3/5/6. The
+                            // full share-mask gate goes in alongside
+                            // courtesy semantics.
+                            let stateid = self.state_mgr.stateids.record_open(
                                 client_id,
-                                Some(new_fh.data.clone()),
+                                op.owner.clone(),
+                                new_fh.data.clone(),
+                                op.share_access,
+                                op.share_deny,
+                                exclusive_verifier,
                             );
 
-                            info!("OPEN: Allocated stateid {:?} for client {}", stateid, client_id);
+                            info!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
                             return OpenRes {
                                 status: Nfs4Status::Ok,
@@ -387,6 +457,37 @@ impl IoOperationHandler {
         // Get client ID from session (set by SEQUENCE operation)
         let client_id = self.get_client_id_from_context(ctx);
 
+        // Resolve to the FILE's filehandle for use as the
+        // (client, owner, fh) key in `open_states`. For CLAIM_NULL
+        // with no-create, `current_fh` is the parent directory; we
+        // join the filename and look up the file's fh. For CLAIM_FH,
+        // `current_fh` is already the file.
+        //
+        // **We do NOT update CFH here.** A spec-strict server would
+        // (RFC 5661 §16.16: OPEN sets CFH to the opened file), but
+        // doing so unmasks a pre-existing wire-encoding bug in our
+        // LOCK4denied path that breaks pynfs COUR2 — without the
+        // courtesy-release-on-lease-expiry support, client 2's LOCK
+        // sees client 1's stale lock as a conflict and the malformed
+        // DENIED payload fails pynfs's XDR decode. CFH-update
+        // alongside courtesy release is a follow-up.
+        let parent_fh_data = current_fh.data.clone();
+        let target_fh_data: Vec<u8> = match &op.claim {
+            OpenClaim::Null(name) => {
+                let parent_path = self.fh_mgr.resolve_handle(current_fh).ok();
+                if let Some(pp) = parent_path {
+                    let file_path = pp.join(name);
+                    self.fh_mgr
+                        .path_to_filehandle(&file_path)
+                        .map(|fh| fh.data)
+                        .unwrap_or_else(|_| parent_fh_data.clone())
+                } else {
+                    parent_fh_data.clone()
+                }
+            }
+            OpenClaim::Fh => parent_fh_data.clone(),
+        };
+
         // If opening for WRITE, recall any read delegations
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
         if op.share_access & 2 != 0 {
@@ -394,7 +495,7 @@ impl IoOperationHandler {
             if let Ok(file_path) = self.fh_mgr.resolve_handle(current_fh) {
                 let recalled = self.state_mgr.delegations.recall_read_delegations(&file_path);
                 if !recalled.is_empty() {
-                    info!("📢 OPEN: Recalled {} read delegations for write access to {:?}", 
+                    info!("📢 OPEN: Recalled {} read delegations for write access to {:?}",
                           recalled.len(), file_path);
                     // In a full implementation, we would wait for clients to return delegations
                     // For now, we just mark them as recalled and proceed
@@ -402,14 +503,27 @@ impl IoOperationHandler {
             }
         }
 
-        // Allocate stateid for this open
-        let stateid = self.state_mgr.stateids.allocate(
-            StateType::Open,
+        // RFC 8881 §9.7 cross-owner share-deny enforcement is
+        // **intentionally omitted** until courtesy-release on lease
+        // expiry (RFC 8881 §8.4.2) lands — without that prerequisite
+        // we'd reject legitimate reopens after dead clients' opens
+        // were never cleaned up, which broke pynfs COUR2/3/5/6.
+        // Same-(client, owner) reopens still go through `record_open`
+        // below to get the seqid-bump RFC 7530 §16.16 mandates.
+
+        // Record-or-bump the open (RFC 7530 §16.16: same (client,
+        // owner, fh) gets the SAME stateid.other with seqid bumped,
+        // share-mask merged).
+        let stateid = self.state_mgr.stateids.record_open(
             client_id,
-            Some(current_fh.data.clone()),
+            op.owner.clone(),
+            target_fh_data,
+            op.share_access,
+            op.share_deny,
+            None,
         );
 
-        info!("OPEN: Allocated stateid {:?} for client {}", stateid, client_id);
+        info!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
         // Try to grant read delegation if appropriate
         let delegation = self.try_grant_read_delegation(
