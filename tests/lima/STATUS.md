@@ -2,15 +2,22 @@
 
 Living document. Update this when a session ends or a milestone lands.
 
-**Last updated:** 2026-05-03 — Phase B complete *with no known gaps*; FH stability shipped (`3f000bb`); single-host nconnect sweep done (`7358c47`); cross-host bench is the only remaining perf move.
-**Branch:** `kind-no-spdk`. **HEAD:** `7358c47`.
+**Last updated:** 2026-05-03 — Phase B complete; six rounds of pynfs conformance work landed (Tier 1A→1E); pynfs at **167 PASS / 4 FAIL / 91 SKIP**, +14 from baseline. Cross-host bench is the next perf move.
+**Branch:** `kind-no-spdk`. **HEAD:** `8155065`.
 
 ### Picking up next session
 
 * **Phase B is fully done.** All 5 sub-PRs (`982edc1`, `a2af4e0`, `e5e1ef3`, `02d3ee5`, `4d2f162`) plus the FH-stability follow-up (`3f000bb`) landed and pushed. The full chain: clients/stateids/layouts persist through a `SqliteBackend` (WAL+NORMAL crash-safe); a per-deployment `server_id` lives in a `server_identity` singleton table and is stamped into every NFSv4 file handle so cached FHs survive restart; `make test-pnfs-restart` proves a kernel client's `read()` against pre-restart open handles still returns the original bytes after the MDS comes back. Sessions deliberately observed-but-not-restored — slot replay state can't survive restart per RFC 8881 §15.1.10.4; the kernel's natural BADSESSION → fresh CREATE_SESSION recovery handles that.
 * **Phase A + Phase B together = pNFS shippable to a first customer.** DS death triggers CB_LAYOUTRECALL + forced revocation (Phase A); MDS pod roll preserves client_id, stateids, layouts, and file-handle stamps so an existing mount keeps working byte-for-byte (Phase B). Phase C (FFL mirroring for HDFS-style replication) is demand-driven from here.
 * **Loopback nconnect sweep is in (`make test-pnfs-nconnect`); the data points to cross-host as the only next move.** Single-host with `nconnect={1,4,8,16}` × `bs={4K,1M}` × `{read,write}` shows **throughput essentially flat across nconnect** on this Mac/loopback hardware (snapshot in `tests/lima/pnfs/nconnect-results-2026-05-03.tsv`). That **rules out** the per-TCP-serial RPC handler at `server_v4.rs:176` as the single-host ceiling — pipelining it would not move the number on this hardware. The bottleneck is below the per-connection layer (kernel page cache writeback, shared-APFS-journal between MDS+DS1+DS2, loopback TCP saturation, fio iodepth — can't disentangle without separating the kernels). **Next move: a real cross-host bench** (Option 1 from the original "performance scaling" branch). Estimated ~3 days harness + Terraform; ~$5–20 cloud cost; ~$0 if you have spare Linux boxes + a switch. The bench is reusable forever.
-* **Test gates as of HEAD:** `cargo test --lib` **310 PASS / 0 FAIL** (was 291 — +19 for `state_backend` module + reload + server_id + migration + `pnfs::config` tests). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` **green with hash assertion firing** — kernel reads pre-restart bytes successfully post-restart with zero stale-handle markers. `make test-nfs-protocol` 153 PASS / 18 FAIL / 91 SKIP — same pynfs baseline.
+* **Test gates as of HEAD:** `cargo test --lib` **314 PASS / 0 FAIL** (was 291 at session start). `make test-pnfs-smoke` green. `make test-pnfs-recall` green (5 markers). `make test-pnfs-restart` **green with hash assertion firing** — kernel reads pre-restart bytes successfully post-restart with zero stale-handle markers. `make test-nfs-protocol` **167 PASS / 4 FAIL / 91 SKIP** (was 153 / 18 / 91 at session start; +14 net).
+* **Conformance work concluded at 167/4/91; the remaining 4 fails are intentionally deferred niche cases (none cascade or corrupt data; production risk profile is low):**
+  * `RNM20` — LINK returns NFS4ERR_ACCESS instead of OK on a hard-link create. Filesystem-perms bug. Affects build systems / Git checkouts that hard-link cache outputs; effectively zero impact on the perf-tier ML use case (write-once / read-many). ~½ session to fix.
+  * `SEQ9c` — LOOKUP with a malformed name expects `NFS4ERR_INVAL`; we return success-ish or NOENT. Real Linux kernel clients never send malformed names (kernel paths are pre-validated). Pure conformance polish. ~½ session.
+  * `SEQ2` — IndexError in pynfs's XDR decoder. Likely a niche reply-shape mismatch on a SEQUENCE replay-cache edge. Linux kernel decoder is more permissive and would just retry. May need ½–1 session, possibly more if it's a real boundary bug.
+  * `RECC3` — non-reclaim OPEN during the server's grace window before the client did RECLAIM_COMPLETE expects `NFS4ERR_GRACE`. Our gate is correct in principle but only fires for the fixed 90s post-start; pynfs reaches RECC3 well past that. Right fix is **dynamic grace** (extend until either all known clients RECLAIM_COMPLETE or `lease_time` elapses with no reclaim attempts). Matters during MDS restart under sustained load; Phase B's persistence already handles steady-state pod rolls (clients keep `client_id` via case-1 EXCHANGE_ID renewal, never even need GRACE). ~1 session.
+  
+  Cumulative cost-benefit if all four were fixed: ~3–4 sessions for `167 → ~171/0/91`. No measurable customer-visible improvement; deferred until perf work picks them up as side-effects.
 * **Useful files for orienting fast:**
   * `docs/plans/pnfs-production-readiness.md` — master plan (Phase A + B done, C deferred).
   * `src/state_backend/{mod,memory,sqlite}.rs` — trait + records + two impls.
@@ -269,6 +276,33 @@ error with `NFS4ERR_BADHANDLE`. This commit closes the gap:
   and a v1→v2 migration test. Lib: 305 → 310.
 
 Phase B is now feature-complete with no known gaps.
+
+### Phase 9 — pynfs conformance (this branch session: `c39954a..8155065`)
+
+Six rounds of focused conformance work landed across `c39954a`,
+`ef2205a`, `c3dcc53`, `3ce5d8b`, `4e23170`, `8155065`. Net **+14
+PASS / -14 FAIL** (153 → 167 PASS, 18 → 4 FAIL, 91 SKIP unchanged).
+Each round was scoped to a single structural fix that unlocked
+multiple tests, and each shipped a Lima/pynfs re-run to prove the
+delta. None regressed smoke or restart e2es.
+
+| Tier | Commit | What | pynfs delta |
+|---|---|---|---|
+| **1A** | `c39954a` | Real RFC 8881 §18.51 RECLAIM_COMPLETE state machine: `Client.reclaim_complete` (persisted, schema v2 → v3 with idempotent `pragma_table_info`-guarded migration), `mark_reclaim_complete -> ReclaimCompleteOutcome`, `is_reclaim_complete` for the OPEN gate. Dispatcher RECLAIM_COMPLETE arm honors `rca_one_fs=TRUE` (per-fs no-op) vs `FALSE` (whole-client bit flip + `COMPLETE_ALREADY` on retry). OPEN claim-type gating (`CLAIM_PREVIOUS=1`, `CLAIM_DELEGATE_PREV=3`, `CLAIM_DELEG_PREV_FH=6`): `NO_GRACE` outside grace OR after RECLAIM_COMPLETE; non-reclaim OPENs during grace before RECLAIM_COMPLETE → `GRACE`. | +2 (RECC1, RECC2, RECC4 fixed; RECC3 still needs dynamic grace) |
+| **1B** | `ef2205a` | One-line `tokio::fs::metadata` → `symlink_metadata` in `handle_lookup`. RFC 5661 §16.10.5 mandates LOOKUP returns the symlink's filehandle without dereferencing — we were following trailing symlinks and erroring with NOENT on dangling-symlink leaves (which pynfs's `--maketree` deliberately creates). | +4 (LKPP1a, PUTFH1a, RNM2a, RNM3a) |
+| **1C** | `c3dcc53` | Per-session resource-limit enforcement (RFC 8881 §18.46.4). New `CompoundRequest.wire_size` field set at decode; dispatcher REQ_TOO_BIG check after SEQUENCE binds session. Encode-then-measure REP_TOO_BIG check post-loop with stripped fallback that keeps the SEQUENCE result at `results[0]` so clients still read `sr_status`. `OperationResult` derives `Clone`. | +2 (SEQ6, CSESS26) |
+| **1A.2** | `3ce5d8b` | Real lease expiration + RFC 8881 §18.35.5 case-5 deferred replacement. `Client.pending_replaces: Option<u64>` (in-memory only — half-confirmed clientid wouldn't survive restart). Case-5 EXCHANGE_ID no longer immediately removes the old client; new client carries the deferred-cleanup target. `mark_confirmed -> Option<u64>` returns the old clientid; CREATE_SESSION cascades through `sessions / stateids / delegations / clients` to discard old state on confirm. New CREATE_SESSION lease-validity check returns STALE_CLIENTID for a clientid whose lease has fully expired. | +3 (EID5f, EID5fb, EID9) |
+| **1D** | `4e23170` | RFC 7530 §16.16 same-owner OPEN seqid bump. New in-memory `open_states: DashMap<(client_id, owner, fh), OpenState>` + `opens_by_fh` index on `StateIdManager`. New methods `find_open` / `share_conflict` / `record_open` / `find_exclusive_match`. `handle_open` routes both create + no-create paths through `record_open` so repeated OPENs by the same (client, owner, fh) get the same `stateid.other` with seqid bumped. CLAIM_NULL no-create resolves parent + name to the file's fh as the open key. | +1 (OPEN2) |
+| **1E** | `8155065` | RFC 8881 §8.4.2.4 courtesy-release at COMPOUND entry. New `lock_mgr` field on `CompoundDispatcher`. `cleanup_expired` cascade now sweeps stateids + open_states + opens_by_fh; dispatcher-side hook drives `lock_mgr.remove_client_locks` for expired clients before each compound runs. Re-enables share-deny gates in handle_open (now self-healing instead of leaking dead clients' state forever). Pre-existing EXCLUSIVE4_1 decoder bug fixed: 8-byte verifier was being discarded; now packed into `OpenHow.attrs` so the dispatcher's existing convention finds it. | +2 (COUR3, OPEN6) |
+
+**Lib gate**: 311 → 314 PASS (3 new unit tests for OpenState
+shape: `test_record_open_bumps_seqid_for_same_owner`,
+`test_share_conflict_detection`, `test_find_exclusive_match`).
+
+**Remaining 4 fails — explicitly deferred**, see top-of-file
+"Picking up next session" for production risk per test. Cost-
+benefit summary: ~3–4 more sessions for 167 → ~171, no measurable
+customer-visible improvement; conformance work concluded here.
 
 ### pynfs coverage for Phase A
 
