@@ -359,6 +359,20 @@ impl SessionOperationHandler {
             Some(_) => { /* matches or already confirmed — proceed */ }
         }
 
+        // RFC 8881 §8.4.2 + pynfs EID9: a clientid whose lease has
+        // fully expired is `STALE_CLIENTID`. The lease is renewed by
+        // every successful SEQUENCE; for an unconfirmed clientid that
+        // never reached CREATE_SESSION, the original EXCHANGE_ID's
+        // implicit lease is the only one. After lease_time + slack
+        // with no renewal, the client must re-EXCHANGE_ID.
+        if !self.state_mgr.leases.is_valid(op.clientid) {
+            warn!(
+                "CREATE_SESSION: Client {} lease expired → STALE_CLIENTID",
+                op.clientid,
+            );
+            return create_session_err(Nfs4Status::StaleClientId);
+        }
+
         // RFC 8881 §18.36.4 sequence checks. Replays return the cached
         // structured response so the client sees byte-identical fields;
         // out-of-order csa_sequence is SEQ_MISORDERED.
@@ -396,8 +410,22 @@ impl SessionOperationHandler {
         // CREATE_SESSION succeeding marks the client record as confirmed,
         // which changes the EXCHANGE_ID §18.35.5 outcome for subsequent
         // EXCHANGE_IDs on the same owner (e.g. allows UPD_CONFIRMED_REC_A
-        // to land instead of NoEnt).
-        self.state_mgr.clients.mark_confirmed(op.clientid);
+        // to land instead of NoEnt). Also drives RFC 8881 §18.35.5
+        // case 5 deferred-cleanup: if this client was allocated as a
+        // case-5 replacement, the OLD clientid's sessions / stateids /
+        // delegations / lease / record are torn down here. Pynfs
+        // EID5f/EID5fb verifies the old session returns BADSESSION
+        // immediately after this call.
+        if let Some(old_id) = self.state_mgr.clients.mark_confirmed(op.clientid) {
+            warn!(
+                "CREATE_SESSION: case-5 deferred cleanup — discarding pre-reboot client {}",
+                old_id,
+            );
+            self.state_mgr.sessions.destroy_client_sessions(old_id);
+            self.state_mgr.stateids.remove_client_stateids(old_id);
+            self.state_mgr.delegations.cleanup_client_delegations(old_id);
+            self.state_mgr.clients.remove_client(old_id);
+        }
 
         // Negotiate session buffer sizes. Take the *minimum* of client-requested
         // and server-maximum. We've already rejected requests below the server

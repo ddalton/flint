@@ -137,6 +137,18 @@ pub struct Client {
     /// Persisted so a post-restart client doesn't re-enter "grace mode"
     /// just because the in-memory state evaporated.
     pub reclaim_complete: bool,
+
+    /// RFC 8881 §18.35.5 case 5: when EXCHANGE_ID detects a client
+    /// reboot (same owner+principal, fresh verifier), the server
+    /// allocates a NEW clientid but MUST keep the OLD client's state
+    /// alive until the new clientid is confirmed via a successful
+    /// CREATE_SESSION. We track the deferred-cleanup target here on
+    /// the *new* client; `mark_confirmed` consumes it.
+    /// Not persisted — the deferred-replacement window is short-
+    /// lived (one CREATE_SESSION) and post-restart recovery wouldn't
+    /// honor a half-completed replacement anyway.
+    #[doc(hidden)]
+    pub pending_replaces: Option<u64>,
 }
 
 impl Client {
@@ -165,6 +177,7 @@ impl Client {
             cs_cached_res: None,
             initial_cs_sequence: 0,
             reclaim_complete: false,
+            pending_replaces: None,
         }
     }
 }
@@ -304,6 +317,9 @@ impl Client {
             }),
             initial_cs_sequence: r.initial_cs_sequence,
             reclaim_complete: r.reclaim_complete,
+            // Deferred replacements never survive restart by design;
+            // a half-confirmed clientid is dropped post-restart.
+            pending_replaces: None,
         }
     }
 }
@@ -518,14 +534,39 @@ impl ClientManager {
                     }
                     (false, true) => {
                         // Case 5 — same principal, fresh verifier (client
-                        // rebooted). Allocate a *new* clientid; the OLD
-                        // clientid's sessions remain valid until the new one
-                        // is confirmed via CREATE_SESSION (we don't enforce
-                        // that delay yet — pynfs's testNoUpdate101b checks
-                        // the post-confirm BADSESSION; deferred for now).
-                        info!("EXCHANGE_ID: case 5 (client reboot), replacing client {}", c.client_id);
-                        let _ = self.remove_client_internal(c.client_id);
-                        self.allocate_client(owner, verifier, flags, principal)
+                        // rebooted). RFC 8881 §18.35.5 / §18.36.3:
+                        // allocate a *new* clientid but DO NOT discard the
+                        // old client's state until the new clientid is
+                        // confirmed via a successful CREATE_SESSION. We
+                        // stash the old client_id on the new record's
+                        // `pending_replaces`; `mark_confirmed` consumes it
+                        // when CREATE_SESSION succeeds.
+                        //
+                        // Pynfs EID5f / EID5fb test exactly this: between
+                        // the second EXCHANGE_ID and the new c2's
+                        // CREATE_SESSION, sess1 (on c1) MUST still work;
+                        // after c2's CREATE_SESSION confirms, sess1 MUST
+                        // return BADSESSION.
+                        info!(
+                            "EXCHANGE_ID: case 5 (client reboot detected) — deferring \
+                             cleanup of clientid {} until new client confirms",
+                            c.client_id,
+                        );
+                        let outcome = self.allocate_client(
+                            owner,
+                            verifier,
+                            flags,
+                            principal,
+                        );
+                        if let ExchangeIdOutcome::NewUnconfirmed { client_id, .. } = &outcome {
+                            if let Some(mut new_c) = self.clients.get_mut(client_id) {
+                                new_c.pending_replaces = Some(c.client_id);
+                                let snap = new_c.clone();
+                                drop(new_c);
+                                self.persist(&snap);
+                            }
+                        }
+                        outcome
                     }
                     (true, false) => {
                         // Case 9 alt — verifier matches but a different
@@ -576,20 +617,28 @@ impl ClientManager {
     }
 
     /// Mark a clientid as confirmed (called by CREATE_SESSION when the
-    /// client successfully establishes its first session).
-    pub fn mark_confirmed(&self, client_id: u64) {
+    /// client successfully establishes its first session). Returns the
+    /// `pending_replaces` clientid (if any) so the caller can drive
+    /// the deferred case-5 cleanup — destroying the old client's
+    /// sessions, stateids, layouts, etc. The `ClientManager` itself
+    /// only owns clients/leases; we let the caller cascade through
+    /// the other managers.
+    pub fn mark_confirmed(&self, client_id: u64) -> Option<u64> {
         let snapshot = self.clients.get_mut(&client_id).and_then(|mut c| {
             if !c.confirmed {
                 debug!("Client {} now confirmed", client_id);
                 c.confirmed = true;
-                Some(c.clone())
+                let pending = c.pending_replaces.take();
+                Some((c.clone(), pending))
             } else {
                 None
             }
         });
-        if let Some(c) = snapshot {
+        if let Some((c, pending)) = snapshot {
             self.persist(&c);
+            return pending;
         }
+        None
     }
 
     /// Allocate a fresh unconfirmed client record. Internal helper used by
