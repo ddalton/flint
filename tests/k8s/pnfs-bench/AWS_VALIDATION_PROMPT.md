@@ -62,6 +62,58 @@ laptop is fine). It does not have to be the validation machine; the
 image just has to be pullable from Docker Hub by the time the bench
 runs.
 
+#### Pre-flight: confirm Docker daemon and `dilipdalton` login (no credential exposure)
+
+These checks are read-only and never print the auth token to your
+terminal — safe to run anywhere.
+
+```bash
+# 1. Daemon running?
+docker version --format '{{.Server.Version}}' \
+  || echo "Docker daemon not running — start Docker Desktop or 'sudo systemctl start docker'"
+
+# 2. Already logged in as dilipdalton?
+#    Two paths depending on how Docker stores credentials:
+
+#    (a) Daemon is up — fastest, single command:
+docker info 2>/dev/null | grep '^ Username:'
+#    Expected: " Username: dilipdalton"
+#    If empty: not logged in (or different account). Run: docker login -u dilipdalton
+
+#    (b) Daemon is down OR you want to verify without starting it.
+#        macOS (default credsStore: osxkeychain — entries live in Keychain):
+security find-internet-password -s "index.docker.io" -a "dilipdalton" 2>&1 \
+  | grep -E '^class|"acct"'
+#    Expected output (no -g flag → password is never extracted):
+#      class: "inet"
+#          "acct"<blob>="dilipdalton"
+#    Exit code 0 = logged in. Exit code 44 = not logged in for that account.
+
+#        Linux with secretservice (GNOME/KDE keyring):
+secret-tool search server index.docker.io 2>/dev/null | grep -E '^attribute.*username|^label'
+#    Expected: a label or username attribute referencing dilipdalton.
+
+#        Linux with pass (`pass` credential helper):
+pass show docker-credential-helpers/aHR0cHM6Ly9pbmRleC5kb2NrZXIuaW8vdjEv/dilipdalton >/dev/null 2>&1 \
+  && echo "logged in as dilipdalton" || echo "no pass entry — run docker login -u dilipdalton"
+#    (`pass show` prints the secret if you don't redirect; the >/dev/null above
+#     keeps the credential off the terminal — only the exit code is consulted.)
+
+# 3. buildx available?
+docker buildx version
+#    Expected: any v0.8+ release. v0.12+ is recommended for clean
+#    multi-arch behaviour but single-arch (--platform linux/amd64)
+#    works on older versions too.
+```
+
+If check (2) fails — i.e., no `dilipdalton` credential found — run
+`docker login -u dilipdalton` and provide a Docker Hub **access
+token** (not your account password). Personal access tokens scoped
+to "Read & Write" are sufficient and revocable; create one at
+`https://hub.docker.com/settings/security` if you don't have one.
+
+#### Build and push
+
 ```bash
 # From the repo root, on an x86-64 machine with Docker:
 git checkout main
@@ -85,10 +137,6 @@ docker buildx build \
   --push \
   spdk-csi-driver
 ```
-
-If `docker login` for `dilipdalton` isn't set up: `docker login -u
-dilipdalton` first. Use a Docker Hub access token, not your account
-password.
 
 After the push, verify the image is pullable:
 
