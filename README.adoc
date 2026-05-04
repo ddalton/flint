@@ -287,12 +287,10 @@ kubectl delete namespace flint-system
 
 == Architecture
 
-For detailed architecture documentation, see link:FLINT_CSI_ARCHITECTURE.md[FLINT_CSI_ARCHITECTURE.md].
-
-== Multi-Replica Setup
-
-For high availability configuration, see link:MULTI_REPLICA_QUICKSTART.md[MULTI_REPLICA_QUICKSTART.md].
-
-== License
-
-Copyright © 2024 Cloudera, Inc.
+* `docs/decisions/` — architectural decision records (one CSI driver,
+  pNFS perf baseline, write-path deep dive)
+* `docs/plans/pnfs-production-readiness.md` — pNFS production
+  hardening roadmap (Phase A + B done, Phase C deferred)
+* `tests/lima/STATUS.md` — living project status with phase notes,
+  test gates, and conformance scores
+* `CHANGELOG.md` — release notes
