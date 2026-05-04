@@ -34,6 +34,46 @@ sudo modprobe ublk_drv
 echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
 ----
 
+=== Snapshot Prerequisites (only if you plan to use snapshots)
+
+The Kubernetes `VolumeSnapshot` / `VolumeSnapshotContent` /
+`VolumeSnapshotClass` CRDs are **cluster-singleton, cluster-scoped**
+components shared across all CSI drivers in a cluster. They are
+**not** installed by the Flint chart — bundling them would conflict
+with other CSI drivers managing the same CRD names. Install them
+once per cluster, before installing Flint:
+
+[source,bash]
+----
+# 1. Install the v1 snapshot CRDs (one-time, cluster-wide)
+kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+
+# 2. Verify
+kubectl get crd | grep snapshot.storage.k8s.io
+# Expected: volumesnapshotclasses, volumesnapshotcontents, volumesnapshots
+----
+
+If you skip this:
+
+* Non-snapshot operations (CreateVolume, mount, write, read, delete,
+  expand) still work — the rest of Flint is unaffected.
+* Snapshot RPCs return `FAILED_PRECONDITION` with a clear error.
+* The Flint controller logs a one-line warning at startup with the
+  exact `kubectl apply -k` command above; check
+  `kubectl logs -n flint-system <flint-csi-controller-pod>` if you
+  see snapshot-related errors.
+
+NOTE: The chart's bundled `snapshot-controller` Deployment depends
+on these CRDs. If the CRDs are missing when the chart is installed,
+the `snapshot-controller` pod will `CrashLoopBackOff` with `no
+matches for kind VolumeSnapshotContent` — install the CRDs above
+to fix.
+
+NOTE: pNFS volumes (StorageClass `parameters.layout: pnfs`) do
+**not** support snapshots in the no-SPDK deployment mode. Snapshot
+requests for pNFS sources return `FAILED_PRECONDITION`. Use a
+non-pNFS StorageClass for volumes that need snapshots.
+
 == Installation
 
 === 1. Set Your Kubeconfig

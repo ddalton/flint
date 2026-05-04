@@ -1,0 +1,38 @@
+{{- /*
+NOTES.txt — printed after `helm install` / `helm upgrade`. Keep concise:
+operators read this once at install time, so it should highlight
+follow-up steps they actually need to take, not restate what the chart
+already did.
+*/ -}}
+Flint CSI driver installed in namespace "{{ .Release.Namespace }}".
+
+Verify the controller and node pods are running:
+  kubectl get pods -n {{ .Release.Namespace }}
+
+If you plan to use Volume Snapshots / Clones:
+
+  The VolumeSnapshot CRDs are a CLUSTER-WIDE prerequisite that the
+  Flint chart does not install (they are shared across all CSI drivers).
+  Verify they are installed:
+
+    kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io
+
+  If that returns "NotFound", install once per cluster:
+
+    kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+
+  Without these CRDs, the bundled snapshot-controller Deployment will
+  CrashLoopBackOff and snapshot RPCs will be rejected. Non-snapshot
+  operations are unaffected. The Flint controller logs a startup
+  warning if the CRDs are missing — see:
+
+    kubectl logs -n {{ .Release.Namespace }} -l app=flint-csi-controller -c flint-csi-driver | grep PREFLIGHT
+
+Snapshot support notes:
+  - SPDK-backed StorageClasses: snapshots supported.
+  - pNFS-backed StorageClasses (parameters.layout: pnfs): snapshots
+    NOT supported in the no-SPDK deployment mode. Use a non-pNFS
+    StorageClass for volumes that need snapshots.
+
+See the full README for prerequisites, disk-init, and StorageClass
+examples: https://github.com/cloudera/flint
