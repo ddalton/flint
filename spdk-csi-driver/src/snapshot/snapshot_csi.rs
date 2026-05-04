@@ -1,12 +1,73 @@
 //! CSI Controller snapshot RPC implementations
-//! 
+//!
 //! Implements the CSI snapshot RPCs completely separately from main CSI controller.
 //! These methods are delegated from main.rs to keep existing CSI operations isolated.
 
 use tonic::{Request, Response, Status};
 use std::sync::Arc;
+use std::collections::BTreeMap;
 use crate::csi::*;
 use crate::driver::SpdkCsiDriver;
+
+/// Reject CreateSnapshot for source volumes whose deployment mode does
+/// not support snapshots. Today the only such case is pNFS volumes:
+/// snapshots require either SPDK blobstore COW (single-server volumes)
+/// or a distributed-snapshot protocol coordinating MDS+DSes (not built).
+/// Without this guard, the request falls through to the SPDK metadata
+/// lookup, which fails with NOT_FOUND because pNFS volumes don't carry
+/// SPDK volumeAttributes — and `external-snapshotter` retries NOT_FOUND
+/// indefinitely, producing the visible "snapshot controller crash loop."
+///
+/// Returning FAILED_PRECONDITION marks the rejection as final:
+/// external-snapshotter records `VolumeSnapshot.status.error` and stops
+/// retrying. The user sees the message via `kubectl describe vs ...`.
+pub(crate) fn validate_snapshot_source(
+    volume_attrs: &BTreeMap<String, String>,
+) -> Result<(), Status> {
+    // pNFS volumes are tagged at create time with `pnfs.flint.io/mds-ip`
+    // (see pnfs_csi::create_volume). Detect by namespace prefix so the
+    // guard catches future pnfs.flint.io/* attributes too.
+    if volume_attrs.keys().any(|k| k.starts_with("pnfs.flint.io/")) {
+        return Err(Status::failed_precondition(
+            "snapshots are not supported for pNFS volumes; \
+             use a StorageClass without `layout: pnfs` for snapshotted volumes, \
+             or enable SPDK on this cluster",
+        ));
+    }
+    Ok(())
+}
+
+/// Read the PV's `volume_attributes` map for a given volume_id without
+/// requiring SPDK metadata keys to be present (unlike the existing
+/// `get_volume_info_from_pv`, which enforces SPDK shape and was the
+/// pre-fix source of NOT_FOUND for pNFS volumes).
+async fn lookup_volume_attributes(
+    driver: &SpdkCsiDriver,
+    volume_id: &str,
+) -> Result<BTreeMap<String, String>, Status> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    use kube::Api;
+
+    let pvs: Api<PersistentVolume> = Api::all(driver.kube_client.clone());
+    let list = pvs
+        .list(&Default::default())
+        .await
+        .map_err(|e| Status::internal(format!("list PVs: {}", e)))?;
+
+    for pv in list.items {
+        if let Some(spec) = &pv.spec {
+            if let Some(csi) = &spec.csi {
+                if csi.volume_handle == volume_id {
+                    return Ok(csi.volume_attributes.clone().unwrap_or_default());
+                }
+            }
+        }
+    }
+    Err(Status::not_found(format!(
+        "PV for volume {} not found",
+        volume_id
+    )))
+}
 
 /// Snapshot-specific CSI controller
 /// Implements only the snapshot-related RPCs - CreateSnapshot, DeleteSnapshot, ListSnapshots
@@ -34,9 +95,16 @@ impl SnapshotController {
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
-        
-        tracing::info!("📸 [SNAPSHOT_CSI] CreateSnapshot: volume={}, name={}", 
+
+        tracing::info!("📸 [SNAPSHOT_CSI] CreateSnapshot: volume={}, name={}",
                  req.source_volume_id, req.name);
+
+        // Guard: reject snapshot requests for volume types that don't
+        // support snapshots (pNFS today). Returns FAILED_PRECONDITION so
+        // external-snapshotter records the error and stops retrying,
+        // instead of looping on NOT_FOUND from the SPDK-shaped lookup.
+        let volume_attrs = lookup_volume_attributes(&self.driver, &req.source_volume_id).await?;
+        validate_snapshot_source(&volume_attrs)?;
 
         // Step 1: Find source volume
         let volume_info = self.driver
@@ -256,14 +324,144 @@ impl SnapshotController {
 
 #[cfg(test)]
 mod tests {
-    
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn pnfs_volume_attrs() -> BTreeMap<String, String> {
+        let mut a = BTreeMap::new();
+        a.insert("pnfs.flint.io/mds-ip".to_string(), "10.0.0.1".to_string());
+        a.insert("pnfs.flint.io/mds-port".to_string(), "20049".to_string());
+        a.insert("pnfs.flint.io/volume-id".to_string(), "pvc-pnfs-1".to_string());
+        a
+    }
+
+    fn spdk_volume_attrs() -> BTreeMap<String, String> {
+        let mut a = BTreeMap::new();
+        a.insert(
+            "flint.csi.storage.io/node-name".to_string(),
+            "worker-1".to_string(),
+        );
+        a.insert(
+            "flint.csi.storage.io/lvol-uuid".to_string(),
+            "00000000-0000-0000-0000-000000000001".to_string(),
+        );
+        a.insert(
+            "flint.csi.storage.io/lvs-name".to_string(),
+            "lvs0".to_string(),
+        );
+        a
+    }
+
+    /// Mirrors the pre-fix code path that produced the crash loop: the
+    /// existing `get_volume_info_from_pv` requires `flint.csi.storage.io/
+    /// node-name` to be present in the PV's volumeAttributes, and
+    /// `create_snapshot` mapped its missing-metadata error to
+    /// `Status::not_found(...)`. NOT_FOUND is retryable per CSI, so
+    /// external-snapshotter loops indefinitely. This simulation pins
+    /// that broken behavior so the regression test is unambiguous.
+    fn pre_fix_lookup_simulation(attrs: &BTreeMap<String, String>) -> Result<(), Status> {
+        if attrs.contains_key("flint.csi.storage.io/node-name") {
+            Ok(())
+        } else {
+            Err(Status::not_found(
+                "Source volume not found: PV missing flint metadata in volumeAttributes",
+            ))
+        }
+    }
+
+    // ----- pre-fix reproduction tests --------------------------------
+
+    #[test]
+    fn pre_fix_pnfs_attrs_lack_spdk_metadata_keys() {
+        let attrs = pnfs_volume_attrs();
+        assert!(
+            !attrs.contains_key("flint.csi.storage.io/node-name"),
+            "pNFS volumes do not carry SPDK node-name attribute"
+        );
+        assert!(
+            !attrs.contains_key("flint.csi.storage.io/lvol-uuid"),
+            "pNFS volumes do not carry SPDK lvol-uuid attribute"
+        );
+    }
+
+    #[test]
+    fn pre_fix_path_returns_retryable_not_found_for_pnfs() {
+        let attrs = pnfs_volume_attrs();
+        let result = pre_fix_lookup_simulation(&attrs);
+        assert!(result.is_err(), "pre-fix lookup must fail for pNFS attrs");
+        let status = result.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::NotFound,
+            "pre-fix returned NOT_FOUND, which external-snapshotter retries forever"
+        );
+    }
+
+    // ----- post-fix tests --------------------------------------------
+
+    #[test]
+    fn post_fix_validate_rejects_pnfs_with_failed_precondition() {
+        let attrs = pnfs_volume_attrs();
+        let result = validate_snapshot_source(&attrs);
+        assert!(result.is_err(), "pNFS source must be rejected");
+        let status = result.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "must be FAILED_PRECONDITION (final, non-retryable) so the loop stops"
+        );
+        let msg = status.message();
+        assert!(msg.contains("pNFS"), "message must name pNFS: got {:?}", msg);
+        assert!(
+            msg.to_lowercase().contains("snapshot"),
+            "message must explain it's about snapshots: got {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn post_fix_validate_allows_spdk_volumes() {
+        let attrs = spdk_volume_attrs();
+        assert!(
+            validate_snapshot_source(&attrs).is_ok(),
+            "SPDK volume must pass validation and reach the existing snapshot path"
+        );
+    }
+
+    #[test]
+    fn post_fix_validate_rejects_any_pnfs_namespace_key() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "pnfs.flint.io/some-future-key".to_string(),
+            "x".to_string(),
+        );
+        let result = validate_snapshot_source(&attrs);
+        assert!(
+            result.is_err(),
+            "detection is by pnfs.flint.io/* prefix, not a single key"
+        );
+        assert_eq!(
+            result.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[test]
+    fn post_fix_validate_passes_through_empty_or_legacy_attrs() {
+        // Volumes with no flint-managed attributes fall through to the
+        // existing diagnosis path; the guard does not invent rejections
+        // beyond its scope.
+        let attrs = BTreeMap::new();
+        assert!(validate_snapshot_source(&attrs).is_ok());
+    }
+
+    // ----- preserved existing test -----------------------------------
 
     #[test]
     fn test_snapshot_name_generation() {
         let volume_id = "pvc-abc123";
         let timestamp = 1234567890;
         let snapshot_name = format!("snap_{}_{}", volume_id, timestamp);
-        
         assert!(snapshot_name.starts_with("snap_"));
         assert!(snapshot_name.contains(volume_id));
     }
