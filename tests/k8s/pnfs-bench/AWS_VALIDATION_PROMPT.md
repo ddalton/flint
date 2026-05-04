@@ -592,13 +592,49 @@ kubectl get pods -n flint-system -o jsonpath='{range .items[*]}{.metadata.name}{
 # (or your actual rc tag). Any :latest is a sign the --set didn't take.
 ```
 
-Then initialize the local NVMe disks via the dashboard:
+Then initialize the local NVMe disk on each worker. The dashboard is
+a thin UI on top of a node-agent HTTP API at port 9081 — for release
+validation, **call the API directly**: scriptable, reproducible,
+auditable in shell history, and avoids the port-forward dance from a
+remote cluster.
+
+```bash
+# 1. Sanity-check: list uninitialized disks visible to each worker.
+for pod in $(kubectl get pods -n flint-system -l app=flint-csi-node -o name); do
+  echo "─── $pod ───"
+  kubectl exec -n flint-system "$pod" -c flint-csi-driver -- \
+    curl -sS -X POST http://localhost:9081/api/disks/uninitialized \
+      -H 'Content-Type: application/json' -d '{}' | jq .
+done
+# Expect: each pod reports /dev/nvme1n1 as uninitialized.
+
+# 2. Initialize the local NVMe on each worker (blobstore creation).
+for pod in $(kubectl get pods -n flint-system -l app=flint-csi-node -o name); do
+  echo "─── initializing /dev/nvme1n1 on $pod ───"
+  kubectl exec -n flint-system "$pod" -c flint-csi-driver -- \
+    curl -sS -X POST http://localhost:9081/api/disks/initialize \
+      -H 'Content-Type: application/json' \
+      -d '{"disks":["/dev/nvme1n1"]}' | jq .
+done
+
+# 3. Verify each disk is now Ready.
+for pod in $(kubectl get pods -n flint-system -l app=flint-csi-node -o name); do
+  echo "─── $pod status ───"
+  kubectl exec -n flint-system "$pod" -c flint-csi-driver -- \
+    curl -sS -X POST http://localhost:9081/api/disks/status \
+      -H 'Content-Type: application/json' -d '{}' \
+    | jq '.[] | {device, blobstore_initialized, status}'
+done
+# Expect: blobstore_initialized=true on /dev/nvme1n1 for every pod.
+```
+
+**Alternative — dashboard UI** (only if you prefer GUI for ad-hoc
+admin; not recommended for release validation):
 
 ```bash
 kubectl port-forward -n flint-system svc/flint-dashboard 3000:3000 &
-# Open http://localhost:3000 in a browser, navigate to "Disk Setup",
+# Open http://localhost:3000, navigate to "Disk Setup",
 # select /dev/nvme1n1 on each worker, click Initialize.
-# Verify all disks show "Ready".
 ```
 
 ## Phase 2 prompt — paste below into a fresh Claude Code session
