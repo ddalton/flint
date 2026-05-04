@@ -189,6 +189,10 @@ test-pnfs-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS, re
 test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP-serial RPC ceiling (loopback only; cross-host is a separate bench)
 	tests/lima/pnfs/nconnect.sh
 
+.PHONY: test-pnfs-cross-host
+test-pnfs-cross-host: ## Multi-host pNFS perf bench against a real K8s cluster — see tests/k8s/pnfs-bench/README.md for required env (KUBECONFIG, PNFS_IMAGE, MDS_NODE, DS_NODES, CLIENT_NODE)
+	tests/k8s/pnfs-bench/cross-host-bench.sh
+
 .PHONY: test-pnfs-all
 test-pnfs-all: ## Run smoke + pynfs + csi-e2e + recall + restart tests in sequence
 	$(MAKE) test-pnfs-smoke
