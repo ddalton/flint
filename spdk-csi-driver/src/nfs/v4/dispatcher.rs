@@ -2219,7 +2219,7 @@ impl CompoundDispatcher {
     #[allow(dead_code)]
     fn encode_file_layout_striped(
         segments: &[crate::pnfs::mds::layout::LayoutSegment],
-        filehandle: &[u8],
+        _filehandle: &[u8],
         stripe_unit: u64,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
@@ -2252,7 +2252,7 @@ impl CompoundDispatcher {
         info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
         info!("      first_stripe_index: 0");
         info!("      pattern_offset: 0");
-        info!("      filehandle length: {} bytes (same for all DSes)", filehandle.len());
+        info!("      nfl_fh_list: empty (DSes use MDS filehandle per RFC 8881 §13.4.2)");
         
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
@@ -2266,16 +2266,15 @@ impl CompoundDispatcher {
         // nfl_pattern_offset: offset where stripe pattern starts (always 0)
         encoder.encode_u64(0);
         
-        // nfl_fh_list: array of filehandles (one per DS in stripe pattern)
-        // For striping across N DSes, we encode N filehandles in round-robin order
-        encoder.encode_u32(segments.len() as u32);
-        for (i, segment) in segments.iter().enumerate() {
-            info!("      FH[{}]: device_id='{}' (will use same filehandle for all DSes)", i, segment.device_id);
-            encoder.encode_opaque(filehandle);
-        }
-        
+        // nfl_fh_list: empty list per RFC 8881 §13.4.2 — signals the
+        // kernel to use the MDS filehandle (from LAYOUTGET's current_fh)
+        // for I/O to all DSes. The DSes accept MDS filehandles via
+        // parse_path_lenient. An empty list is the spec-correct encoding
+        // when DSes share the MDS filehandle namespace.
+        encoder.encode_u32(0);
+
         let result = encoder.finish();
-        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, {} filehandles", result.len(), segments.len());
+        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, empty nfl_fh_list", result.len());
         info!("      📦 First 128 bytes: {:02x?}", &result[..result.len().min(128)]);
         
         result
