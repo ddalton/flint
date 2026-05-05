@@ -15,11 +15,11 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: latest
+    tag: "1.0.0"
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (v25.05.x)
-    tag: latest
+    tag: "1.0.0"
   # NFS Server for ReadWriteMany (RWX) volumes
   # By default, uses the same image as flintCsiDriver (which includes flint-nfs-server binary)
   # Uncomment to override with a separate NFS server image
@@ -166,7 +166,7 @@ dashboard:
     port: 8080
   frontend:
     name: spdk-dashboard-frontend
-    tag: latest
+    tag: "1.0.0"
     port: 3000
   resources:
     backend:
