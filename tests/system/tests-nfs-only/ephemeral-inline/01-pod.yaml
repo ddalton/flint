@@ -50,5 +50,6 @@ spec:
       fsType: ext4
       volumeAttributes:
         size: "100Mi"
+        nfsEmptyDir: "true"
   restartPolicy: Never
 

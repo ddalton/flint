@@ -62,30 +62,86 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 
 ## Running Tests
 
-### Run All Tests
+There are two KUTTL suites plus a standalone clean-shutdown test:
+
+| Suite | Config | Tests | StorageClass | Backend |
+|-------|--------|-------|--------------|---------|
+| SPDK (standard) | `kuttl-testsuite.yaml` | 8 | `flint` (`nfsEmptyDir: false`) | SPDK blobstore |
+| NFS-only | `kuttl-testsuite-nfs-only.yaml` | 4 | `flint-nfs` (`nfsEmptyDir: true`) | emptyDir + NFS |
+| Clean shutdown | `kuttl-testsuite-clean-shutdown.yaml` | 1 | `flint` | SPDK blobstore |
+
+### Pre-requisites
+
+Both StorageClasses must exist before running:
+
 ```bash
-# Standard tests (run in parallel)
-kubectl kuttl test --config kuttl-testsuite.yaml
+# Check existing classes
+kubectl get sc
 
-# Clean shutdown test (runs separately in isolation)
-kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
-
-# Or use make to run both
-make test
+# The Helm chart creates 'flint'. Create 'flint-nfs' manually:
+kubectl apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flint-nfs
+provisioner: flint.csi.storage.io
+parameters:
+  nfsEmptyDir: "true"
+  numReplicas: "1"
+  thinProvision: "false"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+EOF
 ```
 
-**Note**: The clean-shutdown test runs separately because it verifies SPDK log messages and shutdown behavior that could be obscured by parallel test execution.
+For AWS clusters using NVMe (i3en instances), also ensure:
+```bash
+# Kernel modules on all nodes:
+modprobe nvme-fabrics nvme-tcp
+
+# Hugepages (2Gi per node) — kubelet restart needed after:
+echo 1024 > /proc/sys/vm/nr_hugepages
+
+# Disk initialization via node-agent API at PCI address (e.g. 0000:00:1f.0)
+```
+
+### Clean up before each run
+
+Always ensure no leftover state from previous runs:
+
+```bash
+# Delete any orphaned KUTTL namespaces
+kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs -r kubectl delete ns --wait=true
+
+# Delete any orphaned NFS server pods
+kubectl -n flint-system get pods | grep "flint-nfs-pvc-" | grep -E "Error|Completed" | awk '{print $1}' | xargs -r kubectl -n flint-system delete pod --force --grace-period=0
+
+# Verify all CSI node pods are healthy (4/4 Running, 0 restarts ideal)
+kubectl -n flint-system get pods -l app=flint-csi-node -o wide
+```
+
+### Run All Tests
+```bash
+# 1. SPDK suite (8 tests, parallel)
+kubectl kuttl test --config kuttl-testsuite.yaml
+
+# 2. Clean up between suites
+kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs -r kubectl delete ns --wait=true
+
+# 3. NFS-only suite (4 tests, parallel)
+kubectl kuttl test --config kuttl-testsuite-nfs-only.yaml
+
+# 4. Clean shutdown test (runs in isolation)
+kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+```
 
 ### Run Specific Test
 ```bash
-# Standard tests
 kubectl kuttl test --test rwo-pvc-migration
 kubectl kuttl test --test multi-replica
 kubectl kuttl test --test snapshot-restore
 kubectl kuttl test --test volume-expansion
-
-# Clean shutdown test (always runs alone)
-make test-clean-shutdown
 ```
 
 ### Run with Custom Timeout
@@ -339,6 +395,37 @@ desc = Failed to create ublk device: Node agent HTTP call failed:
    KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml
    ```
 
+### Stale NFS Mount Hang
+
+**Problem**: A CSI node pod becomes unresponsive (no new log output). New pods
+on that node get stuck in `ContainerCreating` with "connection refused" on the
+CSI socket.
+
+**Root cause**: A previous test run's NFS server pod was killed (namespace
+deletion) while a client still held a mount. The CSI driver's
+`NodeUnpublishVolume` tries to unmount the dead NFS mount and the kernel enters
+D-state (uninterruptible sleep) on `umount -f`. The `timeout` wrapper cannot
+kill a D-state process.
+
+**Fix (applied in 1.0.0)**: The driver now tries `umount -l` (lazy-only) first,
+which detaches the VFS mount point immediately without contacting the server.
+Only falls back to `umount -f -l` if the lazy attempt fails.
+
+**Recovery if it happens**:
+```bash
+# Identify the stuck node pod
+kubectl -n flint-system get pods -l app=flint-csi-node -o wide
+
+# Delete any errored NFS pods on that node
+kubectl -n flint-system get pods | grep "flint-nfs-pvc-" | grep Error | awk '{print $1}' | xargs -r kubectl -n flint-system delete pod --force --grace-period=0
+
+# Restart the stuck CSI node pod (DaemonSet recreates it)
+kubectl -n flint-system delete pod <stuck-node-pod>
+
+# Wait for it to come back
+kubectl -n flint-system wait --for=condition=ready pod -l app=flint-csi-node --timeout=120s
+```
+
 ### Common Test Failures
 
 | Issue | Solution |
@@ -349,6 +436,8 @@ desc = Failed to create ublk device: Node agent HTTP call failed:
 | Data not persisting | Check CSI driver attach/detach logic |
 | Anti-affinity not working | Ensure multiple nodes available in cluster |
 | Mount device failed | **See UBLK Driver Issues above** |
+| CSI socket "connection refused" | **See Stale NFS Mount Hang above** |
+| NFS-only tests fail with `flint` SC | Ensure `flint-nfs` StorageClass exists |
 
 ## Additional Resources
 

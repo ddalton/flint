@@ -9,4 +9,4 @@ spec:
     requests:
       storage: 1Gi
   # Ensure your storage class supports volume expansion
-  storageClassName: flint
+  storageClassName: flint-nfs
