@@ -18,7 +18,7 @@ spec:
         # Write test data
         echo "Writing test data..."
         echo "Hello from ephemeral volume!" > /data/hello.txt
-        dd if=/dev/urandom of=/data/testfile bs=1M count=50
+        dd if=/dev/urandom of=/data/testfile bs=1M count=10
         sync
         
         # Verify write

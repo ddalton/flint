@@ -2870,7 +2870,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 let mount_output = mount_cmd
                     .output()
                     .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
-                
+
                 if !mount_output.status.success() {
                     let error = String::from_utf8_lossy(&mount_output.stderr);
                     return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
@@ -2930,8 +2930,19 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
         }
 
+        // Write ephemeral marker so NodeUnpublishVolume knows to tear down the
+        // block device and lvol (it doesn't receive volume_context).
+        if is_ephemeral {
+            let marker_dir = "/var/lib/kubelet/plugins/flint.csi.storage.io/ephemeral";
+            let _ = std::fs::create_dir_all(marker_dir);
+            let marker_path = format!("{}/{}", marker_dir, volume_id);
+            if let Err(e) = std::fs::write(&marker_path, "") {
+                println!("⚠️ [NODE] Failed to write ephemeral marker: {}", e);
+            }
+        }
+
         println!("✅ [NODE] Volume {} published successfully at {}", volume_id, target_path);
-        
+
         let response = tonic::Response::new(spdk_csi_driver::csi::NodePublishVolumeResponse {});
         println!("🔵 [GRPC] NodePublishVolume returning success response");
         Ok(response)
@@ -3150,9 +3161,62 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let path_exists_after = final_check.map(|s| s.success()).unwrap_or(false);
         println!("🔍 [DEBUG] Target path exists after cleanup: {}", path_exists_after);
 
+        // Ephemeral volume cleanup: tear down block device + lvol.
+        // For ephemeral CSI volumes, NodeUnpublishVolume is the ONLY cleanup call —
+        // NodeUnstageVolume and DeleteVolume are never called by kubelet.
+        let ephemeral_marker = format!("/var/lib/kubelet/plugins/flint.csi.storage.io/ephemeral/{}", volume_id);
+        let is_ephemeral = std::path::Path::new(&ephemeral_marker).exists();
+        if is_ephemeral {
+            let _ = std::fs::remove_file(&ephemeral_marker);
+            let eph_start = std::time::Instant::now();
+            println!("🧹 [NODE] Ephemeral volume detected — cleaning up block device and lvol");
+            let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+            let backend_mode = std::env::var("BLOCK_DEVICE_BACKEND").unwrap_or("ublk".to_string());
+            println!("🧹 [NODE] Ephemeral cleanup: backend={}, nqn={}", backend_mode, nqn);
+
+            match backend_mode.as_str() {
+                "nvmeof" => {
+                    // Use the node agent endpoint which handles both kernel disconnect
+                    // and SPDK subsystem deletion in the correct order.
+                    println!("🧹 [NODE] Ephemeral: calling /api/blockdev/delete_nvmeof...");
+                    let delete_params = serde_json::json!({ "nqn": nqn });
+                    match self.driver.call_node_agent(&self.driver.node_id, "/api/blockdev/delete_nvmeof", &delete_params).await {
+                        Ok(_) => println!("✅ [NODE] Ephemeral NVMe-oF block device deleted ({:?})", eph_start.elapsed()),
+                        Err(e) => println!("⚠️ [NODE] Ephemeral NVMe-oF deletion failed ({:?}): {}", eph_start.elapsed(), e),
+                    }
+                }
+                _ => {
+                    println!("🧹 [NODE] Ephemeral: deleting ublk device...");
+                    let ublk_id = self.driver.generate_ublk_id(&volume_id);
+                    if let Err(e) = self.driver.delete_ublk_device(ublk_id).await {
+                        println!("⚠️ [NODE] Ephemeral ublk device deletion failed ({:?}): {}", eph_start.elapsed(), e);
+                    } else {
+                        println!("✅ [NODE] Ephemeral ublk device deleted ({:?})", eph_start.elapsed());
+                    }
+                }
+            }
+
+            // Delete the lvol — derive the name the same way NodePublishVolume created it
+            let short_volume_id = if volume_id.len() > 56 {
+                &volume_id[volume_id.len() - 56..]
+            } else {
+                volume_id.as_str()
+            };
+            let lvol_name = format!("eph_{}", short_volume_id);
+            println!("🧹 [NODE] Ephemeral: deleting lvol '{}'...", lvol_name);
+            match self.driver.delete_lvol(&self.driver.node_id, &lvol_name).await {
+                Ok(_) => println!("✅ [NODE] Ephemeral lvol '{}' deleted ({:?})", lvol_name, eph_start.elapsed()),
+                Err(e) if e.to_string().contains("No such device") || e.to_string().contains("not found") => {
+                    println!("ℹ️ [NODE] Ephemeral lvol '{}' already removed ({:?})", lvol_name, eph_start.elapsed());
+                }
+                Err(e) => println!("⚠️ [NODE] Ephemeral lvol deletion failed ({:?}): {}", eph_start.elapsed(), e),
+            }
+            println!("🧹 [NODE] Ephemeral cleanup complete — total time: {:?}", eph_start.elapsed());
+        }
+
         println!("🔍 [DEBUG] Step 7: Preparing success response...");
         println!("✅ [NODE] Volume {} unpublished successfully", volume_id);
-        
+
         let response = tonic::Response::new(spdk_csi_driver::csi::NodeUnpublishVolumeResponse {});
         println!("🔵 [GRPC] NodeUnpublishVolume returning success response");
         println!("🔍 [DEBUG] Step 8: Returning response to caller");
