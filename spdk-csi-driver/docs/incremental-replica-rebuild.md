@@ -1,14 +1,25 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 2**
-**Author:** rev 1 drafted with Claude (Opus 4.8); rev 2 revised with Claude (Fable 5), 2026-06-10
+**Status:** design / proposal — **revision 3**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–3 revised with Claude (Fable 5), 2026-06-10
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 3** (same day, after a four-lens adversarial review):
+§3's mitigation was corrected — deleting a phantom raid is *not* enough, the
+on-disk superblocks must be cleared or fresh creation fails `-EEXIST` (this
+motivates bumping shipped SPDK to v26.05.x for `clear_sb`); the §5 epoch-skew
+correctness argument was repaired for the failure-transition window (back off
+one epoch past the I/O timeout) and gained a mandatory revert-of-the-stale-head
+step; the §3 fencing lever was rewritten to match reality (everything is
+`allow_any_host: true` today); the §6 RWX ride-through and §7 esnap-backfill
+claims were scoped honestly; quiesce leasing and unwind were added to the Tier-2
+patch. Rev 1 was an unpublished working draft and is not preserved in git.
 
 **What changed in rev 2.** Rev 1 concluded that incremental rebuild requires adopting
 a thin SPDK fork carrying Longhorn's raid patches. Rev 2 replaces that with a
 **two-tier design**: Tier 1 needs **zero SPDK changes** and eliminates blind full
 rebuilds in every case except hot rejoin into a live array; Tier 2 (optional,
-data-driven) covers hot rejoin with a **single ~200-line local patch** in the patch
+data-driven) covers hot rejoin with a **single ~250-line local patch** in the patch
 pipeline Flint already runs — not a fork, no Longhorn branch tracking, no delta
 bitmap. Rev 2 also corrects several current-state facts (shipped SPDK version,
 controller-operator status, NFS data path) and documents a newly found
@@ -16,7 +27,8 @@ controller-operator status, NFS data path) and documents a newly found
 must address. All SPDK citations below were re-verified on 2026-06-10 against
 stock v26.05 (`/Users/ddalton/github/spdk`, `v26.05-1-gbb2b757ac`); line numbers
 may differ slightly in the shipped v26.01, but every cited behavior predates
-both. Flint citations are against `main`.
+both. Flint citations are against `main` plus the thin-provisioning default
+flip committed alongside this revision.
 
 ---
 
@@ -32,11 +44,12 @@ degraded and writes continue to the surviving replicas.
 What happens today when the node returns (verified):
 
 - **Nothing re-adds the replica.** The only re-add/rebuild logic lives in
-  `controller_operator.rs`, which is **not shipped**: its `[[bin]]` is commented
-  out (`Cargo.toml:7-9`), `Dockerfile.csi` builds only `csi-driver` and
-  `flint-nfs-server`, and the chart's `spdk-controller-operator` Deployment runs
-  the `flint-driver` image with its default `csi-driver` entrypoint (no `command:`
-  override). The volume stays degraded until the pod is re-staged. The node agent
+  `controller_operator.rs`, which is **not compiled at all**: its `[[bin]]` is
+  commented out (`Cargo.toml:7-9`) and it is not referenced from `lib.rs`;
+  `Dockerfile.csi` builds only `csi-driver` and `flint-nfs-server`, and the
+  chart's `spdk-controller-operator` Deployment runs the `flint-driver` image
+  with its default `csi-driver` entrypoint (no `command:` override). The volume
+  stays degraded until the pod is re-staged. The node agent
   does re-expose the returned replica's lvol over NVMe-oF at startup
   (`reconcile_replica_targets`, `node_agent.rs:1657-1751`), but no live code ever
   calls `bdev_raid_add_base_bdev`.
@@ -121,10 +134,14 @@ is fully verified in stock SPDK; the end-to-end failures need a live repro
 
 **Mechanism.** The raid module registers an `examine_disk` hook
 (`bdev_raid.c:1497` → `raid_bdev_examine`, `:4124`) that runs on **every bdev
-registration** with no opt-out. It reads block 0; on a valid raid superblock with
-no matching raid bdev it **auto-creates a CONFIGURING raid named from the sb**
-(`raid_bdev_create_from_sb`, called at `:3932`) and **claims the base with the
-exclusive module claim** (`spdk_bdev_module_claim_bdev`, `:3519`).
+registration** with no per-module opt-out (the only switch is the global
+`bdev_auto_examine=false`, which also disables lvolstore auto-discovery and
+would force Flint to own examine ordering via explicit `bdev_examine` calls —
+a viable but invasive alternative mitigation). It reads block 0; on a valid
+raid superblock with no matching raid bdev it **auto-creates a CONFIGURING raid
+named from the sb** (`raid_bdev_create_from_sb`, called at `:3932`) and
+**claims the base with the exclusive module claim**
+(`spdk_bdev_module_claim_bdev`, `:3519`).
 
 **Consequence (a) — replica re-export after node reboot may fail.** After the
 first assembly writes superblocks onto the replica lvols, a replica node's SPDK
@@ -144,17 +161,45 @@ Note: first-time staging is unaffected (fresh lvols carry no sb; examine runs at
 registration, *before* the first sb write), which is why this can hide from
 basic testing.
 
-**Mitigation (zero-patch, control plane).** Own assembly explicitly: before
-exporting a replica or assembling a raid, **delete any phantom raid**
-(`bdev_raid_delete` works on a CONFIGURING raid and releases the claims), then
-proceed. Deletion+fresh-create is data-safe: a fresh `bdev_raid_create` with
-`superblock: true` recomputes the same 1 MiB default `data_offset`
-(`bdev_raid.c:3542-3544`), so base data alignment is preserved. Because v26.01's
-delete does not clear the on-disk sb (`clear_sb` arrived in v26.05), phantom
-cleanup must be a standing reconcile step, not a one-shot fix. The same hygiene
-pass should reap **orphaned raids and per-replica nvme controllers on
-previously-used nodes** (fact 3 in §2) so no stale writer can touch the lvols
-during catch-up or after reassembly.
+**Mitigation — the superblocks must be *cleared*, not just the phantom
+deleted.** A fresh `bdev_raid_create` over bases that still carry an old
+on-disk sb **fails outright**: the new-bdev configure path always reads the
+base's superblock (`raid_bdev_load_base_bdev_superblock`, `bdev_raid.c:3626`),
+and a valid sb whose raid uuid differs from the new raid's returns `-EEXIST`
+("Superblock of a different raid bdev found", `:3433-3434`). Flint passes no
+uuid to `bdev_raid_create`, so the fresh raid gets a random uuid and every base
+add fails; passing the old uuid doesn't help (the uuid-match branch diverts
+into `raid_bdev_examine_sb` at `:3429`, which fails `-EINVAL` against a fresh
+CONFIGURING raid whose `sb == NULL`, `:3876-3880`). So the hygiene pass is:
+
+1. Attach/register all base bdevs, then **`bdev_wait_for_examine`** (upstream
+   RPC, `bdev_rpc.c:102`) — examine is asynchronous, and deleting a phantom
+   while another base's examine is still in flight lets the phantom re-create
+   itself between the delete and our create.
+2. Delete any phantom raid **with `clear_sb: true`** (`bdev_raid_delete` param,
+   present since v26.05 — this is the concrete reason §9 phase 0 bumps the
+   shipped SPDK image from v26.01 to v26.05.x; the interim v26.01 fallback of
+   zeroing the sb region through the exported namespace is possible but ugly).
+3. `bdev_raid_create` over the intended members; treat `-EEXIST` as "a phantom
+   re-appeared" and loop from step 1.
+
+The same `wait_for_examine` + clear discipline applies on **R_src's node during
+catch-up** — the attached R_dst bdev carries a valid sb (§5's caveat) and will
+spawn a phantom there too. Data alignment across delete+re-create is safe but
+conditional: the recomputed default `data_offset` is 1 MiB rounded up to the
+base's `optimal_io_boundary` (`bdev_raid.c:3542-3558`), which stays exactly
+1 MiB only because Flint creates lvolstores with a 1 MiB cluster size
+(`minimal_disk_service.rs:182-186`) — the reassembly path should assert
+`recomputed offset == previous offset` so a future cluster-size change cannot
+silently shear the data. For completeness: with **no** hygiene at all, stock
+behavior on re-stage is phantom-assembly-plus-blind-rebuild — the phantom
+assembles under the volume's raid name, the returning stale replica is re-added
+by ONLINE examine with a full rebuild (`:3953-3987` → `:3371` → `:3399`), and
+Flint's own `bdev_raid_create` then fails NodeStage with `-EEXIST`.
+
+The hygiene pass must also reap **orphaned raids and per-replica nvme
+controllers on previously-used nodes** (fact 3 in §2) so no stale writer can
+touch the lvols during catch-up or after reassembly.
 
 **Fencing (the zombie-consumer case).** Hygiene by RPC assumes the old node is
 reachable. The dangerous variant is a node that goes *NotReady* (kubelet dead)
@@ -163,11 +208,24 @@ volume re-staged elsewhere, but the old node still holds an ONLINE raid over the
 replicas **and a mounted kernel filesystem that can keep issuing writes**
 (journal commits, writeback) — two active writers, classic split-brain. This
 exposure exists in Flint today independent of this design, but the design must
-not *assume* "no writers" without enforcing it. Flint has a clean fencing lever
-available: the per-replica NVMe-oF subsystems can restrict allowed host NQNs —
-on re-stage, the orchestrator flips each replica subsystem's allowed-host list
-to the new consumer node before assembly, severing any zombie's connections at
-the target side (NVMe reservations are the heavier alternative). See §10-9.
+not *assume* "no writers" without enforcing it. The natural lever is NVMe-oF
+host filtering — but be clear about the current state: **today every Flint
+subsystem is created `allow_any_host: true`** (`driver.rs:1798` per-replica
+targets, `node_agent.rs:1861` reconcile re-export, `node_agent.rs:1182`
+volume-level, `driver.rs:885`) **and `nvmf_subsystem_add_host` is never
+issued**, so there is no list to flip. The fence must be built as *persistent
+desired state*, not an after-the-fact flip: create all replica subsystems with
+`allow_any_host: false` and an allowed-host list derived from PV annotations,
+applied at creation in **both** export paths — otherwise a returning node's
+`reconcile_replica_targets` re-exports wide open and reopens the door while the
+zombie's kernel initiator is still auto-reconnecting (default `ctrl_loss_tmo`
+is ~10 minutes). Two further sharp edges: SPDK's host-removal disconnect is
+asynchronous and does not wait for qpairs to drain (`lib/nvmf/subsystem.c:1413`),
+so assembly must poll `nvmf_subsystem_get_controllers` until the old host is
+actually gone; and a replica **co-located on the zombie node itself** is reached
+over loopback through that node's own SPDK and can never be fenced externally —
+it must be treated as contaminated and excluded (`stale`) until hygiene runs
+there. NVMe persistent reservations are the heavier alternative. See §10-9.
 
 (Longer term, `superblock: false` for *new* volumes would remove this hazard
 class entirely — PV state is already the authoritative membership record per §2
@@ -186,10 +244,12 @@ common epoch — replica-to-replica, **outside** the raid.
   replica to a *warm standby* that trails the array by ≤ `T_snap` + one delta
   copy; it rejoins as a full member **at the next raid assembly**, where
   membership is decided by the control plane and no rebuild ever starts (§6).
-- **Tier 2 (optional, one ~200-line carried patch):** *hot* rejoin into a live
-  array via a `skip_rebuild` flag on `bdev_raid_add_base_bdev` plus a quiesce
-  mechanism (§7 — we choose a quiesce/unquiesce RPC pair) plus an upstream
-  esnap clone — functionally what Longhorn's fork `grow` primitive does.
+- **Tier 2 (optional, one ~250-line carried patch):** *hot* rejoin into a live
+  array via a `skip_rebuild` flag on `bdev_raid_add_base_bdev` plus a leased
+  quiesce mechanism (§7 — we choose a quiesce/unquiesce RPC pair) plus an
+  upstream esnap ("external snapshot") clone — a thin clone whose parent is an
+  arbitrary external bdev (§5) — functionally what Longhorn's fork `grow`
+  primitive does.
   Built only if Tier 1's measured residual (time spent degraded with a ready
   standby and no reassembly event) justifies it.
 
@@ -215,18 +275,20 @@ never a member yet — there is no half-rebuilt base to mistake for valid, and t
 orchestrator restarts the idempotent copy from the latest common epoch.
 
 Relation to Longhorn V2 (corrected from rev 1): Longhorn has **no epoch
-scheme** — its engine walks the healthy replica's snapshot tree
-(`getRebuildingSnapshotList`, `engine.go:1428-1456`) and rebuilds the whole
-chain on the destination; its `fastSync` additionally relies on **fork-only lvol
-RPCs** (fragmap, range shallow copy, snapshot checksums). Our epoch scheme is
-deliberately shaped so the data movement needs **only upstream primitives**.
+scheme** — its engine (`longhorn/longhorn-spdk-engine`) walks the healthy
+replica's snapshot tree (`getRebuildingSnapshotList`, `engine.go:1428-1456`)
+and rebuilds the whole chain on the destination; its `fastSync` additionally
+relies on **fork-only lvol RPCs** (fragmap, range shallow copy, snapshot
+checksums). Our epoch scheme is deliberately shaped so the data movement needs
+**only upstream primitives**.
 
-## 5. Common machinery (all upstream; contracts verified)
+## 5. Common machinery and tunables (delta primitives upstream; contracts verified)
 
-Used by both tiers. The delta/clone RPCs below (`shallow_copy` + `check`,
-`set_parent`, `set_parent_bdev`, `clone_bdev`) are upstream since v24.05
-(CHANGELOG lines 877-882; authored by Damiano Cipriani, SUSE, 2023-07–2024-02)
-and present in shipped v26.01; the snapshot RPCs are far older.
+Used by both tiers. The delta RPCs below (`shallow_copy` + `check`,
+`set_parent`, `set_parent_bdev`) are upstream since v24.05 (CHANGELOG lines
+877-882; authored by Damiano Cipriani, SUSE, 2023-07–2024-02), `clone_bdev`
+(esnap) since v23.05 (CHANGELOG ~:1236); all present in shipped v26.01. The
+snapshot RPCs are far older.
 
 - **Epoch snapshots** — `bdev_lvol_snapshot` per in-sync replica at a common
   epoch `epoch-<vol>-<seq>`, every `T_snap`; retain last K; delete older
@@ -244,8 +306,9 @@ and present in shipped v26.01; the snapshot RPCs are far older.
     (`blobstore.c:7433-7436`): a sparse, offset-correct image.
   - Destination is any bdev ≥ the lvol's full virtual size
     (`blobstore.c:7487-7495`); the lvolstore block size must be an integer
-    multiple of the destination's (`:7497-7503`); the destination is exclusively
-    claimed for the copy's duration (`vbdev_lvol.c:2047-2055`).
+    multiple of the destination's (`:7497-7503`); the destination is
+    write-claimed for the copy's duration — sole writer, readers still allowed
+    (`vbdev_lvol.c:2047-2055`).
   - The source blob takes a locked-op for the copy (`blobstore.c:7507-7514`):
     concurrent snapshot/resize/set_parent on *that blob* fail EBUSY — the
     scheduler must serialize per-blob operations (§10-3).
@@ -257,16 +320,37 @@ and present in shipped v26.01; the snapshot RPCs are far older.
   (`blobstore.c:3213-3215`; opened read-only with a shared claim,
   `vbdev_lvol.c:1956-1962`). The external bdev needs a static UUID; if absent at
   lvs load the clone comes up degraded and hotplug-recovers.
-- **Catch-up sequence** (R_src = an in-sync replica; R_dst = the returning stale
-  replica; E = most recent common epoch):
-  1. Hygiene pass on R_dst's node and any previous consumer node (§3).
+- **Catch-up sequence** (R_src = an in-sync replica; R_dst = the returning
+  stale replica). The catch-up **base epoch `E_b`** is *not* simply the last
+  recorded common epoch: it is the newest common epoch whose cut completed at
+  least `T_back` (the maximum NVMe-oF I/O timeout plus a clock-skew margin)
+  **before** the raid declared R_dst failed — see the correctness note below
+  for why. In practice: step back one extra epoch whenever `T_snap` is smaller
+  than the I/O timeout.
+  0. **Revert R_dst to its own `E_b`** — discard everything R_dst's head holds
+     beyond that snapshot (its own unacked in-flight tail, or zombie loopback
+     writes): there is no in-place revert RPC, so delete the head and re-create
+     it as a clone of R_dst's local `E_b` (`bdev_lvol_clone`), updating the
+     replica's lvol uuid in the PV record. The correctness argument below is
+     only valid after this step.
+  1. Hygiene + fencing pass on R_dst's node and any previous consumer node (§3).
   2. Re-expose R_dst over NVMe-oF (existing `reconcile_replica_targets` path).
-  3. Attach R_dst as a bdev on R_src's node (`bdev_nvme_attach_controller`).
-  4. For each epoch `E → E+1 → … → E_latest`: `bdev_lvol_start_shallow_copy`
+  3. Attach R_dst as a bdev on R_src's node (`bdev_nvme_attach_controller`),
+     then run the §3 examine discipline **on R_src's node too** — the attached
+     R_dst bdev carries a valid raid sb and will spawn a phantom there.
+  4. For each epoch `E_b → … → E_latest`: `bdev_lvol_start_shallow_copy`
      of the epoch snapshot to the attached R_dst bdev; poll
      `bdev_lvol_check_shallow_copy`. Online; the volume keeps serving degraded.
+     A destination-side allocation failure (R_dst's lvolstore ENOSPC) surfaces
+     as `state=error`: abort the chase, mark the replica `stale`, raise an
+     event — don't retry into a full pool.
   5. Align R_dst's snapshot chain (`bdev_lvol_snapshot` on R_dst +
      `bdev_lvol_set_parent`) so both replicas carry the same epoch lineage.
+  **Retention pinning:** while a catch-up is active or pending, the scheduler
+  must not delete any epoch ≥ the oldest `E_b` in use (record the pin in the PV
+  annotation so it survives orchestrator restarts). Deleting epochs *older*
+  than every replica's base is always safe — deletion merges the snapshot's
+  clusters into its descendant.
   Note the sb region caveat: with `superblock: true` the raid sb occupies the
   first 1 MiB of each replica lvol and *changes on membership events*
   (`seq_number` bump marking R_dst FAILED), so the copied delta will faithfully
@@ -278,22 +362,44 @@ and present in shipped v26.01; the snapshot RPCs are far older.
   `bdev_lvol_get_lvols` (no fragmap RPC exists upstream; that is Longhorn
   fork-only).
 
-### Correctness note: epoch skew across replicas
+### Correctness note: epoch skew, the failure window, and the revert
 
 Epoch snapshots are cut per-replica while writes flow through the raid, so
 replica A's `epoch-N` and replica B's `epoch-N` are **not byte-identical** — a
 write racing the cut can land inside one replica's snapshot and after the
-other's. This does not break the catch-up. The argument needs only two facts:
-(1) raid1 acknowledges a write after **all** live bases complete it, so R_dst
-holds every write acknowledged before it went offline; (2) epoch E is recorded
-as common only after it **completed on every in-sync replica**, so R_src's E
-was cut while R_dst was still receiving writes. Therefore every byte where
-R_dst differs from R_src's final state was written on R_src *after* R_src's E
-cut — and the copied chain (every cluster R_src changed since its own E) is a
-**superset** of the true divergence. Clusters copied redundantly (writes R_dst
-already has) are overwritten with identical content. The epoch invariant is
-temporal ("completed everywhere before recorded"), not byte-equality — no
-quiesce is needed at epoch-cut time.
+other's. That alone is harmless; what makes the catch-up correct is the
+combination of the **back-off base** and the **revert step** above. The honest
+argument, including the parts a naive version gets wrong:
+
+- *Steady state:* raid1 acknowledges a write only after all live bases complete
+  it, so R_dst holds every write acknowledged while it was healthy, and any
+  byte where R_dst lags R_src's final state was written on R_src after R_src's
+  base-epoch cut — the copied chain (every cluster R_src changed since its own
+  `E_b`) is a superset of that lag. Torn multi-cluster writes at a cut are
+  benign for the same reason: the argument is per-cluster, not per-IO.
+- *The failure window (why the last common epoch is NOT a safe base):* raid1's
+  completion starts at FAILED and a **single successful leg flips it to
+  SUCCESS** (`raid1.c:286-305`, `bdev_raid.c:702-714`), with the failed base
+  marked asynchronously (`raid1.c:52-70` → `bdev_raid.c:2440-2444`). So a write
+  whose R_dst leg dangles on a dying path can be **acked via R_src alone**,
+  land *inside* R_src's epoch-E snapshot, and be missing from R_dst — while E
+  is still recorded "common" because epoch cuts travel a control-plane path
+  independent of the consumer's data path. A catch-up based at E would never
+  copy that write: silent divergence. Backing off to `E_b` (cut ≥ `T_back`
+  before the failure) restores the superset property: any acked write missing
+  R_dst's leg was submitted within the I/O timeout of the failure, hence
+  landed on R_src *after* `E_b`'s cut and is in the copied chain.
+- *The reverse direction (why the revert step exists):* R_dst can also hold
+  data R_src lacks — an in-flight write that completed on R_dst's leg but never
+  on R_src's (and was never acked), or zombie loopback writes (§3). R_src's
+  chain never touches those clusters, so without step 0 they would survive
+  catch-up as permanent divergence. Reverting R_dst's head to its own `E_b`
+  discards them; acked writes that the revert also discards are, by the
+  back-off argument, all present in R_src's chain and get re-copied.
+
+With back-off + revert, no quiesce is needed at epoch-cut time. (A Tier-2 raid
+quiesce RPC could shrink `T_back` to zero by making cuts atomic, but it is not
+required for correctness.)
 
 ### Tunables and space overhead
 
@@ -312,12 +418,14 @@ quiesce is needed at epoch-cut time.
   But two consequences follow:
   1. **The head silently becomes thin-provisioned**
      (`blob_set_thin_provision(origblob)`, `blobstore.c:6770-6771`) — even if
-     the lvol was created thick. **Flint creates lvols thick by default**
-     (`thinProvision` StorageClass parameter defaults to `false`,
-     `main.rs:868-870`), so the first epoch snapshot quietly revokes the
-     volume's full-allocation guarantee: subsequent writes COW into *newly
-     allocated* clusters and can hit lvolstore ENOSPC mid-write if capacity was
-     budgeted 1×.
+     the lvol was created thick. Flint's default is thin as of the change
+     accompanying this revision (`thinProvision` flipped to `true` in
+     `main.rs:868-870`, `minimal_disk_service.rs:1666`, the chart
+     StorageClass, and the node-agent HTTP API's `CreateLvolRequest` serde
+     default); **volumes created before then are thick**, and for those
+     the first epoch snapshot quietly revokes the full-allocation guarantee:
+     subsequent writes COW into *newly allocated* clusters and can hit
+     lvolstore ENOSPC mid-write if capacity was budgeted 1×.
   2. **The first snapshot of a thick (or fully written) volume pins the entire
      current image.** As the workload rewrites, the head re-accumulates
      allocated clusters toward a full second copy — i.e., a full-overwrite
@@ -334,12 +442,21 @@ quiesce is needed at epoch-cut time.
     single descendant merges cluster ownership into the descendant and frees
     every cluster the descendant had already overwritten — space returns as
     retention rolls.
-  - **Propagate discards** (`fstrim`/`-o discard`) so deleted-file clusters are
-    released on thin heads (cluster-aligned unmap frees clusters,
-    `blobstore.c:3259-3296`); snapshots retain their copies until deleted.
+  - **Discards do NOT reclaim clusters on epoch-managed heads.** The
+    cluster-release-on-unmap path is gated on the blob being backed by the
+    zeroes device — i.e., thin with *no parent* (`blobstore.c:3269-3271`,
+    `zeroes.c:165-169`). Under this design the head is always a clone of the
+    latest epoch, so `fstrim`/`-o discard` only zero ranges inside
+    still-allocated clusters. Reclamation comes from **retention rolling**
+    (the snapshot-delete merge), and the head reverts to zeroes-backing only
+    after its last snapshot is gone (`blobstore.c:8327-8330`).
   - Capacity rule of thumb for thick volumes that must remain snapshot-safe:
-    budget `2×` (or convert to thin at the next opportunity). §10-4 keeps the
-    follow-up to quantify metadata overhead at target sizes.
+    budget `2×` (or convert to thin at the next opportunity). The controller's
+    capacity cache should count retained-epoch overhead (`Σ epoch deltas` per
+    node) when placing new replicas, or epoch adoption silently overcommits
+    existing pools. §10-4 keeps the follow-up to quantify blobstore *metadata*
+    pressure (md pages per blob × (K+1) × replicas per node — the lvolstore's
+    md region is fixed-size and can ENOSPC before data does).
 
 ## 6. Tier 1 (zero SPDK changes): warm standby + rejoin at reassembly
 
@@ -356,8 +473,16 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
 - **Replica returns.** Run the catch-up sequence (§5) to the latest epoch, then
   **keep chasing**: each new epoch's delta is shallow-copied as it is taken.
   The replica is now `standby`: persistent, thin, trailing the array by
-  ≤ `T_snap` + one delta-copy time. It is *not* in the raid and is never a
-  read source.
+  ≤ `T_snap` + one delta-copy time. It is *not* in the raid, is never a read
+  source, and must never be exported read-write to anything but the catch-up
+  destination claim. **The trailing bound is conditional on convergence**: the
+  chase converges iff a delta copies in < `T_snap`. Under sustained write rates
+  above copy throughput, lag grows without bound — export `lag = epochs-behind
+  × T_snap` as a metric with an alert, reflect the true bound in PV status
+  rather than the nominal one, and respond by raising `T_snap` adaptively
+  (fewer, larger deltas amortize better) before the base epoch ages toward the
+  retention pin. Multiple standbys chasing one source multiply read and network
+  load on that node (§10-5).
 - **Retention expiry.** If a `stale` replica's last common epoch ages out of
   the K retained epochs before catch-up completes, it transitions to the
   thin-aware full build below (E = "empty") — same machinery, larger copy.
@@ -366,9 +491,17 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   1. Hygiene + fencing pass (§3) on this node **and any previous consumer
      node**: delete phantom/orphaned raids, detach stale per-replica
      controllers, flip replica subsystems' allowed hosts to this node.
-  2. If a standby exists: run the **final delta now** — after step 1 there are
-     no writers, so no quiesce is needed; a final snapshot cut here equals the
-     head.
+  2. If a standby exists: run the **final delta now** — after step 1's fencing
+     is *positively confirmed* (every replica subsystem acked the allowed-host
+     state and `nvmf_subsystem_get_controllers` shows the old consumer gone)
+     there are no writers, so no quiesce is needed; a final snapshot cut here
+     equals the head. This copy runs inside NodeStageVolume, so it must respect
+     kubelet's CSI timeout (~2 min with retries): include the standby only if
+     the remaining delta is below a copy-time threshold (it should be — chasing
+     bounds it to ≤ one epoch), make the copy idempotent and resumable keyed
+     off PV state so kubelet retries continue rather than restart it, and on
+     threshold overrun stage degraded without the standby and let chasing
+     finish in the background.
   3. Mark `in_sync` in PV state; include the replica in the
      `bdev_raid_create` base list. **Creation admits all listed bases as
      in-sync** — no rebuild process exists at create time (rebuild starts only
@@ -382,24 +515,54 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   machinery with E = "empty" — shallow-copy *all allocated* clusters of a fresh
   R_src snapshot. Still skips holes, still preserves thinness — unlike stock
   rebuild, which allocates every cluster including zeros (§1).
+- **Assembly after unclean teardown (survivor divergence).** If the previous
+  consumer crashed with writes in flight, the *surviving* replicas can disagree
+  with each other (raid1 fans out with no journal; each leg completes
+  independently), and a fresh create admits all of them as in-sync with raid1
+  free to serve either copy of the same LBA — kernel md resyncs after unclean
+  shutdown for exactly this reason. Detectable: the previous consumer never ran
+  NodeUnstage/hygiene. Handling: pick one survivor as authoritative and run the
+  same epoch reconcile on the others (revert to own `E_b` + copy the
+  authoritative chain) before assembly — same machinery, small deltas. Until
+  implemented, this is an accepted, documented divergence window (it exists in
+  Flint today); filesystem journal replay reading mixed old/new metadata is the
+  workload it endangers.
 
 ### Cutover opportunities (when does "next assembly" happen?)
 
 - **Naturally**: pod reschedule/restart, node drain, spot churn — largely the
   same events that cause replica outages in the first place. No action needed.
-- **RWX volumes — transparently, on demand**: bounce the `flint-nfs-server`
-  pod. Its synthetic RWO PVC is re-staged on restart (raid re-assembled with the
-  standby included) while workload pods ride through NFS retries via the stable
-  per-volume Service. Clients see a stall, not an error.
+- **RWX volumes — on demand, with caveats**: bounce the `flint-nfs-server`
+  pod; its synthetic RWO PVC is re-staged on restart (raid re-assembled with
+  the standby included) while clients retry via the stable per-volume Service.
+  But "ride through" must be scoped honestly against the shipped server:
+  `flint-nfs-server` holds all NFSv4 state **in memory**
+  (`StateManager::new_in_memory`, `server_v4.rs:66` — the SQLite state backend
+  exists in-tree but is not wired into this binary), so a bounce loses
+  clientids/sessions/opens/locks, and recovery rests on a 90 s allow-all grace
+  window (`lease.rs:22`). Stateless I/O and uncommitted writes ride through
+  (the per-boot write verifier forces clients to resend); clients that miss the
+  remaining grace — which the unstage + reassembly + final delta all eat into —
+  get `NFS4ERR_NO_GRACE` → application errors. Required to make the claim
+  solid: wire the SQLite backend with its DB on the exported volume (state then
+  roams with the PVC) and run the final delta *before* deleting the old pod so
+  the outage is just the pod restart. Also note the bounce is racy: if the
+  replacement pod lands on the same node before kubelet unstages, the staged
+  volume is reused — no NodeStage, no reassembly, clients ate a restart for
+  nothing. The orchestrator must verify `sync_state` actually flipped and
+  retry with a scheduling hint (cordon/anti-affinity) if not.
 - **RWO volumes — by policy**: an opt-in knob (per StorageClass or PV
   annotation) to bounce the workload pod during a maintenance window, for
-  workloads that tolerate restarts. Otherwise wait for a natural event.
+  workloads that tolerate restarts. The same same-node race applies — verify
+  the outcome, don't assume it. Otherwise wait for a natural event.
 
 ### Trade-off, stated honestly
 
 Until cutover the array remains degraded: the standby bounds *data-loss
-exposure* (if all in-sync replicas were subsequently lost, the standby is behind
-by at most `T_snap` + the last delta) but it is **not synchronous redundancy**.
+exposure* (if all in-sync replicas were subsequently lost, the standby is
+behind by at most `T_snap` + the last delta — **provided the chase is
+converging**; see the lag metric above) but it is **not synchronous
+redundancy**.
 The deciding metric for Tier 2 is therefore: **time spent degraded with a ready
 standby and no reassembly opportunity** (§9 phase 6). If pods reschedule often
 (spot fleets — the motivating environment), Tier 1 alone may close most of the
@@ -437,20 +600,23 @@ process."** Longhorn's fork implements exactly that: its `grow` path sets
 (`longhorn/spdk` branch `longhorn-v25.09`, `bdev_raid.c` ~4363), wrapped in
 quiesce + superblock write. The fork's four raid RPCs
 (`bdev_raid_rpc.c:780,845,916,989` on that branch) bundle this with a delta
-bitmap we deliberately **do not want** (in-memory; only helps faults within one
-raid lifetime; it cannot survive a roaming raid — §2's governing principle).
+bitmap we deliberately **do not want** (in-memory — only the enable flag is
+persisted in the superblock, `bdev_raid_sb.c:83` on the fork branch, not the
+bitmap itself; so it only helps faults within one raid lifetime and cannot
+survive a roaming raid — §2's governing principle).
 
 So Tier 2 is: an optional **`skip_rebuild` flag on `bdev_raid_add_base_bdev`**,
 carried as one more `.patch` in `Dockerfile.spdk`.
 
 ### Verified patch shape (traced on v26.05; port to shipped v26.01 analogous)
 
-- Plumbing: `schema/schema.json` param (+`genrpc.py` regeneration — RPC decoder
-  structs are build-generated in this SPDK era), decoder row + call site in
-  `bdev_raid_rpc.c`, prototype in `bdev_raid.h`, flag stored **on
-  `raid_base_bdev_info`** — it must survive the silent divert into
-  `raid_bdev_examine_sb` when the added bdev carries a matching old sb
-  (`bdev_raid.c:3429`), which it will after a shallow-copy catch-up (§5).
+- Plumbing: hand-edit the decoder table and call site in `bdev_raid_rpc.c`
+  (`:258-261` — decoder structs are hand-written, not generated; update
+  `schema/schema.json` too so the `genrpc.py` lint/doc pass stays green),
+  prototype in `bdev_raid.h`, flag stored **on `raid_base_bdev_info`** — it
+  must survive the silent divert into `raid_bdev_examine_sb` when the added
+  bdev carries a matching old sb (`bdev_raid.c:3429`), which it will after a
+  shallow-copy catch-up (§5).
 - Skip branch in `raid_bdev_configure_base_bdev_cont`: don't set
   `is_process_target`; replicate the three state mutations
   (`is_configured`/`discovered` `:3377-3379`, `operational` `:3398`).
@@ -473,14 +639,22 @@ carried as one more `.patch` in `Dockerfile.spdk`.
   `spdk_bdev_quiesce` (~30–50 lines), with the control plane performing
   snapshot/clone/add inside the window, or (b) an atomic variant of the add
   RPC that takes the snapshot itself. **We choose (a)**: it is simpler, and a
-  raid-quiesce RPC is independently useful — e.g. it would let an epoch cut be
-  made atomic across replicas if the §5 epoch-skew argument ever needs
-  tightening, and it gives `lvol-flush` a clean pre-snapshot sync point
-  (§10-6).
-- Estimated ~150–200 lines of C **including the quiesce RPC pair**, ~180–250
-  total with schema/CLI. Crash safety is fail-*safe*: a crash between channel
-  install and sb write leaves the slot FAILED on disk → next assembly treats
-  the replica as stale (a redundant catch-up, never corruption).
+  raid-quiesce RPC is independently useful — e.g. it would shrink the §5
+  back-off window to zero by making epoch cuts atomic, and it gives
+  `lvol-flush` a clean pre-snapshot sync point (§10-6).
+- **The quiesce must be leased.** The window spans several control-plane RPCs
+  across three nodes; if the orchestrator dies mid-window, an unleased quiesce
+  leaves guest IO hung until the initiator above the raid escalates to resets.
+  The RPC takes a timeout and auto-unquiesces unless renewed — orchestrator
+  death then degrades to "rejoin attempt failed", not an availability incident.
+  The orchestrator also needs an explicit unwind per step: add fails →
+  unquiesce immediately, delete the esnap clone, and either promote `E_f` to a
+  real common epoch (it qualifies if all survivors cut it) or delete it on all
+  survivors so it cannot pollute the epoch lineage.
+- Estimated ~200–250 lines of C **including the leased quiesce RPC pair**,
+  ~250–300 total with schema/CLI. Crash safety is fail-*safe*: a crash between
+  channel install and sb write leaves the slot FAILED on disk → next assembly
+  treats the replica as stale (a redundant catch-up, never corruption).
 
 ### Correct hot-rejoin sequence (one short quiesce window, metadata ops only)
 
@@ -491,8 +665,18 @@ carried as one more `.patch` in `Dockerfile.spdk`.
    unquiesce. All steps inside the window are metadata operations.
 3. From unquiesce: new writes fan out to R_dst's head; reads of not-yet-local
    clusters forward through the esnap to `E_f` — **correct from the first I/O**.
-4. Backfill the remaining epoch deltas via `shallow_copy` at leisure; then
+4. Backfill the remaining epoch deltas via `shallow_copy`, then
    `bdev_lvol_set_parent` to localize the chain and drop the esnap dependency.
+   **The backfill window is not "at leisure" — it is a dependency window.**
+   Until `set_parent` completes, R_dst's reads of non-local clusters traverse
+   NVMe-oF to R_src's node (double-hop latency on guest reads raid1 routes to
+   R_dst, plus read-modify-write amplification on COW), and R_src's node is a
+   **single point of failure for that data**: if it dies, the esnap degrades
+   and the only base holding those clusters is gone. Run the backfill at high
+   priority, do not report the volume fully redundant until localization
+   completes, and on R_src death mid-backfill transition R_dst back to `stale`
+   (its consistent epoch chain survives) rather than letting esnap read errors
+   surface through the raid.
 
 > Safety gate (unchanged from rev 1): a base must never be a read source unless
 > its reads are genuinely consistent. Here that is structural: the esnap parent
@@ -516,13 +700,13 @@ through the patched add, whose completion path flips the slot to CONFIGURED
 
 ## 8. What is upstream vs. what needs the patch
 
-- **lvol/blobstore delta primitives — UPSTREAM** (since v24.05, in shipped
-  v26.01): `shallow_copy` + `check`, `set_parent`, `set_parent_bdev`,
-  `clone_bdev` (esnap). Verified present and contracts as in §5.
-- **raid "add as in-sync" (+ a quiesce RPC) — NOT upstream anywhere** (verified
-  2026-06-10): fork-only in `longhorn/spdk`; Tier 2 carries the minimal
-  ~200-line equivalent as a local patch in the existing `Dockerfile.spdk`
-  pipeline.
+- **lvol/blobstore delta primitives — UPSTREAM** (shallow_copy/set_parent since
+  v24.05, clone_bdev/esnap since v23.05; all in shipped v26.01). Verified
+  present and contracts as in §5.
+- **raid "add as in-sync" (+ a leased quiesce RPC) — NOT upstream anywhere**
+  (verified 2026-06-10): fork-only in `longhorn/spdk`; Tier 2 carries the
+  minimal ~250-line equivalent as a local patch in the existing
+  `Dockerfile.spdk` pipeline.
 
 Rejected alternatives:
 
@@ -533,16 +717,22 @@ Rejected alternatives:
   evidence; every path ends in rebuild or rejection.
 - **Porting Longhorn's fork branch wholesale (rev 1's recommendation):**
   superseded — it imports the delta bitmap and fastSync surface we don't want,
-  plus a fork-tracking obligation, for a primitive that reduces to ~200 lines.
+  plus a fork-tracking obligation, for a primitive that reduces to ~250 lines.
 - **Custom replication vbdev (drop bdev_raid):** most work; reinvents raid1's
   write fan-out. Reserve for if we outgrow raid1.
 
 ## 9. Phasing
 
-0. **Repro + fix the §3 examine/orphan hazards.** Reboot-replica repro
-   (export fails?) and restage repro (EEXIST?). Add the hygiene pass to the node
-   agent reconcile and the pre-assembly path; add raid teardown + per-replica
-   NQN detach to NodeUnstage; add allowed-host fencing on re-stage (§3).
+0. **Repro + fix the §3 examine/orphan hazards.** Repros: replica-node reboot
+   (export fails on claim?), restage (`bdev_raid_create` `-EEXIST` from
+   phantom), and fresh-create-over-sb-bearing-bases (`-EEXIST` even after
+   phantom delete). Fixes: **bump the shipped SPDK image v26.01 → v26.05.x**
+   (for `bdev_raid_delete clear_sb` — the sb-clearing the hygiene pass needs,
+   and it aligns the image with this doc's verified baseline); the
+   `wait_for_examine` → delete+clear → create discipline in the node agent
+   reconcile and pre-assembly path; raid teardown + per-replica NQN detach in
+   NodeUnstage; subsystems created `allow_any_host: false` with host lists from
+   PV annotations in **both** export paths, plus post-fence verification (§3).
    *Independent bug fix; prerequisite for everything below; ships on its own.*
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
@@ -565,8 +755,16 @@ Rejected alternatives:
 8. **Tests:** offline→rejoin delta resync; roam-during-catch-up (no
    corruption); outage past epoch retention → thin-aware full build; reboot →
    phantom-raid repro; restage → EEXIST repro; power-cut during final delta;
-   Tier 2: quiesce-window bound; crash between channel install and sb write
-   (must trigger rebuild-or-recatchup, never serve stale reads).
+   Tier 2: quiesce-window bound (set a target); crash between channel install
+   and sb write (must trigger rebuild-or-recatchup, never serve stale reads).
+   Adversarial set (build a fault-injection bdev early — delay/error on one
+   raid leg; it exercises several of these): write acked during base failure
+   straddling an epoch cut (validates the §5 back-off); consumer crash with
+   in-flight writes → reassembly read-consistency across survivors (§6
+   survivor divergence); NFS bounce with open files + locks under load past
+   the grace window; orchestrator kill inside the Tier-2 quiesce window
+   (lease must fire); R_src node kill during esnap backfill (R_dst must
+   revert to `stale`, no esnap errors through the raid).
 
 Phases 0–5 are pure Rust control plane against upstream RPCs. The SPDK patch
 decision moves from "gating dependency, sequence first" (rev 1) to "phase 7,
@@ -581,11 +779,14 @@ decided by phase 6's data."
    (~:824) and `replica.go` `RebuildingDstStart` (~:3020): is engine IO
    suspended across snapshot→grow, or does grow's internal quiesce suffice?
    Informs whether our §7 single-window sequence can be relaxed.
-3. **Shallow-copy locked-op interplay**: a chasing copy holds the source epoch
-   snapshot's blob lock (EBUSY for concurrent ops on that blob) — confirm the
-   scheduler's snapshot/delete cadence never needs to touch a blob mid-copy.
-4. **Snapshot/COW cost** (metadata + held space) at target volume sizes; pick
-   `T_snap`/`K` from measurement; consider write-volume-adaptive `T_snap`.
+3. **Shallow-copy locked-op interplay**: the §5 retention-pinning rule covers
+   deletion; remaining question is cadence — confirm the scheduler never needs
+   to snapshot/delete a blob mid-copy (EBUSY) under normal epoch rhythm.
+4. **Blobstore metadata pressure + empirical held-space validation**: md pages
+   per blob × (K+1) epochs × replicas per node against the lvolstore's
+   fixed-size md region (the likely binding constraint at high volume counts);
+   validate §5's held-space model at target sizes; pick `T_snap`/`K` from
+   measurement; consider write-volume-adaptive `T_snap`.
 5. **Two replicas simultaneously stale:** catch-up ordering; which is
    authoritative; do we chase both as standbys concurrently?
 6. **`lvol-flush` patch interaction with epoch snapshots:** epoch and
@@ -602,8 +803,15 @@ decided by phase 6's data."
 8. **Orphan reaping completeness**: enumerate everything a dead consumer node
    can leave behind (raid bdev, nvme controllers, ublk/nvmf frontends, mounted
    filesystems) and make the hygiene pass cover all of it.
-9. **Fencing design** (§3): allowed-host-NQN flipping on the per-replica
-   subsystems vs. NVMe persistent reservations; interaction with the node
-   agent's startup re-export; verify a severed zombie cannot reconnect before
-   the allowed-host list is updated on a node that was unreachable during
-   re-stage.
+9. **Fencing design** (§3): default-closed allowed-host lists (from PV
+   annotations, applied at subsystem creation in both export paths) vs. NVMe
+   persistent reservations; post-fence verification via
+   `nvmf_subsystem_get_controllers` (SPDK host removal is async); the
+   co-located-replica case (cannot be fenced externally — contaminated until
+   hygiene); verify a zombie's auto-reconnecting initiator (`ctrl_loss_tmo`)
+   cannot win a race against a returning node's re-export.
+10. **NFS state persistence** (§6): wire the existing SQLite state backend into
+   `flint-nfs-server` with its DB on the exported volume; grace-period
+   semantics after restore (RFC 8881 stable-storage reclaim gating vs. today's
+   allow-all-in-grace); bound the bounce-cutover outage so clients reliably
+   reclaim within grace.
