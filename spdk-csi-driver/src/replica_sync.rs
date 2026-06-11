@@ -352,6 +352,17 @@ impl VolumeSyncRecord {
             .map(|(_, name)| name)
     }
 
+    /// Name of the oldest recorded epoch, if any — the retention-pin anchor
+    /// for a full build (§9-5): the lineage replay walks to the source's
+    /// chain root, so nothing retained may retire mid-build.
+    pub fn oldest_epoch(&self, volume_id: &str) -> Option<&str> {
+        self.epochs
+            .iter()
+            .filter_map(|e| epoch_seq(volume_id, &e.name).map(|seq| (seq, e.name.as_str())))
+            .min_by_key(|(seq, _)| *seq)
+            .map(|(_, name)| name)
+    }
+
     /// Record a tombstone for a deleted user snapshot whose copy could not
     /// be removed from every replica (§11 deletion). Only names strictly
     /// parseable as this volume's user snapshots are accepted — reaping is
@@ -1153,10 +1164,12 @@ mod tests {
     fn latest_epoch_names_newest_by_sequence() {
         let mut record = three_replica_record();
         assert_eq!(record.latest_epoch("vol1"), None);
+        assert_eq!(record.oldest_epoch("vol1"), None);
         let all = vec!["uuid-a".to_string(), "uuid-b".to_string(), "uuid-c".to_string()];
         record.apply_epoch_cut(&epoch_name("vol1", 2), &all, "t");
         record.apply_epoch_cut(&epoch_name("vol1", 10), &all, "t");
         assert_eq!(record.latest_epoch("vol1"), Some("epoch-vol1-10"));
+        assert_eq!(record.oldest_epoch("vol1"), Some("epoch-vol1-2"));
     }
 
     #[test]

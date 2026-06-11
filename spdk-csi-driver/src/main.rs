@@ -226,9 +226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let catchup_cfg = spdk_csi_driver::catchup::CatchupConfig::from_env();
         if catchup_cfg.enabled {
             println!(
-                "🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: {}s, poll: {}s)",
+                "🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: {}s, poll: {}s, full build: {})",
                 catchup_cfg.t_back.as_secs(),
-                catchup_cfg.poll_interval.as_secs()
+                catchup_cfg.poll_interval.as_secs(),
+                if catchup_cfg.full_build { "on" } else { "off" }
             );
             let catchup_driver = driver.clone();
             tokio::spawn(async move {

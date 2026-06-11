@@ -372,6 +372,13 @@ pub struct CatchupConfig {
     pub t_back: Duration,
     /// Shallow-copy progress poll interval. FLINT_CATCHUP_POLL_SECS, default 2.
     pub poll_interval: Duration,
+    /// §9-5: automatically run the thin-aware full build (revert to EMPTY +
+    /// lineage replay from the source's chain root) for a returned stale
+    /// replica with no usable shared epoch history. Disabled, such replicas
+    /// are only classified (ReplicaNeedsFullRebuild) and stay stale.
+    /// FLINT_CATCHUP_FULL_BUILD, default enabled (the orchestrator itself
+    /// is already opt-in).
+    pub full_build: bool,
 }
 
 impl Default for CatchupConfig {
@@ -380,6 +387,7 @@ impl Default for CatchupConfig {
             enabled: false,
             t_back: Duration::from_secs(120),
             poll_interval: Duration::from_secs(2),
+            full_build: true,
         }
     }
 }
@@ -405,9 +413,22 @@ impl CatchupConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.poll_interval),
+            full_build: std::env::var("FLINT_CATCHUP_FULL_BUILD")
+                .map(|v| {
+                    !(v.eq_ignore_ascii_case("disabled")
+                        || v.eq_ignore_ascii_case("false")
+                        || v == "0")
+                })
+                .unwrap_or(d.full_build),
         }
     }
 }
+
+/// The `reverted_to` resume marker for a full build (§9-5): the head is a
+/// write-virgin EMPTY lvol, not a clone of any epoch. Can never collide
+/// with an epoch name (`epoch-<vol>-<seq>`). Phase 4's in_sync admission
+/// clears it like any other revert marker.
+pub const FULL_BUILD_BASE: &str = "empty";
 
 /// Phase-4 reassembly-admission tunables (NodeStage's final delta).
 #[derive(Debug, Clone)]
@@ -509,19 +530,25 @@ pub fn select_base_epoch(
 
 /// The source's actual blob lineage from `base` (INCLUSIVE — load-bearing,
 /// §5 step 4) through `target`, oldest first, discovered live by walking
-/// parent links from the source head (§11). NOT derived from recorded epoch
-/// names: a user `VolumeSnapshot` interleaved between two epochs splits the
-/// newer epoch's delta (shallow copy moves only clusters allocated in the
-/// source blob itself), so a name-derived chain would silently lose the
-/// slice held by the user snapshot's blob. Elements newer than `target`
-/// (e.g. a user snapshot cut after the newest recorded epoch) belong to a
-/// later session and are skipped. A retired epoch's merge into its
-/// descendant is reflected by construction.
+/// parent links from the source head (§11). `base: None` is the §9-5 full
+/// build: walk all the way to the chain root and collect everything — the
+/// root element's blob holds every cluster written before its cut, so
+/// replaying root → target reproduces the source's target image from
+/// nothing, holes skipped (thin-aware by construction).
+///
+/// NOT derived from recorded epoch names: a user `VolumeSnapshot`
+/// interleaved between two epochs splits the newer epoch's delta (shallow
+/// copy moves only clusters allocated in the source blob itself), so a
+/// name-derived chain would silently lose the slice held by the user
+/// snapshot's blob. Elements newer than `target` (e.g. a user snapshot cut
+/// after the newest recorded epoch) belong to a later session and are
+/// skipped. A retired epoch's merge into its descendant is reflected by
+/// construction.
 async fn lineage_chain(
     rpc: &dyn CatchupRpc,
     src: &ReplicaInfo,
     target: &str,
-    base: &str,
+    base: Option<&str>,
 ) -> Result<Vec<String>, RpcError> {
     // Parent links cannot cycle (the blobstore chain is a tree); the bound
     // is purely defensive against a corrupted fake of reality.
@@ -543,20 +570,34 @@ async fn lineage_chain(
             .and_then(|b| b.as_str())
             .map(String::from)
         else {
-            return Err(format!(
-                "{} not found in the source lineage on {} (walked {} to the chain root)",
-                if collecting { base } else { target },
-                src.node_name,
-                head_alias
-            )
-            .into());
+            // Chain root reached. For a full build that IS the stopping
+            // condition — everything from the root is collected; for a
+            // based session it means the base (or target) never appeared.
+            return match base {
+                None if collecting => {
+                    chain.reverse();
+                    Ok(chain)
+                }
+                None => Err(format!(
+                    "target {} not found in the source lineage on {}",
+                    target, src.node_name
+                )
+                .into()),
+                Some(b) => Err(format!(
+                    "{} not found in the source lineage on {} (walked {} to the chain root)",
+                    if collecting { b } else { target },
+                    src.node_name,
+                    head_alias
+                )
+                .into()),
+            };
         };
         if parent == target {
             collecting = true;
         }
         if collecting {
             chain.push(parent.clone());
-            if parent == base {
+            if base == Some(parent.as_str()) {
                 chain.reverse();
                 return Ok(chain);
             }
@@ -676,6 +717,47 @@ async fn revert_head(
         .and_then(|r| r.as_str())
         .map(String::from)
         .ok_or_else(|| format!("bdev_lvol_clone of {} returned no uuid", base_alias).into())
+}
+
+/// §9-5 full build, step 0 (E = "empty"): discard the head entirely and
+/// re-create it as a fresh EMPTY thin lvol with the same name, sized to the
+/// source head. Safe for the same reason the §5 revert is: a stale
+/// replica's unique data is only its unacked tail (the survivors hold every
+/// acknowledged write), and a no-shared-history chain is too old to delta
+/// from. The old chain's snapshots are NOT ours to reap — deleting only the
+/// head leaves them as orphaned, restorable blobs (§9-5 obligation); the
+/// epoch GC retires the epoch-named ones in its own time. Idempotent across
+/// crashes via the stable lvol name, like `revert_head`.
+async fn revert_head_to_empty(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    head_alias: &str,
+    lvol_name: &str,
+    lvs_name: &str,
+    size_mib: u64,
+) -> Result<String, RpcError> {
+    let delete = json!({ "method": "bdev_lvol_delete", "params": { "name": head_alias } });
+    if let Err(e) = rpc.spdk_rpc(node, &delete).await {
+        if !is_missing(&e.to_string()) {
+            return Err(format!("failed to delete head {} on {}: {}", head_alias, node, e).into());
+        }
+    }
+    let create = json!({
+        "method": "bdev_lvol_create",
+        "params": {
+            "lvol_name": lvol_name,
+            "lvs_name": lvs_name,
+            "size_in_mib": size_mib,
+            "thin_provision": true
+        }
+    });
+    let resp = rpc.spdk_rpc(node, &create).await.map_err(|e| {
+        format!("failed to create empty head {} on {}: {}", lvol_name, node, e)
+    })?;
+    resp.get("result")
+        .and_then(|r| r.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("bdev_lvol_create of {} returned no uuid", lvol_name).into())
 }
 
 /// §3 discipline on the replica node before export: the head inherits a
@@ -963,9 +1045,10 @@ async fn align_head(
 
 /// Copy the base-inclusive source lineage onto the attached destination,
 /// re-snapshotting the destination at every user snapshot it replays (§11)
-/// and at the target epoch. Shared by the bulk catch-up, the chase, and the
-/// phase-4 final delta. Returns the epoch the destination is now consistent
-/// at.
+/// and at the target epoch. `base: None` is the §9-5 full build (replay
+/// from the chain root onto an empty head). Shared by the bulk catch-up,
+/// the full build, the chase, and the phase-4 final delta. Returns the
+/// epoch the destination is now consistent at.
 async fn copy_chain_and_align(
     rpc: &dyn CatchupRpc,
     volume_id: &str,
@@ -974,7 +1057,7 @@ async fn copy_chain_and_align(
     dst: &ReplicaInfo,
     head_alias: &str,
     dst_bdev: &str,
-    base: &str,
+    base: Option<&str>,
     poll_interval: Duration,
     deadline: Option<Instant>,
 ) -> Result<String, RpcError> {
@@ -1002,8 +1085,8 @@ async fn copy_chain_and_align(
     // already holds a snapshot by this name (the revert source / the chase
     // mark); the head now also carries the source's copy of that epoch's
     // delta — consistent without a new snapshot (§5 correctness note, the
-    // E_latest = E_b case).
-    if target != base {
+    // E_latest = E_b case). A full build (no base) always aligns.
+    if base != Some(target.as_str()) {
         align_head(rpc, &dst.node_name, head_alias, &target).await?;
     }
     Ok(target)
@@ -1051,9 +1134,14 @@ async fn catchup_stale(
         .filter(|n| epoch_seq(volume_id, n).is_some())
         .collect();
 
-    let Some(base) = select_base_epoch(volume_id, record, rec, &present, cfg.t_back) else {
+    // No usable shared history → the §9-5 thin-aware full build (E =
+    // "empty", lineage replay from the source's chain root). When the full
+    // build is disabled, the replica is only classified and stays stale.
+    let base = select_base_epoch(volume_id, record, rec, &present, cfg.t_back);
+    if base.is_none() && !cfg.full_build {
         let reason =
-            "full rebuild required: no shared epoch history within retention (phase 5)".to_string();
+            "full rebuild required: no shared epoch history within retention (full build disabled)"
+                .to_string();
         if rec.reason.as_deref() != Some(reason.as_str()) {
             store.record_reason(volume_id, &rec.lvol_uuid, &reason).await?;
             store
@@ -1063,42 +1151,105 @@ async fn catchup_stale(
                     "ReplicaNeedsFullRebuild",
                     &format!(
                         "Replica {} on {} has no shared epoch history within retention; \
-                         it needs a thin-aware full build (phase 5) and stays stale",
+                         the thin-aware full build is disabled (FLINT_CATCHUP_FULL_BUILD), \
+                         so it stays stale",
                         rec.lvol_uuid, identity.node_name
                     ),
                 )
                 .await;
         }
         return Ok(());
-    };
+    }
 
-    // Pin BEFORE the revert: from here the catch-up's foundation must not be
-    // retired (§5 retention pinning; survives orchestrator restarts).
-    store.pin_retention(volume_id, &base).await?;
+    // Pin BEFORE the revert: from here the session's foundation must not be
+    // retired (§5 retention pinning; survives orchestrator restarts). A
+    // full build replays from the source's chain root, so it pins the
+    // OLDEST retained epoch — nothing retained may retire mid-build.
+    let pinned = match &base {
+        Some(b) => b.clone(),
+        None => record
+            .oldest_epoch(volume_id)
+            .ok_or("no recorded epoch to anchor the full build (cannot happen: epochs checked)")?
+            .to_string(),
+    };
+    store.pin_retention(volume_id, &pinned).await?;
 
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
-    let live_uuid = if rec.reverted_to.as_deref() == Some(base.as_str()) {
-        // Resume: the head is still a write-virgin clone of this base (it
-        // has only ever received copy writes) — re-copying the chain onto it
-        // converges without a re-revert.
+    let resume_marker = base.as_deref().unwrap_or(FULL_BUILD_BASE);
+    let live_uuid = if rec.reverted_to.as_deref() == Some(resume_marker) {
+        // Resume: the head is still write-virgin for this exact base (it
+        // has only ever received copy writes) — re-copying the chain onto
+        // it converges without a re-revert.
         rec.live_lvol_uuid().to_string()
     } else {
-        let base_alias = format!("{}/{}", identity.lvs_name, base);
-        let new_uuid =
-            revert_head(rpc, &identity.node_name, &head_alias, &identity.lvol_name, &base_alias)
-                .await?;
-        store.record_revert(volume_id, &rec.lvol_uuid, &base, &new_uuid).await?;
-        store
-            .emit(
-                volume_id,
-                "Normal",
-                "ReplicaCatchupStarted",
-                &format!(
-                    "Catch-up of replica on {} started: head reverted to {}, copying {} → latest from {}",
-                    identity.node_name, base, base, src.node_name
-                ),
-            )
-            .await;
+        let new_uuid = match &base {
+            Some(b) => {
+                let base_alias = format!("{}/{}", identity.lvs_name, b);
+                revert_head(
+                    rpc, &identity.node_name, &head_alias, &identity.lvol_name, &base_alias,
+                )
+                .await?
+            }
+            None => {
+                // Size the empty head to the source head exactly.
+                let src_head_alias = format!("{}/{}", src.lvs_name, src.lvol_name);
+                let src_head = get_bdev(rpc, &src.node_name, &src_head_alias)
+                    .await?
+                    .ok_or_else(|| {
+                        format!("source head {} not found on {}", src_head_alias, src.node_name)
+                    })?;
+                let bytes = src_head.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0)
+                    * src_head.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                if bytes == 0 {
+                    return Err(format!(
+                        "cannot size the rebuilt head: source head {} reports no size",
+                        src_head_alias
+                    )
+                    .into());
+                }
+                let size_mib = bytes.div_ceil(1024 * 1024);
+                revert_head_to_empty(
+                    rpc,
+                    &identity.node_name,
+                    &head_alias,
+                    &identity.lvol_name,
+                    &identity.lvs_name,
+                    size_mib,
+                )
+                .await?
+            }
+        };
+        store.record_revert(volume_id, &rec.lvol_uuid, resume_marker, &new_uuid).await?;
+        match &base {
+            Some(b) => {
+                store
+                    .emit(
+                        volume_id,
+                        "Normal",
+                        "ReplicaCatchupStarted",
+                        &format!(
+                            "Catch-up of replica on {} started: head reverted to {}, copying {} → latest from {}",
+                            identity.node_name, b, b, src.node_name
+                        ),
+                    )
+                    .await;
+            }
+            None => {
+                store
+                    .emit(
+                        volume_id,
+                        "Normal",
+                        "ReplicaFullBuildStarted",
+                        &format!(
+                            "Thin-aware full build of replica on {} started: no shared epoch history \
+                             within retention — head recreated empty, replaying the full source \
+                             lineage from {} (all allocated clusters, holes skipped)",
+                            identity.node_name, src.node_name
+                        ),
+                    )
+                    .await;
+            }
+        }
         new_uuid
     };
 
@@ -1108,13 +1259,13 @@ async fn catchup_stale(
     .await?;
 
     let newest = copy_chain_and_align(
-        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, &base,
+        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, base.as_deref(),
         cfg.poll_interval, None,
     )
     .await?;
 
     store
-        .record_standby(volume_id, &rec.lvol_uuid, &newest, Some(&base))
+        .record_standby(volume_id, &rec.lvol_uuid, &newest, Some(&pinned))
         .await?;
     store
         .emit(
@@ -1124,11 +1275,11 @@ async fn catchup_stale(
             &format!(
                 "Replica on {} is a warm standby: caught up through {} (chain from {}), chasing new epochs; \
                  it rejoins the raid at the next reassembly (phase 4)",
-                identity.node_name, newest, base
+                identity.node_name, newest, resume_marker
             ),
         )
         .await;
-    info!(volume_id, node = %identity.node_name, base = %base, through = %newest, "[CATCHUP] Replica caught up to warm standby");
+    info!(volume_id, node = %identity.node_name, base = %resume_marker, through = %newest, "[CATCHUP] Replica caught up to warm standby");
     Ok(())
 }
 
@@ -1174,7 +1325,7 @@ async fn chase_standby(
     )
     .await?;
     let newest = copy_chain_and_align(
-        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, base,
+        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, Some(base),
         cfg.poll_interval, None,
     )
     .await?;
@@ -1443,7 +1594,7 @@ async fn admit_one_standby(
     )
     .await?;
     let newest = copy_chain_and_align(
-        rpc, volume_id, &record, src, identity, &head_alias, &dst_bdev, &base,
+        rpc, volume_id, &record, src, identity, &head_alias, &dst_bdev, Some(&base),
         cfg.poll_interval, Some(deadline),
     )
     .await?;
@@ -1718,6 +1869,7 @@ mod tests {
             enabled: true,
             t_back: Duration::from_secs(120),
             poll_interval: Duration::ZERO,
+            full_build: true,
         }
     }
 
@@ -1829,6 +1981,7 @@ mod tests {
                     }
                 }
                 "bdev_lvol_clone" => Ok(json!({ "result": self.clone_uuid })),
+                "bdev_lvol_create" => Ok(json!({ "result": self.clone_uuid })),
                 "bdev_raid_get_bdevs" => Ok(json!({
                     "result": self.raids.lock().unwrap().get(node).cloned().unwrap_or_default()
                 })),
@@ -2057,6 +2210,8 @@ mod tests {
         let mut h = json!({
             "name": "head-of-chain",
             "uuid": "head-of-chain-uuid",
+            "num_blocks": 2048,
+            "block_size": 512,
             "driver_specific": { "lvol": { "snapshot": false, "clone": prev.is_some() } }
         });
         if let Some(p) = prev {
@@ -2152,7 +2307,7 @@ mod tests {
 
         // Base-inclusive from 4 through the target 5; the newer user
         // snapshot belongs to a later session and is skipped.
-        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap();
         assert_eq!(
@@ -2161,10 +2316,24 @@ mod tests {
         );
 
         // Degenerate target == base.
-        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 4), &epoch("vol1", 4))
+        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 4), Some(&epoch("vol1", 4)))
             .await
             .unwrap();
         assert_eq!(chain, vec![epoch("vol1", 4)]);
+
+        // Full build (no base): everything from the chain root through the
+        // target — the root element's blob holds all clusters written
+        // before its cut, so this replays the volume from nothing.
+        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), None).await.unwrap();
+        assert_eq!(
+            chain,
+            vec![
+                epoch("vol1", 3),
+                epoch("vol1", 4),
+                "snap_vol1_88".to_string(),
+                epoch("vol1", 5),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2173,16 +2342,20 @@ mod tests {
         let src = replica("node-a", "uuid-a");
 
         // No head at all.
-        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("source head"), "got: {}", err);
 
         // Base not present in the lineage (walked to the chain root).
         install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
-        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap_err();
+        assert!(err.to_string().contains("not found in the source lineage"), "got: {}", err);
+
+        // Full build whose target is not in the lineage at all.
+        let err = lineage_chain(&rpc, &src, &epoch("vol1", 9), None).await.unwrap_err();
         assert!(err.to_string().contains("not found in the source lineage"), "got: {}", err);
     }
 
@@ -2600,7 +2773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_shared_history_classifies_full_build_once() {
+    async fn no_shared_history_classifies_once_when_full_build_disabled() {
         let rpc = {
             let mut rpc = FakeRpc::new("u");
             // The returned replica holds no epoch snapshots at all.
@@ -2611,8 +2784,9 @@ mod tests {
             rpc
         };
         let store = FakeStore::new(stale_b_record());
+        let cfg = CatchupConfig { full_build: false, ..cfg() };
 
-        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg)
             .await
             .unwrap();
         // Marked, evented, nothing pinned or reverted.
@@ -2622,12 +2796,143 @@ mod tests {
         let events = store.events.lock().unwrap().clone();
         assert_eq!(events, vec![("ReplicaNeedsFullRebuild".to_string(), "Warning".to_string())]);
         assert!(rpc.calls_of("bdev_lvol_clone").is_empty());
+        assert!(rpc.calls_of("bdev_lvol_create").is_empty());
 
         // Second cycle: reason already recorded — no duplicate event.
-        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg)
             .await
             .unwrap();
         assert_eq!(store.events.lock().unwrap().len(), 1);
+    }
+
+    // ---- phase 5: thin-aware full build -----------------------------------
+
+    #[tokio::test]
+    async fn full_build_replays_entire_lineage_from_empty() {
+        // The returned replica holds NO epoch snapshots (wiped disk /
+        // retention expiry): revert to EMPTY and replay the source's whole
+        // lineage — including the interleaved user snapshot.
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![("lvol-uuid-b".to_string(), "uuid-b".to_string())],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), "snap_vol1_88", &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // Pin lands on the OLDEST retained epoch before the revert; the
+        // full-build marker is recorded; standby closes the flow.
+        let ops = store.ops.lock().unwrap().clone();
+        assert_eq!(
+            ops,
+            vec![
+                format!("pin:{}", epoch("vol1", 3)),
+                "revert:empty:uuid-b-v2".to_string(),
+                format!("standby:{}", epoch("vol1", 5)),
+            ]
+        );
+
+        // The head was deleted and recreated EMPTY, thin, sized to the
+        // source head (2048 × 512 = 1 MiB).
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert_eq!(deletes[0].1["params"]["name"], "lvs0/lvol-uuid-b");
+        let creates = rpc.calls_of("bdev_lvol_create");
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].0, "node-b");
+        assert_eq!(creates[0].1["params"]["lvol_name"], "lvol-uuid-b");
+        assert_eq!(creates[0].1["params"]["lvs_name"], "lvs0");
+        assert_eq!(creates[0].1["params"]["size_in_mib"], 1);
+        assert_eq!(creates[0].1["params"]["thin_provision"], true);
+        assert!(rpc.calls_of("bdev_lvol_clone").is_empty());
+
+        // The ENTIRE lineage is replayed in order, root first.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        let srcs: Vec<&str> = copies
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            srcs,
+            vec![
+                "lvs0/epoch-vol1-3",
+                "lvs0/snap_vol1_88",
+                "lvs0/epoch-vol1-4",
+                "lvs0/epoch-vol1-5",
+            ]
+        );
+        // The destination re-acquires the user snapshot and the target.
+        let snaps = rpc.calls_of("bdev_lvol_snapshot");
+        let aligned: Vec<&str> = snaps
+            .iter()
+            .map(|(_, p)| p["params"]["snapshot_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(aligned, vec!["snap_vol1_88", "epoch-vol1-5"]);
+
+        // Record end state: standby at 5, live-uuid override, full-build
+        // marker, pin cleared.
+        {
+            let record = store.record.lock().unwrap();
+            let rec = record.get("uuid-b").unwrap();
+            assert_eq!(rec.sync_state, SyncState::Standby);
+            assert_eq!(rec.last_epoch.as_deref(), Some(epoch("vol1", 5).as_str()));
+            assert_eq!(rec.active_lvol_uuid.as_deref(), Some("uuid-b-v2"));
+            assert_eq!(rec.reverted_to.as_deref(), Some(FULL_BUILD_BASE));
+            assert_eq!(record.retention_pin, None);
+        }
+        let reasons: Vec<String> =
+            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(
+            reasons,
+            vec!["ReplicaFullBuildStarted".to_string(), "ReplicaStandby".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn full_build_resumes_without_recreating_the_head() {
+        // A previous full build crashed mid-copy: the marker stands and the
+        // head has only ever received copy writes — replay converges onto
+        // it without deleting or recreating anything.
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![("lvol-uuid-b".to_string(), "uuid-b-v2".to_string())],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(FULL_BUILD_BASE.to_string());
+        let store = FakeStore::new(record);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        assert!(rpc.calls_of("bdev_lvol_delete").is_empty());
+        assert!(rpc.calls_of("bdev_lvol_create").is_empty());
+        assert_eq!(rpc.calls_of("bdev_lvol_start_shallow_copy").len(), 3);
+        let record = store.record.lock().unwrap();
+        assert_eq!(record.get("uuid-b").unwrap().sync_state, SyncState::Standby);
+        drop(record);
+        // No second ReplicaFullBuildStarted on resume.
+        let reasons: Vec<String> =
+            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(reasons, vec!["ReplicaStandby".to_string()]);
     }
 
     #[tokio::test]

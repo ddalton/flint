@@ -1148,6 +1148,41 @@ Rejected alternatives:
    copies on the rebuilt replica — the old local chain still orphans, but
    snapshot coverage is preserved; with no user snapshots it degenerates
    to the single flattened copy sketched above.
+
+   **Implementation status (2026-06-11):** the *same-identity* full build
+   is implemented on `main` in `catchup.rs` (unit-tested, not yet
+   cluster-validated):
+   - **Automatic transition** per §6 retention expiry: when
+     `select_base_epoch` finds no usable shared epoch on a returned stale
+     replica, the orchestrator runs the full build instead of merely
+     classifying (the classification-plus-`ReplicaNeedsFullRebuild` path
+     remains behind `FLINT_CATCHUP_FULL_BUILD=disabled`).
+   - **Revert to `E = "empty"`**: delete the head (tolerating absence — a
+     wiped lvolstore has no head at all) and create a fresh empty thin
+     lvol under the same name, sized to the source head. Only the head is
+     deleted: the old chain's snapshots stay as orphaned, restorable blobs
+     (obligation (a) above). The resume marker is `reverted_to: "empty"`
+     (can never collide with an epoch name); the standard write-virgin
+     resume argument applies and phase 4 clears it on admission unchanged.
+   - **Lineage replay from the root** (`lineage_chain` with no base): the
+     root element's blob holds every cluster written before its cut, so
+     replaying root → target reproduces the source's target image from
+     nothing — thin by construction (holes never copied), and the
+     destination re-acquires every non-tombstoned user snapshot in the
+     chain per §11. The retention pin anchors at the OLDEST retained epoch
+     for the build's duration; a user snapshot deleted mid-build merges
+     into its descendant and the convergent re-run picks up the merged
+     chain.
+   - **Requires at least one recorded epoch** (the replay target): a
+     volume with the scheduler disabled never full-builds — consistent
+     with the empty-record rule everywhere else.
+   - **NOT implemented — replica replacement (new node / new identity):**
+     identity lives in immutable volumeAttributes, so replacing a replica
+     needs a membership-change channel (record-level identity overrides
+     consumed by ControllerPublish/NodeStage, or PV re-creation) plus
+     placement logic. Recorded as open question §10-12; the implemented
+     full build covers the wiped-disk / retention-expiry / recreated-lvol
+     cases where the identity (node + lvol name) survives.
 5b. **Multi-replica `VolumeSnapshot` support** (§11): cut on every in-sync
    replica via the epoch machinery (`execute_cut` + live uuids,
    all-or-abort); lineage-walk chain discovery in the catch-up (replaces
@@ -1241,6 +1276,22 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    lineage-replay full-build data movement vs. a flattened copy under
    rewrite-heavy workloads; restore-clone pinning interplay on healed
    replicas (a clone pins only its own node's copy).
+12. **Replica replacement (new node / new identity)** — the part of §9-5
+   deliberately not implemented. Replica identity (`node_name`, `node_uid`,
+   `lvol_uuid`, lvs) lives in immutable PV volumeAttributes; every consumer
+   (ControllerPublish → publish_context → NodeStage, the reconcile label
+   scan, the health monitor) reads it from there. Replacing a dead node's
+   replica therefore needs: (a) a mutable membership-override channel —
+   most plausibly record-level identity entries in the sync annotation,
+   consumed everywhere volumeAttributes are read today (the
+   `active_lvol_uuid` pattern generalized to whole-replica identity), or
+   PV object re-creation with updated attributes; (b) placement (reuse
+   CreateVolume's node selection) + lvol provisioning for the new replica;
+   (c) `reconcile_membership` semantics for the swapped identity (today a
+   new identity enters `in_sync`, which is wrong for a replacement — it
+   must enter stale/empty and full-build); (d) the §6 question of when
+   replacement is triggered (operator action vs. node-gone timeout). The
+   implemented full build (§9-5) then does the data movement unchanged.
 
 ## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
 
