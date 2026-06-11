@@ -1,8 +1,23 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 3**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–3 revised with Claude (Fable 5), 2026-06-10
+**Status:** design / proposal — **revision 4**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–4 revised with Claude (Fable 5), 2026-06-10
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 4** (same day, after a live-cluster reproduction):
+both §3 hazards were **reproduced end-to-end** on a 3-worker AWS cluster running
+the released v1.0.0 images (see `phase0-hazard-repro-2026-06-10.md` for the full
+evidence and validated recovery runbooks). The examine/phantom/-EEXIST mechanism
+behaves exactly as predicted, but the failure chain fires *earlier* through
+driver-layer bugs the repro surfaced: NodeUnstage leaves a zombie raid whose
+claim blocks re-export; `nvmf_subsystem_add_ns`/`add_listener` are not
+idempotent (bricking even return-to-origin restage and making NodeStage retry
+loops non-convergent); and `reconcile_replica_targets` queries a PV label that
+CreateVolume never sets, so post-reboot re-export is dead code. Leg failure is
+detected only by I/O, PV replica health is never updated, and `autoRebuild` is
+a no-op. §9 phase 0 and §10-1 updated accordingly; the Tier-1 cornerstone
+(`bdev_raid_create` admits equalized bases as in-sync, zero copy) was also
+**demonstrated live** during recovery validation.
 
 **What changed in rev 3** (same day, after a four-lens adversarial review):
 §3's mitigation was corrected — deleting a phantom raid is *not* enough, the
@@ -49,10 +64,11 @@ What happens today when the node returns (verified):
   `Dockerfile.csi` builds only `csi-driver` and `flint-nfs-server`, and the
   chart's `spdk-controller-operator` Deployment runs the `flint-driver` image
   with its default `csi-driver` entrypoint (no `command:` override). The volume
-  stays degraded until the pod is re-staged. The node agent
-  does re-expose the returned replica's lvol over NVMe-oF at startup
-  (`reconcile_replica_targets`, `node_agent.rs:1657-1751`), but no live code ever
-  calls `bdev_raid_add_base_bdev`.
+  stays degraded until the pod is re-staged. The node agent *intends* to
+  re-expose the returned replica's lvol over NVMe-oF at startup
+  (`reconcile_replica_targets`, `node_agent.rs:1657-1751`), but the live repro
+  showed this is dead code — it selects PVs by a label CreateVolume never sets
+  (§3, rev 4) — and no live code ever calls `bdev_raid_add_base_bdev`.
 - **If re-add were wired up, stock SPDK does a blind full rebuild.**
   `bdev_raid_add_base_bdev` on an online array always starts the rebuild process
   (§7 has the code evidence). raid1 rebuild reads every window from a healthy
@@ -126,11 +142,19 @@ Verified current-state facts the design must account for:
    raid) while NFS clients ride through with retries**. This is Tier 1's
    transparent-cutover lever for RWX volumes.
 
-## 3. The superblock-examine hazard (pre-existing; likely affects today's code)
+## 3. The superblock-examine hazard (pre-existing; REPRODUCED on a live cluster)
 
 Discovered while verifying §7 and serious enough to stand alone. The mechanism
-is fully verified in stock SPDK; the end-to-end failures need a live repro
-(§9 phase 0).
+is fully verified in stock SPDK, and **both consequences below were reproduced
+end-to-end on a live cluster on 2026-06-10** (v1.0.0 images, SPDK v26.01; full
+procedure, evidence, and validated recovery runbooks in
+`phase0-hazard-repro-2026-06-10.md`). The repro also showed that in the shipped
+driver the §3 mechanism is *masked behind* earlier driver-layer failures —
+zombie raids left by NodeUnstage and a non-idempotent export path — which brick
+restage before `bdev_raid_create` is ever reached; the phantom/-EEXIST layer
+was demonstrated by issuing the driver's exact attach + create sequence
+manually. Fixing this hazard class therefore means fixing the §9 phase-0 bug
+list as a unit, not just sb hygiene.
 
 **Mechanism.** The raid module registers an `examine_disk` hook
 (`bdev_raid.c:1497` → `raid_bdev_examine`, `:4124`) that runs on **every bdev
@@ -143,19 +167,35 @@ named from the sb** (`raid_bdev_create_from_sb`, called at `:3932`) and
 **claims the base with the exclusive module claim**
 (`spdk_bdev_module_claim_bdev`, `:3519`).
 
-**Consequence (a) — replica re-export after node reboot may fail.** After the
-first assembly writes superblocks onto the replica lvols, a replica node's SPDK
-restart re-registers the lvol carrying that sb → phantom raid claims it → the
-write-mode open inside `nvmf_subsystem_add_ns` fails → `reconcile_replica_targets`
-cannot re-export the replica. The replica can't rejoin *at the transport level*,
-independent of any rebuild question.
+**Consequence (a) — replica re-export after node reboot fails (reproduced).**
+After the first assembly writes superblocks onto the replica lvols, a replica
+node's SPDK restart re-registers the lvol carrying that sb → phantom raid
+claims it → the write-mode open inside `nvmf_subsystem_add_ns` fails
+(`-32602`) → the replica cannot be re-exported. The replica can't rejoin *at
+the transport level*, independent of any rebuild question. Live repro: after
+rebooting the replica node, both replica lvols were claimed by auto-assembled
+phantoms within seconds of lvolstore load; the consumer raid silently ran
+un-redundant (leg failure detected only on the next real I/O; PV health still
+`online`; no rebuild attempted anywhere). Worse, today the re-export is not
+even *attempted*: `reconcile_replica_targets` selects PVs by the label
+`flint.csi.storage.io/replica-{node_uid}=true` (node_agent.rs:1666) which
+CreateVolume never applies — reconcile runs against an empty set.
 
-**Consequence (b) — re-staging on a new node may fail.** At NodeStage the driver
-attaches the remote replicas (`bdev_nvme_attach_controller`); each attached nvme
-bdev carries the sb → examine auto-assembles a phantom `raid_{volume_id}` → the
-driver's own `bdev_raid_create` with the same name fails, and the error
-propagates to a NodeStage failure (`node_agent.rs:856-868` returns HTTP 500 on
-RPC error; `driver.rs:1753` propagates with `?`; no EEXIST tolerance).
+**Consequence (b) — re-staging on a new node fails (reproduced).** At NodeStage
+the driver attaches the remote replicas (`bdev_nvme_attach_controller`); each
+attached nvme bdev carries the sb → examine auto-assembles a phantom
+`raid_{volume_id}` → the driver's own `bdev_raid_create` with the same name
+fails, and the error propagates to a NodeStage failure (`node_agent.rs:856-868`
+returns HTTP 500 on RPC error; `driver.rs:1753` propagates with `?`; no EEXIST
+tolerance). Live repro confirmed both the instant phantom assembly
+(`configuring`, attached bdev claimed `exclusive_write`) and the `-17 File
+exists` on the driver-equivalent create. In the shipped driver the restage
+actually dies two layers earlier — the zombie raid left ONLINE by NodeUnstage
+holds an `exclusive_write` claim on the old node's replica lvol (its export
+fails `-32602`), and the still-exported other replica fails the non-idempotent
+`add_ns` — so the pod sticks in `ContainerCreating` on *every* node, including
+the one it came from. A volume is bricked by a single reschedule (data intact,
+RTO = ∞ without manual surgery).
 
 Note: first-time staging is unaffected (fresh lvols carry no sb; examine runs at
 registration, *before* the first sb write), which is why this can hide from
@@ -178,8 +218,10 @@ CONFIGURING raid whose `sb == NULL`, `:3876-3880`). So the hygiene pass is:
    itself between the delete and our create.
 2. Delete any phantom raid **with `clear_sb: true`** (`bdev_raid_delete` param,
    present since v26.05 — this is the concrete reason §9 phase 0 bumps the
-   shipped SPDK image from v26.01 to v26.05.x; the interim v26.01 fallback of
-   zeroing the sb region through the exported namespace is possible but ugly).
+   shipped SPDK image from v26.01 to v26.05.x; the interim v26.01 fallback —
+   zeroing the first sectors of each replica through a temporary export — is
+   ugly but **validated end-to-end** during the 2026-06-10 recovery, see the
+   repro doc).
 3. `bdev_raid_create` over the intended members; treat `-EEXIST` as "a phantom
    re-appeared" and loop from step 1.
 
@@ -334,7 +376,8 @@ snapshot RPCs are far older.
      replica's lvol uuid in the PV record. The correctness argument below is
      only valid after this step.
   1. Hygiene + fencing pass on R_dst's node and any previous consumer node (§3).
-  2. Re-expose R_dst over NVMe-oF (existing `reconcile_replica_targets` path).
+  2. Re-expose R_dst over NVMe-oF (the `reconcile_replica_targets` path, once
+     phase 0 fixes its PV-label selection and makes the export idempotent).
   3. Attach R_dst as a bdev on R_src's node (`bdev_nvme_attach_controller`),
      then run the §3 examine discipline **on R_src's node too** — the attached
      R_dst bdev carries a valid raid sb and will spawn a phantom there.
@@ -723,16 +766,34 @@ Rejected alternatives:
 
 ## 9. Phasing
 
-0. **Repro + fix the §3 examine/orphan hazards.** Repros: replica-node reboot
-   (export fails on claim?), restage (`bdev_raid_create` `-EEXIST` from
-   phantom), and fresh-create-over-sb-bearing-bases (`-EEXIST` even after
-   phantom delete). Fixes: **bump the shipped SPDK image v26.01 → v26.05.x**
-   (for `bdev_raid_delete clear_sb` — the sb-clearing the hygiene pass needs,
-   and it aligns the image with this doc's verified baseline); the
-   `wait_for_examine` → delete+clear → create discipline in the node agent
-   reconcile and pre-assembly path; raid teardown + per-replica NQN detach in
-   NodeUnstage; subsystems created `allow_any_host: false` with host lists from
-   PV annotations in **both** export paths, plus post-fence verification (§3).
+0. **Fix the §3 examine/orphan hazards + the restage/reboot bug cluster.**
+   ~~Repro~~ **done 2026-06-10** (see `phase0-hazard-repro-2026-06-10.md`):
+   replica-node reboot → phantoms claim replica lvols, re-export dead;
+   restage → bricked on every node; manual attach → phantom + `-EEXIST`
+   confirmed; both recovery runbooks validated on stock v26.01. Fixes, all
+   confirmed necessary by the repro:
+   - **bump the shipped SPDK image v26.01 → v26.05.x** (for `bdev_raid_delete
+     clear_sb` — the sb-clearing the hygiene pass needs; the validated v26.01
+     dd-over-temp-export fallback is operational, not programmatic);
+   - the `wait_for_examine` → delete+clear → create discipline in the node
+     agent reconcile and pre-assembly path;
+   - **full teardown in NodeUnstage**: `bdev_raid_delete` + per-replica
+     controller detach + kernel loopback disconnect (the leftover zombie raid
+     and its claims were the first blocking layer in the repro);
+   - **idempotent, convergent staging**: treat already-present namespace /
+     listener / controller / raid as success-or-reuse in both export paths and
+     NodeStage (`add_ns` and `add_listener` duplicates returned `-32602` and
+     made retry loops permanently non-convergent; a partial stage that fails
+     after `bdev_raid_create` re-writes sbs and re-arms the hazard);
+   - **fix replica-PV labeling**: CreateVolume must apply
+     `flint.csi.storage.io/replica-{node_uid}=true` (or reconcile must select
+     by volumeAttributes) — today `reconcile_replica_targets` matches nothing;
+   - **health truthfulness**: update PV `replicas[].health` on leg failure,
+     emit events, and lengthen/handle the 3 s kernel-device wait (stale kernel
+     controllers need an async rescan); grant the node SA the PV-update RBAC
+     it already assumes;
+   - subsystems created `allow_any_host: false` with host lists from
+     PV annotations in **both** export paths, plus post-fence verification (§3).
    *Independent bug fix; prerequisite for everything below; ships on its own.*
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
@@ -772,9 +833,12 @@ decided by phase 6's data."
 
 ## 10. Open questions to validate
 
-1. **Repro the §3 hazards** on a live cluster. If consequence (a) reproduces,
-   multi-replica volumes currently cannot heal at the transport level after a
-   replica-node reboot — raising phase 0's priority above this design.
+1. ~~**Repro the §3 hazards** on a live cluster.~~ **Answered 2026-06-10:
+   both consequences reproduce** (`phase0-hazard-repro-2026-06-10.md`).
+   Multi-replica volumes cannot heal at the transport level after a
+   replica-node reboot, and a pod reschedule bricks the volume on every node.
+   Phase 0's priority is confirmed above this design — it is a production
+   availability bug in shipped v1.0.0.
 2. **Longhorn's snapshot→grow atomicity** — read `engine.go` `ReplicaAdd`
    (~:824) and `replica.go` `RebuildingDstStart` (~:3020): is engine IO
    suspended across snapshot→grow, or does grow's internal quiesce suffice?
