@@ -1884,76 +1884,95 @@ impl NodeAgent {
                 });
                 let _ = pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await;
             }
+
+            // Phase 1 (incremental-rebuild §9-1): an online raid serves
+            // writes, so a replica not backed by a configured base is
+            // missing acknowledged data — record the in_sync → stale
+            // transition on the PV. Non-online raids (phantoms, leftovers)
+            // imply nothing about replica data and are left alone. Note
+            // this also catches replicas the raid was *created without*
+            // (degraded assembly), which num_base_bdevs above cannot see.
+            if state == "online" {
+                self.record_stale_replicas(volume_id, &raid).await;
+            }
         }
 
         Ok(())
     }
 
+    /// Mark replicas missing from an online raid as stale in the PV sync
+    /// record (incremental-rebuild phase 1). Best effort; runs every monitor
+    /// tick, so a lost write converges one minute later.
+    async fn record_stale_replicas(&self, volume_id: &str, raid: &Value) {
+        use crate::replica_sync;
+
+        let now = replica_sync::now_rfc3339();
+        let mut newly_stale: Vec<String> = Vec::new();
+        let result =
+            replica_sync::update_sync_record(&self.driver.kube_client, volume_id, |record| {
+                // The closure may run more than once on write conflicts.
+                newly_stale.clear();
+                let Some(missing) =
+                    replica_sync::replicas_missing_from_raid(raid, volume_id, record)
+                else {
+                    return;
+                };
+                for uuid in missing {
+                    let why = format!(
+                        "raid leg failed or missing while raid online on {}",
+                        self.node_name
+                    );
+                    if record.mark_stale(&uuid, &why, &now) {
+                        newly_stale.push(uuid);
+                    }
+                }
+            })
+            .await;
+
+        match result {
+            Ok(_) => {
+                for uuid in &newly_stale {
+                    warn!(
+                        volume_id,
+                        lvol_uuid = %uuid,
+                        "[MONITOR] Replica marked stale (not backed by a configured base of the online raid)"
+                    );
+                    replica_sync::emit_pv_event(
+                        &self.driver.kube_client,
+                        &self.node_name,
+                        volume_id,
+                        "Warning",
+                        "ReplicaStale",
+                        &format!(
+                            "Replica {} of volume {} is not backed by a configured base of the online raid on {} — it is no longer receiving writes",
+                            uuid, volume_id, self.node_name
+                        ),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                warn!(volume_id, error = %e, "[MONITOR] Failed to update replica sync record");
+            }
+        }
+    }
+
     /// Best-effort Kubernetes Warning/Normal event attached to a PV.
     async fn emit_pv_event(&self, pv_name: &str, event_type: &str, reason: &str, message: &str) {
-        use k8s_openapi::api::core::v1::Event;
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-        use kube::api::PostParams;
-
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let event = Event {
-            metadata: ObjectMeta {
-                // Unique-enough name; events are best effort
-                name: Some(format!("{}.{:x}", pv_name, now_nanos)),
-                namespace: Some("default".to_string()),
-                ..Default::default()
-            },
-            involved_object: k8s_openapi::api::core::v1::ObjectReference {
-                api_version: Some("v1".to_string()),
-                kind: Some("PersistentVolume".to_string()),
-                name: Some(pv_name.to_string()),
-                ..Default::default()
-            },
-            type_: Some(event_type.to_string()),
-            reason: Some(reason.to_string()),
-            message: Some(message.to_string()),
-            reporting_component: Some("flint.csi.storage.io/node-agent".to_string()),
-            reporting_instance: Some(self.node_name.clone()),
-            event_time: Some(MicroTime(k8s_openapi::jiff::Timestamp::now())),
-            action: Some("HealthCheck".to_string()),
-            ..Default::default()
-        };
-
-        let events: Api<Event> = Api::namespaced(self.driver.kube_client.clone(), "default");
-        if let Err(e) = events.create(&PostParams::default(), &event).await {
-            debug!(pv_name, error = %e, "[MONITOR] Failed to emit event (non-fatal)");
-        }
+        crate::replica_sync::emit_pv_event(
+            &self.driver.kube_client,
+            &self.node_name,
+            pv_name,
+            event_type,
+            reason,
+            message,
+        )
+        .await
     }
 
     /// Extract replica info from PV volumeAttributes
     fn get_replicas_from_pv(&self, pv: &PersistentVolume) -> Result<Option<Vec<ReplicaInfo>>, Box<dyn std::error::Error + Send + Sync>> {
-        let spec = pv.spec.as_ref()
-            .ok_or("PV has no spec")?;
-
-        let csi = spec.csi.as_ref()
-            .ok_or("PV has no CSI spec")?;
-
-        let attrs = csi.volume_attributes.as_ref()
-            .ok_or("PV has no volumeAttributes")?;
-
-        // Check replica count first
-        let replica_count = attrs.get("flint.csi.storage.io/replica-count")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1);
-
-        if replica_count <= 1 {
-            return Ok(None);
-        }
-
-        // Multi-replica: Read replicas JSON
-        let replicas_json = attrs.get("flint.csi.storage.io/replicas")
-            .ok_or("Multi-replica volume missing replicas attribute")?;
-
-        let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
-        Ok(Some(replicas))
+        crate::replica_sync::replicas_from_pv(pv)
     }
 
     /// Verify that a local lvol exists and return its bdev name

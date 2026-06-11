@@ -541,6 +541,9 @@ impl SpdkCsiDriver {
 
     /// Add replica node labels to PV for node-based discovery on restart
     /// Labels format: flint.csi.storage.io/replica-{node_uid}=true
+    /// Also seeds the per-replica sync-state annotation (incremental-rebuild
+    /// phase 1) — all replicas in_sync at creation. Best effort either way:
+    /// the node agent's reconcile/monitor lazily rebuilds both.
     pub async fn add_replica_node_labels(
         &self,
         volume_id: &str,
@@ -570,9 +573,13 @@ impl SpdkCsiDriver {
             return Ok(());
         }
 
+        let sync_record = crate::replica_sync::VolumeSyncRecord::initial(replicas);
         let patch = serde_json::json!({
             "metadata": {
-                "labels": labels
+                "labels": labels,
+                "annotations": {
+                    crate::replica_sync::SYNC_STATE_ANNOTATION: sync_record.to_annotation()
+                }
             }
         });
 
@@ -1686,7 +1693,124 @@ impl SpdkCsiDriver {
             println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
         }
 
+        self.record_assembly_sync_state(volume_id, replicas, &unavailable_replicas)
+            .await;
+
         Ok(raid_bdev_name)
+    }
+
+    /// Persist the membership outcome of a raid assembly on the PV
+    /// (incremental-rebuild phase 1, §9-1). A replica excluded from the
+    /// assembly stops receiving writes the moment the degraded raid goes
+    /// online — that is the in_sync → stale transition. A previously-stale
+    /// replica that was included is today's documented divergence hazard
+    /// (no catch-up exists until phase 3/4): the record keeps it stale and
+    /// the admission is surfaced as an event — behavior is unchanged.
+    /// Best effort: the node agent's health monitor converges the record.
+    async fn record_assembly_sync_state(
+        &self,
+        volume_id: &str,
+        replicas: &[ReplicaInfo],
+        unavailable_replicas: &[(&ReplicaInfo, String)],
+    ) {
+        use crate::replica_sync::{self, SyncState};
+
+        let excluded: Vec<(String, String)> = unavailable_replicas
+            .iter()
+            .map(|(r, reason)| (r.lvol_uuid.clone(), reason.clone()))
+            .collect();
+        let included: Vec<String> = replicas
+            .iter()
+            .map(|r| r.lvol_uuid.clone())
+            .filter(|uuid| !excluded.iter().any(|(e, _)| e == uuid))
+            .collect();
+
+        let now = replica_sync::now_rfc3339();
+        let current_node = self.node_id.clone();
+        let mut newly_stale: Vec<String> = Vec::new();
+        let mut admitted_stale: Vec<String> = Vec::new();
+        let result = replica_sync::update_sync_record(&self.kube_client, volume_id, |record| {
+            // The closure may run more than once on write conflicts.
+            newly_stale.clear();
+            admitted_stale.clear();
+            admitted_stale.extend(
+                included
+                    .iter()
+                    .filter(|uuid| {
+                        record
+                            .get(uuid)
+                            .map(|r| r.sync_state != SyncState::InSync)
+                            .unwrap_or(false)
+                    })
+                    .cloned(),
+            );
+            for (uuid, reason) in &excluded {
+                let why = format!(
+                    "excluded from raid assembly on {}: {}",
+                    current_node, reason
+                );
+                if record.mark_stale(uuid, &why, &now) {
+                    newly_stale.push(uuid.clone());
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(Some(_)) => {
+                for uuid in &newly_stale {
+                    let node = replicas
+                        .iter()
+                        .find(|r| r.lvol_uuid == *uuid)
+                        .map(|r| r.node_name.as_str())
+                        .unwrap_or("unknown");
+                    replica_sync::emit_pv_event(
+                        &self.kube_client,
+                        &self.node_id,
+                        volume_id,
+                        "Warning",
+                        "ReplicaStale",
+                        &format!(
+                            "Replica {} on node {} excluded from raid assembly on {} — it is no longer receiving writes",
+                            uuid, node, self.node_id
+                        ),
+                    )
+                    .await;
+                }
+                for uuid in &admitted_stale {
+                    let node = replicas
+                        .iter()
+                        .find(|r| r.lvol_uuid == *uuid)
+                        .map(|r| r.node_name.as_str())
+                        .unwrap_or("unknown");
+                    println!(
+                        "⚠️ [DRIVER] STALE replica {} (node {}) admitted to raid for {} without catch-up — \
+                         reads may return stale data for writes it missed (incremental rebuild lands in phase 3/4)",
+                        uuid, node, volume_id
+                    );
+                    replica_sync::emit_pv_event(
+                        &self.kube_client,
+                        &self.node_id,
+                        volume_id,
+                        "Warning",
+                        "StaleReplicaAdmitted",
+                        &format!(
+                            "Stale replica {} on node {} was admitted to the raid on {} without catch-up; \
+                             it may serve stale reads for the writes it missed",
+                            uuid, node, self.node_id
+                        ),
+                    )
+                    .await;
+                }
+            }
+            Ok(None) => {} // single-replica volume: no sync record applies
+            Err(e) => {
+                println!(
+                    "⚠️ [DRIVER] Failed to update replica sync record for {} (non-fatal): {}",
+                    volume_id, e
+                );
+            }
+        }
     }
 
     /// Try to attach a remote replica via NVMe-oF

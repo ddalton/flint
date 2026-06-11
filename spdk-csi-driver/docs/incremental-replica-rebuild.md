@@ -833,6 +833,32 @@ Rejected alternatives:
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
    plane.*
+
+   **Implementation status (2026-06-11):** implemented on `main` as
+   `replica_sync.rs`. The record lives in one PV annotation
+   (`flint.csi.storage.io/replica-sync-state`): per-replica `{node_name,
+   node_uid, lvol_uuid, sync_state, last_epoch, since, reason}` plus
+   `current_epoch` (null until phase 2 cuts epochs). Immutable identity
+   stays in volumeAttributes; the annotation is the mutable companion.
+   Writers: the controller seeds all-`in_sync` in the same patch as the
+   replica node labels (lazy rebuild from volumeAttributes covers the
+   PV-not-yet-created race); the consumer node's health monitor marks
+   replicas `stale` when an *online* raid lacks a configured base for them
+   (set difference against healthy bases — SPDK nulls a failed slot's
+   name+uuid, so the failed slot itself is unidentifiable; bases match by
+   lvol uuid, which the NVMe-oF target propagates, with the deterministic
+   remote bdev name as fallback); NodeStage marks replicas excluded from a
+   degraded assembly `stale` and emits `ReplicaStale` /
+   `StaleReplicaAdmitted` Warning events. Updates are read-modify-write
+   merge patches guarded by `resourceVersion` with conflict retry. By
+   design nothing transitions a replica back to `in_sync` yet (that is the
+   phase 3/4 catch-up + admission path) and nothing consumes the state for
+   membership — phase 1 records truthfully, changes no behavior: a stale
+   replica re-admitted at reassembly stays `stale` in the record and the
+   admission (today's documented divergence hazard) becomes observable.
+   RBAC was already sufficient (node SA has PV patch/update since phase 0).
+   Unit-tested (wire-format stability, transitions, membership reconcile,
+   failed-slot/never-attached/non-online raid matching).
 2. **Snapshot scheduler** (common epochs + retention). *Control plane.* Decide
    hosting: revive the controller-operator binary (currently dead per §1; its
    raid-status/replace RPCs also route to `localhost:5260` instead of the

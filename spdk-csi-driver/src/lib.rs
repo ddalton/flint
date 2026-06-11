@@ -2,6 +2,7 @@
 pub mod spdk_native;
 pub mod nvmeof_utils;
 pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)
+pub mod replica_sync;  // Persistent per-replica sync state on the PV (incremental-rebuild phase 1)
 pub mod driver;
 pub mod minimal_models;
 pub mod minimal_disk_service;
