@@ -402,6 +402,10 @@ snapshot RPCs are far older.
      A destination-side allocation failure (R_dst's lvolstore ENOSPC) surfaces
      as `state=error`: abort the chase, mark the replica `stale`, raise an
      event — don't retry into a full pool.
+     **Amended by §11:** once user `VolumeSnapshot`s can interleave in the
+     chain, iterating *epochs by name* splits deltas (the slice held by an
+     interleaved user snapshot's blob is silently skipped) — the iteration
+     must walk the source's actual blob lineage from `E_b`; see §11.
   5. Align R_dst's snapshot chain (`bdev_lvol_snapshot` on R_dst +
      `bdev_lvol_set_parent`) so both replicas carry the same epoch lineage.
   **Retention pinning:** while a catch-up is active or pending, the scheduler
@@ -1133,13 +1137,25 @@ Rejected alternatives:
    must never reap the old chain itself — user snapshots are not ours to
    delete, and the orphaned *epochs* below the retained window are already
    the GC's job; (b) the §10-11 question (multi-replica `VolumeSnapshot`
-   support) is a soft prerequisite — today `CreateSnapshot` resolves its
-   source via the singular `node-name`/`lvol-uuid` volumeAttributes, which
-   multi-replica volumes do not set, so snapshotting them fails outright
-   and user snapshots are single-node objects; whatever design fixes that
-   (cut on all in-sync replicas like epochs, or pin a recorded snapshot
-   home) determines whether a full build or replica replacement can lose
-   the *only* copy of a user snapshot.
+   support, **now designed in §11**) is a soft prerequisite — today
+   `CreateSnapshot` resolves its source via the singular
+   `node-name`/`lvol-uuid` volumeAttributes, which multi-replica volumes
+   do not set, so snapshotting them fails outright and user snapshots are
+   single-node objects. §11 also amends the shape of this phase: with user
+   snapshots in the chain, the full build is specified as **lineage replay
+   from empty** (copy the oldest element's allocated set, then each delta,
+   aligning at user-snapshot elements), which re-creates the user-snapshot
+   copies on the rebuilt replica — the old local chain still orphans, but
+   snapshot coverage is preserved; with no user snapshots it degenerates
+   to the single flattened copy sketched above.
+5b. **Multi-replica `VolumeSnapshot` support** (§11): cut on every in-sync
+   replica via the epoch machinery (`execute_cut` + live uuids,
+   all-or-abort); lineage-walk chain discovery in the catch-up (replaces
+   the name-derived epoch chain — closes the §11 delta-split hazard);
+   align-at-user-snapshot on heal so healed replicas re-acquire snapshot
+   copies; presence-verified restore source selection; tombstone-driven
+   deletion. *Control plane; soft prerequisite for phase 5 wherever user
+   snapshots exist.*
 6. **Measure** the Tier 1 residual: time degraded with a ready standby and no
    reassembly event. *Decides Tier 2 with data.*
 7. *(Conditional)* **Tier 2**: `skip_rebuild` patch + esnap-clone hot rejoin
@@ -1158,9 +1174,9 @@ Rejected alternatives:
    (lease must fire); R_src node kill during esnap backfill (R_dst must
    revert to `stale`, no esnap errors through the raid).
 
-Phases 0–5 are pure Rust control plane against upstream RPCs. The SPDK patch
-decision moves from "gating dependency, sequence first" (rev 1) to "phase 7,
-decided by phase 6's data."
+Phases 0–5 (including 5b) are pure Rust control plane against upstream RPCs.
+The SPDK patch decision moves from "gating dependency, sequence first"
+(rev 1) to "phase 7, decided by phase 6's data."
 
 ## 10. Open questions to validate
 
@@ -1210,15 +1226,159 @@ decided by phase 6's data."
    semantics after restore (RFC 8881 stable-storage reclaim gating vs. today's
    allow-all-in-grace); bound the bounce-cutover outage so clients reliably
    reclaim within grace.
-11. **Multi-replica `VolumeSnapshot` support** (prerequisite question for the
-   §9-5 full build): `CreateSnapshot` resolves its source via the singular
-   `flint.csi.storage.io/node-name`/`lvol-uuid` volumeAttributes, which
-   multi-replica volumes never set (`replicas` JSON only) — snapshotting a
-   multi-replica volume fails "metadata not found" today, so user snapshots
-   are single-node, single-replica objects. Design options: cut on every
-   in-sync replica like epochs (then restore can source any replica, and a
-   replica replacement loses nothing — but snapshot deletion must converge
-   across replicas), or pin one replica as the recorded snapshot home (cheap,
-   but that replica's disk loss takes the volume's snapshots with it, and a
-   full build there orphans them). The choice decides whether replica
-   replacement can destroy the only copy of a user snapshot.
+11. ~~**Multi-replica `VolumeSnapshot` support**~~ **Designed 2026-06-11 —
+   see §11** (cut on every in-sync replica via the epoch machinery;
+   lineage-walk chain copy closing the delta-split hazard; align-at-snapshot
+   on heal; presence-verified restore; tombstone-driven deletion).
+   Implementation is phase 5b. Remaining to validate: the §10-3 locked-op
+   cadence now including user cuts; lineage-replay full-build data movement
+   vs. a flattened copy under rewrite-heavy workloads; restore-clone
+   pinning interplay on healed replicas (a clone pins only its own node's
+   copy).
+
+## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
+
+*Added 2026-06-11; answers §10-11. Implementation is phase 5b (§9). Nothing
+below is implemented yet — this section changes no shipped behavior.*
+
+### Current state (verified in code)
+
+`CreateSnapshot` resolves its source through `get_volume_info`
+(`snapshot_csi.rs:118`), which requires the singular
+`flint.csi.storage.io/node-name`/`lvol-uuid` volumeAttributes — set only for
+single-replica volumes (`main.rs:1046-1073`; multi-replica volumes set the
+`replicas` JSON instead). Snapshotting a multi-replica volume therefore
+fails "metadata not found" today. User snapshots are single-node objects
+named `snap_<vol>_<timestamp>` (`snapshot_csi.rs:131` — strictly parseable,
+the same shape as epochs), cut on one node and restored by cloning on that
+node; restored volumes are always single-replica (`main.rs:551`).
+
+### Semantics: one snapshot, N equivalent copies
+
+A multi-replica `VolumeSnapshot` is cut on **every in-sync replica** (per
+the phase-1 record), under the **same name** on each replica's lvolstore —
+the epoch pattern exactly, with the same machinery: `execute_cut`
+(all-or-abort, EEXIST converges a retry, partial failure rolls back),
+targets addressed by **live head uuid** (`EpochTarget.snapshot_source`; a
+reverted-then-admitted replica's identity uuid addresses nothing). The CSI
+call succeeds — and `ready_to_use` is true — once every in-sync replica
+holds the cut. Stale and standby replicas neither block nor participate;
+they acquire their copy through healing (below).
+
+**Per-copy skew is the accepted semantic.** Cuts are not simultaneous.
+raid1 fans every acked write to all legs, so each replica's cut is a valid
+crash-consistent image of the volume; two copies of the same snapshot can
+differ by writes acked inside the skew window. A restore sources exactly
+one copy, so every restore is crash-consistent — but two restores from the
+same snapshot may differ within that window. This is the semantic class
+§5's epoch-skew argument already accepts, and unlike epochs, user
+snapshots play no role in the delta-resync correctness proof: the skew is
+a documented property, not a correctness input. (Crash-consistency only,
+as today — no filesystem freeze; §10-6's `lvol-flush` question applies to
+user cuts identically.)
+
+### The lineage problem — the one real change to the §5 machinery
+
+A user snapshot interleaved into a replica's chain **splits the epoch
+delta**: with `epoch-4 → snap_X → epoch-5 → head`, epoch-5's blob holds
+only the writes since `snap_X` — the writes between epoch-4 and `snap_X`
+live in `snap_X`'s blob (shallow copy transfers only clusters allocated in
+the source blob itself, `blobstore.c:7445-7451`). The phase-3 chain copy
+derives its chain from the record's *epoch names* (`chain_from`) and would
+copy epoch-4 then epoch-5, silently losing `snap_X`'s slice — data loss on
+the healed replica. **The copy chain must therefore be the source's actual
+blob lineage**, discovered live at copy time: walk from the source head
+through `bdev_get_bdevs → driver_specific.lvol.base_snapshot`
+(`vbdev_lvol.c:768-778`) back to `E_b`, reverse, and copy every element's
+delta in order — still `E_b`-inclusive (§5 step 4), still stopping at the
+session's target epoch.
+
+- The lineage walk is strictly more robust than name-derived chains even
+  with no user snapshots involved (epoch retirement's merge into the
+  descendant is reflected by construction), so phase 5b replaces
+  `chain_from` unconditionally rather than special-casing.
+- **Destination alignment generalizes:** the destination head is
+  snapshotted (EEXIST-tolerant, exactly today's `align_head`) at every
+  *user-snapshot* element it replays, plus the target epoch. A healed
+  replica thereby re-acquires a copy of every user snapshot in the chain —
+  a **bit-identical** one, since it replays the source's exact images
+  (stronger than the cut-time skew equivalence). Intermediate *epoch*
+  elements keep today's behavior — no realign; `select_base_epoch`
+  already tolerates epoch gaps via verified presence.
+- A destination's own pre-failure copy of `snap_X` survives the revert
+  (snapshots are read-only blobs; the revert deletes only the head) and
+  blocks the realign with EEXIST — correct: it is already a valid
+  equivalent copy of that snapshot.
+- A user snapshot newer than the newest recorded epoch is not copied by a
+  chase (the chase's consistency target is that epoch); the first session
+  whose target epoch is newer picks it up — including the phase-4 final
+  delta, whose fresh cut is newer than everything by construction.
+- **Eventual completeness invariant:** a user snapshot exists on every
+  replica that was in-sync at cut time, plus every replica subsequently
+  healed through a chain containing it. The §9-5 full build preserves the
+  invariant by being specified as **lineage replay from empty** — copy the
+  oldest element's full allocated set, then each delta in order, aligning
+  at user-snapshot elements. Cost honesty: replay moves *at most the sum
+  of the chain's deltas*, which exceeds a flattened single copy when
+  clusters were rewritten across elements — that excess is the price of
+  re-creating the snapshot copies; with no user snapshots in the chain it
+  degenerates to the flattened copy.
+
+### Restore: source selection by verified presence
+
+Restore resolves the snapshot's copies by listing the candidate replicas'
+lvols (the `select_base_epoch` discipline: presence is verified, never
+inferred from records), prefers an in-sync replica off the consumer node
+(`pick_source`), and clones there. The snapshot's recorded "home node"
+degrades to a hint. Restored volumes remain single-replica (today's
+semantic); a multi-replica restore is a single-replica clone plus phase-5
+full builds for the remaining replicas — explicitly out of scope here.
+
+### Deletion: tombstone-driven convergence, never absence-driven
+
+Deletion removes the copy from every replica that holds it (absent =
+success, idempotent). An unreachable replica gets a **tombstone** in the
+volume sync record (`deleted_snapshots: [name, …]`), executed convergently
+— by the catch-up at heal time (it is already touching the replica) and by
+a slow snapshot-service reconcile — and cleared once every current replica
+confirms absence. Ownership discipline mirrors the epoch GC exactly: only
+names parsing strictly as `snap_<vol>_<timestamp>` are ever candidates,
+and reaping is driven by a positively recorded delete, **never** by a
+name's absence from a snapshot listing (an empty or unreadable list must
+not delete data — the epoch GC's empty-record rule, same reasoning). A
+copy pinned by a restore clone on its node refuses deletion (`-EPERM`,
+blob has clones) and is left to the blobstore's snapshot-delete merge plus
+retry — the epoch GC behavior; the other replicas' copies delete
+independently, so the pin is local to the node serving the clone.
+
+### Costs and limits, stated honestly
+
+- **Space:** one delta-sized copy per in-sync replica — the §5 space model
+  × N, the price of surviving any single disk loss. Counts toward the
+  §10-4 metadata-page pressure measurement.
+- **Locked-op serialization (§10-3):** user cuts, epoch cuts, and shallow
+  copies of the same head must serialize per blob (EBUSY); the per-volume
+  in-flight set plus EBUSY-retry covers it, but the §10-3 cadence
+  validation must now include user-snapshot traffic.
+- **Equivalence, not identity:** copies of one snapshot differ within the
+  cut-skew window (above); healed replicas' replayed copies are
+  bit-identical to their source's. Both are valid crash-consistent images.
+
+### Implementation sketch (phase 5b)
+
+1. `CreateSnapshot` multi-replica path: resolve replicas + sync record,
+   cut via `execute_cut` on in-sync replicas' live uuids, roll back on
+   partial failure. No copy registry — presence is always verified live,
+   like epochs.
+2. `catchup.rs`: replace `chain_from` with the lineage walk (one
+   `bdev_get_bdevs` sweep of the source per session) and align at
+   user-snapshot elements.
+3. Restore: presence-verified source selection.
+4. Deletion: per-replica fan-out, sync-record tombstones, heal-time
+   reconcile.
+5. Tests — unit: lineage walk over fake bdev forests (interleaved user
+   snapshots, retired epochs); cut targeting and rollback;
+   align-at-user-snapshot choreography; tombstone convergence including a
+   clone-pinned copy. E2e (§9-8 set gains): snapshot cut while degraded →
+   replica heals → restore sourced from the healed replica serves the
+   snapshot's content.
