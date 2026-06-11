@@ -117,7 +117,14 @@ rules:
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
-    verbs: ["get", "list", "patch"]  # Added "list" for attachRequired=false
+    # "update" kept alongside "patch" as a safety net for any remaining
+    # replace-style writes (block-device info, replica-health, PV labels)
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    # Read-only: reconcile derives the fencing host list from the
+    # VolumeAttachment (which node currently consumes a volume)
+    verbs: ["get", "list"]
   # Removed SPDK CRD permissions for node components - no longer needed
   # Node agents now use direct SPDK queries via Unix sockets
 ---

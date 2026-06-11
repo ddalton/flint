@@ -1,0 +1,16 @@
+diff --git a/lib/nvmf/ctrlr.c b/lib/nvmf/ctrlr.c
+index dafaa7ddc..519fc7e8f 100644
+--- a/lib/nvmf/ctrlr.c
++++ b/lib/nvmf/ctrlr.c
+@@ -857,8 +857,9 @@ nvmf_qpair_access_allowed(struct spdk_nvmf_qpair *qpair, struct spdk_nvmf_subsys
+ 	}
+ 
+ 	if (!spdk_nvmf_subsystem_listener_allowed(subsystem, &listen_trid)) {
+-		SPDK_ERRLOG("Subsystem '%s' does not allow host '%s' to connect at this address.\n",
+-			    subsystem->subnqn, hostnqn);
++		SPDK_ERRLOG("Subsystem '%s' does not allow host '%s' to connect at this address. Listener address is %s/%s/%s\n",
++			    subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype),
++			    listen_trid.traddr, listen_trid.trsvcid);
+ 		return false;
+ 	}
+ 

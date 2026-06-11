@@ -2467,6 +2467,33 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // Continue anyway - best effort cleanup
         }
 
+        // Kernel-side loopback disconnect fallback: delete_block_device above
+        // handles this when PV info is available, but that lookup can fail
+        // (e.g. the device info was never stored). A leftover kernel
+        // controller needs an async ns rescan on the next stage and made the
+        // 3s device wait flaky in the live repro. Best effort; harmless when
+        // already disconnected.
+        let kernel_disconnect = std::process::Command::new("nvme")
+            .args(["disconnect", "-n", &nqn])
+            .output();
+        match kernel_disconnect {
+            Ok(out) if out.status.success() => {
+                println!("✅ [NODE] Kernel NVMe disconnect: {}", nqn);
+            }
+            _ => println!("ℹ️ [NODE] Kernel NVMe disconnect skipped (not connected)"),
+        }
+
+        // Full SPDK teardown (phase 0): loopback subsystem, raid bdev (frees
+        // the claims that brick later restage), per-replica controllers.
+        // Raid-delete failure must fail the unstage so kubelet retries it.
+        if let Err(e) = self.driver.teardown_volume_spdk_state(&actual_volume_id).await {
+            println!("❌ [NODE] SPDK teardown failed: {}", e);
+            return Err(tonic::Status::internal(format!(
+                "Failed to tear down SPDK state for volume {}: {}",
+                actual_volume_id, e
+            )));
+        }
+
         println!("✅ [NODE] Volume {} unstaged successfully", volume_id);
         
         let response = tonic::Response::new(spdk_csi_driver::csi::NodeUnstageVolumeResponse {});
@@ -3283,6 +3310,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             Err(e) => {
                 (true, format!("Health check failed: {}", e))
             }
+        };
+
+        // Multi-replica volumes: the raid bdev on this node is the authority
+        // on redundancy. A degraded leg must surface as an abnormal volume
+        // condition (phase 0 fix — previously invisible to kubelet).
+        let (abnormal, message) = match self.driver.check_local_raid_health(&req.volume_id).await {
+            Some((true, raid_msg)) => (true, raid_msg),
+            Some((false, raid_msg)) if !abnormal => (false, raid_msg),
+            _ => (abnormal, message),
         };
 
         println!("{} [NODE] Volume health: abnormal={}, message={}",

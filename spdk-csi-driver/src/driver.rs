@@ -56,9 +56,13 @@ pub struct SpdkCsiDriver {
     
     // Simple caching for efficiency
     pub spdk_node_urls: Arc<Mutex<HashMap<String, String>>>,
-    
+
     // Capacity cache for scalability
     pub capacity_cache: CapacityCache,
+
+    // Whether the local SPDK supports `bdev_raid_delete clear_sb` (v26.05+).
+    // Probed once via spdk_get_version and cached for the process lifetime.
+    clear_sb_support: Arc<tokio::sync::OnceCell<bool>>,
 }
 
 impl SpdkCsiDriver {
@@ -80,6 +84,7 @@ impl SpdkCsiDriver {
             nvmeof_target_port,
             spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
             capacity_cache: CapacityCache::new(30), // 30 second TTL
+            clear_sb_support: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
     
@@ -1162,34 +1167,31 @@ impl SpdkCsiDriver {
     /// Store block device info in PV annotations for later cleanup
     pub async fn store_block_device_info(&self, volume_id: &str, device_info: &BlockDeviceInfo) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::api::{Patch, PatchParams};
 
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
 
-        // Get the PV
-        let mut pv = pvs.get(volume_id).await?;
-
-        // Initialize annotations if needed
-        if pv.metadata.annotations.is_none() {
-            pv.metadata.annotations = Some(std::collections::BTreeMap::new());
-        }
-
-        let annotations = pv.metadata.annotations.as_mut().unwrap();
-
-        // Store backend type and cleanup data
-        annotations.insert("flint.io/block-device-backend".to_string(), format!("{:?}", device_info.backend_type));
-
+        // Annotation merge-patch instead of a full-object replace: the node
+        // SA only holds the patch verb (phase 0 fix — the old replace was
+        // rejected with 403, so unstage could never find the device info),
+        // and patch avoids clobbering concurrent PV updates.
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            "flint.io/block-device-backend".to_string(),
+            json!(format!("{:?}", device_info.backend_type)),
+        );
         match &device_info.cleanup_data {
             CleanupData::Ublk { ublk_id } => {
-                annotations.insert("flint.io/ublk-id".to_string(), ublk_id.to_string());
+                annotations.insert("flint.io/ublk-id".to_string(), json!(ublk_id.to_string()));
             }
             CleanupData::Nvmeof { nqn, nvme_device } => {
-                annotations.insert("flint.io/nvmeof-nqn".to_string(), nqn.clone());
-                annotations.insert("flint.io/nvme-device".to_string(), nvme_device.clone());
+                annotations.insert("flint.io/nvmeof-nqn".to_string(), json!(nqn));
+                annotations.insert("flint.io/nvme-device".to_string(), json!(nvme_device));
             }
         }
+        let patch = json!({ "metadata": { "annotations": annotations } });
 
-        // Update the PV
-        pvs.replace(volume_id, &Default::default(), &pv).await?;
+        pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
 
         Ok(())
     }
@@ -1664,12 +1666,19 @@ impl SpdkCsiDriver {
             println!("   Note: Unavailable replicas will be re-added when nodes recover");
         }
 
+        // The attaches above registered new bdevs; any that carry an old raid
+        // superblock will spawn a phantom raid from the asynchronous examine
+        // hook. Settle examine before looking at raid state (§3 discipline).
+        if let Err(e) = self.wait_for_examine().await {
+            println!("⚠️ [DRIVER] bdev_wait_for_examine failed (continuing): {}", e);
+        }
+
         // Create RAID 1 bdev with available replicas
         let raid_name = format!("raid_{}", volume_id);
         println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
                  raid_name, base_bdevs.len());
 
-        let raid_bdev_name = self.create_raid1_bdev(&raid_name, base_bdevs).await?;
+        let raid_bdev_name = self.ensure_raid1_bdev(&raid_name, base_bdevs).await?;
 
         if unavailable_count > 0 {
             println!("⚠️ [DRIVER] RAID 1 bdev created in DEGRADED mode: {}", raid_bdev_name);
@@ -1733,136 +1742,201 @@ impl SpdkCsiDriver {
         }
     }
 
-    /// Create RAID 1 bdev
-    async fn create_raid1_bdev(
+    /// Whether the node-local SPDK supports `bdev_raid_delete` with
+    /// `clear_sb` (added in SPDK v26.05). Without it, deleting a phantom
+    /// raid leaves the on-disk superblocks behind and they re-arm the §3
+    /// examine hazard on the next bdev registration.
+    pub async fn spdk_supports_clear_sb(&self) -> bool {
+        *self
+            .clear_sb_support
+            .get_or_init(|| async {
+                let payload = json!({ "method": "spdk_get_version" });
+                match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await {
+                    Ok(resp) => {
+                        let major = resp["result"]["fields"]["major"].as_i64().unwrap_or(0);
+                        let minor = resp["result"]["fields"]["minor"].as_i64().unwrap_or(0);
+                        let supported = major > 26 || (major == 26 && minor >= 5);
+                        println!(
+                            "ℹ️ [DRIVER] SPDK v{}.{:02} — bdev_raid_delete clear_sb {}",
+                            major,
+                            minor,
+                            if supported { "supported" } else { "NOT supported (phantom deletes leave superblocks)" }
+                        );
+                        supported
+                    }
+                    Err(_) => false,
+                }
+            })
+            .await
+    }
+
+    /// Wait for all in-flight bdev examine callbacks to finish. Examine is
+    /// asynchronous: a bdev registered a moment ago (nvme attach, lvolstore
+    /// load) may still be spawning a phantom raid. Settle before inspecting.
+    async fn wait_for_examine(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = json!({ "method": "bdev_wait_for_examine" });
+        self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+        Ok(())
+    }
+
+    /// Fetch the raid bdev record by name on the local SPDK, if present.
+    async fn get_raid_bdev(
+        &self,
+        raid_name: &str,
+    ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = json!({
+            "method": "bdev_raid_get_bdevs",
+            "params": { "category": "all" }
+        });
+        let response = self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+        let raid = response
+            .get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|raids| {
+                raids
+                    .iter()
+                    .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(raid_name))
+            })
+            .cloned();
+        Ok(raid)
+    }
+
+    /// Delete a raid bdev, clearing on-disk superblocks when SPDK supports it.
+    async fn delete_raid_bdev(
+        &self,
+        raid_name: &str,
+        clear_sb: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut params = json!({ "name": raid_name });
+        if clear_sb {
+            params["clear_sb"] = json!(true);
+        }
+        let payload = json!({ "method": "bdev_raid_delete", "params": params });
+        self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+        Ok(())
+    }
+
+    /// Create-or-converge the RAID 1 bdev (phase 0 fix).
+    ///
+    /// The §3 examine hook auto-assembles a phantom raid under this very name
+    /// the moment an attached base carrying a superblock registers, and a
+    /// previous partially-failed NodeStage may have left a live raid behind —
+    /// a blind `bdev_raid_create` then fails `-EEXIST` forever. Converge
+    /// instead: reuse an ONLINE raid (idempotent restage), delete anything
+    /// else (phantoms are CONFIGURING; clear_sb when available so the
+    /// superblocks can't respawn them) and create, retrying once around races
+    /// with in-flight examine.
+    async fn ensure_raid1_bdev(
         &self,
         raid_name: &str,
         base_bdevs: Vec<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Call SPDK RPC directly
-        let payload = serde_json::json!({
-            "method": "bdev_raid_create",
-            "params": {
-                "name": raid_name,
-                "raid_level": "1",
-                "base_bdevs": base_bdevs,
-                "superblock": true,
+        const MAX_ATTEMPTS: usize = 3;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            if let Some(raid) = self.get_raid_bdev(raid_name).await? {
+                let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                if state == "online" {
+                    let configured = raid
+                        .get("base_bdevs_list")
+                        .and_then(|b| b.as_array())
+                        .map(|bases| {
+                            bases
+                                .iter()
+                                .filter(|b| b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    println!(
+                        "♻️ [DRIVER] RAID {} already ONLINE ({} base(s) configured) — reusing",
+                        raid_name, configured
+                    );
+                    return Ok(raid_name.to_string());
+                }
+
+                // CONFIGURING (phantom from examine) or offline leftover:
+                // remove it so our create can proceed.
+                let clear_sb = self.spdk_supports_clear_sb().await;
+                println!(
+                    "🧹 [DRIVER] RAID {} exists in state '{}' (phantom/stale) — deleting (clear_sb: {})",
+                    raid_name, state, clear_sb
+                );
+                self.delete_raid_bdev(raid_name, clear_sb).await?;
+                // Examine may still be in flight for another base; let it
+                // settle so the phantom can't re-create itself between our
+                // delete and create.
+                let _ = self.wait_for_examine().await;
             }
-        });
 
-        self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+            let payload = json!({
+                "method": "bdev_raid_create",
+                "params": {
+                    "name": raid_name,
+                    "raid_level": "1",
+                    "base_bdevs": base_bdevs,
+                    "superblock": true,
+                }
+            });
 
-        println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_name);
-        Ok(raid_name.to_string())
+            match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await {
+                Ok(_) => {
+                    println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_name);
+                    return Ok(raid_name.to_string());
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let eexist = msg.contains("File exists") || msg.contains("Code=-17");
+                    if eexist && attempt < MAX_ATTEMPTS {
+                        println!(
+                            "🔄 [DRIVER] bdev_raid_create hit EEXIST (attempt {}/{}) — phantom re-appeared, re-converging",
+                            attempt, MAX_ATTEMPTS
+                        );
+                        let _ = self.wait_for_examine().await;
+                        continue;
+                    }
+                    return Err(format!("Failed to create RAID bdev {}: {}", raid_name, e).into());
+                }
+            }
+        }
+
+        Err(format!(
+            "RAID bdev {} did not converge after {} attempts (phantom kept re-appearing)",
+            raid_name, MAX_ATTEMPTS
+        )
+        .into())
     }
 
     /// Setup NVMe-oF target and return connection info
     pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
-        
+
         let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
-        
-        // Try to get specific subsystem by NQN (more efficient than listing all)
-        let get_subsystem_params = json!({
-            "method": "nvmf_get_subsystems",
-            "params": {
-                "nqn": nqn
-            }
-        });
-        
-        let subsystem_exists = match self.call_node_agent(node_name, "/api/spdk/rpc", &get_subsystem_params).await {
-            Ok(response) => {
-                // If result is a non-empty array, subsystem exists
-                if let Some(result) = response.get("result") {
-                    if let Some(subsystems) = result.as_array() {
-                        !subsystems.is_empty()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            Err(_) => false
-        };
-        
-        if subsystem_exists {
-            println!("ℹ️ [DRIVER] Subsystem already exists (idempotent): {}", nqn);
-        } else {
-            // Create subsystem
-            println!("🔧 [DRIVER] Creating new NVMe-oF subsystem: {}", nqn);
-            let subsystem_params = json!({
-                "method": "nvmf_create_subsystem",
-                "params": {
-                    "nqn": nqn,
-                    "allow_any_host": true,
-                    "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64),
-                    "model_number": "SPDK CSI Volume"
-                }
-            });
 
-            match self.call_node_agent(node_name, "/api/spdk/rpc", &subsystem_params).await {
-                Ok(_) => println!("✅ [DRIVER] Subsystem created: {}", nqn),
-                Err(e) if e.to_string().contains("already exists") => {
-                    println!("ℹ️ [DRIVER] Subsystem already exists (race condition): {}", nqn);
-                }
-                Err(e) => {
-                    println!("❌ [DRIVER] Failed to create subsystem: {}", e);
-                    return Err(format!("Failed to create subsystem: {}", e).into());
-                }
-            }
-        }
-
-        // Add namespace
-        let namespace_params = json!({
-            "method": "nvmf_subsystem_add_ns",
-            "params": {
-                "nqn": nqn,
-                "namespace": {
-                    "nsid": 1,
-                    "bdev_name": bdev_name
-                }
-            }
-        });
-
-        match self.call_node_agent(node_name, "/api/spdk/rpc", &namespace_params).await {
-            Ok(_) => println!("✅ [DRIVER] Namespace added for bdev: {}", bdev_name),
-            Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [DRIVER] Namespace already exists for bdev: {}", bdev_name);
-            }
-            Err(e) => return Err(format!("Failed to add namespace: {}", e).into()),
-        }
-
-        // Add listener
         let node_ip = self.get_node_ip(node_name).await
             .map_err(|e| format!("Failed to get node IP: {}", e))?;
-        
-        let listener_params = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": nqn,
-                "listen_address": {
-                    "trtype": self.nvmeof_transport.to_uppercase(),
-                    "traddr": node_ip,
-                    "trsvcid": self.nvmeof_target_port.to_string(),
-                    "adrfam": "ipv4"
-                }
-            }
-        });
 
-        match self.call_node_agent(node_name, "/api/spdk/rpc", &listener_params).await {
-            Ok(_) => println!("✅ [DRIVER] Listener added: {}:{}", node_ip, self.nvmeof_target_port),
-            Err(e) if e.to_string().contains("already exists") => {
-                println!("ℹ️ [DRIVER] Listener already exists: {}:{}", node_ip, self.nvmeof_target_port);
-            }
-            Err(e) => return Err(format!("Failed to add listener: {}", e).into()),
-        }
+        // Convergent export: inspects subsystem/namespace/listener state and
+        // only issues the RPCs that are missing, so a partially-created export
+        // from an earlier failed attempt is completed instead of failing on
+        // duplicates (phase 0 fix; see docs/phase0-hazard-repro-2026-06-10.md).
+        // Fencing: this node is the consumer doing the staging, so it is the
+        // single admitted host — staging IS the fence flip that locks out a
+        // previous consumer (doc §3).
+        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&self.node_id)];
+        let transport = crate::nvmeof_export::NodeAgentTransport { driver: self, node_name };
+        let spec = crate::nvmeof_export::ExportSpec {
+            nqn: &nqn,
+            bdev_name,
+            bdev_aliases: &[],
+            trtype: &self.nvmeof_transport,
+            traddr: &node_ip,
+            trsvcid: self.nvmeof_target_port,
+            allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
+        };
+        crate::nvmeof_export::ensure_export(&transport, &spec).await?;
 
         println!("🎉 [DRIVER] NVMe-oF target setup completed: {}", nqn);
-        
+
         Ok(NvmeofConnectionInfo {
             nqn: nqn.clone(),
             target_ip: node_ip.clone(),
@@ -1880,7 +1954,28 @@ impl SpdkCsiDriver {
         
         let controller_name = format!("nvme_{}", conn_info.nqn.replace(":", "_").replace(".", "_"));
         println!("   Controller name: {}", controller_name);
-        
+
+        let expected_bdev = format!("{}n1", controller_name);
+
+        // Pre-check (phase 0 fix): an earlier stage attempt, a kubelet retry,
+        // or a previous consumer of this volume on this node may have left
+        // this controller behind. Reuse it while it serves a bdev; replace it
+        // when it is dead weight (e.g. state=failed after the remote rebooted
+        // — exactly what the live repro observed). The old code only reacted
+        // to an "already exists" error string SPDK does not reliably emit.
+        if self.nvme_controller_exists(&controller_name).await {
+            if self.verify_bdev_exists(&expected_bdev).await.is_ok() {
+                println!("♻️ [DRIVER] NVMe controller {} already attached with bdev {} — reusing",
+                         controller_name, expected_bdev);
+                return Ok(expected_bdev);
+            }
+            println!("🧹 [DRIVER] NVMe controller {} exists without usable bdev (stale/failed) — detaching",
+                     controller_name);
+            if let Err(e) = self.delete_nvme_controller(&controller_name).await {
+                println!("⚠️ [DRIVER] Failed to delete stale controller (continuing): {}", e);
+            }
+        }
+
         let attach_params = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
@@ -1889,90 +1984,59 @@ impl SpdkCsiDriver {
                 "traddr": conn_info.target_ip,
                 "trsvcid": conn_info.target_port.to_string(),
                 "subnqn": conn_info.nqn,
-                "adrfam": "IPv4"
+                "adrfam": "IPv4",
+                // Stable per-node identity so the target's host fencing can
+                // admit exactly this consumer (doc §3). Default initiator
+                // NQNs are random, which makes host filtering impossible.
+                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_id)
             }
         });
 
         println!("📡 [DRIVER] Calling bdev_nvme_attach_controller...");
         match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {
             Ok(response) => {
-                println!("✅ [DRIVER] bdev_nvme_attach_controller succeeded");
                 // The response should contain the bdev names created
-                if let Some(result) = response.get("result") {
-                    if let Some(bdev_names) = result.as_array() {
-                        if let Some(first_bdev) = bdev_names.first() {
-                            if let Some(bdev_name) = first_bdev.as_str() {
-                                println!("✅ [DRIVER] Connected to NVMe-oF target, bdev created: {}", bdev_name);
-                                return Ok(bdev_name.to_string());
-                            }
-                        }
-                    }
+                if let Some(bdev_name) = response
+                    .get("result")
+                    .and_then(|r| r.as_array())
+                    .and_then(|names| names.first())
+                    .and_then(|b| b.as_str())
+                {
+                    println!("✅ [DRIVER] Connected to NVMe-oF target, bdev created: {}", bdev_name);
+                    return Ok(bdev_name.to_string());
                 }
                 // Fallback - construct expected bdev name
-                let bdev_name = format!("{}n1", controller_name);
-                println!("✅ [DRIVER] Connected to NVMe-oF target, expected bdev: {}", bdev_name);
-                Ok(bdev_name)
-            }
-            Err(e) if e.to_string().contains("already exists") => {
-                println!("⚠️ [DRIVER] Controller already exists (error -114)");
-                println!("   This could mean:");
-                println!("   1. Controller is connected and working (bdev exists) ✅");
-                println!("   2. Controller exists but is FAILED (no bdev) ❌");
-                println!("   Verifying bdev existence...");
-                
-                let expected_bdev = format!("{}n1", controller_name);
-                println!("   Expected bdev name: {}", expected_bdev);
-                
-                match self.verify_bdev_exists(&expected_bdev).await {
-                    Ok(()) => {
-                        // Bdev exists - controller is working
-                        println!("✅ [DRIVER] Bdev verified to exist: {}", expected_bdev);
-                        println!("   Controller is working, using existing connection");
-                        Ok(expected_bdev)
-                    }
-                    Err(_) => {
-                        // Bdev doesn't exist - controller is in FAILED state
-                        println!("❌ [DRIVER] Bdev NOT found - controller is in FAILED state");
-                        println!("   Cleaning up stale controller and retrying...");
-                        
-                        // Delete the failed controller
-                        if let Err(e) = self.delete_nvme_controller(&controller_name).await {
-                            println!("⚠️ [DRIVER] Failed to delete stale controller: {}", e);
-                            println!("   Continuing with retry anyway...");
-                        } else {
-                            println!("✅ [DRIVER] Stale controller deleted: {}", controller_name);
-                        }
-                        
-                        // Retry the attach
-                        println!("🔄 [DRIVER] Retrying bdev_nvme_attach_controller after cleanup...");
-                        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {
-                            Ok(response) => {
-                                if let Some(result) = response.get("result") {
-                                    if let Some(bdev_names) = result.as_array() {
-                                        if let Some(first_bdev) = bdev_names.first() {
-                                            if let Some(bdev_name) = first_bdev.as_str() {
-                                                println!("✅ [DRIVER] Retry succeeded, bdev created: {}", bdev_name);
-                                                return Ok(bdev_name.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                let bdev_name = format!("{}n1", controller_name);
-                                println!("✅ [DRIVER] Retry succeeded, expected bdev: {}", bdev_name);
-                                Ok(bdev_name)
-                            }
-                            Err(e) => {
-                                println!("❌ [DRIVER] Retry failed: {}", e);
-                                Err(format!("Retry attach failed after cleanup: {}", e).into())
-                            }
-                        }
-                    }
-                }
+                println!("✅ [DRIVER] Connected to NVMe-oF target, expected bdev: {}", expected_bdev);
+                Ok(expected_bdev)
             }
             Err(e) => {
+                // Attach failed — possibly a race with a concurrent attach of
+                // the same controller. Verify state before giving up.
+                if self.verify_bdev_exists(&expected_bdev).await.is_ok() {
+                    println!("♻️ [DRIVER] Attach raced but bdev {} exists — reusing", expected_bdev);
+                    return Ok(expected_bdev);
+                }
                 println!("❌ [DRIVER] bdev_nvme_attach_controller failed: {}", e);
                 Err(format!("Failed to attach NVMe controller: {}", e).into())
             }
+        }
+    }
+
+    /// Whether an NVMe-oF initiator controller with this name exists locally.
+    async fn nvme_controller_exists(&self, controller_name: &str) -> bool {
+        let payload = json!({
+            "method": "bdev_nvme_get_controllers",
+            "params": { "name": controller_name }
+        });
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await {
+            Ok(response) => response
+                .get("result")
+                .and_then(|r| r.as_array())
+                .map(|c| !c.is_empty())
+                .unwrap_or(false),
+            // Missing controller surfaces as an RPC error; treat lookup
+            // failures as absent and let the attach surface real problems.
+            Err(_) => false,
         }
     }
 
@@ -2026,6 +2090,100 @@ impl SpdkCsiDriver {
                 Ok(()) // Best effort cleanup
             }
         }
+    }
+
+    /// Inspect the node-local raid bdev for a multi-replica volume.
+    /// Returns None when no raid exists locally (single-replica volume or
+    /// not staged here); otherwise (degraded, message).
+    /// Phase 0 fix: leg failure used to be invisible — the control plane kept
+    /// reporting both replicas online while the array ran un-redundant.
+    pub async fn check_local_raid_health(&self, volume_id: &str) -> Option<(bool, String)> {
+        let raid_name = format!("raid_{}", volume_id);
+        let raid = self.get_raid_bdev(&raid_name).await.ok()??;
+
+        let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+        let total = raid.get("num_base_bdevs").and_then(|n| n.as_u64()).unwrap_or(0);
+        let bases = raid
+            .get("base_bdevs_list")
+            .and_then(|b| b.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let configured = bases
+            .iter()
+            .filter(|b| b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false))
+            .count() as u64;
+
+        let degraded = state != "online" || configured < total;
+        let message = if degraded {
+            format!(
+                "RAID {} state={} with {}/{} base bdevs configured — volume is running without full redundancy",
+                raid_name, state, configured, total
+            )
+        } else {
+            format!("RAID {} online with {}/{} base bdevs", raid_name, configured, total)
+        };
+        Some((degraded, message))
+    }
+
+    /// Tear down all node-local SPDK state for a volume at NodeUnstage
+    /// (phase 0 fix). The shipped driver left the raid bdev ONLINE after
+    /// unstage; its exclusive claims on the local replica lvol and the
+    /// remote-replica bdevs then blocked every later export/stage of the
+    /// volume (docs/phase0-hazard-repro-2026-06-10.md, bug 1).
+    ///
+    /// Order matters: stop serving (loopback subsystem) → delete the raid
+    /// (clear_sb while the remote legs are still attached, so the wipe
+    /// reaches all replicas) → detach the per-replica initiator controllers.
+    ///
+    /// Raid-delete failure is returned as an error so kubelet retries
+    /// unstage — a live raid's claims cannot be converged around later.
+    /// Subsystem and controller cleanup are best-effort.
+    pub async fn teardown_volume_spdk_state(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 1. Loopback subsystem (idempotent; absent for never-staged volumes)
+        let loopback_nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let delete_subsystem = json!({
+            "method": "nvmf_delete_subsystem",
+            "params": { "nqn": loopback_nqn }
+        });
+        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &delete_subsystem).await {
+            Ok(_) => println!("✅ [DRIVER] Loopback subsystem deleted: {}", loopback_nqn),
+            Err(e) => println!("ℹ️ [DRIVER] Loopback subsystem not deleted (may not exist): {}", e),
+        }
+
+        // 2. Raid bdev — frees the exclusive_write claims
+        let raid_name = format!("raid_{}", volume_id);
+        if self.get_raid_bdev(&raid_name).await?.is_some() {
+            let clear_sb = self.spdk_supports_clear_sb().await;
+            self.delete_raid_bdev(&raid_name, clear_sb)
+                .await
+                .map_err(|e| format!("Failed to delete raid {} at unstage: {}", raid_name, e))?;
+            println!("✅ [DRIVER] RAID deleted at unstage: {} (clear_sb: {})", raid_name, clear_sb);
+        }
+
+        // 3. Per-replica initiator controllers (nvme_..._volume_{vol}_{i})
+        let per_replica_prefix = format!(
+            "nvme_{}_",
+            format!("nqn.2024-11.com.flint:volume:{}", volume_id)
+                .replace(":", "_")
+                .replace(".", "_")
+        );
+        let list = json!({ "method": "bdev_nvme_get_controllers" });
+        if let Ok(response) = self.call_node_agent(&self.node_id, "/api/spdk/rpc", &list).await {
+            if let Some(controllers) = response.get("result").and_then(|r| r.as_array()) {
+                for ctrlr in controllers {
+                    if let Some(name) = ctrlr.get("name").and_then(|n| n.as_str()) {
+                        if name.starts_with(&per_replica_prefix) {
+                            match self.delete_nvme_controller(name).await {
+                                Ok(_) => println!("✅ [DRIVER] Detached replica controller: {}", name),
+                                Err(e) => println!("⚠️ [DRIVER] Failed to detach controller {} (continuing): {}", name, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Remove NVMe-oF target from a node

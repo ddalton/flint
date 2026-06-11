@@ -795,6 +795,25 @@ Rejected alternatives:
    - subsystems created `allow_any_host: false` with host lists from
      PV annotations in **both** export paths, plus post-fence verification (§3).
    *Independent bug fix; prerequisite for everything below; ships on its own.*
+
+   **Implementation status (2026-06-10):** all of the above implemented on
+   `main` — convergent export module (`nvmeof_export.rs`, check-then-act with
+   unit tests for every poison state the repro produced), staging as a
+   reconcile loop (`ensure_raid1_bdev`: reuse-if-online / delete-phantom /
+   retry-on-EEXIST + `wait_for_examine`), full NodeUnstage teardown
+   (loopback subsystem, raid delete with `clear_sb` when supported, replica
+   controller detach, kernel disconnect fallback), replica-side phantom
+   hygiene in reconcile, PV-label fallback scan + opportunistic labeling
+   (reconcile now also runs every 60s, not just at startup), raid-aware
+   `NodeGetVolumeStats` + PV `replica-health` annotation + `VolumeDegraded`
+   events, 20s device wait with explicit ns-rescan, node-SA RBAC fix, host
+   fencing via stable per-node host NQNs (`nqn.2024-11.com.flint:node:{node}`,
+   consumer derived from the VolumeAttachment, default-closed, post-fence
+   controller-drain verification, `FLINT_NVMF_FENCING=disabled` escape
+   hatch), and the spdk-tgt image bumped to v26.05 (all carried patches
+   verified; the old inline ctrlr.c seds became `nvmf-hostlog.patch` — they
+   would mis-apply on v26.05). Remaining: cluster acceptance test = re-run
+   the repro scenarios and observe convergence instead of bricking.
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
    plane.*

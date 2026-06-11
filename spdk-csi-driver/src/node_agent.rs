@@ -162,6 +162,27 @@ impl NodeAgent {
             }
         });
 
+        // Periodic reconcile + raid health monitor (phase 0 fix).
+        // Reconcile previously ran only once at startup; an export lost later
+        // (or a PV that appears after startup) was never repaired. The health
+        // monitor surfaces degraded raids to the PV (annotation + event) —
+        // previously a dead raid leg was invisible to the control plane.
+        let monitor_agent = Arc::new(self.clone());
+        let monitor_task = tokio::spawn(async move {
+            let mut monitor_interval = interval(Duration::from_secs(60));
+            // First tick fires immediately; startup already reconciled.
+            monitor_interval.tick().await;
+            loop {
+                monitor_interval.tick().await;
+                if let Err(e) = monitor_agent.reconcile_replica_targets().await {
+                    warn!(error = %e, "[MONITOR] Replica reconciliation failed (non-fatal)");
+                }
+                if let Err(e) = monitor_agent.monitor_raid_health().await {
+                    warn!(error = %e, "[MONITOR] Raid health check failed (non-fatal)");
+                }
+            }
+        });
+
         // Setup HTTP API routes
         let routes = self.setup_routes();
 
@@ -174,13 +195,16 @@ impl NodeAgent {
 
         info!(port = node_agent_port, "[NODE_AGENT] Starting HTTP server");
 
-        // Start both the HTTP server and discovery loop
+        // Start the HTTP server, discovery loop, and reconcile/health monitor
         tokio::select! {
             _ = warp::serve(routes).run(([0, 0, 0, 0], node_agent_port)) => {
                 info!("[NODE_AGENT] HTTP server stopped");
             }
             _ = discovery_task => {
                 info!("[NODE_AGENT] Discovery task stopped");
+            }
+            _ = monitor_task => {
+                info!("[NODE_AGENT] Monitor task stopped");
             }
         }
 
@@ -1040,7 +1064,7 @@ impl NodeAgent {
         }
 
         // 3. Execute kernel nvme connect
-        if let Err(e) = Self::kernel_nvme_connect(nqn, target_ip, target_port).await {
+        if let Err(e) = Self::kernel_nvme_connect(nqn, target_ip, target_port, &node_agent.node_name).await {
             let error_response = json!({
                 "success": false,
                 "error": format!("Failed to connect NVMe device: {}", e)
@@ -1048,23 +1072,30 @@ impl NodeAgent {
             return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
         }
 
-        // 4. Wait for device to appear and discover it
+        // 4. Wait for device to appear and discover it.
+        //
+        // Phase 0 fix: the previous 3-second wait was too tight when the
+        // kernel controller pre-existed (e.g. left over from an earlier
+        // stage) — a namespace added to a live subsystem only surfaces after
+        // an async AER-triggered rescan, which can exceed 3s. Wait up to 20s
+        // and nudge the controller with an explicit ns-rescan every ~2s.
         let mut device_path = String::new();
-        for attempt in 1..=30 {
+        for attempt in 1..=100u32 {
             if let Ok(path) = Self::find_nvme_device_by_nqn(nqn).await {
                 device_path = path;
                 break;
             }
             if attempt % 10 == 0 {
-                debug!(attempt, "[HTTP_API] Waiting for NVMe device");
+                debug!(attempt, "[HTTP_API] Waiting for NVMe device; triggering ns rescan");
+                Self::kernel_nvme_ns_rescan(nqn).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
 
         if device_path.is_empty() {
             let error_response = json!({
                 "success": false,
-                "error": "NVMe device did not appear after 3 seconds"
+                "error": "NVMe device did not appear after 20 seconds"
             });
             return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
         }
@@ -1132,89 +1163,26 @@ impl NodeAgent {
         target_ip: &str,
         target_port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Step 0: Check if subsystem already exists (idempotency + safety)
-        // This handles the case where NodeUnstageVolume wasn't called (e.g., pod completed vs deleted)
-        let check_params = json!({
-            "method": "nvmf_get_subsystems",
-        });
-
-        if let Ok(result) = node_agent.disk_service.call_spdk_rpc(&check_params).await {
-            if let Some(subsystems) = result["result"].as_array() {
-                for subsystem in subsystems {
-                    if let Some(existing_nqn) = subsystem["nqn"].as_str() {
-                        if existing_nqn == nqn {
-                            // SAFETY CHECK: Only delete if no active namespaces
-                            let namespace_count = subsystem["namespaces"]
-                                .as_array()
-                                .map(|ns| ns.len())
-                                .unwrap_or(0);
-
-                            if namespace_count == 0 {
-                                // Stale subsystem with no active connections - safe to cleanup
-                                debug!(nqn, "[NVMEOF] Subsystem exists with 0 namespaces (stale), cleaning up");
-                                let delete_params = json!({
-                                    "method": "nvmf_delete_subsystem",
-                                    "params": {
-                                        "nqn": nqn
-                                    }
-                                });
-                                // Best effort delete - ignore errors
-                                let _ = node_agent.disk_service.call_spdk_rpc(&delete_params).await;
-                            } else {
-                                // Active subsystem with connections - DO NOT DELETE
-                                // This handles RWX/ROX or concurrent pod scenarios
-                                debug!(namespace_count, nqn, "[NVMEOF] Subsystem exists with active namespaces, reusing");
-                                // Skip creation steps - subsystem is already properly configured
-                                return Ok(());
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Step 1: Create subsystem
-        let subsystem_params = json!({
-            "method": "nvmf_create_subsystem",
-            "params": {
-                "nqn": nqn,
-                "allow_any_host": true,
-                "serial_number": format!("SPDK{}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()),
-                "model_number": "SPDK CSI Volume"
-            }
-        });
-        node_agent.disk_service.call_spdk_rpc(&subsystem_params).await?;
-
-        // Step 2: Add namespace
-        let namespace_params = json!({
-            "method": "nvmf_subsystem_add_ns",
-            "params": {
-                "nqn": nqn,
-                "namespace": {
-                    "nsid": 1,
-                    "bdev_name": bdev_name
-                }
-            }
-        });
-        node_agent.disk_service.call_spdk_rpc(&namespace_params).await?;
-
-        // Step 3: Add listener
-        let listener_params = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": nqn,
-                "listen_address": {
-                    "trtype": "TCP",
-                    "traddr": target_ip,
-                    "trsvcid": target_port.to_string(),
-                    "adrfam": "ipv4"
-                }
-            }
-        });
-        node_agent.disk_service.call_spdk_rpc(&listener_params).await?;
+        // Convergent export (phase 0 fix): completes whatever subset of
+        // {subsystem, namespace, listener} is missing instead of blindly
+        // creating (duplicates fail -32602) or blindly reusing (a subsystem
+        // can exist with namespaces but no listener after a partial attempt).
+        // This also covers the NodeUnstageVolume-never-ran case the old
+        // stale-subsystem cleanup handled: a leftover export for the same
+        // bdev is simply converged upon and reused, and a namespace pointing
+        // at a stale bdev is replaced.
+        // Fencing: this export is consumed by the local kernel initiator.
+        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&node_agent.node_name)];
+        let spec = crate::nvmeof_export::ExportSpec {
+            nqn,
+            bdev_name,
+            bdev_aliases: &[],
+            trtype: "TCP",
+            traddr: target_ip,
+            trsvcid: target_port,
+            allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
+        };
+        crate::nvmeof_export::ensure_export(&node_agent.disk_service, &spec).await?;
 
         Ok(())
     }
@@ -1224,7 +1192,11 @@ impl NodeAgent {
         nqn: &str,
         target_ip: &str,
         target_port: u16,
+        node_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Stable per-node host NQN so the target's host fencing can admit
+        // exactly this node (doc §3); matches the SPDK initiator identity.
+        let hostnqn = crate::nvmeof_export::flint_host_nqn(node_name);
         let output = tokio::process::Command::new("nvme")
             .args(&[
                 "connect",
@@ -1232,6 +1204,7 @@ impl NodeAgent {
                 "-a", target_ip,
                 "-s", &target_port.to_string(),
                 "-n", nqn,
+                "-q", &hostnqn,
             ])
             .output()
             .await?;
@@ -1245,6 +1218,23 @@ impl NodeAgent {
         }
 
         Ok(())
+    }
+
+    /// Helper: Trigger a namespace rescan on the kernel controller connected
+    /// to `nqn` (no-op if none). A namespace added to an already-connected
+    /// subsystem only appears after a rescan; AER delivery can lag.
+    async fn kernel_nvme_ns_rescan(nqn: &str) {
+        let nvme_path = std::path::Path::new("/sys/class/nvme");
+        let Ok(entries) = std::fs::read_dir(nvme_path) else { return };
+        for entry in entries.flatten() {
+            let subsysnqn_path = entry.path().join("subsysnqn");
+            if let Ok(subsys_nqn) = std::fs::read_to_string(&subsysnqn_path) {
+                if subsys_nqn.trim() == nqn {
+                    let rescan = entry.path().join("rescan_controller");
+                    let _ = std::fs::write(&rescan, "1");
+                }
+            }
+        }
     }
 
     /// Helper: Execute kernel nvme disconnect
@@ -1661,26 +1651,72 @@ impl NodeAgent {
         let node_uid = self.node_uid.read().await.clone();
         debug!(node_name = %self.node_name, node_uid, "[RECONCILE] Starting replica target reconciliation");
 
-        // Query PVs with label selector: flint.csi.storage.io/replica-{node_uid}=true
+        // Fast path: PVs labeled flint.csi.storage.io/replica-{node_uid}=true
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-        let label_selector = format!("flint.csi.storage.io/replica-{}=true", node_uid);
-        let lp = ListParams::default().labels(&label_selector);
+        let label_key = format!("flint.csi.storage.io/replica-{}", node_uid);
+        let lp = ListParams::default().labels(&format!("{}=true", label_key));
 
-        let pv_list = match pvs.list(&lp).await {
-            Ok(list) => list,
+        let mut pv_items = match pvs.list(&lp).await {
+            Ok(list) => list.items,
             Err(e) => {
                 error!(error = %e, "[RECONCILE] Failed to query PVs");
                 return Err(format!("Failed to query PVs: {}", e).into());
             }
         };
 
-        debug!(pv_count = pv_list.items.len(), "[RECONCILE] Found PVs with local replicas");
+        // Fallback (phase 0 fix, repro bug 4): nothing ever applies that
+        // label — CreateVolume cannot, because the external-provisioner only
+        // creates the PV object after CreateVolume returns. Without this
+        // scan the reconcile matched zero PVs and post-reboot replica
+        // re-export never ran. Scan this driver's PVs by volumeAttributes
+        // and label the matches so the fast path works on later cycles.
+        let labeled_names: std::collections::HashSet<String> = pv_items
+            .iter()
+            .filter_map(|pv| pv.metadata.name.clone())
+            .collect();
+        match pvs.list(&ListParams::default()).await {
+            Ok(all) => {
+                for pv in all.items {
+                    let Some(name) = pv.metadata.name.clone() else { continue };
+                    if labeled_names.contains(&name) {
+                        continue;
+                    }
+                    let is_local_replica = self
+                        .get_replicas_from_pv(&pv)
+                        .ok()
+                        .flatten()
+                        .map(|replicas| {
+                            replicas
+                                .iter()
+                                .any(|r| r.node_uid == node_uid || r.node_name == self.node_name)
+                        })
+                        .unwrap_or(false);
+                    if !is_local_replica {
+                        continue;
+                    }
+                    // Best-effort label so future cycles take the fast path.
+                    let patch = serde_json::json!({
+                        "metadata": { "labels": { &label_key: "true" } }
+                    });
+                    use kube::api::{Patch, PatchParams};
+                    if let Err(e) = pvs.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                        debug!(volume_id = %name, error = %e, "[RECONCILE] Could not label PV (continuing)");
+                    }
+                    pv_items.push(pv);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "[RECONCILE] Fallback PV scan failed; only labeled PVs reconciled");
+            }
+        }
+
+        debug!(pv_count = pv_items.len(), "[RECONCILE] Found PVs with local replicas");
 
         let mut success_count = 0;
         let mut skip_count = 0;
         let mut error_count = 0;
 
-        for pv in pv_list.items {
+        for pv in pv_items {
             let volume_id = match &pv.metadata.name {
                 Some(name) => name.clone(),
                 None => {
@@ -1732,8 +1768,24 @@ impl NodeAgent {
                 }
             }
 
+            // §3 hygiene (phase 0 fix): after a reboot the replica lvol
+            // re-registers carrying a raid superblock and examine
+            // auto-assembles a phantom raid that claims it exclusive_write —
+            // the export below would fail -32602 forever. A raid for this
+            // volume on a node that is NOT the volume's current consumer is
+            // by definition such a phantom; delete it (clearing superblocks
+            // when SPDK supports it) before exporting.
+            let attached_node = self.get_attached_node(&volume_id).await;
+            if attached_node.as_deref() != Some(self.node_name.as_str()) {
+                if let Err(e) = self.delete_phantom_raid_local(&volume_id).await {
+                    error!(volume_id, error = %e, "[RECONCILE] Failed to delete phantom raid");
+                    error_count += 1;
+                    continue;
+                }
+            }
+
             // Setup NVMe-oF target for this replica (idempotent)
-            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica).await {
+            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica, attached_node.as_deref()).await {
                 Ok(_) => {
                     debug!(replica_index, "[RECONCILE] NVMe-oF target set up");
                     success_count += 1;
@@ -1748,6 +1800,132 @@ impl NodeAgent {
         info!(success_count, skip_count, error_count, "[RECONCILE] Reconciliation complete");
 
         Ok(())
+    }
+
+    /// Surface the health of node-local raid bdevs to the control plane
+    /// (phase 0 fix, repro bug 6). For every `raid_{volume_id}` on this node:
+    /// degraded → patch the PV annotation
+    /// `flint.csi.storage.io/replica-health` and emit a Warning event;
+    /// healthy → clear the annotation. volumeAttributes are immutable, so
+    /// the mutable annotation is the channel (same pattern as
+    /// `filesystem-initialized`).
+    async fn monitor_raid_health(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = json!({
+            "method": "bdev_raid_get_bdevs",
+            "params": { "category": "all" }
+        });
+        let response = self.disk_service.call_spdk_rpc(&payload).await?;
+        let raids = response
+            .get("result")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for raid in raids {
+            let Some(raid_name) = raid.get("name").and_then(|n| n.as_str()) else { continue };
+            let Some(volume_id) = raid_name.strip_prefix("raid_") else { continue };
+
+            let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+            let total = raid.get("num_base_bdevs").and_then(|n| n.as_u64()).unwrap_or(0);
+            let bases: Vec<Value> = raid
+                .get("base_bdevs_list")
+                .and_then(|b| b.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let configured: Vec<&Value> = bases
+                .iter()
+                .filter(|b| b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false))
+                .collect();
+            let degraded = state != "online" || (configured.len() as u64) < total;
+
+            let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+            use kube::api::{Patch, PatchParams};
+
+            if degraded {
+                let health = json!({
+                    "state": state,
+                    "configured": configured.len(),
+                    "total": total,
+                    "observed_by": self.node_name,
+                })
+                .to_string();
+                let patch = json!({
+                    "metadata": {
+                        "annotations": { "flint.csi.storage.io/replica-health": health }
+                    }
+                });
+                match pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                    Ok(_) => {
+                        warn!(
+                            volume_id, state,
+                            configured = configured.len(),
+                            total,
+                            "[MONITOR] RAID degraded — PV annotated"
+                        );
+                    }
+                    Err(e) => warn!(volume_id, error = %e, "[MONITOR] Failed to annotate PV"),
+                }
+                self.emit_pv_event(
+                    volume_id,
+                    "Warning",
+                    "VolumeDegraded",
+                    &format!(
+                        "RAID for volume {} is {} with {}/{} base bdevs configured on node {}",
+                        volume_id, state, configured.len(), total, self.node_name
+                    ),
+                )
+                .await;
+            } else {
+                // Clear a previously-set annotation (merge-patch null deletes)
+                let patch = json!({
+                    "metadata": {
+                        "annotations": { "flint.csi.storage.io/replica-health": null }
+                    }
+                });
+                let _ = pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Best-effort Kubernetes Warning/Normal event attached to a PV.
+    async fn emit_pv_event(&self, pv_name: &str, event_type: &str, reason: &str, message: &str) {
+        use k8s_openapi::api::core::v1::Event;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
+        use kube::api::PostParams;
+
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let event = Event {
+            metadata: ObjectMeta {
+                // Unique-enough name; events are best effort
+                name: Some(format!("{}.{:x}", pv_name, now_nanos)),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                api_version: Some("v1".to_string()),
+                kind: Some("PersistentVolume".to_string()),
+                name: Some(pv_name.to_string()),
+                ..Default::default()
+            },
+            type_: Some(event_type.to_string()),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+            reporting_component: Some("flint.csi.storage.io/node-agent".to_string()),
+            reporting_instance: Some(self.node_name.clone()),
+            event_time: Some(MicroTime(k8s_openapi::jiff::Timestamp::now())),
+            action: Some("HealthCheck".to_string()),
+            ..Default::default()
+        };
+
+        let events: Api<Event> = Api::namespaced(self.driver.kube_client.clone(), "default");
+        if let Err(e) = events.create(&PostParams::default(), &event).await {
+            debug!(pv_name, error = %e, "[MONITOR] Failed to emit event (non-fatal)");
+        }
     }
 
     /// Extract replica info from PV volumeAttributes
@@ -1807,11 +1985,65 @@ impl NodeAgent {
 
     /// Setup NVMe-oF target for a local replica
     /// Creates subsystem, adds namespace, and adds listener (all idempotent)
+    /// Delete a phantom raid bdev for `volume_id` on this node, if present
+    /// (§3 hygiene). Waits for in-flight examine first so the phantom can't
+    /// re-create itself mid-delete; clears on-disk superblocks when the
+    /// local SPDK supports it (v26.05+).
+    async fn delete_phantom_raid_local(
+        &self,
+        volume_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let raid_name = format!("raid_{}", volume_id);
+        let list = json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } });
+        let response = self.disk_service.call_spdk_rpc(&list).await?;
+        let exists = response
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|raids| {
+                raids
+                    .iter()
+                    .any(|r| r.get("name").and_then(|n| n.as_str()) == Some(raid_name.as_str()))
+            })
+            .unwrap_or(false);
+        if !exists {
+            return Ok(());
+        }
+
+        // Settle async examine before deleting.
+        let _ = self
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "bdev_wait_for_examine" }))
+            .await;
+
+        // clear_sb requires SPDK v26.05+
+        let version = self
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "spdk_get_version" }))
+            .await?;
+        let major = version["result"]["fields"]["major"].as_i64().unwrap_or(0);
+        let minor = version["result"]["fields"]["minor"].as_i64().unwrap_or(0);
+        let clear_sb = major > 26 || (major == 26 && minor >= 5);
+
+        let mut params = json!({ "name": raid_name });
+        if clear_sb {
+            params["clear_sb"] = json!(true);
+        }
+        self.disk_service
+            .call_spdk_rpc(&json!({ "method": "bdev_raid_delete", "params": params }))
+            .await?;
+        warn!(
+            volume_id, clear_sb,
+            "[RECONCILE] Deleted phantom raid claiming local replica (§3 hygiene)"
+        );
+        Ok(())
+    }
+
     async fn setup_nvmeof_target_for_replica(
         &self,
         volume_id: &str,
         replica_index: usize,
         replica: &ReplicaInfo,
+        attached_node: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Generate NQN using same format as driver
         let nqn = format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index);
@@ -1825,99 +2057,55 @@ impl NodeAgent {
         let target_port = self.driver.nvmeof_target_port;
         let transport = &self.driver.nvmeof_transport;
 
-        // Step 1: Check if subsystem already exists (idempotency)
-        let get_subsystem_rpc = json!({
-            "method": "nvmf_get_subsystems",
-            "params": {
-                "nqn": nqn
-            }
-        });
-
-        let subsystem_exists = match self.disk_service.call_spdk_rpc(&get_subsystem_rpc).await {
-            Ok(response) => {
-                if let Some(result) = response.get("result") {
-                    if let Some(subsystems) = result.as_array() {
-                        !subsystems.is_empty()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            Err(_) => false
+        // Convergent export: completes any partial state (subsystem without
+        // ns, ns without listener, ...) instead of bailing out or failing on
+        // duplicates. The old early-return on "subsystem exists" left empty
+        // subsystems unexported forever (phase 0 fix).
+        //
+        // Fencing: the VolumeAttachment is the authority on which node may
+        // consume this volume right now (resolved by the caller). Unattached
+        // → default-closed (empty host list); the next NodeStage admits
+        // itself.
+        let allowed: Option<Vec<String>> = if crate::nvmeof_export::fencing_enabled() {
+            let hosts = match attached_node {
+                Some(consumer) => vec![crate::nvmeof_export::flint_host_nqn(consumer)],
+                None => vec![],
+            };
+            Some(hosts)
+        } else {
+            None
         };
-
-        if subsystem_exists {
-            debug!(nqn, "[RECONCILE] Subsystem already exists (idempotent)");
-            return Ok(());
-        }
-
-        // Step 2: Create subsystem
-        let create_subsystem_rpc = json!({
-            "method": "nvmf_create_subsystem",
-            "params": {
-                "nqn": nqn,
-                "allow_any_host": true,
-                "serial_number": format!("SPDK{}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()),
-                "model_number": "SPDK CSI Volume"
-            }
-        });
-
-        match self.disk_service.call_spdk_rpc(&create_subsystem_rpc).await {
-            Ok(_) => debug!("[RECONCILE] Subsystem created"),
-            Err(e) if e.to_string().contains("already exists") => {
-                debug!("[RECONCILE] Subsystem already exists (race condition)");
-            }
-            Err(e) => return Err(format!("Failed to create subsystem: {}", e).into()),
-        }
-
-        // Step 3: Add namespace with lvol bdev
-        let add_namespace_rpc = json!({
-            "method": "nvmf_subsystem_add_ns",
-            "params": {
-                "nqn": nqn,
-                "namespace": {
-                    "nsid": 1,
-                    "bdev_name": replica.lvol_uuid
-                }
-            }
-        });
-
-        match self.disk_service.call_spdk_rpc(&add_namespace_rpc).await {
-            Ok(_) => debug!("[RECONCILE] Namespace added"),
-            Err(e) if e.to_string().contains("already exists") => {
-                debug!("[RECONCILE] Namespace already exists");
-            }
-            Err(e) => return Err(format!("Failed to add namespace: {}", e).into()),
-        }
-
-        // Step 4: Add TCP listener
-        let add_listener_rpc = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": nqn,
-                "listen_address": {
-                    "trtype": transport.to_uppercase(),
-                    "traddr": node_ip,
-                    "trsvcid": target_port.to_string(),
-                    "adrfam": "ipv4"
-                }
-            }
-        });
-
-        match self.disk_service.call_spdk_rpc(&add_listener_rpc).await {
-            Ok(_) => debug!(node_ip, target_port, "[RECONCILE] Listener added"),
-            Err(e) if e.to_string().contains("already exists") => {
-                debug!("[RECONCILE] Listener already exists");
-            }
-            Err(e) => return Err(format!("Failed to add listener: {}", e).into()),
-        }
+        let spec = crate::nvmeof_export::ExportSpec {
+            nqn: &nqn,
+            bdev_name: &replica.lvol_uuid,
+            bdev_aliases: &[&replica.lvol_name],
+            trtype: transport,
+            traddr: &node_ip,
+            trsvcid: target_port,
+            allowed_hosts: allowed.as_deref(),
+        };
+        crate::nvmeof_export::ensure_export(&self.disk_service, &spec)
+            .await
+            .map_err(|e| format!("Failed to ensure NVMe-oF export for {}: {}", nqn, e))?;
 
         debug!(nqn, "[RECONCILE] NVMe-oF target ready");
         Ok(())
+    }
+
+    /// Node currently attached to this volume per its VolumeAttachment, if any.
+    async fn get_attached_node(&self, volume_id: &str) -> Option<String> {
+        use k8s_openapi::api::storage::v1::VolumeAttachment;
+        let vas: Api<VolumeAttachment> = Api::all(self.driver.kube_client.clone());
+        let list = vas.list(&ListParams::default()).await.ok()?;
+        list.items.into_iter().find_map(|va| {
+            let source_pv = va.spec.source.persistent_volume_name.as_deref();
+            let attached = va.status.as_ref().map(|s| s.attached).unwrap_or(false);
+            if source_pv == Some(volume_id) && attached {
+                Some(va.spec.node_name)
+            } else {
+                None
+            }
+        })
     }
 }
 

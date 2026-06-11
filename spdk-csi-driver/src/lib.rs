@@ -1,6 +1,7 @@
 // Minimal State SPDK CSI Driver - Library Modules
 pub mod spdk_native;
 pub mod nvmeof_utils;
+pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)
 pub mod driver;
 pub mod minimal_models;
 pub mod minimal_disk_service;
