@@ -11,9 +11,10 @@ right architectural choice. The two-tier split also makes sense: Tier 1 avoids
 SPDK changes by catching replicas up out of band and admitting them only at
 reassembly; Tier 2 is correctly left as an optional hot-rejoin optimization.
 
-The main issue is narrower: **§5's correctness proof overstates what
-`back-off + revert` proves.** The procedure can still be correct, but the proof
-needs to name the other mechanisms it relies on.
+The main remaining item is a **clarity improvement**: §5's correctness
+narrative should explicitly tie together the load-bearing pieces it already
+relies on (backed-off base selection, revert-to-`E_b`, copying from `R_src`'s
+`E_b`, and the fenced final delta before standby admission).
 
 ## Core Findings
 

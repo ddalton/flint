@@ -18,6 +18,10 @@ detected only by I/O, PV replica health is never updated, and `autoRebuild` is
 a no-op. §9 phase 0 and §10-1 updated accordingly; the Tier-1 cornerstone
 (`bdev_raid_create` admits equalized bases as in-sync, zero copy) was also
 **demonstrated live** during recovery validation.
+Post-review clarification (2026-06-11): §5 retention now explicitly scopes
+epoch cleanup to internal rebuild-owned snapshots only; user-created CSI
+`VolumeSnapshot`s remain governed by Kubernetes snapshot lifecycle and must not
+be garbage-collected by the rebuild scheduler.
 
 **What changed in rev 3** (same day, after a four-lens adversarial review):
 §3's mitigation was corrected — deleting a phantom raid is *not* enough, the
@@ -394,6 +398,15 @@ snapshot RPCs are far older.
   annotation so it survives orchestrator restarts). Deleting epochs *older*
   than every replica's base is always safe — deletion merges the snapshot's
   clusters into its descendant.
+  **Ownership boundary:** this retention rule applies only to internal
+  rebuild-owned epoch snapshots (`epoch-<vol>-<seq>`). User-created CSI
+  `VolumeSnapshot` snapshots are governed by the Kubernetes
+  `VolumeSnapshot`/`VolumeSnapshotContent` lifecycle and deletion policy, and
+  must never be garbage-collected by the rebuild scheduler. The scheduler should
+  identify its own snapshots explicitly (name prefix plus PV annotation/state)
+  and delete only those; if an internal epoch participates in a lineage that a
+  user snapshot still depends on, cleanup must rely on the blobstore's
+  snapshot-delete merge semantics rather than raw removal assumptions.
   Note the sb region caveat: with `superblock: true` the raid sb occupies the
   first 1 MiB of each replica lvol and *changes on membership events*
   (`seq_number` bump marking R_dst FAILED), so the copied delta will faithfully
