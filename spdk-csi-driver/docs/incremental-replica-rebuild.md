@@ -22,6 +22,15 @@ Post-review clarification (2026-06-11): §5 retention now explicitly scopes
 epoch cleanup to internal rebuild-owned snapshots only; user-created CSI
 `VolumeSnapshot`s remain governed by Kubernetes snapshot lifecycle and must not
 be garbage-collected by the rebuild scheduler.
+The same review also tightened §5's correctness note: the catch-up proof now
+rests explicitly on three pieces — backed-off base, revert, and copying
+`E_b`'s **own** snapshot (the piece that handles ordinary cut skew, including
+the `E_latest = E_b` case that the final delta does *not* cover) — plus
+withholding `in_sync` until the fenced final delta at reassembly, and §5
+step 4 now marks the copy loop `E_b`-inclusive as load-bearing. The Tier-1
+cornerstone (`bdev_raid_create` admits equalized bases, no rebuild) is called
+out as a regression test the phase-3/4 cluster suite must pin. The review
+file was folded into these revisions and removed.
 
 **What changed in rev 3** (same day, after a four-lens adversarial review):
 §3's mitigation was corrected — deleting a phantom raid is *not* enough, the
@@ -385,7 +394,9 @@ snapshot RPCs are far older.
   3. Attach R_dst as a bdev on R_src's node (`bdev_nvme_attach_controller`),
      then run the §3 examine discipline **on R_src's node too** — the attached
      R_dst bdev carries a valid raid sb and will spawn a phantom there.
-  4. For each epoch `E_b → … → E_latest`: `bdev_lvol_start_shallow_copy`
+  4. For each epoch `E_b → … → E_latest` — **`E_b` inclusive**; copying
+     `E_b`'s own snapshot is load-bearing, not an off-by-one (see the
+     correctness note) — `bdev_lvol_start_shallow_copy`
      of the epoch snapshot to the attached R_dst bdev; poll
      `bdev_lvol_check_shallow_copy`. Online; the volume keeps serving degraded.
      A destination-side allocation failure (R_dst's lvolstore ENOSPC) surfaces
@@ -423,16 +434,32 @@ snapshot RPCs are far older.
 Epoch snapshots are cut per-replica while writes flow through the raid, so
 replica A's `epoch-N` and replica B's `epoch-N` are **not byte-identical** — a
 write racing the cut can land inside one replica's snapshot and after the
-other's. That alone is harmless; what makes the catch-up correct is the
-combination of the **back-off base** and the **revert step** above. The honest
+other's. That alone is harmless, but only because of how the pieces compose.
+The catch-up proof rests on **three pieces** — the **backed-off base** `E_b`,
+the **revert** of R_dst to its own `E_b`, and **copying R_src's `E_b`
+snapshot itself** before the subsequent deltas (step 4 is `E_b`-inclusive) —
+and even then the standby is consistent only up to the latest copied epoch:
+it must not be admitted `in_sync` until the fenced **final delta** at
+reassembly (§6) completes. No two of these pieces are sufficient. The honest
 argument, including the parts a naive version gets wrong:
 
-- *Steady state:* raid1 acknowledges a write only after all live bases complete
-  it, so R_dst holds every write acknowledged while it was healthy, and any
-  byte where R_dst lags R_src's final state was written on R_src after R_src's
-  base-epoch cut — the copied chain (every cluster R_src changed since its own
-  `E_b`) is a superset of that lag. Torn multi-cluster writes at a cut are
-  benign for the same reason: the argument is per-cluster, not per-IO.
+- *Steady state and cut skew (why `E_b` itself is copied):* raid1
+  acknowledges a write only after all live bases complete it, so R_dst holds
+  every write acknowledged while it was healthy — but after the revert,
+  "holds" means "held at R_dst's own `E_b` cut", and the two replicas' cuts
+  are skewed. An acked write landing between the cuts sits *inside* R_src's
+  `E_b` yet *after* R_dst's: the revert discards it from R_dst, no post-`E_b`
+  delta ever contains it (its clusters are allocated in R_src's `E_b`, not
+  later), and the final delta at reassembly misses it for the same reason —
+  a chain defined as "changes since `E_b`" loses that write permanently,
+  including in the degenerate `E_latest = E_b` case where the per-epoch loop
+  would otherwise copy nothing at all. Copying `E_b`'s own snapshot (its
+  allocated clusters — the `E_(b-1) → E_b` delta) is what re-supplies it.
+  With `E_b` included, the chain covers every cluster R_src changed since
+  its `E_(b-1)` cut — a window that brackets R_dst's `E_b` cut by a full
+  `T_snap` on each side, swamping both cut skew and I/O lifetimes. Torn
+  multi-cluster writes at a cut are benign for the same reason: the argument
+  is per-cluster, not per-IO.
 - *The failure window (why the last common epoch is NOT a safe base):* raid1's
   completion starts at FAILED and a **single successful leg flips it to
   SUCCESS** (`raid1.c:286-305`, `bdev_raid.c:702-714`), with the failed base
@@ -450,12 +477,24 @@ argument, including the parts a naive version gets wrong:
   on R_src's (and was never acked), or zombie loopback writes (§3). R_src's
   chain never touches those clusters, so without step 0 they would survive
   catch-up as permanent divergence. Reverting R_dst's head to its own `E_b`
-  discards them; acked writes that the revert also discards are, by the
-  back-off argument, all present in R_src's chain and get re-copied.
+  discards them; acked writes that the revert also discards are all present
+  in R_src's chain and get re-copied — by the back-off argument for writes
+  near the failure, and by the `E_b`-inclusive copy for writes merely racing
+  the base-epoch cut.
+- *The admission boundary:* a fully chased standby still trails by whatever
+  landed after the latest copied epoch. The transition to `in_sync` —
+  and with it eligibility as a raid member and read source — happens only
+  after the §6 reassembly sequence's fenced final delta, never on copy
+  completion alone.
 
-With back-off + revert, no quiesce is needed at epoch-cut time. (A Tier-2 raid
-quiesce RPC could shrink `T_back` to zero by making cuts atomic, but it is not
-required for correctness.)
+With the three pieces composed — and `in_sync` withheld until the fenced
+final delta — no quiesce is needed at epoch-cut time. (A Tier-2 raid quiesce
+RPC could shrink `T_back` to zero by making cuts atomic, but it is not
+required for correctness.) Tier 1 additionally stands on `bdev_raid_create`
+admitting equalized bases as in-sync with no rebuild (§6, demonstrated live
+during the phase-0 recovery validation); the phase-3/4 cluster suite must pin
+that invariant with a regression test — an SPDK version bump could silently
+change it.
 
 ### Tunables and space overhead
 
