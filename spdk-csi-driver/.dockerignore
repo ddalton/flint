@@ -1,0 +1,11 @@
+# Rust build artifacts: ~9 GB, never COPY'd by any Dockerfile
+target/
+
+# Not needed inside images
+docs/
+tests/
+helm/
+spdk-benchmark/
+spdk-benchmark-c/
+*.md
+*.adoc

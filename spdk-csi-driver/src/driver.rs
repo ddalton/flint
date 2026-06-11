@@ -1702,6 +1702,7 @@ impl SpdkCsiDriver {
             &replica.node_name,
             &replica.lvol_uuid,
             &format!("{}_{}", volume_id, replica_index),
+            &self.node_id,
         ).await?;
 
         // Attach NVMe-oF target from current node
@@ -1906,8 +1907,12 @@ impl SpdkCsiDriver {
         .into())
     }
 
-    /// Setup NVMe-oF target and return connection info
-    pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
+    /// Setup NVMe-oF target and return connection info. `consumer_node` is
+    /// the node whose kernel/SPDK initiator will connect — the fencing
+    /// whitelist admits exactly that host, so the caller must pass the real
+    /// consumer (ControllerPublish runs in the controller process, where
+    /// `self.node_id` is the controller pod, not the consumer).
+    pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str, consumer_node: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
 
         let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
@@ -1919,10 +1924,10 @@ impl SpdkCsiDriver {
         // only issues the RPCs that are missing, so a partially-created export
         // from an earlier failed attempt is completed instead of failing on
         // duplicates (phase 0 fix; see docs/phase0-hazard-repro-2026-06-10.md).
-        // Fencing: this node is the consumer doing the staging, so it is the
-        // single admitted host — staging IS the fence flip that locks out a
-        // previous consumer (doc §3).
-        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&self.node_id)];
+        // Fencing: the consumer doing the staging is the single admitted
+        // host — staging IS the fence flip that locks out a previous
+        // consumer (doc §3).
+        let allowed = vec![crate::nvmeof_export::flint_host_nqn(consumer_node)];
         let transport = crate::nvmeof_export::NodeAgentTransport { driver: self, node_name };
         let spec = crate::nvmeof_export::ExportSpec {
             nqn: &nqn,

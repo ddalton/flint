@@ -1456,11 +1456,15 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     // Construct bdev name for lvol
                     let bdev_name = volume_info.lvol_uuid.clone();
                     
-                    // Setup NVMe-oF target on the node hosting the logical volume
+                    // Setup NVMe-oF target on the node hosting the logical
+                    // volume. The consumer is the node the pod runs on
+                    // (req.node_id) — fencing admits that host, not this
+                    // controller.
                     let conn_info = match self.driver.setup_nvmeof_target_on_node(
                         &volume_info.node_name,
                         &bdev_name,
-                        &volume_id
+                        &volume_id,
+                        &node_id
                     ).await {
                         Ok(info) => info,
                         Err(e) => {
