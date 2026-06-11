@@ -81,11 +81,35 @@ pub struct ReplicaSyncRecord {
     pub reason: Option<String>,
 }
 
+/// One retained common epoch (phase 2). An epoch is recorded here only after
+/// its snapshot was cut on *every* in-sync replica — that is what "common"
+/// means and what the §5 catch-up correctness argument relies on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpochEntry {
+    pub name: String,
+    /// RFC3339 time the epoch was recorded common. A conservative upper
+    /// bound on every per-replica cut time (an EEXIST-converged retry may
+    /// have cut a replica earlier) — phase 3's `T_back` back-off must
+    /// compare against this, which only ever errs toward an older, safer
+    /// base epoch.
+    pub recorded_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VolumeSyncRecord {
     /// The volume's current common epoch name (phase 2 owns this).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_epoch: Option<String>,
+    /// Retained common epochs, oldest first; the newest entry is
+    /// `current_epoch`. Maintained by the epoch scheduler (phase 2);
+    /// serde defaults keep records written by phase-1 builds parseable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epochs: Vec<EpochEntry>,
+    /// Oldest epoch a pending or active catch-up still needs (§5 retention
+    /// pinning). Phase 3 sets it; the scheduler refuses to retire this
+    /// epoch or anything newer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_pin: Option<String>,
     pub replicas: Vec<ReplicaSyncRecord>,
 }
 
@@ -96,6 +120,8 @@ impl VolumeSyncRecord {
     pub fn initial(replicas: &[ReplicaInfo]) -> Self {
         VolumeSyncRecord {
             current_epoch: None,
+            epochs: Vec::new(),
+            retention_pin: None,
             replicas: replicas
                 .iter()
                 .map(|r| ReplicaSyncRecord {
@@ -166,6 +192,93 @@ impl VolumeSyncRecord {
             _ => false,
         }
     }
+
+    /// Highest epoch sequence number recorded for this volume (0 if none).
+    /// The next cut uses this + 1, so a sequence number is never reused even
+    /// after old epochs are retired.
+    pub fn latest_epoch_seq(&self, volume_id: &str) -> u64 {
+        self.epochs
+            .iter()
+            .filter_map(|e| epoch_seq(volume_id, &e.name))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Record a common epoch after its snapshot was cut on every in-sync
+    /// replica: append the entry, advance current_epoch, and stamp
+    /// last_epoch on exactly the replicas that were cut (a stale replica's
+    /// last_epoch stays frozen at the last epoch it participated in).
+    /// Idempotent — the resourceVersion-guarded writer may re-apply.
+    pub fn apply_epoch_cut(&mut self, epoch: &str, cut_lvol_uuids: &[String], now_rfc3339: &str) {
+        if !self.epochs.iter().any(|e| e.name == epoch) {
+            self.epochs.push(EpochEntry {
+                name: epoch.to_string(),
+                recorded_at: now_rfc3339.to_string(),
+            });
+        }
+        self.current_epoch = Some(epoch.to_string());
+        for rec in &mut self.replicas {
+            if cut_lvol_uuids.iter().any(|u| *u == rec.lvol_uuid) {
+                rec.last_epoch = Some(epoch.to_string());
+            }
+        }
+    }
+
+    /// Drop retired epochs from the record, oldest-first, refusing to retire
+    /// the current epoch, the pinned epoch or anything newer (§5 retention
+    /// pinning — the pin may have appeared between plan and write, so this
+    /// re-checks), or anything once an unparseable name is hit (epochs merge
+    /// from the oldest end; skipping would break that discipline). Returns
+    /// the names actually removed — node-side snapshot deletion is the GC
+    /// pass's job, keyed off the updated record.
+    pub fn retire_epochs(&mut self, volume_id: &str, names: &[String]) -> Vec<String> {
+        let pin_seq = match &self.retention_pin {
+            // An unparseable pin pins everything (conservative).
+            Some(pin) => match epoch_seq(volume_id, pin) {
+                Some(seq) => Some(seq),
+                None => return Vec::new(),
+            },
+            None => None,
+        };
+
+        let mut retired = Vec::new();
+        for name in names {
+            if self.current_epoch.as_deref() == Some(name.as_str()) {
+                break;
+            }
+            let Some(seq) = epoch_seq(volume_id, name) else { break };
+            if let Some(pin) = pin_seq {
+                if seq >= pin {
+                    break;
+                }
+            }
+            let before = self.epochs.len();
+            self.epochs.retain(|e| e.name != *name);
+            if self.epochs.len() < before {
+                retired.push(name.clone());
+            }
+        }
+        retired
+    }
+}
+
+/// Common-epoch snapshot name: `epoch-<volume>-<seq>` (§5). The lvol name
+/// limit is 63 chars: "epoch-" + a 40-char PV name + "-" + seq leaves 16
+/// digits of headroom, far beyond any realistic sequence number.
+pub fn epoch_name(volume_id: &str, seq: u64) -> String {
+    format!("epoch-{}-{}", volume_id, seq)
+}
+
+/// Parse the sequence number out of one of this volume's epoch names.
+/// None for anything else (other volumes' epochs, user snapshots) — callers
+/// use this as the "is it ours" filter, so it must stay strict.
+pub fn epoch_seq(volume_id: &str, name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("epoch-")?.strip_prefix(volume_id)?;
+    let digits = rest.strip_prefix('-')?;
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// The base bdev name `connect_to_nvmeof_target` produces for a remote
@@ -582,5 +695,89 @@ mod tests {
         // Unknown fields from a newer build must not break older parsers.
         let forward = r#"{"current_epoch":null,"replicas":[],"future_field":1}"#;
         assert!(VolumeSyncRecord::from_annotation(forward).is_ok());
+    }
+
+    #[test]
+    fn phase1_record_without_epoch_fields_parses() {
+        // Records written by phase-1 builds have no epochs/retention_pin.
+        let phase1 = r#"{"current_epoch":null,"replicas":[{"node_name":"n","node_uid":"u","lvol_uuid":"x","sync_state":"in_sync"}]}"#;
+        let record = VolumeSyncRecord::from_annotation(phase1).unwrap();
+        assert!(record.epochs.is_empty());
+        assert_eq!(record.retention_pin, None);
+    }
+
+    #[test]
+    fn epoch_naming_roundtrip_and_strictness() {
+        let name = epoch_name("pvc-123", 7);
+        assert_eq!(name, "epoch-pvc-123-7");
+        assert_eq!(epoch_seq("pvc-123", &name), Some(7));
+        // Other volumes' epochs — including ones whose id is a prefix of
+        // ours extended by '-' — must not match.
+        assert_eq!(epoch_seq("pvc-123", "epoch-pvc-456-7"), None);
+        assert_eq!(epoch_seq("pvc-123", "epoch-pvc-123-extra-7"), None);
+        // User snapshots and junk must not parse.
+        assert_eq!(epoch_seq("pvc-123", "snap_pvc-123_170000"), None);
+        assert_eq!(epoch_seq("pvc-123", "epoch-pvc-123-"), None);
+        assert_eq!(epoch_seq("pvc-123", "epoch-pvc-123-7x"), None);
+    }
+
+    #[test]
+    fn apply_epoch_cut_records_and_freezes_stale_last_epoch() {
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-c", "leg failed", "t0");
+
+        let cut = vec!["uuid-a".to_string(), "uuid-b".to_string()];
+        record.apply_epoch_cut("epoch-vol1-1", &cut, "t1");
+        assert_eq!(record.current_epoch.as_deref(), Some("epoch-vol1-1"));
+        assert_eq!(record.epochs.len(), 1);
+        assert_eq!(record.latest_epoch_seq("vol1"), 1);
+        assert_eq!(record.get("uuid-a").unwrap().last_epoch.as_deref(), Some("epoch-vol1-1"));
+        // The stale replica did not participate: last_epoch stays frozen.
+        assert_eq!(record.get("uuid-c").unwrap().last_epoch, None);
+
+        // Idempotent re-apply (resourceVersion conflict retry).
+        record.apply_epoch_cut("epoch-vol1-1", &cut, "t2");
+        assert_eq!(record.epochs.len(), 1);
+        assert_eq!(record.epochs[0].recorded_at, "t1");
+
+        record.apply_epoch_cut("epoch-vol1-2", &cut, "t3");
+        assert_eq!(record.latest_epoch_seq("vol1"), 2);
+        assert_eq!(record.epochs.len(), 2);
+    }
+
+    #[test]
+    fn retire_epochs_respects_pin_and_current() {
+        let mut record = three_replica_record();
+        let all = vec!["uuid-a".to_string(), "uuid-b".to_string(), "uuid-c".to_string()];
+        for seq in 1..=5 {
+            record.apply_epoch_cut(&epoch_name("vol1", seq), &all, "t");
+        }
+
+        // No pin: requested epochs retire oldest-first.
+        let retired = record.retire_epochs(
+            "vol1",
+            &[epoch_name("vol1", 1), epoch_name("vol1", 2)],
+        );
+        assert_eq!(retired, vec![epoch_name("vol1", 1), epoch_name("vol1", 2)]);
+        assert_eq!(record.epochs.len(), 3);
+
+        // Pin at epoch 4: epoch 3 (< pin) retires; 4 is blocked by the pin
+        // (not by the current-epoch guard — current is 5) and blocking is
+        // prefix semantics, so nothing after it is considered either.
+        record.retention_pin = Some(epoch_name("vol1", 4));
+        let retired = record.retire_epochs(
+            "vol1",
+            &[epoch_name("vol1", 3), epoch_name("vol1", 4)],
+        );
+        assert_eq!(retired, vec![epoch_name("vol1", 3)]);
+        assert_eq!(record.epochs.len(), 2);
+
+        // The current epoch never retires, pin or not.
+        record.retention_pin = None;
+        assert!(record.retire_epochs("vol1", &[epoch_name("vol1", 5)]).is_empty());
+
+        // Unparseable pin pins everything.
+        record.retention_pin = Some("garbage".to_string());
+        assert!(record.retire_epochs("vol1", &[epoch_name("vol1", 4)]).is_empty());
     }
 }

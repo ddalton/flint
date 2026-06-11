@@ -877,6 +877,42 @@ Rejected alternatives:
    raid-status/replace RPCs also route to `localhost:5260` instead of the
    per-node agent and need fixing) or fold into existing loops (node agent's 30s
    interval; controller's capacity-cache refresh loop).
+
+   **Implementation status (2026-06-11):** implemented on `main` as
+   `epoch_scheduler.rs`; unit-tested, not yet cluster-validated (e2e is
+   deferred until phases 3/4 complete, then exercised together). Hosting
+   decided: a background loop in the **controller process** (single
+   coordinator that already reaches every node agent; the operator binary
+   stays dead). **Default-disabled** via `FLINT_EPOCH_SCHEDULER=enabled`
+   (+`FLINT_EPOCH_INTERVAL_SECS`, default 300; `FLINT_EPOCH_RETAIN`,
+   default 6) until the phase-3/4 consumers exist — epochs cost snapshot
+   space (up to 2× on pre-1.1 thick volumes, §5) and heal nothing alone.
+   Mechanics: 60s tick over this driver's multi-replica PVs; cuts
+   `epoch-<vol>-<seq>` via each replica node's agent on **attached**
+   volumes only (detached = no writes to capture), on **in-sync** replicas
+   only (per the phase-1 record — degraded volumes keep cutting on
+   survivors, which is exactly the delta a stale replica will need).
+   All-or-abort: the epoch is recorded common (appended to the record's
+   new `epochs[{name, recorded_at}]` list, `current_epoch` advanced,
+   `last_epoch` stamped on cut replicas only) only when every in-sync
+   replica's snapshot succeeded; failures roll back best-effort and emit
+   `EpochCutFailed`. "Already exists" converges (a leftover from an
+   aborted attempt is the same head cut earlier — §5's skew argument
+   tolerates that; `recorded_at` is then an upper bound on the true cut
+   time, which errs the phase-3 `T_back` back-off toward an older, safer
+   base). Retention retires oldest-first, record-first; node-side
+   snapshots are reaped by a convergent GC pass that deletes only epochs
+   **below** the retained window (a record rebuilt after annotation loss
+   has an empty epoch list and GCs nothing). GC observes §5's ownership
+   boundary: only names parsing strictly as `epoch-<vol>-<seq>` are ever
+   candidates, so user CSI `VolumeSnapshot`s are never touched, and a
+   delete blocked by a user clone is left to the blobstore's
+   snapshot-delete merge semantics and retried. The record gains
+   `retention_pin` — phase 3 sets it; `retire_epochs` re-checks it at
+   write time, refusing the pinned epoch and everything newer. Sequence
+   numbers never reuse retired epochs'. Deferred: write-volume-adaptive
+   `T_snap` (§10-4), per-StorageClass opt-in, lag metrics (§6) — and the
+   §10-3/§10-4 measurements need the live cluster.
 3. **Catch-up orchestrator**: detect returned replica → hygiene → bulk
    shallow-copy → epoch chasing (warm standby). *Control plane.*
 4. **Tier 1 reassembly admission**: final delta at NodeStage + standby inclusion

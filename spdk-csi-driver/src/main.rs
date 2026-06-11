@@ -192,6 +192,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spdk_csi_driver::snapshot::preflight::log_preflight_result(&preflight);
     }
 
+    // Epoch snapshot scheduler (incremental-rebuild phase 2) — controller
+    // role: common epochs need a single coordinator that can reach every
+    // replica's node agent (assumes one controller instance, as CreateVolume
+    // placement already does). Default-disabled until the phase-3/4
+    // consumers of epochs exist: epochs cost snapshot space on every
+    // multi-replica volume and heal nothing on their own yet.
+    if mode == "controller" || mode == "all" {
+        let epoch_cfg = spdk_csi_driver::epoch_scheduler::EpochConfig::from_env();
+        if epoch_cfg.enabled {
+            println!(
+                "⏱️ [EPOCH] Epoch snapshot scheduler enabled (interval: {}s, retain: {})",
+                epoch_cfg.interval.as_secs(),
+                epoch_cfg.retain
+            );
+            let epoch_driver = driver.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::epoch_scheduler::run_epoch_scheduler(epoch_driver, epoch_cfg)
+                    .await;
+            });
+        } else {
+            println!("ℹ️ [EPOCH] Epoch snapshot scheduler disabled (set FLINT_EPOCH_SCHEDULER=enabled to activate)");
+        }
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;
