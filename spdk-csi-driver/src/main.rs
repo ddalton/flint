@@ -867,7 +867,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         let thin_provision = req.parameters.get("thinProvision")
             .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let nfs_empty_dir = req.parameters.get("nfsEmptyDir")
             .map(|v| v == "true")

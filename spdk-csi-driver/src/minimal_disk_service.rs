@@ -1663,7 +1663,7 @@ impl MinimalDiskService {
                 let lvol_name = params["lvol_name"].as_str().unwrap_or("");  
                 let size_mib = params["size_in_mib"].as_u64().unwrap_or(0);
                 let size_bytes = size_mib * 1024 * 1024;
-                let thin_provision = params["thin_provision"].as_bool().unwrap_or(false);
+                let thin_provision = params["thin_provision"].as_bool().unwrap_or(true);
                 
                 eprintln!("   lvol_name: {}, size: {} MiB, thin: {}", lvol_name, size_mib, thin_provision);
                 

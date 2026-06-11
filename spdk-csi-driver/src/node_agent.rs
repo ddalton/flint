@@ -1962,8 +1962,12 @@ pub struct CreateLvolRequest {
     pub lvs_name: String,
     pub volume_id: String,
     pub size_bytes: u64,
-    #[serde(default)]
+    #[serde(default = "default_thin_provision")]
     pub thin_provision: bool,
+}
+
+fn default_thin_provision() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)] 

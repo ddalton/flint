@@ -142,7 +142,7 @@ storageClass:
   parameters:
     numReplicas: "1"  # Single replica (default). Set to "2" or "3" for multi-replica HA (not yet implemented)
     autoRebuild: "true"
-    thinProvision: "false"  # Set to "true" for thin provisioning (space allocated on write)
+    thinProvision: "true"  # Thin provisioning (space allocated on write). Set to "false" for thick (full allocation up front; note: the first snapshot converts the head to thin and pins the full image — see docs/incremental-replica-rebuild.md §5)
     nfsEmptyDir: "false"  # Set to "true" for Kind/dev clusters (bypasses kernel block device requirement)
 
 # VolumeSnapshotClass configuration
