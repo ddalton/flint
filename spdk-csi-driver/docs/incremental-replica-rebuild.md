@@ -814,6 +814,22 @@ Rejected alternatives:
    verified; the old inline ctrlr.c seds became `nvmf-hostlog.patch` — they
    would mis-apply on v26.05). Remaining: cluster acceptance test = re-run
    the repro scenarios and observe convergence instead of bricking.
+
+   **Functional validation (2026-06-11, v1.1.1):** the standard kuttl suite
+   (`tests/system/kuttl-testsuite.yaml`, 8 tests: cross-node RWO migration,
+   pvc-clone, volume-expansion, snapshot-restore, ROX multi-pod, RWX/NFS,
+   ephemeral-inline, multi-replica raid assembly) is green on a live 4-node
+   i4i.large cluster running the 1.1.1 images. The suite caught one phase-0
+   regression before release: the controller-path export passed its own
+   `node_id` (the controller pod) as the fencing consumer, so every
+   cross-node single-replica NodeStage was rejected at
+   `bdev_nvme_attach_controller` with EIO — five of eight tests failed on
+   1.1.0. Fixed by threading the consumer node (`req.node_id`) through
+   `setup_nvmeof_target_on_node` (commit `cdbd213`); the node-side
+   multi-replica path was already correct. Still open: re-run the §3 repro
+   scenarios (replica-node reboot → phantom raid; restage → EEXIST) on the
+   fixed build and observe convergence, plus the isolated clean-shutdown
+   suite (`kuttl-testsuite-clean-shutdown.yaml`).
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
    plane.*
