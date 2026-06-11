@@ -136,6 +136,13 @@ pub struct VolumeSyncRecord {
     /// epoch or anything newer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_pin: Option<String>,
+    /// Tombstones for deleted user snapshots whose copies could not be
+    /// removed from every replica at delete time (§11, phase 5b). Reaping
+    /// is tombstone-driven, never absence-driven: the catch-up reconciles
+    /// these at heal time and clears each entry once every current replica
+    /// confirms absence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_snapshots: Vec<String>,
     pub replicas: Vec<ReplicaSyncRecord>,
 }
 
@@ -148,6 +155,7 @@ impl VolumeSyncRecord {
             current_epoch: None,
             epochs: Vec::new(),
             retention_pin: None,
+            deleted_snapshots: Vec::new(),
             replicas: replicas
                 .iter()
                 .map(|r| ReplicaSyncRecord {
@@ -334,6 +342,40 @@ impl VolumeSyncRecord {
             .unwrap_or(0)
     }
 
+    /// Name of the newest recorded epoch (by sequence number), if any —
+    /// the target of every copy session (§11 lineage walk).
+    pub fn latest_epoch(&self, volume_id: &str) -> Option<&str> {
+        self.epochs
+            .iter()
+            .filter_map(|e| epoch_seq(volume_id, &e.name).map(|seq| (seq, e.name.as_str())))
+            .max_by_key(|(seq, _)| *seq)
+            .map(|(_, name)| name)
+    }
+
+    /// Record a tombstone for a deleted user snapshot whose copy could not
+    /// be removed from every replica (§11 deletion). Only names strictly
+    /// parseable as this volume's user snapshots are accepted — reaping is
+    /// tombstone-driven and the tombstone set must never be able to name
+    /// anything we don't own. Returns true if newly added.
+    pub fn add_snapshot_tombstone(&mut self, volume_id: &str, name: &str) -> bool {
+        if user_snapshot_ts(volume_id, name).is_none() {
+            return false;
+        }
+        if self.deleted_snapshots.iter().any(|t| t == name) {
+            return false;
+        }
+        self.deleted_snapshots.push(name.to_string());
+        true
+    }
+
+    /// Drop a tombstone once every current replica has confirmed the copy
+    /// is gone. Returns true if it was present.
+    pub fn clear_snapshot_tombstone(&mut self, name: &str) -> bool {
+        let before = self.deleted_snapshots.len();
+        self.deleted_snapshots.retain(|t| t != name);
+        self.deleted_snapshots.len() < before
+    }
+
     /// Record a common epoch after its snapshot was cut on every in-sync
     /// replica: append the entry, advance current_epoch, and stamp
     /// last_epoch on exactly the replicas that were cut (a stale replica's
@@ -409,6 +451,35 @@ pub fn epoch_seq(volume_id: &str, name: &str) -> Option<u64> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// Parse the timestamp/id suffix out of one of this volume's user snapshot
+/// names (`snap_<volume>_<suffix>`, snapshot_csi.rs). None for anything
+/// else — like `epoch_seq`, callers use this as the "is it ours" filter
+/// (alignment and tombstone reaping must never touch foreign names), so it
+/// must stay strict.
+pub fn user_snapshot_ts(volume_id: &str, name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("snap_")?.strip_prefix(volume_id)?;
+    let digits = rest.strip_prefix('_')?;
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Split a name-shaped CSI snapshot id (`snap_<volume>_<suffix>`) into its
+/// volume id and suffix. Multi-replica snapshots use the NAME as the CSI
+/// snapshot id (phase 5b) — there is one copy per replica, each with its
+/// own uuid, so only the common name identifies the snapshot; conveniently
+/// it also embeds the source volume. Single-replica snapshot ids are SPDK
+/// uuids and never parse here.
+pub fn parse_user_snapshot_id(snapshot_id: &str) -> Option<(&str, u64)> {
+    let rest = snapshot_id.strip_prefix("snap_")?;
+    let (volume_id, suffix) = rest.rsplit_once('_')?;
+    if volume_id.is_empty() {
+        return None;
+    }
+    suffix.parse().ok().map(|ts| (volume_id, ts))
 }
 
 /// The base bdev name `connect_to_nvmeof_target` produces for a remote
@@ -1056,6 +1127,58 @@ mod tests {
     fn record_pv_name_strips_synthetic_nfs_handle() {
         assert_eq!(record_pv_name("pvc-123"), "pvc-123");
         assert_eq!(record_pv_name("nfs-server-pvc-123"), "pvc-123");
+    }
+
+    #[test]
+    fn user_snapshot_naming_roundtrip_and_strictness() {
+        assert_eq!(user_snapshot_ts("pvc-123", "snap_pvc-123_1699999999"), Some(1699999999));
+        // Other volumes, epochs, junk: never ours.
+        assert_eq!(user_snapshot_ts("pvc-123", "snap_pvc-456_1699999999"), None);
+        assert_eq!(user_snapshot_ts("pvc-123", "snap_pvc-123-extra_169"), None);
+        assert_eq!(user_snapshot_ts("pvc-123", "epoch-pvc-123-7"), None);
+        assert_eq!(user_snapshot_ts("pvc-123", "snap_pvc-123_"), None);
+        assert_eq!(user_snapshot_ts("pvc-123", "snap_pvc-123_17x"), None);
+
+        // Id-form parse (volume unknown a priori): splits at the LAST '_'.
+        assert_eq!(
+            parse_user_snapshot_id("snap_pvc-123_1699999999"),
+            Some(("pvc-123", 1699999999))
+        );
+        // A single-replica snapshot id is an SPDK uuid: never parses.
+        assert_eq!(parse_user_snapshot_id("8b2c9d7e-1234-4a5b-9c8d-7e6f5a4b3c2d"), None);
+        assert_eq!(parse_user_snapshot_id("snap__1699999999"), None);
+    }
+
+    #[test]
+    fn latest_epoch_names_newest_by_sequence() {
+        let mut record = three_replica_record();
+        assert_eq!(record.latest_epoch("vol1"), None);
+        let all = vec!["uuid-a".to_string(), "uuid-b".to_string(), "uuid-c".to_string()];
+        record.apply_epoch_cut(&epoch_name("vol1", 2), &all, "t");
+        record.apply_epoch_cut(&epoch_name("vol1", 10), &all, "t");
+        assert_eq!(record.latest_epoch("vol1"), Some("epoch-vol1-10"));
+    }
+
+    #[test]
+    fn snapshot_tombstones_are_strict_and_idempotent() {
+        let mut record = three_replica_record();
+
+        // Only this volume's user-snapshot names are ever accepted.
+        assert!(record.add_snapshot_tombstone("vol1", "snap_vol1_99"));
+        assert!(!record.add_snapshot_tombstone("vol1", "snap_vol1_99")); // dedup
+        assert!(!record.add_snapshot_tombstone("vol1", "snap_other_99"));
+        assert!(!record.add_snapshot_tombstone("vol1", "epoch-vol1-3"));
+        assert_eq!(record.deleted_snapshots, vec!["snap_vol1_99".to_string()]);
+
+        // Wire format roundtrips; phase-4 records without the field parse.
+        let parsed = VolumeSyncRecord::from_annotation(&record.to_annotation()).unwrap();
+        assert_eq!(parsed.deleted_snapshots, vec!["snap_vol1_99".to_string()]);
+        let phase4 = r#"{"current_epoch":null,"replicas":[]}"#;
+        assert!(VolumeSyncRecord::from_annotation(phase4).unwrap().deleted_snapshots.is_empty());
+
+        assert!(record.clear_snapshot_tombstone("snap_vol1_99"));
+        assert!(!record.clear_snapshot_tombstone("snap_vol1_99"));
+        assert!(record.deleted_snapshots.is_empty());
     }
 
     #[test]

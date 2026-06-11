@@ -34,15 +34,24 @@
 //   `active_lvol_uuid`. `reverted_to` marks the head as a write-virgin clone
 //   of E_b: resume skips the revert only while that exact base still stands,
 //   and any future in_sync admission (phase 4) must clear the marker.
-// - **E_b-inclusive copy** (`chain_from`): every copy session — bulk AND
-//   chase — starts at the destination's base epoch *inclusive*. For the bulk
-//   this is §5 step 4's load-bearing rule. For the chase it additionally
-//   makes switching copy sources safe: replica A's and B's cuts of the same
-//   epoch are skewed, so a chain that continued exclusive-of-base from a new
-//   source could permanently lose a write acked between the two sources'
-//   base cuts. Re-copying the base's own delta from the current source
-//   closes that window. Interrupted copies simply re-run: epoch snapshots
-//   are immutable, so re-copying the same chain onto the same head converges.
+// - **E_b-inclusive lineage copy** (`lineage_chain`, §11): every copy
+//   session — bulk, chase, AND final delta — copies the source's actual
+//   blob lineage from the destination's base epoch *inclusive* through the
+//   session's target epoch. Base-inclusivity is §5 step 4's load-bearing
+//   rule, and for the chase it additionally makes switching copy sources
+//   safe: replica A's and B's cuts of the same epoch are skewed, so a chain
+//   that continued exclusive-of-base from a new source could permanently
+//   lose a write acked between the two sources' base cuts. The chain is
+//   discovered by walking parent links on the source (NOT derived from
+//   recorded epoch names): a user `VolumeSnapshot` interleaved between two
+//   epochs splits the newer epoch's delta — shallow copy moves only
+//   clusters allocated in the source blob itself — so a name-derived chain
+//   would silently lose the slice held by the user snapshot's blob (§11
+//   delta-split hazard). The destination is re-snapshotted at every user
+//   snapshot it replays (so healed replicas re-acquire bit-identical
+//   copies; tombstoned names are not re-created) and at the target epoch.
+//   Interrupted copies simply re-run: the lineage is immutable, so
+//   re-copying the same chain onto the same head converges.
 // - **Superblock hygiene** (`clear_head_sb`): the reverted head inherits a
 //   valid raid superblock through its clone parent (reads of cluster 0 fall
 //   through to E_b). If the head were exported and attached on the source
@@ -205,6 +214,10 @@ pub trait CatchupStore: Sync {
         replica_uuid: &str,
         last_epoch: &str,
     ) -> Result<(), RpcError>;
+    /// Clear a §11 snapshot tombstone once every current replica confirmed
+    /// the deleted snapshot's copy is gone (phase 5b).
+    async fn clear_snapshot_tombstone(&self, volume_id: &str, name: &str)
+        -> Result<(), RpcError>;
     async fn emit(&self, volume_id: &str, event_type: &str, reason: &str, message: &str);
 }
 
@@ -317,6 +330,19 @@ impl CatchupStore for KubeStore {
                 "admitted at reassembly after fenced final delta",
                 &now,
             );
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn clear_snapshot_tombstone(
+        &self,
+        volume_id: &str,
+        name: &str,
+    ) -> Result<(), RpcError> {
+        let name = name.to_string();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.clear_snapshot_tombstone(&name);
         })
         .await?;
         Ok(())
@@ -481,22 +507,74 @@ pub fn select_base_epoch(
     }
 }
 
-/// The copy chain from `base` (INCLUSIVE — load-bearing, §5 step 4) through
-/// the newest retained epoch, in sequence order. If `base` itself has been
-/// retired from the record, its delta was merged into its retained successor
-/// by the snapshot-delete merge, so the surviving chain still covers it.
-pub fn chain_from(volume_id: &str, record: &VolumeSyncRecord, base: &str) -> Vec<String> {
-    let Some(base_seq) = epoch_seq(volume_id, base) else {
-        return Vec::new();
-    };
-    let mut chain: Vec<(u64, String)> = record
-        .epochs
-        .iter()
-        .filter_map(|e| epoch_seq(volume_id, &e.name).map(|seq| (seq, e.name.clone())))
-        .filter(|(seq, _)| *seq >= base_seq)
-        .collect();
-    chain.sort_by_key(|(seq, _)| *seq);
-    chain.into_iter().map(|(_, name)| name).collect()
+/// The source's actual blob lineage from `base` (INCLUSIVE — load-bearing,
+/// §5 step 4) through `target`, oldest first, discovered live by walking
+/// parent links from the source head (§11). NOT derived from recorded epoch
+/// names: a user `VolumeSnapshot` interleaved between two epochs splits the
+/// newer epoch's delta (shallow copy moves only clusters allocated in the
+/// source blob itself), so a name-derived chain would silently lose the
+/// slice held by the user snapshot's blob. Elements newer than `target`
+/// (e.g. a user snapshot cut after the newest recorded epoch) belong to a
+/// later session and are skipped. A retired epoch's merge into its
+/// descendant is reflected by construction.
+async fn lineage_chain(
+    rpc: &dyn CatchupRpc,
+    src: &ReplicaInfo,
+    target: &str,
+    base: &str,
+) -> Result<Vec<String>, RpcError> {
+    // Parent links cannot cycle (the blobstore chain is a tree); the bound
+    // is purely defensive against a corrupted fake of reality.
+    const MAX_DEPTH: usize = 4096;
+    let head_alias = format!("{}/{}", src.lvs_name, src.lvol_name);
+    let mut cursor = get_bdev(rpc, &src.node_name, &head_alias)
+        .await?
+        .ok_or_else(|| {
+            format!("source head {} not found on {}", head_alias, src.node_name)
+        })?;
+
+    let mut chain: Vec<String> = Vec::new();
+    let mut collecting = false;
+    for _ in 0..MAX_DEPTH {
+        let Some(parent) = cursor
+            .get("driver_specific")
+            .and_then(|d| d.get("lvol"))
+            .and_then(|l| l.get("base_snapshot"))
+            .and_then(|b| b.as_str())
+            .map(String::from)
+        else {
+            return Err(format!(
+                "{} not found in the source lineage on {} (walked {} to the chain root)",
+                if collecting { base } else { target },
+                src.node_name,
+                head_alias
+            )
+            .into());
+        };
+        if parent == target {
+            collecting = true;
+        }
+        if collecting {
+            chain.push(parent.clone());
+            if parent == base {
+                chain.reverse();
+                return Ok(chain);
+            }
+        }
+        cursor = get_bdev(rpc, &src.node_name, &format!("{}/{}", src.lvs_name, parent))
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "lineage element {} missing on {} (broken chain)",
+                    parent, src.node_name
+                )
+            })?;
+    }
+    Err(format!(
+        "source lineage on {} exceeds {} elements — refusing to walk further",
+        src.node_name, MAX_DEPTH
+    )
+    .into())
 }
 
 /// Pick the copy source: an in-sync replica, preferring one whose node is
@@ -883,9 +961,11 @@ async fn align_head(
     }
 }
 
-/// Copy the base-inclusive chain onto the attached destination and align the
-/// newest epoch. Shared by the bulk catch-up and the chase. Returns the
-/// epoch the destination is now consistent at.
+/// Copy the base-inclusive source lineage onto the attached destination,
+/// re-snapshotting the destination at every user snapshot it replays (§11)
+/// and at the target epoch. Shared by the bulk catch-up, the chase, and the
+/// phase-4 final delta. Returns the epoch the destination is now consistent
+/// at.
 async fn copy_chain_and_align(
     rpc: &dyn CatchupRpc,
     volume_id: &str,
@@ -898,25 +978,35 @@ async fn copy_chain_and_align(
     poll_interval: Duration,
     deadline: Option<Instant>,
 ) -> Result<String, RpcError> {
-    let chain = chain_from(volume_id, record, base);
-    if chain.is_empty() {
-        return Err(format!("no copyable epochs from base {} for {}", base, volume_id).into());
-    }
-    for epoch in &chain {
-        let src_lvol = format!("{}/{}", src.lvs_name, epoch);
-        debug!(volume_id, epoch = %epoch, src = %src.node_name, dst = %dst.node_name, "[CATCHUP] Copying epoch delta");
+    let target = record
+        .latest_epoch(volume_id)
+        .ok_or_else(|| format!("no recorded epoch to copy toward for {}", volume_id))?
+        .to_string();
+    let chain = lineage_chain(rpc, src, &target, base).await?;
+    for element in &chain {
+        let src_lvol = format!("{}/{}", src.lvs_name, element);
+        debug!(volume_id, element = %element, src = %src.node_name, dst = %dst.node_name, "[CATCHUP] Copying lineage delta");
         shallow_copy(rpc, &src.node_name, &src_lvol, dst_bdev, poll_interval, deadline).await?;
+        // §11: the head at this instant equals the source's image of this
+        // element exactly — materialize the destination's copy of each user
+        // snapshot it replays (EEXIST = its own pre-failure copy, kept).
+        // A tombstoned (deleted) snapshot is never re-created; its delta
+        // was still copied, which correctness requires.
+        if replica_sync::user_snapshot_ts(volume_id, element).is_some()
+            && !record.deleted_snapshots.iter().any(|t| t == element)
+        {
+            align_head(rpc, &dst.node_name, head_alias, element).await?;
+        }
     }
-    let newest = chain.last().expect("chain checked non-empty").clone();
-    // Degenerate single-epoch chain where the newest IS the base: the
-    // destination already holds a snapshot by this name (the revert source /
-    // the chase mark); the head now also carries the source's copy of that
-    // epoch's delta — consistent without a new snapshot (§5 correctness
-    // note, the E_latest = E_b case).
-    if newest != base {
-        align_head(rpc, &dst.node_name, head_alias, &newest).await?;
+    // Degenerate chain where the target IS the base: the destination
+    // already holds a snapshot by this name (the revert source / the chase
+    // mark); the head now also carries the source's copy of that epoch's
+    // delta — consistent without a new snapshot (§5 correctness note, the
+    // E_latest = E_b case).
+    if target != base {
+        align_head(rpc, &dst.node_name, head_alias, &target).await?;
     }
-    Ok(newest)
+    Ok(target)
 }
 
 /// Bulk catch-up of one stale replica (§5 sequence). Quietly skips while the
@@ -1391,9 +1481,53 @@ async fn admit_one_standby(
     })
 }
 
-/// One orchestrator pass over a single volume: chase every standby, then run
-/// at most one stale replica's bulk catch-up. Per-replica failures are
-/// contained (warned + evented) so one replica cannot starve the others.
+/// §11 tombstone reconcile: delete tombstoned user-snapshot copies from
+/// every replica, clearing each tombstone once ALL current replicas confirm
+/// absence (delete succeeded or copy already missing). An unreachable node
+/// or a clone-pinned copy (`-EPERM`) keeps the tombstone for a later cycle.
+/// Reaping is driven exclusively by these positively-recorded tombstones —
+/// never by a name's absence from any listing.
+async fn reconcile_snapshot_tombstones(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    record: &VolumeSyncRecord,
+    replicas: &[ReplicaInfo],
+) {
+    for name in &record.deleted_snapshots {
+        let mut all_confirmed_absent = true;
+        for replica in replicas {
+            let alias = format!("{}/{}", replica.lvs_name, name);
+            let payload = json!({ "method": "bdev_lvol_delete", "params": { "name": alias } });
+            match rpc.spdk_rpc(&replica.node_name, &payload).await {
+                Ok(_) => {}
+                Err(e) if is_missing(&e.to_string()) => {}
+                Err(e) => {
+                    debug!(
+                        volume_id, node = %replica.node_name, snapshot = %name, error = %e,
+                        "[CATCHUP] Tombstoned snapshot copy not yet deletable — keeping tombstone"
+                    );
+                    all_confirmed_absent = false;
+                }
+            }
+        }
+        if all_confirmed_absent {
+            match store.clear_snapshot_tombstone(volume_id, name).await {
+                Ok(()) => {
+                    info!(volume_id, snapshot = %name, "[CATCHUP] Deleted snapshot reconciled off every replica");
+                }
+                Err(e) => {
+                    warn!(volume_id, snapshot = %name, error = %e, "[CATCHUP] Failed to clear snapshot tombstone (retried next cycle)");
+                }
+            }
+        }
+    }
+}
+
+/// One orchestrator pass over a single volume: reconcile snapshot
+/// tombstones, chase every standby, then run at most one stale replica's
+/// bulk catch-up. Per-replica failures are contained (warned + evented) so
+/// one replica cannot starve the others.
 pub async fn run_catchup_for_volume(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
@@ -1405,6 +1539,9 @@ pub async fn run_catchup_for_volume(
     let Some(record) = store.load(volume_id).await? else {
         return Ok(()); // single-replica volume
     };
+    if !record.deleted_snapshots.is_empty() {
+        reconcile_snapshot_tombstones(rpc, store, volume_id, &record, replicas).await;
+    }
     if record.epochs.is_empty() {
         // No common epochs yet (scheduler disabled or volume too new):
         // nothing to catch up from, and nothing to classify as full-build —
@@ -1881,12 +2018,51 @@ mod tests {
             Ok(())
         }
 
+        async fn clear_snapshot_tombstone(
+            &self,
+            _volume_id: &str,
+            name: &str,
+        ) -> Result<(), RpcError> {
+            self.record.lock().unwrap().clear_snapshot_tombstone(name);
+            self.ops.lock().unwrap().push(format!("clear_tombstone:{}", name));
+            Ok(())
+        }
+
         async fn emit(&self, _volume_id: &str, event_type: &str, reason: &str, _message: &str) {
             self.events
                 .lock()
                 .unwrap()
                 .push((reason.to_string(), event_type.to_string()));
         }
+    }
+
+    /// Install a parent-linked snapshot chain plus head on a node's fake
+    /// bdev table so the §11 lineage walk can discover it. `elements` are
+    /// oldest first; the head's parent is the last element.
+    fn install_chain(rpc: &FakeRpc, node: &str, lvs: &str, head_name: &str, elements: &[&str]) {
+        let mut bdevs = rpc.bdevs.lock().unwrap();
+        let mut prev: Option<&str> = None;
+        for e in elements {
+            let mut b = json!({
+                "name": format!("uuid-of-{}", e),
+                "uuid": format!("uuid-of-{}", e),
+                "driver_specific": { "lvol": { "snapshot": true, "clone": prev.is_some() } }
+            });
+            if let Some(p) = prev {
+                b["driver_specific"]["lvol"]["base_snapshot"] = json!(p);
+            }
+            bdevs.insert((node.to_string(), format!("{}/{}", lvs, e)), b);
+            prev = Some(e);
+        }
+        let mut h = json!({
+            "name": "head-of-chain",
+            "uuid": "head-of-chain-uuid",
+            "driver_specific": { "lvol": { "snapshot": false, "clone": prev.is_some() } }
+        });
+        if let Some(p) = prev {
+            h["driver_specific"]["lvol"]["base_snapshot"] = json!(p);
+        }
+        bdevs.insert((node.to_string(), format!("{}/{}", lvs, head_name)), h);
     }
 
     // ---- pure planning --------------------------------------------------
@@ -1955,21 +2131,59 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chain_from_is_base_inclusive_and_survives_retirement() {
-        let record = stale_b_record(); // epochs 3, 4, 5
-        assert_eq!(
-            chain_from("vol1", &record, &epoch("vol1", 4)),
-            vec![epoch("vol1", 4), epoch("vol1", 5)]
+    #[tokio::test]
+    async fn lineage_walk_is_base_inclusive_and_carries_user_snapshots() {
+        let rpc = FakeRpc::new("u");
+        let src = replica("node-a", "uuid-a");
+        // Chain on the source, oldest first: a user snapshot interleaves
+        // between epochs 4 and 5 (its blob holds part of what a name-derived
+        // epoch chain would attribute to epoch 5 — the §11 split hazard),
+        // and another user snapshot is NEWER than the target epoch.
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[
+                &epoch("vol1", 3),
+                &epoch("vol1", 4),
+                "snap_vol1_88",
+                &epoch("vol1", 5),
+                "snap_vol1_99",
+            ],
         );
-        // Base retired from the record: the surviving chain still covers it
-        // (snapshot-delete merged its delta into epoch 3's successor).
+
+        // Base-inclusive from 4 through the target 5; the newer user
+        // snapshot belongs to a later session and is skipped.
+        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+            .await
+            .unwrap();
         assert_eq!(
-            chain_from("vol1", &record, &epoch("vol1", 2)),
-            vec![epoch("vol1", 3), epoch("vol1", 4), epoch("vol1", 5)]
+            chain,
+            vec![epoch("vol1", 4), "snap_vol1_88".to_string(), epoch("vol1", 5)]
         );
-        // Foreign name: nothing to copy.
-        assert!(chain_from("vol1", &record, "snap_user_1").is_empty());
+
+        // Degenerate target == base.
+        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 4), &epoch("vol1", 4))
+            .await
+            .unwrap();
+        assert_eq!(chain, vec![epoch("vol1", 4)]);
+    }
+
+    #[tokio::test]
+    async fn lineage_walk_errors_are_loud() {
+        let rpc = FakeRpc::new("u");
+        let src = replica("node-a", "uuid-a");
+
+        // No head at all.
+        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("source head"), "got: {}", err);
+
+        // Base not present in the lineage (walked to the chain root).
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), &epoch("vol1", 4))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found in the source lineage"), "got: {}", err);
     }
 
     #[test]
@@ -2248,6 +2462,10 @@ mod tests {
             );
             rpc
         };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
         let store = FakeStore::new(stale_b_record());
 
         run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
@@ -2316,6 +2534,10 @@ mod tests {
             );
             rpc
         };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
         // A previous attempt already reverted to epoch 4 and crashed.
         let mut record = stale_b_record();
         record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
@@ -2361,6 +2583,7 @@ mod tests {
             );
             rpc
         };
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 1)]);
 
         run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
             .await
@@ -2438,6 +2661,10 @@ mod tests {
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
         );
 
         run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
@@ -2520,6 +2747,10 @@ mod tests {
     #[tokio::test]
     async fn admission_full_choreography() {
         let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
         let store = FakeStore::new(standby_b_record());
 
         let admitted = admit_standbys_at_stage(
@@ -2698,6 +2929,10 @@ mod tests {
     #[tokio::test]
     async fn admission_budget_overrun_stages_degraded() {
         let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
         let store = FakeStore::new(standby_b_record());
         let cfg = StageConfig { final_delta_budget: Duration::ZERO, ..stage_cfg() };
 
@@ -2727,6 +2962,10 @@ mod tests {
         // base list as the local live lvol — no loopback export, which would
         // put an NVMe-oF hop on the data path forever.
         let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
         let store = FakeStore::new(standby_b_record());
 
         let admitted = admit_standbys_at_stage(
@@ -2751,6 +2990,134 @@ mod tests {
         );
     }
 
+    // ---- phase 5b: user snapshots in the chain + tombstones ---------------
+
+    #[tokio::test]
+    async fn chase_replays_interleaved_user_snapshot() {
+        // b is a standby at epoch 4; a user snapshot was cut between epochs
+        // 4 and 5 while b was away. The chase must copy its delta (the §11
+        // split hazard) AND materialize b's copy of it.
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record);
+
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let expected = expected_remote_base_bdev("vol1", 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected.clone()),
+            json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), "snap_vol1_88", &epoch("vol1", 5)],
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // The user snapshot's delta is copied in chain position.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        let srcs: Vec<&str> = copies
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            srcs,
+            vec!["lvs0/epoch-vol1-4", "lvs0/snap_vol1_88", "lvs0/epoch-vol1-5"]
+        );
+        // The destination is aligned at the user snapshot AND the target.
+        let snaps = rpc.calls_of("bdev_lvol_snapshot");
+        let aligned: Vec<(&str, &str)> = snaps
+            .iter()
+            .map(|(n, p)| (n.as_str(), p["params"]["snapshot_name"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            aligned,
+            vec![("node-b", "snap_vol1_88"), ("node-b", "epoch-vol1-5")]
+        );
+    }
+
+    #[tokio::test]
+    async fn tombstoned_snapshot_is_reaped_not_replayed() {
+        // The user snapshot was deleted while b was away, but its copy could
+        // not be removed everywhere — a tombstone remains. The reconcile
+        // deletes the copies and clears the tombstone; the chase still
+        // copies the snapshot's delta (correctness) but does NOT re-create
+        // the deleted snapshot on the destination.
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        assert!(record.add_snapshot_tombstone("vol1", "snap_vol1_88"));
+        let store = FakeStore::new(record);
+
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let expected = expected_remote_base_bdev("vol1", 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected.clone()),
+            json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), "snap_vol1_88", &epoch("vol1", 5)],
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // Reconcile fanned the delete to every replica node, by alias.
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        let delete_nodes: Vec<&str> = deletes.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(delete_nodes, vec!["node-a", "node-b", "node-c"]);
+        assert!(deletes.iter().all(|(_, p)| p["params"]["name"] == "lvs0/snap_vol1_88"));
+        // All confirmed absent → tombstone cleared.
+        assert!(store
+            .ops
+            .lock()
+            .unwrap()
+            .contains(&"clear_tombstone:snap_vol1_88".to_string()));
+        assert!(store.record.lock().unwrap().deleted_snapshots.is_empty());
+
+        // The delta still copied; the deleted name was NOT re-aligned.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        assert_eq!(copies.len(), 3);
+        let snaps = rpc.calls_of("bdev_lvol_snapshot");
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].1["params"]["snapshot_name"], epoch("vol1", 5));
+    }
+
+    #[tokio::test]
+    async fn tombstone_survives_unreachable_replica() {
+        let mut record = stale_b_record();
+        assert!(record.add_snapshot_tombstone("vol1", "snap_vol1_88"));
+        let store = FakeStore::new(record);
+
+        let mut rpc = FakeRpc::new("u");
+        // node-c cannot confirm deletion (unreachable / clone-pinned).
+        rpc.fail.insert(
+            ("node-c".to_string(), "bdev_lvol_delete".to_string()),
+            "connection refused".to_string(),
+        );
+        // The stale replica's node is also down → no catch-up either.
+        rpc.fail.insert(
+            ("node-b".to_string(), "bdev_lvol_get_lvols".to_string()),
+            "connection refused".to_string(),
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // Tombstone kept for the next cycle; no clear op recorded.
+        assert!(!store.ops.lock().unwrap().iter().any(|o| o.starts_with("clear_tombstone")));
+        assert_eq!(
+            store.record.lock().unwrap().deleted_snapshots,
+            vec!["snap_vol1_88".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn copy_failure_emits_event_and_keeps_replica_stale() {
         let rpc = {
@@ -2768,6 +3135,10 @@ mod tests {
                 .push("error:No space left on device".to_string());
             rpc
         };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
         let store = FakeStore::new(stale_b_record());
 
         run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())

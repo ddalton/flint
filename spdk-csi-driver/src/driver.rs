@@ -2502,6 +2502,26 @@ impl SpdkCsiDriver {
         }
     }
 
+    /// Node currently attached to this volume per its VolumeAttachment, if
+    /// any (controller-side helper; the node agent keeps an equivalent).
+    /// Used to keep snapshot-restore copy reads off the data path (§11).
+    pub async fn get_attached_node(&self, volume_id: &str) -> Option<String> {
+        use k8s_openapi::api::storage::v1::VolumeAttachment;
+        use kube::api::ListParams;
+
+        let vas: Api<VolumeAttachment> = Api::all(self.kube_client.clone());
+        let list = vas.list(&ListParams::default()).await.ok()?;
+        list.items.into_iter().find_map(|va| {
+            let source_pv = va.spec.source.persistent_volume_name.as_deref();
+            let attached = va.status.as_ref().map(|s| s.attached).unwrap_or(false);
+            if source_pv == Some(volume_id) && attached {
+                Some(va.spec.node_name)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Get list of all node names in the cluster
     /// Used by snapshot controller to query all nodes for snapshots
     pub async fn get_all_nodes(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {

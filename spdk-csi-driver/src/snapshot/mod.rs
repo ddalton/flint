@@ -23,6 +23,7 @@ pub mod snapshot_models;
 pub mod snapshot_routes;
 pub mod snapshot_csi;
 pub mod preflight;
+pub mod multi_replica;  // Multi-replica VolumeSnapshots (incremental-rebuild §11, phase 5b)
 
 // Re-export commonly used types
 pub use snapshot_service::SnapshotService;

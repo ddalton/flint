@@ -77,6 +77,20 @@ async fn lookup_volume_attributes(
     )))
 }
 
+/// Deterministic numeric suffix from the CSI snapshot request name (FNV-1a
+/// 64, rendered as the decimal the `snap_<vol>_<suffix>` parser expects).
+/// Retries of the same CreateSnapshot carry the same `name`, so the
+/// generated lvol name is stable and the multi-replica cut converges via
+/// EEXIST instead of creating a second snapshot under a fresh timestamp.
+fn stable_snapshot_suffix(csi_name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in csi_name.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Snapshot-specific CSI controller
 /// Implements only the snapshot-related RPCs - CreateSnapshot, DeleteSnapshot, ListSnapshots
 pub struct SnapshotController {
@@ -113,6 +127,13 @@ impl SnapshotController {
         // instead of looping on NOT_FOUND from the SPDK-shaped lookup.
         let volume_attrs = lookup_volume_attributes(&self.driver, &req.source_volume_id).await?;
         validate_snapshot_source(&volume_attrs)?;
+
+        // Multi-replica volumes (incremental-rebuild §11, phase 5b): one
+        // snapshot, N equivalent copies — the same name cut on every
+        // in-sync replica. The single-replica path below is untouched.
+        if let Ok(Some(replicas)) = self.driver.get_replicas_from_pv(&req.source_volume_id).await {
+            return self.create_multi_replica_snapshot(&req, &replicas).await;
+        }
 
         // Step 1: Find source volume
         let volume_info = self.driver
@@ -172,10 +193,82 @@ impl SnapshotController {
         }))
     }
 
+    /// Multi-replica CreateSnapshot (§11, phase 5b): cut the same name on
+    /// every in-sync replica via the epoch machinery (`execute_cut` —
+    /// all-or-abort, EEXIST-converges, live-uuid addressing). The CSI
+    /// snapshot id is the NAME: each copy has its own SPDK uuid, so only
+    /// the common name identifies the snapshot, and it embeds the source
+    /// volume for delete/restore resolution. Stale/standby replicas are
+    /// not cut — they acquire their copy through the catch-up's lineage
+    /// replay.
+    async fn create_multi_replica_snapshot(
+        &self,
+        req: &CreateSnapshotRequest,
+        replicas: &[crate::minimal_models::ReplicaInfo],
+    ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        use crate::replica_sync;
+        use crate::snapshot::multi_replica;
+
+        // The sync record supplies in-sync membership and live head uuids.
+        let record = replica_sync::update_sync_record(
+            &self.driver.kube_client,
+            &req.source_volume_id,
+            |_| {},
+        )
+        .await
+        .map_err(|e| Status::unavailable(format!("Cannot load replica sync record: {}", e)))?
+        .ok_or_else(|| Status::internal("multi-replica volume has no sync record"))?;
+
+        // Deterministic name: the suffix derives from the CSI request name,
+        // so external-snapshotter retries converge on the SAME copies (via
+        // the cut's EEXIST handling) instead of piling up snapshots under
+        // fresh timestamps.
+        let snapshot_name = format!(
+            "snap_{}_{}",
+            req.source_volume_id,
+            stable_snapshot_suffix(&req.name)
+        );
+        tracing::info!(
+            "📸 [SNAPSHOT_CSI] Multi-replica snapshot {} (from CSI name {})",
+            snapshot_name, req.name
+        );
+
+        let cut = multi_replica::cut_snapshot_on_replicas(
+            self.driver.as_ref(),
+            &req.source_volume_id,
+            &snapshot_name,
+            replicas,
+            &record,
+        )
+        .await
+        .map_err(|e| Status::unavailable(format!("Snapshot cut failed (retryable): {}", e)))?;
+
+        tracing::info!(
+            "✅ [SNAPSHOT_CSI] Snapshot {} cut on {} in-sync replica(s)",
+            snapshot_name,
+            cut.len()
+        );
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Ok(Response::new(CreateSnapshotResponse {
+            snapshot: Some(Snapshot {
+                snapshot_id: snapshot_name,
+                source_volume_id: req.source_volume_id.clone(),
+                creation_time: Some(prost_types::Timestamp { seconds: now as i64, nanos: 0 }),
+                ready_to_use: true,
+                size_bytes: 0, // unspecified: copies are thin per-replica deltas
+                group_snapshot_id: String::new(),
+            }),
+        }))
+    }
+
     /// Delete snapshot - CSI RPC implementation
-    /// 
+    ///
     /// Called by Kubernetes snapshot-controller when user deletes a VolumeSnapshot.
-    /// 
+    ///
     /// # Flow
     /// 1. Query all nodes to find the snapshot
     /// 2. Call node agent to delete SPDK snapshot
@@ -185,8 +278,32 @@ impl SnapshotController {
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<DeleteSnapshotResponse>, Status> {
         let req = request.into_inner();
-        
+
         tracing::info!("🗑️ [SNAPSHOT_CSI] DeleteSnapshot: {}", req.snapshot_id);
+
+        // Multi-replica name-shaped ids (§11, phase 5b): fan the delete out
+        // to every replica; tombstone whatever cannot be confirmed gone.
+        // Single-replica ids are SPDK uuids and never parse here.
+        if let Some((volume_id, _)) = crate::replica_sync::parse_user_snapshot_id(&req.snapshot_id)
+        {
+            let volume_id = volume_id.to_string();
+            match self.driver.get_replicas_from_pv(&volume_id).await {
+                Ok(Some(replicas)) => {
+                    return self
+                        .delete_multi_replica_snapshot(&volume_id, &req.snapshot_id, &replicas)
+                        .await;
+                }
+                Ok(None) => {} // single-replica volume: legacy scan below
+                Err(_) => {
+                    // The volume's PV is gone: no record to tombstone into.
+                    // Best-effort sweep — delete the named copy from every
+                    // node that still holds one (the legacy scan below stops
+                    // at the first hit, which would orphan the other copies).
+                    self.sweep_snapshot_copies_by_name(&req.snapshot_id).await;
+                    return Ok(Response::new(DeleteSnapshotResponse {}));
+                }
+            }
+        }
 
         // Query all nodes to find the snapshot
         let nodes = self.driver.get_all_nodes().await
@@ -226,8 +343,77 @@ impl SnapshotController {
         Ok(Response::new(DeleteSnapshotResponse {}))
     }
 
+    /// Multi-replica DeleteSnapshot (§11): per-replica fan-out; whatever
+    /// could not be confirmed gone (unreachable node, clone-pinned copy)
+    /// gets a tombstone in the sync record, which the catch-up reconciles
+    /// at heal time. If the tombstone cannot be recorded, the delete fails
+    /// retryably — returning success without it would leak the copy.
+    async fn delete_multi_replica_snapshot(
+        &self,
+        volume_id: &str,
+        snapshot_id: &str,
+        replicas: &[crate::minimal_models::ReplicaInfo],
+    ) -> Result<Response<DeleteSnapshotResponse>, Status> {
+        use crate::replica_sync;
+        use crate::snapshot::multi_replica;
+
+        let pending =
+            multi_replica::delete_snapshot_on_replicas(self.driver.as_ref(), snapshot_id, replicas)
+                .await;
+        if !pending.is_empty() {
+            tracing::info!(
+                "🪦 [SNAPSHOT_CSI] {} cop(ies) of {} not yet deletable — tombstoning",
+                pending.len(),
+                snapshot_id
+            );
+            let vol = volume_id.to_string();
+            let name = snapshot_id.to_string();
+            replica_sync::update_sync_record(&self.driver.kube_client, volume_id, move |r| {
+                r.add_snapshot_tombstone(&vol, &name);
+            })
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!(
+                    "Copies remain on {} replica(s) and the tombstone could not be recorded \
+                     (retry): {}",
+                    pending.len(),
+                    e
+                ))
+            })?;
+        }
+        tracing::info!("🎉 [SNAPSHOT_CSI] DeleteSnapshot {} done", snapshot_id);
+        Ok(Response::new(DeleteSnapshotResponse {}))
+    }
+
+    /// Best-effort sweep for a name-shaped snapshot id whose volume PV no
+    /// longer exists: find and delete every copy by name on every node.
+    async fn sweep_snapshot_copies_by_name(&self, snapshot_name: &str) {
+        let Ok(nodes) = self.driver.get_all_nodes().await else { return };
+        for node in nodes {
+            let listed = match self
+                .driver
+                .call_node_agent(&node, "/api/snapshots/list", &serde_json::json!({}))
+                .await
+            {
+                Ok(resp) => resp["snapshots"].as_array().cloned().unwrap_or_default(),
+                Err(_) => continue,
+            };
+            for snap in listed {
+                if snap["snapshot_name"].as_str() == Some(snapshot_name) {
+                    let payload = serde_json::json!({
+                        "snapshot_uuid": snap["snapshot_uuid"].as_str().unwrap_or("")
+                    });
+                    let _ = self
+                        .driver
+                        .call_node_agent(&node, "/api/snapshots/delete", &payload)
+                        .await;
+                }
+            }
+        }
+    }
+
     /// List snapshots - CSI RPC implementation
-    /// 
+    ///
     /// Called by Kubernetes snapshot-controller or kubectl to list snapshots.
     /// 
     /// # Flow
@@ -499,6 +685,23 @@ mod tests {
         let snapshot_name = format!("snap_{}_{}", volume_id, timestamp);
         assert!(snapshot_name.starts_with("snap_"));
         assert!(snapshot_name.contains(volume_id));
+    }
+
+    #[test]
+    fn multi_replica_snapshot_name_is_stable_and_parseable() {
+        // Same CSI request name → same suffix (retry idempotency).
+        let a = stable_snapshot_suffix("snapshot-5c2e9a1f");
+        let b = stable_snapshot_suffix("snapshot-5c2e9a1f");
+        assert_eq!(a, b);
+        assert_ne!(a, stable_snapshot_suffix("snapshot-other"));
+
+        // The generated id round-trips through the §11 id parser.
+        let name = format!("snap_pvc-abc123_{}", a);
+        assert_eq!(
+            crate::replica_sync::parse_user_snapshot_id(&name),
+            Some(("pvc-abc123", a))
+        );
+        assert_eq!(crate::replica_sync::user_snapshot_ts("pvc-abc123", &name), Some(a));
     }
 }
 

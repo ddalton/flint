@@ -1156,6 +1156,12 @@ Rejected alternatives:
    copies; presence-verified restore source selection; tombstone-driven
    deletion. *Control plane; soft prerequisite for phase 5 wherever user
    snapshots exist.*
+
+   **Implementation status (2026-06-11):** implemented on `main`
+   (`snapshot/multi_replica.rs`, the lineage walk in `catchup.rs`, CSI
+   wiring in `snapshot_csi.rs` and the restore path); unit-tested, not
+   yet cluster-validated. See the §11 status note for deviations from the
+   design sketch and known limitations.
 6. **Measure** the Tier 1 residual: time degraded with a ready standby and no
    reassembly event. *Decides Tier 2 with data.*
 7. *(Conditional)* **Tier 2**: `skip_rebuild` patch + esnap-clone hot rejoin
@@ -1226,20 +1232,49 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    semantics after restore (RFC 8881 stable-storage reclaim gating vs. today's
    allow-all-in-grace); bound the bounce-cutover outage so clients reliably
    reclaim within grace.
-11. ~~**Multi-replica `VolumeSnapshot` support**~~ **Designed 2026-06-11 —
-   see §11** (cut on every in-sync replica via the epoch machinery;
-   lineage-walk chain copy closing the delta-split hazard; align-at-snapshot
-   on heal; presence-verified restore; tombstone-driven deletion).
-   Implementation is phase 5b. Remaining to validate: the §10-3 locked-op
-   cadence now including user cuts; lineage-replay full-build data movement
-   vs. a flattened copy under rewrite-heavy workloads; restore-clone
-   pinning interplay on healed replicas (a clone pins only its own node's
-   copy).
+11. ~~**Multi-replica `VolumeSnapshot` support**~~ **Designed and
+   implemented 2026-06-11 — see §11** (cut on every in-sync replica via the
+   epoch machinery; lineage-walk chain copy closing the delta-split hazard;
+   align-at-snapshot on heal; presence-verified restore; tombstone-driven
+   deletion). Phase 5b, unit-tested; cluster validation pending. Remaining
+   to validate: the §10-3 locked-op cadence now including user cuts;
+   lineage-replay full-build data movement vs. a flattened copy under
+   rewrite-heavy workloads; restore-clone pinning interplay on healed
+   replicas (a clone pins only its own node's copy).
 
 ## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
 
-*Added 2026-06-11; answers §10-11. Implementation is phase 5b (§9). Nothing
-below is implemented yet — this section changes no shipped behavior.*
+*Added 2026-06-11; answers §10-11. Implementation is phase 5b (§9).*
+
+**Implementation status (2026-06-11):** implemented on `main` as designed;
+unit-tested (lineage walks over forests with interleaved user snapshots,
+cut targeting/rollback by live uuid, align-at-user-snapshot replay,
+tombstone convergence incl. unreachable-replica retention, restore source
+selection by verified presence), not yet cluster-validated. Deviations
+from the sketch below, all deliberate:
+- **The name suffix is not a timestamp**: multi-replica snapshot names are
+  `snap_<vol>_<fnv64(csi_request_name)>` — external-snapshotter retries
+  carry the same CSI `name`, so the lvol name is stable and the cut
+  converges via EEXIST instead of piling up snapshots under fresh
+  timestamps (the single-replica path's known idempotency wart, left
+  unchanged there). The suffix parses as the same `u64` the strict-name
+  discipline expects.
+- **`CreateSnapshot` reports `size_bytes: 0`** (unspecified) for
+  multi-replica snapshots — copies are thin per-replica deltas with no
+  single meaningful size.
+- **`DeleteSnapshot` with the volume's PV already gone** falls back to a
+  best-effort all-node sweep by name (the legacy uuid scan stops at the
+  first hit, which would orphan the other copies); with the PV present, a
+  failed tombstone write fails the delete retryably — success without the
+  tombstone would leak copies.
+- **Known limitation — `ListSnapshots`**: the node-side listing still
+  reports each copy separately under its per-node uuid, so a multi-replica
+  snapshot appears once per replica and not under its name-shaped CSI id.
+  Create/delete/restore never use the listing; revisit only if the e2e
+  shows external-snapshotter caring.
+- **Pre-existing, unchanged**: `DeleteVolume` does not reap the volume's
+  snapshot copies (true for single-replica today as well); the post-PV
+  deletion sweep above covers later `DeleteSnapshot` calls.
 
 ### Current state (verified in code)
 

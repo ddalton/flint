@@ -491,35 +491,88 @@ impl MinimalControllerService {
         eprintln!("   This log proves the NEW CODE is running!");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-        // Step 1: Find which node has the snapshot
-        let nodes = self.driver.get_all_nodes().await
-            .map_err(|e| tonic::Status::internal(format!("Failed to list nodes: {}", e)))?;
-
-        let mut snapshot_node = None;
-        
-        for node in &nodes {
-            let payload = serde_json::json!({
-                "snapshot_uuid": snapshot_id
-            });
-            
-            match self.driver.call_node_agent(node, "/api/snapshots/get_info", &payload).await {
-                Ok(_) => {
-                    snapshot_node = Some(node.clone());
-                    println!("✅ [CONTROLLER] Found snapshot on node: {}", node);
-                    break;
-                }
-                Err(_) => continue,
+        // Step 1: Locate a copy of the snapshot and the node to clone on.
+        //
+        // Multi-replica snapshots (incremental-rebuild §11, phase 5b) use
+        // the snapshot NAME as the CSI id — there is one copy per replica,
+        // so the source is picked by VERIFIED presence (listing the
+        // replica's lvols), preferring an in-sync replica off the consumer
+        // node, and the clone references the copy by its lvs/name alias.
+        // Single-replica ids are SPDK uuids: the legacy all-node scan.
+        let mut multi_source: Option<(String, String)> = None;
+        if let Some((src_volume, _)) =
+            spdk_csi_driver::replica_sync::parse_user_snapshot_id(snapshot_id)
+        {
+            if let Ok(Some(replicas)) = self.driver.get_replicas_from_pv(src_volume).await {
+                let record = spdk_csi_driver::replica_sync::update_sync_record(
+                    &self.driver.kube_client,
+                    src_volume,
+                    |_| {},
+                )
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    spdk_csi_driver::replica_sync::VolumeSyncRecord::initial(&replicas)
+                });
+                let consumer = self.driver.get_attached_node(src_volume).await;
+                let src = spdk_csi_driver::snapshot::multi_replica::pick_snapshot_source(
+                    self.driver.as_ref(),
+                    snapshot_id,
+                    &replicas,
+                    &record,
+                    consumer.as_deref(),
+                )
+                .await
+                .ok_or_else(|| {
+                    tonic::Status::not_found(format!(
+                        "No replica holds a verified copy of snapshot {}",
+                        snapshot_id
+                    ))
+                })?;
+                println!(
+                    "✅ [CONTROLLER] Snapshot copy verified on replica node: {}",
+                    src.node_name
+                );
+                multi_source =
+                    Some((src.node_name.clone(), format!("{}/{}", src.lvs_name, snapshot_id)));
             }
         }
-        
-        let node_name = snapshot_node
-            .ok_or_else(|| tonic::Status::not_found(format!("Snapshot {} not found", snapshot_id)))?;
+
+        let (node_name, snapshot_ref) = match multi_source {
+            Some(source) => source,
+            None => {
+                let nodes = self.driver.get_all_nodes().await
+                    .map_err(|e| tonic::Status::internal(format!("Failed to list nodes: {}", e)))?;
+
+                let mut snapshot_node = None;
+
+                for node in &nodes {
+                    let payload = serde_json::json!({
+                        "snapshot_uuid": snapshot_id
+                    });
+
+                    match self.driver.call_node_agent(node, "/api/snapshots/get_info", &payload).await {
+                        Ok(_) => {
+                            snapshot_node = Some(node.clone());
+                            println!("✅ [CONTROLLER] Found snapshot on node: {}", node);
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+
+                let node = snapshot_node
+                    .ok_or_else(|| tonic::Status::not_found(format!("Snapshot {} not found", snapshot_id)))?;
+                (node, snapshot_id.to_string())
+            }
+        };
 
         // Step 2: Clone the snapshot to create a new writable volume
         let clone_name = format!("vol_{}", volume_id);
-        
+
         let payload = serde_json::json!({
-            "snapshot_uuid": snapshot_id,
+            "snapshot_uuid": snapshot_ref,
             "clone_name": clone_name
         });
         
