@@ -203,11 +203,11 @@ pub enum CutOutcome {
     Aborted { failures: Vec<(String, String)> },
 }
 
-fn is_already_exists(msg: &str) -> bool {
+pub(crate) fn is_already_exists(msg: &str) -> bool {
     msg.contains("File exists") || msg.contains("Code=-17") || msg.contains("already exists")
 }
 
-fn is_missing(msg: &str) -> bool {
+pub(crate) fn is_missing(msg: &str) -> bool {
     msg.contains("No such device")
         || msg.contains("Code=-19")
         || msg.contains("No such file or directory")

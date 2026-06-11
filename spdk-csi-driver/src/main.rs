@@ -216,6 +216,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Replica catch-up orchestrator (incremental-rebuild phase 3) —
+    // controller role, alongside the epoch scheduler it consumes. Brings
+    // returned stale replicas to warm standby (revert → fenced re-export →
+    // epoch-chain shallow copy) and keeps standbys chasing new epochs.
+    // Default-disabled until phase 4 admits standbys at reassembly; it also
+    // does nothing unless the epoch scheduler has cut common epochs.
+    if mode == "controller" || mode == "all" {
+        let catchup_cfg = spdk_csi_driver::catchup::CatchupConfig::from_env();
+        if catchup_cfg.enabled {
+            println!(
+                "🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: {}s, poll: {}s)",
+                catchup_cfg.t_back.as_secs(),
+                catchup_cfg.poll_interval.as_secs()
+            );
+            let catchup_driver = driver.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::catchup::run_catchup_orchestrator(catchup_driver, catchup_cfg)
+                    .await;
+            });
+        } else {
+            println!("ℹ️ [CATCHUP] Replica catch-up orchestrator disabled (set FLINT_CATCHUP=enabled to activate)");
+        }
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;

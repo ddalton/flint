@@ -14,14 +14,16 @@
 //                     "last_epoch": null, "since": "...", "reason": "..." } ] }
 //
 // Phase 1 records state truthfully but changes no behavior: nothing consumes
-// sync_state for raid membership yet (phase 4), and nothing transitions a
-// replica back to in_sync (the catch-up orchestrator, phase 3). In
-// particular, a replica that misses acknowledged writes stays `stale` even
-// after a later reassembly re-admits it — that admission is today's
-// documented divergence hazard, surfaced via a StaleReplicaAdmitted event.
+// sync_state for raid membership yet (phase 4). Phase 3's catch-up
+// orchestrator (catchup.rs) transitions stale → standby; in_sync admission
+// remains phase 4's. A replica that misses acknowledged writes therefore
+// still stays out of `in_sync` even after a later reassembly re-admits it —
+// that admission is today's documented divergence hazard, surfaced via a
+// StaleReplicaAdmitted event.
 //
 // Writers: the controller seeds the record after CreateVolume; the consumer
-// node's agent (raid health monitor) and NodeStage record stale transitions.
+// node's agent (raid health monitor) and NodeStage record stale transitions;
+// the catch-up orchestrator records revert/standby/chase progress.
 // Updates are read-modify-write patches guarded by resourceVersion, so a
 // concurrent writer costs a retry, never a silently lost transition.
 
@@ -79,6 +81,30 @@ pub struct ReplicaSyncRecord {
     /// Why the last transition happened (operator-facing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Live head lvol uuid when it differs from the immutable identity in
+    /// volumeAttributes — the catch-up revert (§5 step 0) deletes the head
+    /// and re-creates it as a clone, which assigns a new uuid. The lvol
+    /// *name* (and so the `lvs/name` alias) is preserved across the revert;
+    /// this override is how anything addressing the replica by uuid finds
+    /// the live bdev. None = volumeAttributes' uuid is still live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_lvol_uuid: Option<String>,
+    /// Epoch the head was last reverted to (catch-up §5 step 0). While set,
+    /// the head is a write-virgin clone of this epoch that has only ever
+    /// received catch-up copy writes — the orchestrator may resume an
+    /// interrupted copy onto it without re-reverting. Any transition to
+    /// in_sync (phase 4) MUST clear it: from then on the head takes raid
+    /// writes and a later catch-up must revert again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted_to: Option<String>,
+}
+
+impl ReplicaSyncRecord {
+    /// The uuid that addresses the live head lvol (post-revert override, or
+    /// the immutable identity uuid).
+    pub fn live_lvol_uuid(&self) -> &str {
+        self.active_lvol_uuid.as_deref().unwrap_or(&self.lvol_uuid)
+    }
 }
 
 /// One retained common epoch (phase 2). An epoch is recorded here only after
@@ -132,6 +158,8 @@ impl VolumeSyncRecord {
                     last_epoch: None,
                     since: None,
                     reason: None,
+                    active_lvol_uuid: None,
+                    reverted_to: None,
                 })
                 .collect(),
         }
@@ -166,6 +194,8 @@ impl VolumeSyncRecord {
                         last_epoch: None,
                         since: None,
                         reason: None,
+                        active_lvol_uuid: None,
+                        reverted_to: None,
                     })
             })
             .collect();
@@ -191,6 +221,69 @@ impl VolumeSyncRecord {
             }
             _ => false,
         }
+    }
+
+    /// Transition a replica to standby: caught up through `last_epoch` and
+    /// chasing (§6). Stamps last_epoch unconditionally — the chase also uses
+    /// this to advance an existing standby's high-water mark. Returns true
+    /// if anything changed.
+    pub fn mark_standby(
+        &mut self,
+        lvol_uuid: &str,
+        last_epoch: &str,
+        reason: &str,
+        now_rfc3339: &str,
+    ) -> bool {
+        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            Some(rec) => {
+                let mut changed = false;
+                if rec.sync_state != SyncState::Standby {
+                    rec.sync_state = SyncState::Standby;
+                    rec.since = Some(now_rfc3339.to_string());
+                    rec.reason = Some(reason.to_string());
+                    changed = true;
+                }
+                if rec.last_epoch.as_deref() != Some(last_epoch) {
+                    rec.last_epoch = Some(last_epoch.to_string());
+                    changed = true;
+                }
+                changed
+            }
+            None => false,
+        }
+    }
+
+    /// Lower the retention pin to `epoch` (§5 retention pinning). A pin only
+    /// ever moves toward older epochs here — an existing older (or
+    /// unparseable, i.e. pin-everything) pin is kept. Returns true if the
+    /// pin changed.
+    pub fn pin_retention(&mut self, volume_id: &str, epoch: &str) -> bool {
+        let new_seq = epoch_seq(volume_id, epoch);
+        let keep_existing = match (&self.retention_pin, new_seq) {
+            (None, _) => false,
+            // Unparseable existing pin pins everything already.
+            (Some(existing), Some(new)) => match epoch_seq(volume_id, existing) {
+                Some(old) => old <= new,
+                None => true,
+            },
+            // Unparseable new pin: only "upgrade" if there is no pin at all.
+            (Some(_), None) => true,
+        };
+        if keep_existing {
+            return false;
+        }
+        self.retention_pin = Some(epoch.to_string());
+        true
+    }
+
+    /// Clear the retention pin if it is exactly `epoch` (the pin this
+    /// catch-up set). A different pin belongs to someone else — leave it.
+    pub fn clear_pin_if(&mut self, epoch: &str) -> bool {
+        if self.retention_pin.as_deref() == Some(epoch) {
+            self.retention_pin = None;
+            return true;
+        }
+        false
     }
 
     /// Highest epoch sequence number recorded for this volume (0 if none).
@@ -743,6 +836,85 @@ mod tests {
         record.apply_epoch_cut("epoch-vol1-2", &cut, "t3");
         assert_eq!(record.latest_epoch_seq("vol1"), 2);
         assert_eq!(record.epochs.len(), 2);
+    }
+
+    #[test]
+    fn mark_standby_transitions_and_advances() {
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.replicas[1].active_lvol_uuid = Some("uuid-b2".to_string());
+        record.replicas[1].reverted_to = Some("epoch-vol1-3".to_string());
+
+        // stale → standby stamps state, epoch, since, reason.
+        assert!(record.mark_standby("uuid-b", "epoch-vol1-5", "caught up", "t1"));
+        let rec = record.get("uuid-b").unwrap();
+        assert_eq!(rec.sync_state, SyncState::Standby);
+        assert_eq!(rec.last_epoch.as_deref(), Some("epoch-vol1-5"));
+        assert_eq!(rec.since.as_deref(), Some("t1"));
+        // The revert bookkeeping survives the transition (the head is still
+        // the write-virgin clone; phase 4 clears it on in_sync admission).
+        assert_eq!(rec.live_lvol_uuid(), "uuid-b2");
+        assert_eq!(rec.reverted_to.as_deref(), Some("epoch-vol1-3"));
+
+        // Chase: same state, newer epoch — advances the mark only.
+        assert!(record.mark_standby("uuid-b", "epoch-vol1-6", "chasing", "t2"));
+        let rec = record.get("uuid-b").unwrap();
+        assert_eq!(rec.last_epoch.as_deref(), Some("epoch-vol1-6"));
+        assert_eq!(rec.since.as_deref(), Some("t1")); // unchanged
+
+        // Fully idempotent re-apply.
+        assert!(!record.mark_standby("uuid-b", "epoch-vol1-6", "chasing", "t3"));
+        // Unknown replica: no-op.
+        assert!(!record.mark_standby("uuid-zz", "epoch-vol1-6", "?", "t4"));
+    }
+
+    #[test]
+    fn live_lvol_uuid_prefers_override() {
+        let mut record = three_replica_record();
+        assert_eq!(record.get("uuid-a").unwrap().live_lvol_uuid(), "uuid-a");
+        record.replicas[0].active_lvol_uuid = Some("uuid-a2".to_string());
+        assert_eq!(record.get("uuid-a").unwrap().live_lvol_uuid(), "uuid-a2");
+    }
+
+    #[test]
+    fn pin_retention_only_moves_older() {
+        let mut record = three_replica_record();
+
+        // No pin: any parseable pin takes.
+        assert!(record.pin_retention("vol1", &epoch_name("vol1", 4)));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-4"));
+
+        // Newer epoch never loosens the pin.
+        assert!(!record.pin_retention("vol1", &epoch_name("vol1", 6)));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-4"));
+
+        // Older epoch tightens it.
+        assert!(record.pin_retention("vol1", &epoch_name("vol1", 2)));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-2"));
+
+        // An unparseable existing pin (pins everything) is never replaced.
+        record.retention_pin = Some("garbage".to_string());
+        assert!(!record.pin_retention("vol1", &epoch_name("vol1", 1)));
+        assert_eq!(record.retention_pin.as_deref(), Some("garbage"));
+
+        // clear_pin_if only clears its own pin.
+        let mut record = three_replica_record();
+        record.retention_pin = Some(epoch_name("vol1", 2));
+        assert!(!record.clear_pin_if(&epoch_name("vol1", 3)));
+        assert!(record.clear_pin_if(&epoch_name("vol1", 2)));
+        assert_eq!(record.retention_pin, None);
+    }
+
+    #[test]
+    fn phase2_record_without_catchup_fields_parses() {
+        // Records written by phase-1/2 builds have no active_lvol_uuid or
+        // reverted_to; they must parse with both absent.
+        let phase2 = r#"{"current_epoch":"epoch-v-1","epochs":[{"name":"epoch-v-1","recorded_at":"t"}],"replicas":[{"node_name":"n","node_uid":"u","lvol_uuid":"x","sync_state":"stale","last_epoch":"epoch-v-1"}]}"#;
+        let record = VolumeSyncRecord::from_annotation(phase2).unwrap();
+        let rec = record.get("x").unwrap();
+        assert_eq!(rec.active_lvol_uuid, None);
+        assert_eq!(rec.reverted_to, None);
+        assert_eq!(rec.live_lvol_uuid(), "x");
     }
 
     #[test]

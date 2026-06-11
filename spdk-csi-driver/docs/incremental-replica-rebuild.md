@@ -954,6 +954,81 @@ Rejected alternatives:
    §10-3/§10-4 measurements need the live cluster.
 3. **Catch-up orchestrator**: detect returned replica → hygiene → bulk
    shallow-copy → epoch chasing (warm standby). *Control plane.*
+
+   **Implementation status (2026-06-11):** implemented on `main` as
+   `catchup.rs`; unit-tested (planning functions plus the full RPC
+   choreography against a fake node transport and record store), not yet
+   cluster-validated (e2e deferred until phase 4, then exercised together).
+   Hosted next to the epoch scheduler in the controller process;
+   **default-disabled** via `FLINT_CATCHUP=enabled`
+   (+`FLINT_CATCHUP_TBACK_SECS`, default 120 — `T_back` must cover the
+   NVMe-oF I/O timeout *plus* the 60s health-monitor tick, because `since`
+   is stamped at detection and trails the true leg failure;
+   `FLINT_CATCHUP_POLL_SECS`, default 2). Mechanics, mapped to §5:
+   - **`E_b` selection:** newest recorded epoch that is verified present on
+     the returning replica (listed on the node, not inferred from
+     `last_epoch` — a replica healed by an earlier catch-up has gaps) and
+     whose `recorded_at` is ≥ `T_back` before the replica's stale-marking.
+     `recorded_at` is an upper bound on every per-replica cut time, so the
+     comparison only errs toward an older, safer base; an unparseable
+     failure time degrades to the oldest present epoch. No candidate →
+     `ReplicaNeedsFullRebuild` event (phase 5) and the replica stays stale.
+     An empty epoch list does nothing at all — a record rebuilt after
+     annotation loss must never condemn a healable replica.
+   - **Retention pin** set to `E_b` *before* the revert, cleared on reaching
+     standby; the chase needs no pin because a retired epoch's delta merges
+     into its retained successor (snapshot-delete semantics), so copying the
+     surviving chain still covers the gap.
+   - **Revert** deletes the head and re-clones it from the replica's own
+     `E_b`, keeping the lvol *name* (the stable `lvs/name` alias makes the
+     revert idempotent across crashes). The new uuid is recorded as
+     `active_lvol_uuid` in the sync record — volumeAttributes stay
+     immutable — and `reverted_to` marks the head as a write-virgin clone:
+     resume skips the re-revert only while that exact base stands, and
+     **phase 4 must clear `reverted_to` when it admits the replica
+     `in_sync`** (from then on the head takes raid writes and a later
+     catch-up must revert again).
+   - **Superblock hygiene before every export** (the linchpin): the
+     reverted head reads its clone parent's raid sb at block 0, so the
+     orchestrator force-examines it on the replica node, lets the phantom
+     assemble, and deletes it with `clear_sb` — the bdev later attached on
+     the source node then presents a zeroed block 0 and examine finds
+     nothing. Without this, attach on a non-consumer source spawns a
+     phantom; attach on the *consumer* source gets the §3 ONLINE-examine
+     re-add — a stock blind full rebuild. If a raid does claim the attached
+     destination: CONFIGURING → released (no `clear_sb` — its bases can
+     include the source's own live lvols); ONLINE → loud abort, never
+     fight it. An ONLINE raid on the *replica's* node likewise refuses the
+     catch-up (zombie consumer; §2 fact 3).
+   - **Fenced re-export:** the per-replica subsystem's host list converges
+     to exactly the source node (the copy writer) — a previous consumer's
+     auto-reconnecting initiator is locked out; phase-4 staging re-flips
+     the fence to the new consumer.
+   - **Copies are base-INCLUSIVE in every session** — bulk (§5 step 4's
+     load-bearing rule) *and* chase: re-copying the base's own delta from
+     the current source also closes the cut-skew window when the source
+     replica changes between sessions, so source selection can stay
+     stateless (any in-sync replica, preferring one off the consumer
+     node). Interrupted copies re-run the whole chain; epoch snapshots are
+     immutable so the re-copy converges. The destination head is
+     re-snapshotted as the newest copied epoch (§5 step 5) — the standby's
+     consistent resume point — except in the degenerate `E_latest = E_b`
+     case, where the name already exists on the destination and the head
+     is consistent without it.
+   - **Scheduling:** 60s tick; each volume runs as its own task behind an
+     in-flight set (a multi-hour bulk copy on one volume must not stall
+     other volumes' chases); one stale replica per volume per cycle
+     (§10-5's two-simultaneously-stale question stays open). "Returned" is
+     detected by the replica node answering the lvol listing; an
+     unreachable node is silent, real failures emit
+     `ReplicaCatchupFailed`.
+   - **Known phase-3 asymmetry:** NodeStage still exports the *identity*
+     uuid from volumeAttributes, so after a revert a stage attempt fails
+     against the recreated head, the replica is (correctly) excluded from
+     assembly, and the attempt tramples the catch-up export — the next
+     chase cycle converges it back. Phase 4 makes staging sync-state-aware
+     (export `active_lvol_uuid`, run the final delta, include the standby,
+     clear `reverted_to`) and ends the churn.
 4. **Tier 1 reassembly admission**: final delta at NodeStage + standby inclusion
    in `bdev_raid_create`; RWX NFS-pod bounce; RWO pod-bounce policy knob.
    *Control plane.*
