@@ -240,6 +240,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Reassembly cutover orchestrator (incremental-rebuild phase 4, §6
+    // cutover opportunities) — controller role. When a standby has caught up
+    // (lag ≤ max_lag), creates the reassembly NodeStage needs: bounces the
+    // RWX NFS server pod (delete → wait detach → recreate), or — strictly
+    // opt-in via the PV annotation flint.csi.storage.io/rejoin-bounce —
+    // the RWO workload pods. Verifies the outcome (CutoverSucceeded /
+    // CutoverIneffective events) instead of assuming it.
+    if mode == "controller" || mode == "all" {
+        let cutover_cfg = spdk_csi_driver::cutover::CutoverConfig::from_env();
+        if cutover_cfg.enabled {
+            println!(
+                "🔁 [CUTOVER] Reassembly cutover orchestrator enabled (cooldown: {}s, max lag: {} epoch(s))",
+                cutover_cfg.cooldown.as_secs(),
+                cutover_cfg.max_lag
+            );
+            let cutover_driver = driver.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::cutover::run_cutover_orchestrator(cutover_driver, cutover_cfg)
+                    .await;
+            });
+        } else {
+            println!("ℹ️ [CUTOVER] Reassembly cutover orchestrator disabled (set FLINT_CUTOVER=enabled to activate)");
+        }
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;

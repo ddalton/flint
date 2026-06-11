@@ -1756,13 +1756,42 @@ impl NodeAgent {
 
             debug!(replica_index, lvol_uuid = %local_replica.lvol_uuid, "[RECONCILE] Found local replica");
 
+            // Sync-state awareness (incremental-rebuild phase 4): a stale or
+            // standby replica's export belongs to the catch-up orchestrator
+            // (fenced to the copy source) — re-exporting it here would
+            // trample that fence every cycle. And after a catch-up revert
+            // the live head has a new uuid (`active_lvol_uuid`); the
+            // identity uuid addresses nothing.
+            let sync_rec = pv
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(crate::replica_sync::SYNC_STATE_ANNOTATION))
+                .and_then(|s| crate::replica_sync::VolumeSyncRecord::from_annotation(s).ok())
+                .and_then(|r| r.get(&local_replica.lvol_uuid).cloned());
+            if let Some(rec) = &sync_rec {
+                if rec.sync_state != crate::replica_sync::SyncState::InSync {
+                    debug!(
+                        volume_id,
+                        state = rec.sync_state.as_str(),
+                        "[RECONCILE] Replica not in_sync — its export is owned by the catch-up orchestrator, skipping"
+                    );
+                    skip_count += 1;
+                    continue;
+                }
+            }
+            let live_uuid = sync_rec
+                .as_ref()
+                .map(|r| r.live_lvol_uuid().to_string())
+                .unwrap_or_else(|| local_replica.lvol_uuid.clone());
+
             // Verify the lvol exists locally
-            match self.verify_local_lvol(&local_replica.lvol_uuid).await {
+            match self.verify_local_lvol(&live_uuid).await {
                 Ok(bdev_name) => {
                     debug!(bdev_name, "[RECONCILE] Local lvol verified");
                 }
                 Err(e) => {
-                    warn!(lvol_uuid = %local_replica.lvol_uuid, error = %e, "[RECONCILE] Local lvol not found");
+                    warn!(lvol_uuid = %live_uuid, error = %e, "[RECONCILE] Local lvol not found");
                     skip_count += 1;
                     continue;
                 }
@@ -1785,7 +1814,7 @@ impl NodeAgent {
             }
 
             // Setup NVMe-oF target for this replica (idempotent)
-            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica, attached_node.as_deref()).await {
+            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica, &live_uuid, attached_node.as_deref()).await {
                 Ok(_) => {
                     debug!(replica_index, "[RECONCILE] NVMe-oF target set up");
                     success_count += 1;
@@ -1824,6 +1853,9 @@ impl NodeAgent {
         for raid in raids {
             let Some(raid_name) = raid.get("name").and_then(|n| n.as_str()) else { continue };
             let Some(volume_id) = raid_name.strip_prefix("raid_") else { continue };
+            // RWX volumes stage under the synthetic "nfs-server-<vol>"
+            // handle; PV reads/patches must target the user PV.
+            let pv_name = crate::replica_sync::record_pv_name(volume_id);
 
             let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
             let total = raid.get("num_base_bdevs").and_then(|n| n.as_u64()).unwrap_or(0);
@@ -1854,7 +1886,7 @@ impl NodeAgent {
                         "annotations": { "flint.csi.storage.io/replica-health": health }
                     }
                 });
-                match pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                match pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await {
                     Ok(_) => {
                         warn!(
                             volume_id, state,
@@ -1882,7 +1914,7 @@ impl NodeAgent {
                         "annotations": { "flint.csi.storage.io/replica-health": null }
                     }
                 });
-                let _ = pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await;
+                let _ = pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await;
             }
 
             // Phase 1 (incremental-rebuild §9-1): an online raid serves
@@ -2057,11 +2089,14 @@ impl NodeAgent {
         Ok(())
     }
 
+    /// `bdev_name` is the live head to export — the identity uuid unless a
+    /// catch-up revert recorded an `active_lvol_uuid` override (phase 4).
     async fn setup_nvmeof_target_for_replica(
         &self,
         volume_id: &str,
         replica_index: usize,
         replica: &ReplicaInfo,
+        bdev_name: &str,
         attached_node: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Generate NQN using same format as driver
@@ -2096,7 +2131,7 @@ impl NodeAgent {
         };
         let spec = crate::nvmeof_export::ExportSpec {
             nqn: &nqn,
-            bdev_name: &replica.lvol_uuid,
+            bdev_name,
             bdev_aliases: &[&replica.lvol_name],
             trtype: transport,
             traddr: &node_ip,

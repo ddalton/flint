@@ -114,12 +114,16 @@ impl EpochConfig {
     }
 }
 
-/// One replica to snapshot in a cut: identity from volumeAttributes
-/// (node/lvs for addressing, lvol uuid as the snapshot source).
+/// One replica to snapshot in a cut. `lvol_uuid` is the immutable identity
+/// (what the record is keyed by); `snapshot_source` is the bdev the snapshot
+/// is actually taken of — the *live* head uuid, which differs from the
+/// identity after a catch-up revert (phase 3 `active_lvol_uuid`). Cutting by
+/// identity uuid on a reverted-then-admitted replica would fail forever.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EpochTarget {
     pub node_name: String,
     pub lvol_uuid: String,
+    pub snapshot_source: String,
     pub lvs_name: String,
 }
 
@@ -152,11 +156,16 @@ pub fn plan_cut(
         .replicas
         .iter()
         .filter(|rec| rec.sync_state == SyncState::InSync)
-        .filter_map(|rec| replicas.iter().find(|ri| ri.lvol_uuid == rec.lvol_uuid))
-        .map(|ri| EpochTarget {
-            node_name: ri.node_name.clone(),
-            lvol_uuid: ri.lvol_uuid.clone(),
-            lvs_name: ri.lvs_name.clone(),
+        .filter_map(|rec| {
+            replicas
+                .iter()
+                .find(|ri| ri.lvol_uuid == rec.lvol_uuid)
+                .map(|ri| EpochTarget {
+                    node_name: ri.node_name.clone(),
+                    lvol_uuid: ri.lvol_uuid.clone(),
+                    snapshot_source: rec.live_lvol_uuid().to_string(),
+                    lvs_name: ri.lvs_name.clone(),
+                })
         })
         .collect();
     if targets.is_empty() {
@@ -225,7 +234,7 @@ pub async fn execute_cut(rpc: &dyn NodeRpc, plan: &CutPlan) -> CutOutcome {
     for target in &plan.targets {
         let payload = json!({
             "method": "bdev_lvol_snapshot",
-            "params": { "lvol_name": target.lvol_uuid, "snapshot_name": plan.epoch }
+            "params": { "lvol_name": target.snapshot_source, "snapshot_name": plan.epoch }
         });
         match rpc.spdk_rpc(&target.node_name, &payload).await {
             Ok(_) => succeeded.push(target),
@@ -660,6 +669,25 @@ mod tests {
         assert_eq!(snaps[0].1["params"]["snapshot_name"], "epoch-vol1-1");
         assert_eq!(snaps[0].1["params"]["lvol_name"], "uuid-a");
         assert!(rpc.calls_of("bdev_lvol_delete").is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_cut_uses_live_uuid_after_revert() {
+        // A replica reverted by catch-up and admitted back in_sync (phase 4)
+        // is addressed by its live head uuid; the record still keys — and
+        // last_epoch still stamps — by the identity uuid.
+        let mut record = record3();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        let rpc = FakeNodeRpc::new();
+        let plan = plan_cut("vol1", &record, &replicas3(), true, now(), &cfg()).unwrap();
+        match execute_cut(&rpc, &plan).await {
+            CutOutcome::Recorded { cut_uuids } => {
+                assert_eq!(cut_uuids, vec!["uuid-a", "uuid-b", "uuid-c"]);
+            }
+            other => panic!("expected Recorded, got {:?}", other),
+        }
+        let snaps = rpc.calls_of("bdev_lvol_snapshot");
+        assert_eq!(snaps[1].1["params"]["lvol_name"], "uuid-b-v2");
     }
 
     #[tokio::test]

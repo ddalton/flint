@@ -1022,17 +1022,124 @@ Rejected alternatives:
      detected by the replica node answering the lvol listing; an
      unreachable node is silent, real failures emit
      `ReplicaCatchupFailed`.
-   - **Known phase-3 asymmetry:** NodeStage still exports the *identity*
-     uuid from volumeAttributes, so after a revert a stage attempt fails
-     against the recreated head, the replica is (correctly) excluded from
-     assembly, and the attempt tramples the catch-up export — the next
-     chase cycle converges it back. Phase 4 makes staging sync-state-aware
-     (export `active_lvol_uuid`, run the final delta, include the standby,
-     clear `reverted_to`) and ends the churn.
+   - **Known phase-3 asymmetry (resolved by phase 4):** NodeStage used to
+     export the *identity* uuid from volumeAttributes, so after a revert a
+     stage attempt failed against the recreated head, the replica was
+     (correctly) excluded from assembly, and the attempt trampled the
+     catch-up export until the next chase cycle converged it back. Phase 4
+     made staging sync-state-aware (export `active_lvol_uuid`, run the
+     final delta, include the standby, clear `reverted_to`) and ended the
+     churn — see the §9-4 status below.
 4. **Tier 1 reassembly admission**: final delta at NodeStage + standby inclusion
    in `bdev_raid_create`; RWX NFS-pod bounce; RWO pod-bounce policy knob.
    *Control plane.*
+
+   **Implementation status (2026-06-11):** implemented on `main`
+   (`catchup.rs` admission + `cutover.rs` bounces + sync-state-aware
+   staging in `driver.rs`/`node_agent.rs`); unit-tested, not yet
+   cluster-validated — phases 1–4 are now complete, so the combined e2e
+   suite is the next step. Mechanics, mapped to §6:
+   - **Sync-state-aware staging** (`create_raid_from_replicas`): the sync
+     record is loaded at assembly and *enforced only when the volume has
+     epoch history* — without epochs the catch-up cannot heal an excluded
+     replica, so legacy attach-everything (with the `StaleReplicaAdmitted`
+     warning) remains the lesser hazard. In-sync replicas attach by their
+     **live head uuid** (`active_lvol_uuid` after a revert; the identity
+     uuid in volumeAttributes addresses nothing post-revert — this ends
+     the phase-3 export-trample asymmetry). Stale replicas stay out;
+     standbys go through admission. Two fallbacks keep availability:
+     stale replicas are force-admitted (loudly, evented) when exclusions
+     would drop the assembly below the 2-base minimum.
+   - **Final delta** (`admit_standbys_at_stage`, called between the
+     survivor attaches and `bdev_raid_create`): every attached survivor's
+     export fence now admits exactly the staging node and the raid does
+     not exist yet, so **no writer exists anywhere** — one more common
+     epoch cut (reusing the scheduler's all-or-abort `execute_cut`,
+     targeted at exactly the replicas that attached, addressed by live
+     uuid) equals every head with zero skew; one more base-inclusive
+     chase session onto the standby equalizes it; `bdev_raid_create`
+     admits all listed bases as in-sync with no rebuild. The §5 machinery
+     is reused verbatim — the final delta is just a chase session whose
+     source is provably frozen.
+   - **Ordering is load-bearing**: the final epoch is recorded *before*
+     the copy (an interrupted admission leaves a normal common epoch the
+     background chase consumes); `in_sync` is recorded — **clearing
+     `reverted_to`**, the phase-3 obligation — *before* the consumer-side
+     attach and create (the reverse order risks a raid member the chase
+     still treats as a standby target; if the attach/create then fails,
+     the health monitor re-marks the replica stale once an online raid
+     exists without it). An ONLINE raid already on the staging node
+     defers all admissions: `ensure_raid1_bdev` will reuse it, and
+     add-to-ONLINE is the stock blind rebuild (§7).
+   - **Budget** (kubelet's CSI timeout): `FLINT_STAGE_DELTA_BUDGET_SECS`
+     (default 60) bounds the copy via a deadline threaded into the poll
+     loop; `FLINT_STAGE_MAX_EPOCHS_BEHIND` (default 4) pre-rejects a
+     non-converged chase. Overrun = stage degraded without the standby
+     (`StandbyAdmissionDeferred` event), replica keeps chasing, next
+     reassembly retries — the §6 resumability comes free from the
+     idempotent chain re-copy.
+   - **Health-monitor truthfulness fixes** so admission sticks:
+     `replicas_missing_from_raid` now matches bases by live uuid (an
+     admitted reverted replica exposes `active_lvol_uuid`) and reports
+     only `in_sync` replicas (a chasing standby is *expected* to be
+     missing from the raid — previously the monitor would demote it back
+     to stale every tick). The node agent's reconcile skips stale/standby
+     exports entirely (the catch-up orchestrator owns those fences) and
+     exports the live uuid for in-sync replicas. RWX identity split
+     fixed: everything keyed off a volumeHandle resolves through
+     `record_pv_name` (`nfs-server-<vol>` → user PV).
+   - **Cutover** (`cutover.rs`, controller loop, default-disabled via
+     `FLINT_CUTOVER`): plans a bounce only when every standby is *ready*
+     (lag ≤ `FLINT_CUTOVER_MAX_LAG`, default 1 — so the final delta is
+     small). RWX: the bare `flint-nfs-<vol>` pod is captured → deleted →
+     the synthetic PV's detach is awaited (closes the §6 same-node
+     staged-volume-reuse race) → recreated from the sanitized spec with
+     `nodeName` cleared. RWO: strictly opt-in via the PV annotation
+     `flint.csi.storage.io/rejoin-bounce: "enabled"`; the claim's pods
+     are deleted and their controller reschedules them. Every bounce is
+     **verified**: standbys that flip → `CutoverSucceeded`; still standby
+     after `FLINT_CUTOVER_COOLDOWN_SECS` (default 900) →
+     `CutoverIneffective`, then eligible to retry. The §6 scheduling-hint
+     escalation (cordon/anti-affinity) is deliberately not implemented —
+     an ineffective bounce is surfaced, not silently fought.
+   - **Known windows, accepted and documented:** a concurrent chase can
+     overlap the final delta (both copy the same immutable epochs onto
+     the same head — convergent, merely wasteful; bounded to one cycle by
+     the in-flight set). The final epoch is briefly recorded while a
+     failed-attach survivor is still marked in_sync (stale-marking is
+     post-create by design); a catch-up sourcing that replica in the
+     window fails its copy and retries clean. The §6
+     survivor-divergence-after-unclean-teardown reconcile remains future
+     work, as does the NFS server's SQLite state backend for solid
+     bounce-through (§6 caveats).
 5. **Thin-aware full build** for new/replaced replicas. *Control plane.*
+
+   **Design note — user `VolumeSnapshot` preservation (2026-06-11):** the
+   implemented machinery (phases 2–4) preserves user snapshots by
+   construction: the only bulk-delete path is epoch GC, gated by the strict
+   `epoch-<vol>-<seq>` name parser (a user snapshot can never become a
+   candidate — pinned by test), and the catch-up revert deletes only the
+   writable *head*; snapshots are independent read-only blobs the
+   blobstore keeps (SPDK refuses to delete any blob with clones besides),
+   so a user snapshot cut between `E_b` and the failure simply becomes a
+   branch point — still restorable. The final delta only creates
+   snapshots. The full build must keep that property, but can only do so
+   in a weaker sense: reverting to `E = "empty"` necessarily orphans the
+   replica's local user-snapshot chain — the blobs stay intact and
+   restorable (restore clones from the snapshot, not the head) but are no
+   longer the head's ancestry, so their clusters remain allocated as
+   standalone space; on a physically *replaced* replica they are gone with
+   the disk. Two obligations for the implementation: (a) the full build
+   must never reap the old chain itself — user snapshots are not ours to
+   delete, and the orphaned *epochs* below the retained window are already
+   the GC's job; (b) the §10-11 question (multi-replica `VolumeSnapshot`
+   support) is a soft prerequisite — today `CreateSnapshot` resolves its
+   source via the singular `node-name`/`lvol-uuid` volumeAttributes, which
+   multi-replica volumes do not set, so snapshotting them fails outright
+   and user snapshots are single-node objects; whatever design fixes that
+   (cut on all in-sync replicas like epochs, or pin a recorded snapshot
+   home) determines whether a full build or replica replacement can lose
+   the *only* copy of a user snapshot.
 6. **Measure** the Tier 1 residual: time degraded with a ready standby and no
    reassembly event. *Decides Tier 2 with data.*
 7. *(Conditional)* **Tier 2**: `skip_rebuild` patch + esnap-clone hot rejoin
@@ -1103,3 +1210,15 @@ decided by phase 6's data."
    semantics after restore (RFC 8881 stable-storage reclaim gating vs. today's
    allow-all-in-grace); bound the bounce-cutover outage so clients reliably
    reclaim within grace.
+11. **Multi-replica `VolumeSnapshot` support** (prerequisite question for the
+   §9-5 full build): `CreateSnapshot` resolves its source via the singular
+   `flint.csi.storage.io/node-name`/`lvol-uuid` volumeAttributes, which
+   multi-replica volumes never set (`replicas` JSON only) — snapshotting a
+   multi-replica volume fails "metadata not found" today, so user snapshots
+   are single-node, single-replica objects. Design options: cut on every
+   in-sync replica like epochs (then restore can source any replica, and a
+   replica replacement loses nothing — but snapshot deletion must converge
+   across replicas), or pin one replica as the recorded snapshot home (cheap,
+   but that replica's disk loss takes the volume's snapshots with it, and a
+   full build there orphans them). The choice decides whether replica
+   replacement can destroy the only copy of a user snapshot.

@@ -4,7 +4,8 @@ pub mod nvmeof_utils;
 pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)
 pub mod replica_sync;  // Persistent per-replica sync state on the PV (incremental-rebuild phase 1)
 pub mod epoch_scheduler;  // Common-epoch snapshot scheduler (incremental-rebuild phase 2)
-pub mod catchup;  // Replica catch-up orchestrator / warm standby (incremental-rebuild phase 3)
+pub mod catchup;  // Replica catch-up orchestrator / warm standby + reassembly admission (incremental-rebuild phases 3/4)
+pub mod cutover;  // Reassembly cutover: RWX NFS-pod bounce + RWO policy knob (incremental-rebuild phase 4)
 pub mod driver;
 pub mod minimal_models;
 pub mod minimal_disk_service;

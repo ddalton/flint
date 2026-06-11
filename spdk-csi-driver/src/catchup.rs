@@ -1,14 +1,22 @@
-// catchup.rs — replica catch-up orchestrator (warm standby).
-// Phase 3 of docs/incremental-replica-rebuild.md §9.
+// catchup.rs — replica catch-up orchestrator (warm standby) and Tier-1
+// reassembly admission. Phases 3 and 4 of docs/incremental-replica-rebuild.md §9.
 //
-// Detects a returned stale replica, brings it to a warm standby with the §5
-// catch-up sequence — revert to its own base epoch, hygiene, re-export,
-// attach on the source node, shallow-copy the epoch chain — and keeps every
-// standby chasing new epochs as the scheduler (phase 2) cuts them. Nothing
-// here admits a replica back to `in_sync`: that is phase 4's fenced
-// final-delta at reassembly. A standby is persistent, thin, and trails the
-// array by ≤ T_snap + one delta copy (§6), but it is NOT a raid member and
-// never a read source.
+// Phase 3 detects a returned stale replica, brings it to a warm standby with
+// the §5 catch-up sequence — revert to its own base epoch, hygiene,
+// re-export, attach on the source node, shallow-copy the epoch chain — and
+// keeps every standby chasing new epochs as the scheduler (phase 2) cuts
+// them. A standby is persistent, thin, and trails the array by ≤ T_snap +
+// one delta copy (§6), but it is NOT a raid member and never a read source.
+//
+// Phase 4 (`admit_standbys_at_stage`, called from NodeStage's raid
+// assembly) admits a standby back to `in_sync` via the §6 fenced final
+// delta: with every surviving in-sync replica attached — and therefore
+// fenced — to the staging node and the raid not yet created, there are no
+// writers anywhere, so one more common epoch cut equals every head exactly;
+// one more base-inclusive chase session onto the standby equalizes it; the
+// record flips to in_sync (clearing `reverted_to`); and the head is
+// re-exported fenced to the consumer and joins the `bdev_raid_create` base
+// list, which admits all listed bases as in-sync with no rebuild.
 //
 // How the §5 correctness pieces map to code:
 // - **Base epoch E_b** (`select_base_epoch`): newest common epoch recorded
@@ -57,16 +65,33 @@
 //   snapshot-delete merges fold a retired epoch's delta into its retained
 //   descendant, so copying the surviving chain still covers everything.
 //
-// Interactions left deliberately asymmetric in phase 3 (documented):
-// - NodeStage still tries to export the *identity* uuid from
-//   volumeAttributes; after a revert that bdev is gone, the export fails,
-//   and the replica is (correctly) excluded from assembly and stays out of
-//   the raid. The stage attempt's namespace-swap tramples the catch-up
-//   export — the next chase cycle converges it back. Phase 4 makes staging
-//   sync-state-aware and ends the churn.
+// Phase-4 admission ordering (each step's failure mode considered):
+// - The final epoch is cut on exactly the replicas that ATTACHED at this
+//   stage (a recorded in-sync replica whose attach failed is about to be
+//   marked stale; cutting on it is impossible and recording an epoch it
+//   lacks would break source interchangeability).
+// - `in_sync` is recorded BEFORE the consumer-side attach and raid create:
+//   at that moment it is simply true (the head equals the survivors' and no
+//   writers exist until the raid does), and the reverse order would leave a
+//   replica taking raid writes while the chase still considers it a standby
+//   target. If the attach or create then fails, the health monitor re-marks
+//   the replica stale once an online raid exists without it.
+// - An ONLINE raid already on the staging node defers all admissions:
+//   `ensure_raid1_bdev` will reuse it, and adding a base to an ONLINE raid
+//   is exactly the stock blind rebuild this design avoids (§7).
+// - Budget overrun (NodeStage runs under kubelet's CSI timeout) defers the
+//   standby: the abandoned copy is outside the raid and idempotent, the
+//   replica stays standby, the background chase converges it, and the next
+//   reassembly retries. The final epoch already cut stays recorded — it is
+//   a perfectly normal common epoch for the chase to consume.
+//
+// Interactions left deliberately open (documented):
 // - A replica whose base aged out of retention (or that never shared an
 //   epoch) needs the phase-5 thin-aware full build; it is marked with a
 //   `ReplicaNeedsFullRebuild` event and left stale.
+// - A concurrent chase from the controller can overlap the final delta
+//   (both copy the same immutable epochs onto the same head — convergent,
+//   merely wasteful); the in-flight set bounds it to one cycle.
 //
 // Hosting mirrors the epoch scheduler: a background loop in the controller
 // process, default-disabled via FLINT_CATCHUP until phase 4 lands. Long
@@ -76,17 +101,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use crate::driver::{NvmeofConnectionInfo, SpdkCsiDriver};
-use crate::epoch_scheduler::{is_already_exists, is_missing};
+use crate::epoch_scheduler::{
+    execute_cut, is_already_exists, is_missing, CutOutcome, CutPlan, EpochTarget, NodeRpc,
+};
 use crate::minimal_models::ReplicaInfo;
 use crate::replica_sync::{
-    self, epoch_seq, expected_remote_base_bdev, ReplicaSyncRecord, SyncState, VolumeSyncRecord,
+    self, epoch_name, epoch_seq, expected_remote_base_bdev, ReplicaSyncRecord, SyncState,
+    VolumeSyncRecord,
 };
 
 pub type RpcError = Box<dyn std::error::Error + Send + Sync>;
@@ -159,6 +187,23 @@ pub trait CatchupStore: Sync {
         volume_id: &str,
         replica_uuid: &str,
         reason: &str,
+    ) -> Result<(), RpcError>;
+    /// Record a common epoch cut on exactly `cut_uuids` (phase-4 final
+    /// delta; identity uuids). Appends the epoch, advances current_epoch,
+    /// stamps last_epoch on the cut replicas.
+    async fn record_epoch_cut(
+        &self,
+        volume_id: &str,
+        epoch: &str,
+        cut_uuids: &[String],
+    ) -> Result<(), RpcError>;
+    /// Admit a replica to in_sync at `last_epoch` (phase 4) — clears the
+    /// `reverted_to` write-virgin marker (the documented phase-3 obligation).
+    async fn record_in_sync(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        last_epoch: &str,
     ) -> Result<(), RpcError>;
     async fn emit(&self, volume_id: &str, event_type: &str, reason: &str, message: &str);
 }
@@ -242,6 +287,41 @@ impl CatchupStore for KubeStore {
         Ok(())
     }
 
+    async fn record_epoch_cut(
+        &self,
+        volume_id: &str,
+        epoch: &str,
+        cut_uuids: &[String],
+    ) -> Result<(), RpcError> {
+        let (epoch, cut) = (epoch.to_string(), cut_uuids.to_vec());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.apply_epoch_cut(&epoch, &cut, &now);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_in_sync(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        last_epoch: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, through) = (replica_uuid.to_string(), last_epoch.to_string());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.mark_in_sync(
+                &uuid,
+                &through,
+                "admitted at reassembly after fenced final delta",
+                &now,
+            );
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn emit(&self, volume_id: &str, event_type: &str, reason: &str, message: &str) {
         replica_sync::emit_pv_event(
             &self.client,
@@ -294,6 +374,57 @@ impl CatchupConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.t_back),
+            poll_interval: std::env::var("FLINT_CATCHUP_POLL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.poll_interval),
+        }
+    }
+}
+
+/// Phase-4 reassembly-admission tunables (NodeStage's final delta).
+#[derive(Debug, Clone)]
+pub struct StageConfig {
+    /// Wall-clock budget for one standby's final delta (cut + copy + align +
+    /// admission). NodeStageVolume runs under kubelet's CSI timeout (~2 min
+    /// with retries); overrun stages degraded without the standby and lets
+    /// the background chase finish (§6 step 2).
+    /// FLINT_STAGE_DELTA_BUDGET_SECS, default 60.
+    pub final_delta_budget: Duration,
+    /// Pre-check: a standby more than this many epochs behind is deferred
+    /// without attempting the copy — the chase normally bounds lag to ≤ 1
+    /// epoch, so a large lag means the chase is not converging and the copy
+    /// would blow the budget anyway. FLINT_STAGE_MAX_EPOCHS_BEHIND, default 4.
+    pub max_epochs_behind: u64,
+    /// Shallow-copy progress poll interval (shares the catch-up default).
+    /// FLINT_CATCHUP_POLL_SECS, default 2.
+    pub poll_interval: Duration,
+}
+
+impl Default for StageConfig {
+    fn default() -> Self {
+        StageConfig {
+            final_delta_budget: Duration::from_secs(60),
+            max_epochs_behind: 4,
+            poll_interval: Duration::from_secs(2),
+        }
+    }
+}
+
+impl StageConfig {
+    pub fn from_env() -> Self {
+        let d = StageConfig::default();
+        StageConfig {
+            final_delta_budget: std::env::var("FLINT_STAGE_DELTA_BUDGET_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.final_delta_budget),
+            max_epochs_behind: std::env::var("FLINT_STAGE_MAX_EPOCHS_BEHIND")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(d.max_epochs_behind),
             poll_interval: std::env::var("FLINT_CATCHUP_POLL_SECS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -659,14 +790,25 @@ async fn ensure_dst_attached(
 /// One epoch delta: start the shallow copy on the source node and poll to a
 /// terminal state. Copies only clusters allocated in the snapshot itself
 /// (§5) — exactly the epoch's delta — at identical offsets on the
-/// destination.
+/// destination. `deadline` (phase-4 final delta) bounds the wall clock: an
+/// overrun abandons the poll (a started copy keeps running server-side;
+/// epochs are immutable, so the chase's re-copy converges over it) and the
+/// caller stages without the standby.
 async fn shallow_copy(
     rpc: &dyn CatchupRpc,
     src_node: &str,
     src_lvol: &str,
     dst_bdev: &str,
     poll_interval: Duration,
+    deadline: Option<Instant>,
 ) -> Result<(), RpcError> {
+    if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+        return Err(format!(
+            "final-delta budget exceeded before copying {} — staging degraded, chase continues",
+            src_lvol
+        )
+        .into());
+    }
     let start = json!({
         "method": "bdev_lvol_start_shallow_copy",
         "params": { "src_lvol_name": src_lvol, "dst_bdev_name": dst_bdev }
@@ -690,6 +832,14 @@ async fn shallow_copy(
         match result.get("state").and_then(|s| s.as_str()) {
             Some("complete") => return Ok(()),
             Some("in progress") => {
+                if deadline.map(|d| Instant::now() >= d).unwrap_or(false) {
+                    return Err(format!(
+                        "final-delta budget exceeded while copying {} (copy abandoned mid-flight; \
+                         the chase re-copy converges it)",
+                        src_lvol
+                    )
+                    .into());
+                }
                 if !poll_interval.is_zero() {
                     tokio::time::sleep(poll_interval).await;
                 }
@@ -745,7 +895,8 @@ async fn copy_chain_and_align(
     head_alias: &str,
     dst_bdev: &str,
     base: &str,
-    cfg: &CatchupConfig,
+    poll_interval: Duration,
+    deadline: Option<Instant>,
 ) -> Result<String, RpcError> {
     let chain = chain_from(volume_id, record, base);
     if chain.is_empty() {
@@ -754,7 +905,7 @@ async fn copy_chain_and_align(
     for epoch in &chain {
         let src_lvol = format!("{}/{}", src.lvs_name, epoch);
         debug!(volume_id, epoch = %epoch, src = %src.node_name, dst = %dst.node_name, "[CATCHUP] Copying epoch delta");
-        shallow_copy(rpc, &src.node_name, &src_lvol, dst_bdev, cfg.poll_interval).await?;
+        shallow_copy(rpc, &src.node_name, &src_lvol, dst_bdev, poll_interval, deadline).await?;
     }
     let newest = chain.last().expect("chain checked non-empty").clone();
     // Degenerate single-epoch chain where the newest IS the base: the
@@ -867,7 +1018,8 @@ async fn catchup_stale(
     .await?;
 
     let newest = copy_chain_and_align(
-        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, &base, cfg,
+        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, &base,
+        cfg.poll_interval, None,
     )
     .await?;
 
@@ -932,12 +1084,311 @@ async fn chase_standby(
     )
     .await?;
     let newest = copy_chain_and_align(
-        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, base, cfg,
+        rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, base,
+        cfg.poll_interval, None,
     )
     .await?;
     store.record_standby(volume_id, &rec.lvol_uuid, &newest, None).await?;
     info!(volume_id, node = %identity.node_name, through = %newest, "[CATCHUP] Standby chased to latest epoch");
     Ok(())
+}
+
+/// Adapts the catch-up transport to the epoch scheduler's `NodeRpc` so the
+/// final delta reuses `execute_cut` (all-or-abort + rollback) verbatim.
+struct NodeRpcAdapter<'a>(&'a dyn CatchupRpc);
+
+#[async_trait]
+impl NodeRpc for NodeRpcAdapter<'_> {
+    async fn spdk_rpc(&self, node: &str, payload: &Value) -> Result<Value, RpcError> {
+        self.0.spdk_rpc(node, payload).await
+    }
+}
+
+/// A standby admitted to in_sync by the phase-4 final delta, ready for the
+/// `bdev_raid_create` base list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedStandby {
+    /// Identity uuid (volumeAttributes / record key).
+    pub lvol_uuid: String,
+    pub node_name: String,
+    /// Base bdev name on the staging node (local live uuid, or the attached
+    /// remote bdev).
+    pub bdev: String,
+    pub final_epoch: String,
+}
+
+/// Phase 4 (§6 "rejoin at the next assembly"): run the fenced final delta
+/// for every standby and admit the equalized heads. Called from NodeStage's
+/// raid assembly AFTER the surviving in-sync replicas attached (their
+/// exports' fences now admit exactly `consumer_node`, so no writer exists
+/// anywhere) and BEFORE `bdev_raid_create`. `volume_id` is the record/epoch
+/// volume id (`replica_sync::record_pv_name` of the staged handle);
+/// `raid_name` is the raid bdev the stage will create (named after the raw
+/// handle); `attached_in_sync` are the identity uuids whose attach succeeded.
+///
+/// Never fails the stage: every deferral is contained per-standby (Warning
+/// event + the replica simply stays a chasing standby) and an empty result
+/// means "stage exactly as phase 3 did".
+pub async fn admit_standbys_at_stage(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    raid_name: &str,
+    replicas: &[ReplicaInfo],
+    consumer_node: &str,
+    attached_in_sync: &[String],
+    cfg: &StageConfig,
+) -> Vec<AdmittedStandby> {
+    let mut admitted: Vec<AdmittedStandby> = Vec::new();
+
+    let standby_uuids: Vec<String> = match store.load(volume_id).await {
+        Ok(Some(record)) if !record.epochs.is_empty() => record
+            .replicas
+            .iter()
+            .filter(|r| r.sync_state == SyncState::Standby)
+            .map(|r| r.lvol_uuid.clone())
+            .collect(),
+        Ok(_) => return admitted, // single replica / no epoch machinery
+        Err(e) => {
+            warn!(volume_id, error = %e, "[ADMIT] Cannot load sync record — staging without admission");
+            return admitted;
+        }
+    };
+    if standby_uuids.is_empty() {
+        return admitted;
+    }
+    if attached_in_sync.is_empty() {
+        debug!(volume_id, "[ADMIT] No attached in-sync replica to source the final delta from");
+        return admitted;
+    }
+
+    // Re-stage guard: an ONLINE raid here means ensure_raid1_bdev will reuse
+    // it, and a base cannot join an ONLINE raid without the stock blind
+    // rebuild (§7) — defer to the next real reassembly.
+    match get_raids(rpc, consumer_node).await {
+        Ok(raids) => {
+            let online = raids.iter().any(|r| {
+                r.get("name").and_then(|n| n.as_str()) == Some(raid_name)
+                    && r.get("state").and_then(|s| s.as_str()) == Some("online")
+            });
+            if online {
+                info!(
+                    volume_id, raid_name,
+                    "[ADMIT] Raid already ONLINE on {} (restage reuses it) — standby admission deferred",
+                    consumer_node
+                );
+                return admitted;
+            }
+        }
+        Err(e) => {
+            warn!(volume_id, error = %e, "[ADMIT] Cannot inspect raids on {} — admission deferred", consumer_node);
+            return admitted;
+        }
+    }
+
+    // Replicas the final epoch may be cut on / copied from: the ones that
+    // actually attached this stage, plus standbys admitted earlier in this
+    // very loop (their heads are equalized and they hold the chain).
+    let mut attached: Vec<String> = attached_in_sync.to_vec();
+
+    for uuid in standby_uuids {
+        match admit_one_standby(
+            rpc, store, volume_id, raid_name, replicas, consumer_node, &attached, &uuid, cfg,
+        )
+        .await
+        {
+            Ok(one) => {
+                store
+                    .emit(
+                        volume_id,
+                        "Normal",
+                        "ReplicaAdmitted",
+                        &format!(
+                            "Replica on {} admitted to the raid on {}: fenced final delta equalized \
+                             its head at {} — in_sync, no rebuild",
+                            one.node_name, consumer_node, one.final_epoch
+                        ),
+                    )
+                    .await;
+                info!(
+                    volume_id, node = %one.node_name, epoch = %one.final_epoch,
+                    "[ADMIT] Standby admitted in_sync at reassembly"
+                );
+                attached.push(one.lvol_uuid.clone());
+                admitted.push(one);
+            }
+            Err(e) => {
+                warn!(volume_id, replica = %uuid, error = %e, "[ADMIT] Standby admission deferred — staging degraded, chase continues");
+                store
+                    .emit(
+                        volume_id,
+                        "Warning",
+                        "StandbyAdmissionDeferred",
+                        &format!(
+                            "Standby replica {} stays out of this assembly: {} \
+                             (it keeps chasing and rejoins at the next reassembly)",
+                            uuid, e
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+    admitted
+}
+
+/// One standby's §6 admission: cut the final common epoch on the attached
+/// survivors (no writers exist — the cut equals every head), run one
+/// base-inclusive chase session onto the standby under the stage budget,
+/// record in_sync (clearing `reverted_to`), and re-export the head fenced to
+/// the consumer for the base list.
+async fn admit_one_standby(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    raid_name: &str,
+    replicas: &[ReplicaInfo],
+    consumer_node: &str,
+    attached: &[String],
+    replica_uuid: &str,
+    cfg: &StageConfig,
+) -> Result<AdmittedStandby, RpcError> {
+    let deadline = Instant::now() + cfg.final_delta_budget;
+
+    // Fresh record per standby: earlier admissions in this stage appended an
+    // epoch and flipped states.
+    let record = store
+        .load(volume_id)
+        .await?
+        .ok_or("sync record disappeared during staging")?;
+    let rec = record
+        .get(replica_uuid)
+        .cloned()
+        .ok_or("replica missing from sync record")?;
+    if rec.sync_state != SyncState::Standby {
+        return Err(format!("replica is {} — not a standby", rec.sync_state.as_str()).into());
+    }
+    let Some((index, identity)) = replicas
+        .iter()
+        .enumerate()
+        .find(|(_, ri)| ri.lvol_uuid == replica_uuid)
+    else {
+        return Err("replica identity not in volumeAttributes".into());
+    };
+    let base = rec
+        .last_epoch
+        .clone()
+        .ok_or("standby has no last_epoch mark")?;
+    let Some(base_seq) = epoch_seq(volume_id, &base) else {
+        return Err(format!("standby mark {} is not an epoch of this volume", base).into());
+    };
+    let behind = record.latest_epoch_seq(volume_id).saturating_sub(base_seq);
+    if behind > cfg.max_epochs_behind {
+        return Err(format!(
+            "standby is {} epochs behind (limit {}) — the chase has not converged",
+            behind, cfg.max_epochs_behind
+        )
+        .into());
+    }
+
+    // Final common epoch on exactly the attached in-sync replicas. With all
+    // of them fenced to this node and the raid not yet created, no writer
+    // exists: the cut equals each head, and skew is zero.
+    let final_epoch = epoch_name(volume_id, record.latest_epoch_seq(volume_id) + 1);
+    let targets: Vec<EpochTarget> = record
+        .replicas
+        .iter()
+        .filter(|r| r.sync_state == SyncState::InSync)
+        .filter(|r| attached.iter().any(|a| *a == r.lvol_uuid))
+        .filter_map(|r| {
+            replicas
+                .iter()
+                .find(|ri| ri.lvol_uuid == r.lvol_uuid)
+                .map(|ri| EpochTarget {
+                    node_name: ri.node_name.clone(),
+                    lvol_uuid: ri.lvol_uuid.clone(),
+                    snapshot_source: r.live_lvol_uuid().to_string(),
+                    lvs_name: ri.lvs_name.clone(),
+                })
+        })
+        .collect();
+    if targets.is_empty() {
+        return Err("no attached in-sync replica to cut the final epoch on".into());
+    }
+    let plan = CutPlan { epoch: final_epoch.clone(), targets };
+    let cut_uuids = match execute_cut(&NodeRpcAdapter(rpc), &plan).await {
+        CutOutcome::Recorded { cut_uuids } => cut_uuids,
+        CutOutcome::Aborted { failures } => {
+            return Err(format!(
+                "final epoch cut failed on {} replica(s): {}",
+                failures.len(),
+                failures
+                    .iter()
+                    .map(|(node, e)| format!("{}: {}", node, e))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+            .into());
+        }
+    };
+    store.record_epoch_cut(volume_id, &final_epoch, &cut_uuids).await?;
+
+    // Local view with the new epoch, for chain selection and source pick.
+    let mut record = record;
+    record.apply_epoch_cut(&final_epoch, &cut_uuids, &replica_sync::now_rfc3339());
+
+    // One more chase session: base-inclusive from the standby's mark through
+    // the final epoch, from an attached source (prefer off the consumer).
+    let attached_replicas: Vec<ReplicaInfo> = replicas
+        .iter()
+        .filter(|ri| attached.iter().any(|a| *a == ri.lvol_uuid))
+        .cloned()
+        .collect();
+    let src = pick_source(&record, &attached_replicas, Some(consumer_node))
+        .ok_or("no in-sync source among the attached replicas")?;
+    let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
+    let live_uuid = rec.live_lvol_uuid().to_string();
+    let dst_bdev = ensure_dst_attached(
+        rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
+    )
+    .await?;
+    let newest = copy_chain_and_align(
+        rpc, volume_id, &record, src, identity, &head_alias, &dst_bdev, &base,
+        cfg.poll_interval, Some(deadline),
+    )
+    .await?;
+
+    // Admission order is load-bearing (module note): record in_sync —
+    // clearing the write-virgin marker — BEFORE the head joins the raid.
+    store.record_in_sync(volume_id, replica_uuid, &newest).await?;
+
+    // The head joins the base list: locally as the live lvol; remotely via
+    // the §3-disciplined fenced re-export, which flips the subsystem's host
+    // list from the copy source to the consumer.
+    let bdev = if identity.node_name == consumer_node {
+        clear_head_sb(rpc, consumer_node, &head_alias, raid_name).await?;
+        live_uuid.clone()
+    } else {
+        let bdev = ensure_dst_attached(
+            rpc, volume_id, index, identity, &head_alias, &live_uuid, consumer_node, raid_name,
+        )
+        .await?;
+        // The copy controller on the source node is fenced out now — detach
+        // it best-effort so it doesn't linger as dead weight.
+        if src.node_name != consumer_node {
+            let expected = expected_remote_base_bdev(volume_id, index);
+            let controller = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
+            detach_controller(rpc, &src.node_name, &controller).await;
+        }
+        bdev
+    };
+
+    Ok(AdmittedStandby {
+        lvol_uuid: replica_uuid.to_string(),
+        node_name: identity.node_name.clone(),
+        bdev,
+        final_epoch: newest,
+    })
 }
 
 /// One orchestrator pass over a single volume: chase every standby, then run
@@ -1402,6 +1853,34 @@ mod tests {
             Ok(())
         }
 
+        async fn record_epoch_cut(
+            &self,
+            _volume_id: &str,
+            epoch: &str,
+            cut_uuids: &[String],
+        ) -> Result<(), RpcError> {
+            self.record.lock().unwrap().apply_epoch_cut(epoch, cut_uuids, "t-cut");
+            self.ops.lock().unwrap().push(format!("epoch_cut:{}", epoch));
+            Ok(())
+        }
+
+        async fn record_in_sync(
+            &self,
+            _volume_id: &str,
+            replica_uuid: &str,
+            last_epoch: &str,
+        ) -> Result<(), RpcError> {
+            self.record
+                .lock()
+                .unwrap()
+                .mark_in_sync(replica_uuid, last_epoch, "admitted", "t-insync");
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("in_sync:{}:{}", replica_uuid, last_epoch));
+            Ok(())
+        }
+
         async fn emit(&self, _volume_id: &str, event_type: &str, reason: &str, _message: &str) {
             self.events
                 .lock()
@@ -1724,7 +2203,7 @@ mod tests {
             .lock()
             .unwrap()
             .extend(["in progress".to_string(), "in progress".to_string()]);
-        shallow_copy(&rpc, "node-a", "lvs0/epoch-vol1-4", "dst", Duration::ZERO)
+        shallow_copy(&rpc, "node-a", "lvs0/epoch-vol1-4", "dst", Duration::ZERO, None)
             .await
             .unwrap();
         assert_eq!(rpc.calls_of("bdev_lvol_check_shallow_copy").len(), 3);
@@ -1737,7 +2216,7 @@ mod tests {
             .lock()
             .unwrap()
             .push("error:No space left on device".to_string());
-        let err = shallow_copy(&rpc, "node-a", "lvs0/epoch-vol1-4", "dst", Duration::ZERO)
+        let err = shallow_copy(&rpc, "node-a", "lvs0/epoch-vol1-4", "dst", Duration::ZERO, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("No space left"), "got: {}", err);
@@ -2012,6 +2491,264 @@ mod tests {
         assert!(rpc.calls.lock().unwrap().is_empty());
         assert!(store.ops.lock().unwrap().is_empty());
         assert!(store.events.lock().unwrap().is_empty());
+    }
+
+    // ---- phase 4: reassembly admission -----------------------------------
+
+    /// b is a warm standby caught up through epoch 5 (the newest), with the
+    /// phase-3 revert bookkeeping in place.
+    fn standby_b_record() -> VolumeSyncRecord {
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.mark_standby("uuid-b", &epoch("vol1", 5), "caught up", "t");
+        record
+    }
+
+    fn stage_cfg() -> StageConfig {
+        StageConfig {
+            final_delta_budget: Duration::from_secs(3600),
+            max_epochs_behind: 4,
+            poll_interval: Duration::ZERO,
+        }
+    }
+
+    fn attached_ac() -> Vec<String> {
+        vec!["uuid-a".to_string(), "uuid-c".to_string()]
+    }
+
+    #[tokio::test]
+    async fn admission_full_choreography() {
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert_eq!(
+            admitted,
+            vec![AdmittedStandby {
+                lvol_uuid: "uuid-b".to_string(),
+                node_name: "node-b".to_string(),
+                bdev: expected_remote_base_bdev("vol1", 1),
+                final_epoch: epoch("vol1", 6),
+            }]
+        );
+
+        // Final epoch 6 cut on the attached survivors (a on node-a, c on
+        // node-c), then the standby's head aligned at 6 on node-b.
+        let snaps = rpc.calls_of("bdev_lvol_snapshot");
+        let cut: Vec<(&str, &str)> = snaps
+            .iter()
+            .map(|(n, p)| (n.as_str(), p["params"]["lvol_name"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            cut,
+            vec![("node-a", "uuid-a"), ("node-c", "uuid-c"), ("node-b", "lvs0/lvol-uuid-b")]
+        );
+        assert!(snaps
+            .iter()
+            .all(|(_, p)| p["params"]["snapshot_name"] == epoch("vol1", 6)));
+
+        // The copy is one more base-inclusive chase session: the standby's
+        // mark (5) re-copied, then the final epoch — from the non-consumer
+        // source node-a.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        let srcs: Vec<&str> = copies
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(srcs, vec!["lvs0/epoch-vol1-5", "lvs0/epoch-vol1-6"]);
+        assert!(copies.iter().all(|(node, _)| node == "node-a"));
+
+        // Two fenced exports of the live head: first to the copy source,
+        // then the admission flip to the consumer.
+        let exports = rpc.exports.lock().unwrap().clone();
+        assert_eq!(
+            exports,
+            vec![
+                ("node-b".into(), "uuid-b-v2".into(), "vol1_1".into(), "node-a".into()),
+                ("node-b".into(), "uuid-b-v2".into(), "vol1_1".into(), "node-c".into()),
+            ]
+        );
+        // The copy controller on the source node is detached after the flip.
+        let detaches = rpc.calls_of("bdev_nvme_detach_controller");
+        assert_eq!(detaches.len(), 1);
+        assert_eq!(detaches[0].0, "node-a");
+
+        // Store ordering: the cut is recorded before in_sync.
+        let ops = store.ops.lock().unwrap().clone();
+        assert_eq!(
+            ops,
+            vec![
+                format!("epoch_cut:{}", epoch("vol1", 6)),
+                format!("in_sync:uuid-b:{}", epoch("vol1", 6)),
+            ]
+        );
+
+        // Record end state: admitted in_sync at 6, write-virgin marker
+        // cleared, live-uuid override kept, survivors stamped at 6.
+        {
+            let record = store.record.lock().unwrap();
+            let rec = record.get("uuid-b").unwrap();
+            assert_eq!(rec.sync_state, SyncState::InSync);
+            assert_eq!(rec.last_epoch.as_deref(), Some(epoch("vol1", 6).as_str()));
+            assert_eq!(rec.reverted_to, None);
+            assert_eq!(rec.active_lvol_uuid.as_deref(), Some("uuid-b-v2"));
+            assert_eq!(record.current_epoch.as_deref(), Some(epoch("vol1", 6).as_str()));
+            assert_eq!(
+                record.get("uuid-a").unwrap().last_epoch.as_deref(),
+                Some(epoch("vol1", 6).as_str())
+            );
+        }
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("ReplicaAdmitted".to_string(), "Normal".to_string())]);
+
+        // Idempotent restage: nothing left to admit.
+        let again = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+        assert!(again.is_empty());
+        assert_eq!(store.events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admission_defers_when_raid_already_online() {
+        // Restage with the raid alive: ensure_raid1_bdev will reuse it, and
+        // a base cannot join an ONLINE raid without the stock blind rebuild.
+        let rpc = FakeRpc::new("uuid-b-v2");
+        rpc.raids.lock().unwrap().insert(
+            "node-c".to_string(),
+            vec![json!({ "name": "raid_vol1", "state": "online" })],
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
+        assert!(store.ops.lock().unwrap().is_empty());
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_defers_on_excessive_lag() {
+        let mut record = standby_b_record();
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "behind", "t"); // 1 behind
+        let store = FakeStore::new(record);
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let cfg = StageConfig { max_epochs_behind: 0, ..stage_cfg() };
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(), &cfg,
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        // Nothing cut, nothing recorded — the standby just keeps chasing.
+        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
+        assert!(store.ops.lock().unwrap().is_empty());
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn admission_defers_when_final_cut_fails_and_rolls_back() {
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.fail.insert(
+            ("node-c".to_string(), "bdev_lvol_snapshot".to_string()),
+            "connection refused".to_string(),
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        // The partial cut rolled back (node-a's snapshot deleted), nothing
+        // recorded, replica still standby.
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].0, "node-a");
+        assert_eq!(deletes[0].1["params"]["name"], format!("lvs0/{}", epoch("vol1", 6)));
+        assert!(store.ops.lock().unwrap().is_empty());
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn admission_budget_overrun_stages_degraded() {
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let store = FakeStore::new(standby_b_record());
+        let cfg = StageConfig { final_delta_budget: Duration::ZERO, ..stage_cfg() };
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(), &cfg,
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        // The final epoch was cut and recorded — a normal common epoch the
+        // background chase consumes — but no copy started and the replica
+        // stays a standby (never in_sync).
+        let ops = store.ops.lock().unwrap().clone();
+        assert_eq!(ops, vec![format!("epoch_cut:{}", epoch("vol1", 6))]);
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn admission_of_local_standby_uses_live_lvol_directly() {
+        // The standby lives on the staging node itself: the head joins the
+        // base list as the local live lvol — no loopback export, which would
+        // put an NVMe-oF hop on the data path forever.
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-b", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].bdev, "uuid-b-v2");
+        // Exactly one export — to the copy source — and no consumer flip.
+        let exports = rpc.exports.lock().unwrap().clone();
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].3, "node-a");
+        assert!(rpc
+            .calls_of("bdev_nvme_attach_controller")
+            .iter()
+            .all(|(node, _)| node == "node-a"));
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::InSync
+        );
     }
 
     #[tokio::test]

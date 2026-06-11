@@ -1595,47 +1595,146 @@ impl SpdkCsiDriver {
         volume_id: &str,
         replicas: &[ReplicaInfo],
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::catchup::{self, CatchupStore};
+        use crate::replica_sync::SyncState;
+
         let current_node = &self.node_id;
+        // RWX volumes stage under the synthetic "nfs-server-<vol>" handle;
+        // the sync record (and epoch namespace) lives on the user PV.
+        let record_volume_id = crate::replica_sync::record_pv_name(volume_id).to_string();
 
         println!("🔧 [DRIVER] Creating RAID 1 on node: {}", current_node);
         println!("🔧 [DRIVER] Processing {} replicas...", replicas.len());
 
-        // Try to attach each replica, collecting successes and failures
+        // Staging is sync-state-aware (incremental-rebuild phase 4). The
+        // record is consulted best-effort, and enforced only when the volume
+        // has epoch history — without epochs the catch-up machinery cannot
+        // heal an excluded replica, so legacy behavior (attach everything,
+        // warn on stale admission) is the lesser hazard.
+        let store = catchup::KubeStore { client: self.kube_client.clone() };
+        let record = match store.load(&record_volume_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                println!(
+                    "⚠️ [DRIVER] Cannot load replica sync record for {} (staging without it): {}",
+                    record_volume_id, e
+                );
+                None
+            }
+        };
+        let enforce = record.as_ref().map(|r| !r.epochs.is_empty()).unwrap_or(false);
+
         let mut base_bdevs = Vec::new();
+        let mut attached_in_sync: Vec<String> = Vec::new();
         let mut unavailable_replicas: Vec<(&ReplicaInfo, String)> = Vec::new();
+        let mut deferred_standbys: Vec<&ReplicaInfo> = Vec::new();
+        let mut excluded_stale: Vec<(usize, &ReplicaInfo)> = Vec::new();
 
         for (i, replica) in replicas.iter().enumerate() {
-            if replica.node_name == *current_node {
-                // LOCAL: Use lvol bdev directly - this should always work if the lvol exists
-                println!("   Replica {}: LOCAL access (lvol: {})",
-                         i + 1, replica.lvol_uuid);
+            let rec = record.as_ref().and_then(|r| r.get(&replica.lvol_uuid));
+            let state = rec.map(|r| r.sync_state).unwrap_or(SyncState::InSync);
+            // After a catch-up revert the live head has a new uuid; the
+            // identity uuid in volumeAttributes addresses nothing.
+            let live_uuid = rec
+                .map(|r| r.live_lvol_uuid().to_string())
+                .unwrap_or_else(|| replica.lvol_uuid.clone());
 
-                // Verify local lvol exists before adding
-                match self.verify_local_lvol_exists(&replica.lvol_uuid).await {
-                    Ok(bdev_name) => {
-                        println!("   ✓ Local replica verified: {}", bdev_name);
-                        base_bdevs.push(bdev_name);
-                    }
-                    Err(e) => {
-                        let reason = format!("Local lvol not found: {}", e);
-                        println!("   ✗ Replica {} UNAVAILABLE: {}", i + 1, reason);
-                        unavailable_replicas.push((replica, reason));
-                    }
+            if enforce && state == SyncState::Standby {
+                println!(
+                    "   Replica {}: STANDBY on {} — deferred to final-delta admission",
+                    i + 1,
+                    replica.node_name
+                );
+                deferred_standbys.push(replica);
+                continue;
+            }
+            if enforce && state == SyncState::Stale {
+                println!(
+                    "   Replica {}: STALE on {} — excluded from assembly (missed writes; \
+                     the catch-up orchestrator heals it in the background)",
+                    i + 1,
+                    replica.node_name
+                );
+                excluded_stale.push((i, replica));
+                continue;
+            }
+
+            match self.attach_replica_base(volume_id, i, replica, &live_uuid).await {
+                Ok(bdev) => {
+                    base_bdevs.push(bdev);
+                    attached_in_sync.push(replica.lvol_uuid.clone());
                 }
-            } else {
-                // REMOTE: Setup NVMe-oF and attach - may fail if node is down
-                println!("   Replica {}: REMOTE access (node: {}, setting up NVMe-oF...)",
-                         i + 1, replica.node_name);
+                Err(reason) => {
+                    println!(
+                        "   ✗ Replica {} on node {} UNAVAILABLE: {}",
+                        i + 1,
+                        replica.node_name,
+                        reason
+                    );
+                    unavailable_replicas.push((replica, reason));
+                }
+            }
+        }
 
-                match self.try_attach_remote_replica(volume_id, replica, i).await {
-                    Ok(nvme_bdev) => {
-                        println!("   ✓ Attached remote replica as: {}", nvme_bdev);
-                        base_bdevs.push(nvme_bdev);
+        // Phase 4 (§6 rejoin-at-assembly): every survivor that attached is
+        // now fenced to this node — no writer exists — so standbys can run
+        // the final delta and join the create as in-sync members. Deferral
+        // is contained per-standby (the replica stays a chasing standby).
+        let mut admitted_standbys: Vec<catchup::AdmittedStandby> = Vec::new();
+        let raid_name = format!("raid_{}", volume_id);
+        if !deferred_standbys.is_empty() {
+            let stage_cfg = catchup::StageConfig::from_env();
+            admitted_standbys = catchup::admit_standbys_at_stage(
+                self,
+                &store,
+                &record_volume_id,
+                &raid_name,
+                replicas,
+                current_node,
+                &attached_in_sync,
+                &stage_cfg,
+            )
+            .await;
+            for a in &admitted_standbys {
+                println!(
+                    "✅ [DRIVER] Standby replica on {} admitted in_sync at {} — base bdev {}",
+                    a.node_name, a.final_epoch, a.bdev
+                );
+                base_bdevs.push(a.bdev.clone());
+            }
+        }
+
+        // Last-resort fallback: if exclusions left us below the 2-base
+        // minimum, admit stale replicas rather than brick the volume —
+        // exactly the pre-phase-4 behavior, still surfaced loudly via the
+        // StaleReplicaAdmitted event below.
+        let mut forced_stale: Vec<String> = Vec::new();
+        if base_bdevs.len() < 2 && !excluded_stale.is_empty() {
+            println!(
+                "⚠️ [DRIVER] Below the 2-base minimum with stale replicas excluded — \
+                 forced stale admission (divergence hazard, evented)"
+            );
+            for (i, replica) in &excluded_stale {
+                if base_bdevs.len() >= 2 {
+                    break;
+                }
+                let live_uuid = record
+                    .as_ref()
+                    .and_then(|r| r.get(&replica.lvol_uuid))
+                    .map(|r| r.live_lvol_uuid().to_string())
+                    .unwrap_or_else(|| replica.lvol_uuid.clone());
+                match self.attach_replica_base(volume_id, *i, replica, &live_uuid).await {
+                    Ok(bdev) => {
+                        base_bdevs.push(bdev);
+                        forced_stale.push(replica.lvol_uuid.clone());
                     }
-                    Err(e) => {
-                        let reason = format!("NVMe-oF connection failed: {}", e);
-                        println!("   ✗ Replica {} on node {} UNAVAILABLE: {}",
-                                 i + 1, replica.node_name, reason);
+                    Err(reason) => {
+                        println!(
+                            "   ✗ Replica {} on node {} UNAVAILABLE: {}",
+                            i + 1,
+                            replica.node_name,
+                            reason
+                        );
                         unavailable_replicas.push((replica, reason));
                     }
                 }
@@ -1655,9 +1754,11 @@ impl SpdkCsiDriver {
                 .collect();
 
             return Err(format!(
-                "Cannot create RAID 1: need minimum 2 replicas, only {} available. \
-                 Unavailable: [{}]",
+                "Cannot create RAID 1: need minimum 2 replicas, only {} available \
+                 ({} standby deferred, {} stale excluded). Unavailable: [{}]",
                 available_count,
+                deferred_standbys.len() - admitted_standbys.len(),
+                excluded_stale.len() - forced_stale.len(),
                 unavailable_nodes.join(", ")
             ).into());
         }
@@ -1681,7 +1782,6 @@ impl SpdkCsiDriver {
         }
 
         // Create RAID 1 bdev with available replicas
-        let raid_name = format!("raid_{}", volume_id);
         println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
                  raid_name, base_bdevs.len());
 
@@ -1693,25 +1793,81 @@ impl SpdkCsiDriver {
             println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
         }
 
-        self.record_assembly_sync_state(volume_id, replicas, &unavailable_replicas)
+        // Replicas deliberately left out in a healable state (standby or
+        // stale-with-catch-up-pending) must not be re-marked stale or
+        // counted as silently-admitted by the bookkeeping below.
+        let skipped: Vec<String> = deferred_standbys
+            .iter()
+            .map(|r| r.lvol_uuid.clone())
+            .filter(|u| !admitted_standbys.iter().any(|a| a.lvol_uuid == *u))
+            .chain(
+                excluded_stale
+                    .iter()
+                    .map(|(_, r)| r.lvol_uuid.clone())
+                    .filter(|u| !forced_stale.contains(u)),
+            )
+            .collect();
+        self.record_assembly_sync_state(volume_id, replicas, &unavailable_replicas, &skipped)
             .await;
 
         Ok(raid_bdev_name)
     }
 
+    /// Attach one replica as a raid base on this node: local lvols verify
+    /// directly, remote ones go through the fenced NVMe-oF export + attach.
+    /// `bdev_name` is the live head (the identity uuid unless a catch-up
+    /// revert recorded an `active_lvol_uuid` override).
+    async fn attach_replica_base(
+        &self,
+        volume_id: &str,
+        replica_index: usize,
+        replica: &ReplicaInfo,
+        bdev_name: &str,
+    ) -> Result<String, String> {
+        if replica.node_name == self.node_id {
+            println!("   Replica {}: LOCAL access (lvol: {})", replica_index + 1, bdev_name);
+            match self.verify_local_lvol_exists(bdev_name).await {
+                Ok(bdev) => {
+                    println!("   ✓ Local replica verified: {}", bdev);
+                    Ok(bdev)
+                }
+                Err(e) => Err(format!("Local lvol not found: {}", e)),
+            }
+        } else {
+            println!(
+                "   Replica {}: REMOTE access (node: {}, setting up NVMe-oF...)",
+                replica_index + 1,
+                replica.node_name
+            );
+            match self
+                .try_attach_remote_replica(volume_id, replica, replica_index, bdev_name)
+                .await
+            {
+                Ok(nvme_bdev) => {
+                    println!("   ✓ Attached remote replica as: {}", nvme_bdev);
+                    Ok(nvme_bdev)
+                }
+                Err(e) => Err(format!("NVMe-oF connection failed: {}", e)),
+            }
+        }
+    }
+
     /// Persist the membership outcome of a raid assembly on the PV
     /// (incremental-rebuild phase 1, §9-1). A replica excluded from the
     /// assembly stops receiving writes the moment the degraded raid goes
-    /// online — that is the in_sync → stale transition. A previously-stale
-    /// replica that was included is today's documented divergence hazard
-    /// (no catch-up exists until phase 3/4): the record keeps it stale and
-    /// the admission is surfaced as an event — behavior is unchanged.
-    /// Best effort: the node agent's health monitor converges the record.
+    /// online — that is the in_sync → stale transition. A stale replica
+    /// that was force-admitted (phase-4 below-minimum fallback) is surfaced
+    /// as a StaleReplicaAdmitted event. `skipped` are replicas deliberately
+    /// left out in a healable state (deferred standbys, excluded stale):
+    /// they are neither re-marked stale (a standby must keep chasing) nor
+    /// counted as admitted. Best effort: the node agent's health monitor
+    /// converges the record.
     async fn record_assembly_sync_state(
         &self,
         volume_id: &str,
         replicas: &[ReplicaInfo],
         unavailable_replicas: &[(&ReplicaInfo, String)],
+        skipped: &[String],
     ) {
         use crate::replica_sync::{self, SyncState};
 
@@ -1723,6 +1879,7 @@ impl SpdkCsiDriver {
             .iter()
             .map(|r| r.lvol_uuid.clone())
             .filter(|uuid| !excluded.iter().any(|(e, _)| e == uuid))
+            .filter(|uuid| !skipped.contains(uuid))
             .collect();
 
         let now = replica_sync::now_rfc3339();
@@ -1815,16 +1972,19 @@ impl SpdkCsiDriver {
 
     /// Try to attach a remote replica via NVMe-oF
     /// Returns Ok(bdev_name) on success, Err on failure (node down, connection refused, etc.)
+    /// `bdev_name` is the bdev to export — the replica's live head uuid
+    /// (post-revert override aware, incremental-rebuild phase 4).
     async fn try_attach_remote_replica(
         &self,
         volume_id: &str,
         replica: &ReplicaInfo,
         replica_index: usize,
+        bdev_name: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Create NVMe-oF target on remote node
         let conn_info = self.setup_nvmeof_target_on_node(
             &replica.node_name,
-            &replica.lvol_uuid,
+            bdev_name,
             &format!("{}_{}", volume_id, replica_index),
             &self.node_id,
         ).await?;

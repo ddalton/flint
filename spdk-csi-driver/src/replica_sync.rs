@@ -253,6 +253,43 @@ impl VolumeSyncRecord {
         }
     }
 
+    /// Admit a replica back to in_sync (phase 4: the fenced final delta at
+    /// reassembly equalized its head with the survivors'). Stamps
+    /// `last_epoch` with the final epoch and ALWAYS clears `reverted_to` —
+    /// from now on the head takes raid writes, so a later catch-up must
+    /// revert again (the documented phase-3 obligation). `active_lvol_uuid`
+    /// is kept: the post-revert head stays the live lvol from here on.
+    /// Returns true if anything changed.
+    pub fn mark_in_sync(
+        &mut self,
+        lvol_uuid: &str,
+        last_epoch: &str,
+        reason: &str,
+        now_rfc3339: &str,
+    ) -> bool {
+        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            Some(rec) => {
+                let mut changed = false;
+                if rec.sync_state != SyncState::InSync {
+                    rec.sync_state = SyncState::InSync;
+                    rec.since = Some(now_rfc3339.to_string());
+                    rec.reason = Some(reason.to_string());
+                    changed = true;
+                }
+                if rec.last_epoch.as_deref() != Some(last_epoch) {
+                    rec.last_epoch = Some(last_epoch.to_string());
+                    changed = true;
+                }
+                if rec.reverted_to.is_some() {
+                    rec.reverted_to = None;
+                    changed = true;
+                }
+                changed
+            }
+            None => false,
+        }
+    }
+
     /// Lower the retention pin to `epoch` (§5 retention pinning). A pin only
     /// ever moves toward older epochs here — an existing older (or
     /// unparseable, i.e. pin-everything) pin is kept. Returns true if the
@@ -383,11 +420,16 @@ pub fn expected_remote_base_bdev(volume_id: &str, replica_index: usize) -> Strin
     format!("nvme_{}n1", nqn.replace(':', "_").replace('.', "_"))
 }
 
-/// Replicas of `record` not backed by a configured base of `raid`
-/// (a `bdev_raid_get_bdevs` entry), i.e. replicas missing acknowledged
+/// In-sync replicas of `record` not backed by a configured base of `raid`
+/// (a `bdev_raid_get_bdevs` entry), i.e. replicas newly missing acknowledged
 /// writes. Returns None unless the raid is online: only an online raid
 /// serves writes, so a CONFIGURING phantom or an offline leftover implies
 /// nothing about replica data.
+///
+/// Only `in_sync` replicas are reported: a stale or standby replica is
+/// already recorded as missing writes, and "not in the raid" is its expected
+/// condition — reporting it would let the health monitor demote a chasing
+/// standby back to stale on every tick (phase 4).
 ///
 /// Matching is by set difference against the *healthy* bases — when a leg
 /// fails on an online raid, SPDK nulls both the slot's name and uuid
@@ -396,6 +438,9 @@ pub fn expected_remote_base_bdev(volume_id: &str, replica_index: usize) -> Strin
 /// their uuid as the bdev uuid, and the NVMe-oF target propagates the
 /// backing bdev's uuid into the namespace, subsystem.c:2608), by name equal
 /// to the lvol uuid (local base), or by the deterministic remote bdev name.
+/// The *live* uuid is matched as well as the identity uuid: after a
+/// catch-up revert the head carries `active_lvol_uuid`, and that is the
+/// uuid a base admitted at reassembly (phase 4) exposes.
 pub fn replicas_missing_from_raid(
     raid: &Value,
     volume_id: &str,
@@ -421,17 +466,33 @@ pub fn replicas_missing_from_raid(
         .replicas
         .iter()
         .enumerate()
+        .filter(|(_, rec)| rec.sync_state == SyncState::InSync)
         .filter(|(index, rec)| {
             let remote_name = expected_remote_base_bdev(volume_id, *index);
+            let live = rec.live_lvol_uuid();
             !configured.iter().any(|base| {
                 let uuid = base.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
                 let name = base.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                uuid == rec.lvol_uuid || name == rec.lvol_uuid || name == remote_name
+                uuid == rec.lvol_uuid
+                    || uuid == live
+                    || name == rec.lvol_uuid
+                    || name == live
+                    || name == remote_name
             })
         })
         .map(|(_, rec)| rec.lvol_uuid.clone())
         .collect();
     Some(missing)
+}
+
+/// The PV that holds a volume's replica record. RWX/ROX volumes stage
+/// through a synthetic PV whose volumeHandle is "nfs-server-<volume>"
+/// (rwx_nfs.rs); the replicas — and therefore the sync record — live on the
+/// user volume's PV. Everything keyed off a volumeHandle (NodeStage, the
+/// health monitor's raid-name strip) must resolve through this before
+/// touching the record.
+pub fn record_pv_name(volume_id: &str) -> &str {
+    volume_id.strip_prefix("nfs-server-").unwrap_or(volume_id)
 }
 
 /// Extract the immutable replica identity list from a PV's volumeAttributes.
@@ -481,6 +542,8 @@ where
 {
     const MAX_ATTEMPTS: usize = 3;
     let pvs: Api<PersistentVolume> = Api::all(client.clone());
+    // RWX synthetic handles ("nfs-server-<vol>") resolve to the user PV.
+    let volume_id = record_pv_name(volume_id);
 
     for attempt in 1..=MAX_ATTEMPTS {
         let pv = pvs.get(volume_id).await?;
@@ -552,6 +615,7 @@ pub async fn emit_pv_event(
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
     use kube::api::PostParams;
 
+    let pv_name = record_pv_name(pv_name);
     let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -915,6 +979,83 @@ mod tests {
         assert_eq!(rec.active_lvol_uuid, None);
         assert_eq!(rec.reverted_to, None);
         assert_eq!(rec.live_lvol_uuid(), "x");
+    }
+
+    #[test]
+    fn mark_in_sync_clears_revert_marker_and_stamps_epoch() {
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.replicas[1].active_lvol_uuid = Some("uuid-b2".to_string());
+        record.replicas[1].reverted_to = Some("epoch-vol1-3".to_string());
+        record.mark_standby("uuid-b", "epoch-vol1-5", "chasing", "t1");
+
+        // standby → in_sync: state, epoch, since, reason — and the
+        // write-virgin marker MUST clear (the head takes raid writes now).
+        assert!(record.mark_in_sync("uuid-b", "epoch-vol1-6", "admitted at reassembly", "t2"));
+        let rec = record.get("uuid-b").unwrap();
+        assert_eq!(rec.sync_state, SyncState::InSync);
+        assert_eq!(rec.last_epoch.as_deref(), Some("epoch-vol1-6"));
+        assert_eq!(rec.since.as_deref(), Some("t2"));
+        assert_eq!(rec.reverted_to, None);
+        // The live head is still the post-revert clone.
+        assert_eq!(rec.live_lvol_uuid(), "uuid-b2");
+
+        // Idempotent re-apply (resourceVersion conflict retry).
+        assert!(!record.mark_in_sync("uuid-b", "epoch-vol1-6", "again", "t3"));
+        assert_eq!(record.get("uuid-b").unwrap().since.as_deref(), Some("t2"));
+
+        // A lingering marker on an already-in_sync replica still clears.
+        record.replicas[0].reverted_to = Some("epoch-vol1-2".to_string());
+        assert!(record.mark_in_sync("uuid-a", "epoch-vol1-6", "x", "t4"));
+        assert_eq!(record.get("uuid-a").unwrap().reverted_to, None);
+
+        // Unknown replica: no-op.
+        assert!(!record.mark_in_sync("uuid-zz", "epoch-vol1-6", "?", "t5"));
+    }
+
+    #[test]
+    fn missing_skips_stale_and_standby_replicas() {
+        // A standby is not in the raid by design — the monitor must not
+        // demote it back to stale every tick while it chases (phase 4).
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_standby("uuid-c", "epoch-vol1-4", "chasing", "t1");
+        let raid = raid_json(
+            "online",
+            vec![json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true})],
+        );
+        assert_eq!(
+            replicas_missing_from_raid(&raid, "vol1", &record).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn missing_matches_admitted_replica_by_live_uuid() {
+        // After a catch-up revert + phase-4 admission, the base in the raid
+        // exposes the ACTIVE uuid, not the identity uuid — the in_sync
+        // replica must still match (locally by name/uuid, remotely by
+        // propagated uuid).
+        let mut record = three_replica_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b2".to_string());
+        let raid = raid_json(
+            "online",
+            vec![
+                json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
+                json!({"name": "uuid-b2", "uuid": "uuid-b2", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev("vol1", 2), "uuid": "uuid-c", "is_configured": true}),
+            ],
+        );
+        assert_eq!(
+            replicas_missing_from_raid(&raid, "vol1", &record).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn record_pv_name_strips_synthetic_nfs_handle() {
+        assert_eq!(record_pv_name("pvc-123"), "pvc-123");
+        assert_eq!(record_pv_name("nfs-server-pvc-123"), "pvc-123");
     }
 
     #[test]
