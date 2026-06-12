@@ -1220,6 +1220,11 @@ impl NodeAgent {
         // at a stale bdev is replaced.
         // Fencing: this export is consumed by the local kernel initiator.
         let allowed = vec![crate::nvmeof_export::flint_host_nqn(&node_agent.node_name)];
+        // Kernel-facing namespace: pin a deterministic identity so an
+        // in-place rebuild after spdk-tgt restart presents the SAME
+        // namespace and the initiator reattaches (phase-6 layer 2).
+        let volume_id = nqn.rsplit(':').next().unwrap_or(nqn);
+        let (ns_uuid, ns_nguid) = crate::nvmeof_export::stable_ns_identity(volume_id);
         let spec = crate::nvmeof_export::ExportSpec {
             nqn,
             bdev_name,
@@ -1228,6 +1233,7 @@ impl NodeAgent {
             traddr: target_ip,
             trsvcid: target_port,
             allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
+            ns_identity: Some((&ns_uuid, &ns_nguid)),
         };
         crate::nvmeof_export::ensure_export(&node_agent.disk_service, &spec).await?;
 
@@ -2237,16 +2243,126 @@ impl NodeAgent {
         Ok(())
     }
 
+    /// In-place data-path repair (phase-6 layer 2): rebuild the raid
+    /// (same sync-state-aware assembly NodeStage uses) and re-export the
+    /// loopback subsystem with its pinned namespace identity — the kernel
+    /// initiator, still retrying inside its reconnect window, reattaches
+    /// and queued I/O completes. Zero workload disruption. Refuses ublk
+    /// frontends (the device node died with spdk-tgt; only a restage
+    /// helps) and tears its raid back down if the attachment vanished
+    /// mid-repair (a zombie consumer raid is the §3 hazard).
+    /// Whether kubelet currently has `volume_handle` STAGED on this node
+    /// (its `vol_data.json` exists under the CSI staging dir). The VA can
+    /// linger mid-detach during a consumer handover; kubelet's staging
+    /// record is the truth about whether a mount on this node still
+    /// expects the data path. Observed live (layer-2 validation): the
+    /// previous consumer's agent repaired against a detaching VA and
+    /// kubelet's in-flight unstage immediately tore it down — harmless
+    /// there, but the repair could steal replica fences for a tick.
+    fn is_staged_here(volume_handle: &str) -> bool {
+        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/flint.csi.storage.io";
+        let Ok(entries) = std::fs::read_dir(staging_base) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let vol_data = entry.path().join("vol_data.json");
+            let Ok(content) = std::fs::read_to_string(&vol_data) else {
+                continue;
+            };
+            if serde_json::from_str::<serde_json::Value>(&content)
+                .ok()
+                .and_then(|v| v["volumeHandle"].as_str().map(|h| h == volume_handle))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn repair_data_path(
+        &self,
+        pv: &PersistentVolume,
+        volume_handle: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pv_name = pv.metadata.name.as_deref().unwrap_or(volume_handle);
+        if pv
+            .metadata
+            .annotations
+            .as_ref()
+            .map(|a| a.contains_key("flint.io/ublk-id"))
+            .unwrap_or(false)
+        {
+            return Err("ublk frontend — the device node died with spdk-tgt; restage required".into());
+        }
+        if !Self::is_staged_here(volume_handle) {
+            return Err(
+                "volume not staged on this node per kubelet (VA lingering mid-detach?) — \
+                 repair refused"
+                    .into(),
+            );
+        }
+        let replicas = self
+            .get_replicas_from_pv(pv)?
+            .ok_or("no replica list on the PV")?;
+
+        // Reassemble exactly as NodeStage would (sync-record-aware
+        // admission, fenced replica attaches, §3 hygiene).
+        let raid_bdev = self
+            .driver
+            .create_raid_from_replicas(volume_handle, &replicas)
+            .await?;
+
+        // Anti-zombie guard: if the attachment left while we rebuilt
+        // (concurrent unstage), tear the raid back down and bail.
+        if self.get_attached_node(pv_name).await.as_deref() != Some(self.node_name.as_str()) {
+            let _ = self
+                .disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "bdev_raid_delete",
+                    "params": { "name": format!("raid_{}", volume_handle) }
+                }))
+                .await;
+            return Err("attachment left this node mid-repair — raid torn back down".into());
+        }
+
+        // Re-export the loopback subsystem: same NQN/listener/serial and
+        // the PINNED namespace identity, listener-last via the convergent
+        // module — the partial-rebuild hazard from the layer-2 experiment
+        // (listener over a namespace-less subsystem makes the kernel
+        // conclude the namespace was deleted) cannot recur.
+        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_handle);
+        let target_ip =
+            std::env::var("NVMEOF_LOCAL_TARGET_IP").unwrap_or("127.0.0.1".to_string());
+        let target_port = std::env::var("NVMEOF_TARGET_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(4420);
+        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&self.node_name)];
+        let (ns_uuid, ns_nguid) = crate::nvmeof_export::stable_ns_identity(volume_handle);
+        let spec = crate::nvmeof_export::ExportSpec {
+            nqn: &nqn,
+            bdev_name: &raid_bdev,
+            bdev_aliases: &[],
+            trtype: "TCP",
+            traddr: &target_ip,
+            trsvcid: target_port,
+            allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
+            ns_identity: Some((&ns_uuid, &ns_nguid)),
+        };
+        crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await?;
+        Ok(())
+    }
+
     /// Consumer-blindness detection (phase-6 yield, bug 1): a volume
     /// ATTACHED to this node whose raid bdev does not exist here has a
     /// dead data path the health monitor cannot see (its stale predicate
-    /// requires an online raid). Flag the PV with the data-path-lost
-    /// annotation + a Warning event after 3 consecutive 60s observations
+    /// requires an online raid). After 3 consecutive 60s observations
     /// (an in-flight NodeStage legitimately has VA-before-raid for up to
-    /// the stage-delta budget); clear our own flag (+ Normal event) when
-    /// the raid reappears or the attachment leaves this node.
-    /// Detection only — remediation is layered separately (storage
-    /// baseline recovery, in-place repair, opt-in cutover bounce).
+    /// the stage-delta budget), attempt the in-place repair (layer 2)
+    /// first; only when it fails, flag the PV with the data-path-lost
+    /// annotation + a Warning event. Clear our own flag (+ Normal event)
+    /// when the raid reappears or the attachment leaves this node.
     async fn detect_lost_data_paths(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use crate::cutover::{data_path_verdict, DataPathAction, DATA_PATH_LOST_ANNOTATION};
         use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -2310,6 +2426,45 @@ impl NodeAgent {
             } else {
                 0
             };
+
+            // Layer 2 first: once the loss is confirmed (3 strikes), try
+            // the in-place repair every tick — including while flagged,
+            // so a repair blocked transiently (replica node down) heals
+            // later. Flag only when repair fails.
+            if attached && !raid_present && strikes_with_this >= 3 {
+                match self.repair_data_path(&pv, &csi.volume_handle).await {
+                    Ok(()) => {
+                        info!(volume_id = %pv_name, "[DATA_PATH] In-place repair succeeded — raid rebuilt, export restored, kernel reattaches");
+                        self.emit_pv_event(
+                            &pv_name,
+                            "Normal",
+                            "VolumeDataPathRepaired",
+                            &format!(
+                                "Raid rebuilt and loopback export restored in place on {}; the \
+                                 kernel initiator reattaches within its reconnect window — no \
+                                 workload restart needed",
+                                self.node_name
+                            ),
+                        )
+                        .await;
+                        strikes.remove(&pv_name);
+                        still_missing.remove(&pv_name);
+                        if flagged_by_me {
+                            use kube::api::{Patch, PatchParams};
+                            let patch = serde_json::json!({
+                                "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION: null } }
+                            });
+                            let _ = pvs
+                                .patch(&pv_name, &PatchParams::default(), &Patch::Merge(&patch))
+                                .await;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(volume_id = %pv_name, error = %e, "[DATA_PATH] In-place repair failed — falling back to flagging");
+                    }
+                }
+            }
             match data_path_verdict(attached, raid_present, flagged_by_me, strikes_with_this, 3) {
                 DataPathAction::Flag => {
                     use kube::api::{Patch, PatchParams};
@@ -2502,6 +2657,7 @@ impl NodeAgent {
             traddr: &node_ip,
             trsvcid: target_port,
             allowed_hosts: allowed.as_deref(),
+            ns_identity: None,
         };
         crate::nvmeof_export::ensure_export(&self.disk_service, &spec)
             .await

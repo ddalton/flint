@@ -153,10 +153,34 @@ pinned at stage before it can be retested.
   STALLED rather than EIO'd this time — layer 0 restored the target
   fast enough that the kernel kept queueing within its reconnect
   window).
-- **Layer 2 — in-place repair (follow-up):** reconcile rebuilds the
-  raid + loopback export (convergent module, listener-last) so the
-  kernel reconnects with zero workload disruption; blocked on the
-  namespace-identity retest above.
+- **Layer 2 — in-place repair (landed same day):** when detection
+  confirms a loss (3 strikes), the agent rebuilds the raid (the same
+  sync-record-aware assembly NodeStage uses) and re-exports the
+  loopback subsystem via the convergent module — same NQN, stable
+  serial, and a **pinned namespace identity** (`stable_ns_identity`:
+  deterministic UUID/NGUID from the volume id, set at stage and at
+  repair) so the kernel initiator revalidates the namespace and
+  reattaches. Guards: refuses ublk frontends (device node dies with
+  spdk; restage only), refuses volumes kubelet does not have staged
+  here (`vol_data.json` check — a lingering mid-detach VA must not
+  spawn a zombie raid; observed live during a handover before the
+  guard existed, self-resolved by the in-flight unstage), and tears
+  its raid back down if the attachment leaves mid-repair. Detection
+  flags only when repair fails, and keeps retrying every tick.
+  **Validated end-to-end with forced direct I/O**: lone spdk-tgt kill
+  → repair at T+2m23s → 16 KiB `O_DIRECT` write + synced append/read-
+  back through the rebuilt path succeeded in the SAME pod, zero
+  restarts — a ~3-minute I/O stall the workload slept through.
+  Validation lessons, recorded for posterity: (a) cached reads lie —
+  two earlier "successful" rounds were page-cache illusions over a
+  dead mount; only direct I/O or synced write-then-read-back proves a
+  data path; (b) **the pinning migration is itself a hazard for
+  volumes staged pre-pinning**: re-exporting a namespace with changed
+  identity under a still-connected kernel controller makes the kernel
+  delete the old device node (journal abort under any mount on it)
+  and mint a new one — each existing volume needs one full
+  detach/restage cycle (or a workload bounce) to cross onto pinned
+  identity safely.
 - **Layer 3 — bounce fallback (follow-up):** the cutover loop consumes
   the annotation (RWX: NFS-pod bounce; RWO: `rejoin-bounce` opt-in) for
   what repair can't reach — fs gone read-only, window expired, ublk

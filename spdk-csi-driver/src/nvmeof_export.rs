@@ -63,6 +63,40 @@ pub struct ExportSpec<'a> {
     ///   fence flip on restage); non-Flint host entries are preserved.
     ///   `Some(&[])` means nobody may connect (unattached volume).
     pub allowed_hosts: Option<&'a [String]>,
+    /// Deterministic namespace identity `(uuid, nguid)`, for exports a
+    /// KERNEL initiator consumes (the loopback raid export): the kernel
+    /// verifies namespace identity on reconnect, and a rebuilt raid bdev
+    /// gets a fresh UUID — without pinning, an in-place repair (phase-6
+    /// layer 2) presents a "different" namespace and the initiator
+    /// refuses to reattach. `None` = SPDK default (bdev UUID), correct
+    /// for replica exports whose backing lvol identity is stable.
+    pub ns_identity: Option<(&'a str, &'a str)>,
+}
+
+/// Deterministic (UUID, NGUID) for a volume's kernel-facing namespace,
+/// stable across raid rebuilds and spdk-tgt restarts. UUID is RFC4122-
+/// shaped; NGUID is the same 16 bytes as 32 hex chars.
+pub fn stable_ns_identity(volume_id: &str) -> (String, String) {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    ("flint-ns-id-a", volume_id).hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    ("flint-ns-id-b", volume_id).hash(&mut h2);
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&h1.finish().to_be_bytes());
+    bytes[8..].copy_from_slice(&h2.finish().to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC4122 variant
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
+    (uuid, hex)
 }
 
 /// Fetch the subsystem record for `nqn`, or None if it does not exist.
@@ -167,11 +201,16 @@ pub async fn ensure_export(
                 }
             }
         }
+        let mut ns_obj = json!({ "bdev_name": spec.bdev_name });
+        if let Some((uuid, nguid)) = spec.ns_identity {
+            ns_obj["uuid"] = json!(uuid);
+            ns_obj["nguid"] = json!(nguid);
+        }
         let add = json!({
             "method": "nvmf_subsystem_add_ns",
             "params": {
                 "nqn": spec.nqn,
-                "namespace": { "bdev_name": spec.bdev_name }
+                "namespace": ns_obj
             }
         });
         if let Err(e) = rpc.rpc(&add).await {
@@ -508,6 +547,7 @@ mod tests {
             traddr: "10.0.0.2",
             trsvcid: 4420,
             allowed_hosts: None,
+            ns_identity: None,
         }
     }
 
@@ -518,6 +558,49 @@ mod tests {
         assert_eq!(rpc.method_calls("nvmf_create_subsystem"), 1);
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 1);
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_listener"), 1);
+    }
+
+    #[test]
+    fn stable_ns_identity_is_deterministic_and_well_formed() {
+        let (u1, g1) = stable_ns_identity("pvc-abc");
+        let (u2, g2) = stable_ns_identity("pvc-abc");
+        assert_eq!((u1.clone(), g1.clone()), (u2, g2));
+        assert_ne!(stable_ns_identity("pvc-other").0, u1);
+        // RFC4122 shape: 8-4-4-4-12, version 4, variant bits.
+        let parts: Vec<&str> = u1.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'));
+        assert!("89ab".contains(&parts[3][0..1]));
+        // NGUID = same 16 bytes, 32 hex chars, no dashes.
+        assert_eq!(g1.len(), 32);
+        assert_eq!(g1, u1.replace('-', ""));
+    }
+
+    #[tokio::test]
+    async fn pinned_ns_identity_reaches_add_ns() {
+        let rpc = FakeRpc::new(None);
+        let (uuid, nguid) = stable_ns_identity("test_1");
+        let s = ExportSpec { ns_identity: Some((&uuid, &nguid)), ..spec() };
+        ensure_export(&rpc, &s).await.unwrap();
+        let calls = rpc.calls.lock().unwrap();
+        let add = calls
+            .iter()
+            .find(|c| c["method"] == "nvmf_subsystem_add_ns")
+            .expect("add_ns issued");
+        assert_eq!(add["params"]["namespace"]["uuid"], json!(uuid));
+        assert_eq!(add["params"]["namespace"]["nguid"], json!(nguid));
+        // Unpinned spec omits both (SPDK default = bdev identity).
+        let rpc2 = FakeRpc::new(None);
+        ensure_export(&rpc2, &spec()).await.unwrap();
+        let calls2 = rpc2.calls.lock().unwrap();
+        let add2 = calls2
+            .iter()
+            .find(|c| c["method"] == "nvmf_subsystem_add_ns")
+            .unwrap();
+        assert!(add2["params"]["namespace"].get("uuid").is_none());
     }
 
     #[tokio::test]
