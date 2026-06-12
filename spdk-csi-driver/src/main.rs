@@ -500,7 +500,8 @@ impl MinimalControllerService {
         // replica's lvols), preferring an in-sync replica off the consumer
         // node, and the clone references the copy by its lvs/name alias.
         // Single-replica ids are SPDK uuids: the legacy all-node scan.
-        let mut multi_source: Option<(String, String)> = None;
+        let mut multi_source: Option<(spdk_csi_driver::minimal_models::ReplicaInfo, String)> =
+            None;
         if let Some((src_volume, _)) =
             spdk_csi_driver::replica_sync::parse_user_snapshot_id(snapshot_id)
         {
@@ -535,13 +536,13 @@ impl MinimalControllerService {
                     "✅ [CONTROLLER] Snapshot copy verified on replica node: {}",
                     src.node_name
                 );
-                multi_source =
-                    Some((src.node_name.clone(), format!("{}/{}", src.lvs_name, snapshot_id)));
+                let snapshot_ref = format!("{}/{}", src.lvs_name, snapshot_id);
+                multi_source = Some((src, snapshot_ref));
             }
         }
 
-        let (node_name, snapshot_ref) = match multi_source {
-            Some(source) => source,
+        let (node_name, snapshot_ref) = match &multi_source {
+            Some((src, snapshot_ref)) => (src.node_name.clone(), snapshot_ref.clone()),
             None => {
                 let nodes = self.driver.get_all_nodes().await
                     .map_err(|e| tonic::Status::internal(format!("Failed to list nodes: {}", e)))?;
@@ -630,7 +631,7 @@ impl MinimalControllerService {
             "flint.csi.storage.io/source-snapshot".to_string(),
             snapshot_id.to_string(),
         );
-        
+
         // Add NFS replica-nodes attribute (needed for ROX volumes from snapshots)
         // Since snapshot clones are always single replica, this is just the node where the snapshot was cloned
         volume_context.insert(
@@ -2100,6 +2101,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("⚠️ [NODE] Failed to store block device info in PV: {}", e);
             // Non-fatal - cleanup may be less clean but will still work
         };
+
         
         // Device now exists (either created or already existed)
         {
@@ -2333,6 +2335,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     
                                     needs_reformat
                                 } else {
+                                    // A volume marked filesystem-initialized
+                                    // (clone, restore, or previously formatted)
+                                    // is supposed to carry data; formatting
+                                    // here silently destroys it. Fail the
+                                    // stage instead so the real cause (wrong
+                                    // device, missing offset, lost data) gets
+                                    // investigated.
+                                    if fs_initialized && !is_ephemeral {
+                                        return Err(tonic::Status::internal(format!(
+                                            "Volume {} is marked filesystem-initialized but no filesystem \
+                                             was found on {}; refusing to format (would destroy data)",
+                                            volume_id, device_path
+                                        )));
+                                    }
                                     println!("📁 [NODE] No filesystem found on {}", device_path);
                                     true // Need to format
                                 };
@@ -2500,7 +2516,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             
             if is_mounted {
                 println!("🔧 [NODE] Staging path is mounted, attempting unmount: {}", staging_target_path);
-                
+
                 // Try normal unmount with retry (3 attempts)
                 let mut unmount_success = false;
                 for attempt in 1..=3 {
@@ -2551,11 +2567,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 
                 if still_mounted {
                     return Err(tonic::Status::internal(
-                        format!("Failed to unmount staging path: {} - refusing to delete ublk device to prevent ghost mount", 
+                        format!("Failed to unmount staging path: {} - refusing to delete ublk device to prevent ghost mount",
                                 staging_target_path)
                     ));
                 }
-                
+
                 println!("✅ [NODE] Verified staging path is no longer mounted");
             } else {
                 println!("ℹ️ [NODE] Staging path exists but is not mounted");

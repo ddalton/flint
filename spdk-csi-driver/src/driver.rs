@@ -1448,20 +1448,20 @@ impl SpdkCsiDriver {
                     if csi.volume_handle == volume_id {
                         // Found PV - check for replica annotations
                         if let Some(attrs) = &csi.volume_attributes {
-                            // Check replica count first
-                            let replica_count = attrs.get("flint.csi.storage.io/replica-count")
-                                .and_then(|s| s.parse::<u32>().ok())
-                                .unwrap_or(1);
-
-                            if replica_count > 1 {
-                                // Multi-replica: Read replicas JSON
-                                if let Some(replicas_json) = attrs.get("flint.csi.storage.io/replicas") {
-                                    let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
-                                    return Ok(Some(replicas));
-                                }
+                            // Gate on the replicas attribute itself, not the
+                            // count: a volume restored from a multi-replica
+                            // snapshot carries ONE replica entry but must
+                            // still stage through the raid path — its clone
+                            // holds the source raid's superblock, so the
+                            // filesystem sits at the raid data offset (§11;
+                            // live-cluster regression 2026-06-12). Legacy
+                            // single-replica volumes never have this field.
+                            if let Some(replicas_json) = attrs.get("flint.csi.storage.io/replicas") {
+                                let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
+                                return Ok(Some(replicas));
                             }
-                            
-                            // Single replica or no replicas field
+
+                            // No replicas field: legacy bare-lvol volume
                             return Ok(None);
                         }
                     }
@@ -1741,12 +1741,17 @@ impl SpdkCsiDriver {
             }
         }
 
-        // Check if we have minimum replicas for RAID 1
+        // Check if we have minimum replicas for RAID 1. The floor protects
+        // a multi-replica volume from assembling below quorum — but a
+        // volume whose identity holds a single replica (one restored from
+        // a multi-replica snapshot, §11) is complete at one base; SPDK
+        // raid1 accepts a single-base create.
         let total_replicas = replicas.len();
         let available_count = base_bdevs.len();
         let unavailable_count = unavailable_replicas.len();
+        let min_required = total_replicas.min(2);
 
-        if available_count < 2 {
+        if available_count < min_required {
             // Cannot create RAID with fewer than 2 replicas
             let unavailable_nodes: Vec<String> = unavailable_replicas
                 .iter()
@@ -1754,8 +1759,9 @@ impl SpdkCsiDriver {
                 .collect();
 
             return Err(format!(
-                "Cannot create RAID 1: need minimum 2 replicas, only {} available \
+                "Cannot create RAID 1: need minimum {} replicas, only {} available \
                  ({} standby deferred, {} stale excluded). Unavailable: [{}]",
+                min_required,
                 available_count,
                 deferred_standbys.len() - admitted_standbys.len(),
                 excluded_stale.len() - forced_stale.len(),
@@ -1813,6 +1819,29 @@ impl SpdkCsiDriver {
         Ok(raid_bdev_name)
     }
 
+    /// Delete every flint-owned NVMe-oF subsystem on this node that exports
+    /// `bdev` (see `flint_subsystems_exporting_bdev` for the match rules).
+    /// Used at NodeStage before a consumer-local lvol is claimed as a raid
+    /// base; live-cluster regression 2026-06-12 (stage-2 e2e on runf).
+    async fn drop_stale_local_exports(
+        &self,
+        bdev: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = serde_json::json!({"method": "nvmf_get_subsystems", "params": {}});
+        let response = self.call_node_agent(&self.node_id, "/api/spdk/rpc", &payload).await?;
+        let empty = serde_json::json!([]);
+        let subsystems = response.get("result").unwrap_or(&empty);
+        for nqn in flint_subsystems_exporting_bdev(subsystems, bdev) {
+            println!("   Dropping stale local export {} of {}", nqn, bdev);
+            let del = serde_json::json!({
+                "method": "nvmf_delete_subsystem",
+                "params": {"nqn": nqn}
+            });
+            self.call_node_agent(&self.node_id, "/api/spdk/rpc", &del).await?;
+        }
+        Ok(())
+    }
+
     /// Attach one replica as a raid base on this node: local lvols verify
     /// directly, remote ones go through the fenced NVMe-oF export + attach.
     /// `bdev_name` is the live head (the identity uuid unless a catch-up
@@ -1826,6 +1855,16 @@ impl SpdkCsiDriver {
     ) -> Result<String, String> {
         if replica.node_name == self.node_id {
             println!("   Replica {}: LOCAL access (lvol: {})", replica_index + 1, bdev_name);
+            // A surviving NVMe-oF export of this lvol (created while a
+            // previous consumer ran on another node) holds a write-mode
+            // open, so the raid module's exclusive claim of the local base
+            // fails with EPERM at bdev_raid_create. This node is the
+            // volume's new exclusive consumer — the fence whitelist already
+            // admits only us — so any subsystem exporting the lvol is
+            // stale; drop it before claiming.
+            if let Err(e) = self.drop_stale_local_exports(bdev_name).await {
+                println!("   ⚠ Stale local export cleanup failed (continuing): {}", e);
+            }
             match self.verify_local_lvol_exists(bdev_name).await {
                 Ok(bdev) => {
                     println!("   ✓ Local replica verified: {}", bdev);
@@ -2153,13 +2192,25 @@ impl SpdkCsiDriver {
                 let _ = self.wait_for_examine().await;
             }
 
+            // superblock:false — flint never uses SPDK's examine-based
+            // auto-reassembly (raids are ephemeral, re-created here at every
+            // NodeStage from the PV replica record), so the superblock only
+            // ever hurt: it is the root of the §3 phantom-assembly hazard
+            // class, and it shifted the filesystem 1 MiB into every base
+            // lvol, which made snapshots/clones unmountable raw and silently
+            // formatted volumes restored from multi-replica snapshots
+            // (live-cluster regression, 2026-06-12). Without it the base
+            // lvols carry the filesystem at LBA 0, identical to bare
+            // single-replica volumes. Layout change: lvols written by
+            // superblocked builds (≤1.2.0-rc4, pre-release only) are
+            // incompatible — recreate, don't upgrade in place.
             let payload = json!({
                 "method": "bdev_raid_create",
                 "params": {
                     "name": raid_name,
                     "raid_level": "1",
                     "base_bdevs": base_bdevs,
-                    "superblock": true,
+                    "superblock": false,
                 }
             });
 
@@ -2572,4 +2623,102 @@ pub struct BackingStorageHealth {
     pub message: String,
     /// Whether the node was reachable for the health check
     pub node_reachable: bool,
+}
+
+/// NQNs of flint-owned NVMe-oF subsystems (`:volume:` NQNs) that export
+/// `bdev`, matched against each namespace's `bdev_name`, `uuid` or `name`.
+/// Matching by namespace — not by reconstructing the NQN — covers every
+/// historical NQN shape and the `active_lvol_uuid` override after a
+/// catch-up revert. The raid loopback subsystem exports the raid bdev, not
+/// the lvol, so it can never match.
+fn flint_subsystems_exporting_bdev(subsystems: &Value, bdev: &str) -> Vec<String> {
+    let mut nqns = Vec::new();
+    let Some(list) = subsystems.as_array() else {
+        return nqns;
+    };
+    for s in list {
+        let nqn = s.get("nqn").and_then(|v| v.as_str()).unwrap_or("");
+        if !nqn.contains(":volume:") {
+            continue;
+        }
+        let exports_bdev = s
+            .get("namespaces")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ns| {
+                ns.iter().any(|n| {
+                    ["bdev_name", "uuid", "name"]
+                        .iter()
+                        .any(|k| n.get(*k).and_then(|v| v.as_str()) == Some(bdev))
+                })
+            });
+        if exports_bdev {
+            nqns.push(nqn.to_string());
+        }
+    }
+    nqns
+}
+
+#[cfg(test)]
+mod local_export_tests {
+    use super::flint_subsystems_exporting_bdev;
+
+    fn subsystems() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "nqn": "nqn.2014-08.org.nvmexpress.discovery",
+                "namespaces": []
+            },
+            {
+                "nqn": "nqn.2024-11.com.flint:volume:pvc-aaa_1",
+                "namespaces": [{"nsid": 1, "bdev_name": "6f21eb70-63fb-4dbe-9caa-ef3af2253592",
+                                "uuid": "6f21eb70-63fb-4dbe-9caa-ef3af2253592"}]
+            },
+            {
+                "nqn": "nqn.2024-11.com.flint:volume:pvc-aaa",
+                "namespaces": [{"nsid": 1, "bdev_name": "raid_pvc-aaa"}]
+            },
+            {
+                "nqn": "nqn.2024-11.com.flint:volume:pvc-bbb_0",
+                "namespaces": [{"nsid": 1, "bdev_name": "lvs/vol_pvc-bbb_replica_0",
+                                "uuid": "11111111-2222-3333-4444-555555555555"}]
+            }
+        ])
+    }
+
+    #[test]
+    fn matches_only_subsystems_exporting_the_bdev() {
+        // Live-cluster repro (runf, 2026-06-12): consumer re-staged onto the
+        // replica-hosting node; the replica export (here pvc-aaa_1) blocked
+        // bdev_raid_create with EPERM and had to be dropped.
+        let nqns = flint_subsystems_exporting_bdev(
+            &subsystems(),
+            "6f21eb70-63fb-4dbe-9caa-ef3af2253592",
+        );
+        assert_eq!(nqns, vec!["nqn.2024-11.com.flint:volume:pvc-aaa_1".to_string()]);
+    }
+
+    #[test]
+    fn matches_namespace_uuid_when_bdev_name_is_an_alias() {
+        let nqns = flint_subsystems_exporting_bdev(
+            &subsystems(),
+            "11111111-2222-3333-4444-555555555555",
+        );
+        assert_eq!(nqns, vec!["nqn.2024-11.com.flint:volume:pvc-bbb_0".to_string()]);
+    }
+
+    #[test]
+    fn ignores_raid_loopback_and_foreign_subsystems() {
+        // The volume-level loopback exports the raid bdev — never the lvol —
+        // and non-flint NQNs are out of scope entirely.
+        assert!(flint_subsystems_exporting_bdev(&subsystems(), "raid_pvc-zzz").is_empty());
+        let nqns = flint_subsystems_exporting_bdev(&subsystems(), "raid_pvc-aaa");
+        assert_eq!(nqns, vec!["nqn.2024-11.com.flint:volume:pvc-aaa".to_string()]);
+    }
+
+    #[test]
+    fn tolerates_malformed_subsystem_lists() {
+        assert!(flint_subsystems_exporting_bdev(&serde_json::json!(null), "x").is_empty());
+        assert!(flint_subsystems_exporting_bdev(&serde_json::json!({}), "x").is_empty());
+        assert!(flint_subsystems_exporting_bdev(&serde_json::json!([{"no_nqn": true}]), "x").is_empty());
+    }
 }
