@@ -1388,7 +1388,12 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    `temp_pvc_clone_*` under a live PV (deletion-path bug, not an
    orphan), an ephemeral leak with its frontend intact (indistinguishable
    from in-use), and the pin-until-admission change to epoch GC (still
-   open above).
+   open above). **Cluster-validated 2026-06-12** on a fresh 4-node
+   cluster: planted orphan head/epoch/snapshot lvols and an orphan
+   subsystem next to a live volume — all four reaped on exactly the
+   third cycle; the live volume's lvol, subsystem and data untouched
+   throughout; normal PVC deletion still converges to zero without the
+   sweep's involvement.
 
 ## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
 
