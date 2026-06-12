@@ -44,9 +44,13 @@ spec:
             - name: api
               containerPort: 8080
               protocol: TCP
+          # Probe /healthz (server-loop-only), NOT /api/dashboard: the
+          # aggregate endpoint fans out to every node agent, so probing it
+          # couples pod health to node reachability — one dead node used to
+          # liveness-kill a healthy backend.
           livenessProbe:
             httpGet:
-              path: /api/dashboard
+              path: /healthz
               port: api
             initialDelaySeconds: 30
             periodSeconds: 10
@@ -54,7 +58,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /api/dashboard
+              path: /healthz
               port: api
             initialDelaySeconds: 5
             periodSeconds: 5

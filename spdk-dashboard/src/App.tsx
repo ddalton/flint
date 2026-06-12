@@ -139,6 +139,7 @@ const App: React.FC = () => {
         onRefresh={handleRefresh}
         onLogout={handleLogout}
         usingMockData={dashboardHook.usingMockData}
+        connectionError={dashboardHook.connectionError}
         showNodesWithDisksOnly={showNodesWithDisksOnly}
         onShowNodesWithDisksOnlyChange={setShowNodesWithDisksOnly}
       />

@@ -267,7 +267,16 @@ async fn read_node_memory_info(node_url: &str, node_name: &str) -> Result<NodeIn
     let url = format!("{}/api/system/memory", node_url);
     println!("🔍 [MEMORY_INFO] Fetching memory info for node {} from: {}", node_name, url);
 
-    match HttpClient::new().get(&url).send().await {
+    // Bounded like every other node-agent call: reqwest's default has NO
+    // total timeout, so an unreachable node (dead spot instance) parks
+    // this future in kernel SYN retries for ~2 minutes — join_all then
+    // holds /api/dashboard past the probe deadline.
+    let client = HttpClient::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    match client.get(&url).send().await {
         Ok(response) if response.status().is_success() => {
             // If node agent provides memory endpoint, use it
             let mem_data: serde_json::Value = response.json().await?;
@@ -1710,7 +1719,16 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .allow_methods(vec!["GET", "POST", "PUT", "DELETE"]);
     
     let state_filter = warp::any().map(move || app_state.clone());
-    
+
+    // Liveness/readiness target: answers from the server loop alone, no
+    // remote calls. Probing /api/dashboard instead couples pod health to
+    // every node agent — one unreachable node stalls the aggregate past
+    // the probe deadline and the kubelet kills a perfectly healthy
+    // backend (the 2026-06-12 dashboard outage).
+    let healthz_route = warp::path("healthz")
+        .and(warp::get())
+        .map(|| warp::reply::json(&json!({"status": "ok"})));
+
     // Main dashboard endpoint with optional query parameters for backend filtering
     let dashboard_route = warp::path("api")
         .and(warp::path("dashboard"))
@@ -1858,7 +1876,8 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(state_filter.clone())
         .and_then(delete_orphaned_lvol);
     
-    dashboard_route
+    healthz_route
+        .or(dashboard_route)
         .or(proxy_uninitialized)
         .or(proxy_setup)
         .or(proxy_initialize)

@@ -737,6 +737,7 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
   });
   const [loading, setLoading] = useState(true);
   const [usingMockData, setUsingMockData] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   
   // No need for complex pause logic - auto-refresh checkbox is managed automatically
 
@@ -799,25 +800,34 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
          }
 
       } catch (apiError) {
-        console.warn('API not available, using mock data:', apiError);
-        // Use mock data for development/demo
-        // Apply client-side filters to mock data as fallback
-        const filtered = filters ? {
-          ...mockData,
-          volumes: filterVolumesByType(mockData.volumes, filters.volumeFilter || 'all'),
-          disks: mockData.disks.filter(d => 
-            (!filters.diskNode || d.node.toLowerCase().includes(filters.diskNode.toLowerCase())) &&
-            (filters.diskInitialized === undefined || d.blobstore_initialized === filters.diskInitialized)
-          )
-        } : mockData;
-        setData(filtered);
-        setUsingMockData(true);
+        // Never substitute fake data for a failed backend: a populated,
+        // healthy-looking dashboard during a real outage hides the outage
+        // (2026-06-12 incident). Keep the last real data on screen and
+        // surface the failure. Mock data remains available for local UI
+        // development only (vite dev server without a backend).
+        if (import.meta.env.DEV) {
+          console.warn('DEV: API not available, using mock data:', apiError);
+          const filtered = filters ? {
+            ...mockData,
+            volumes: filterVolumesByType(mockData.volumes, filters.volumeFilter || 'all'),
+            disks: mockData.disks.filter(d =>
+              (!filters.diskNode || d.node.toLowerCase().includes(filters.diskNode.toLowerCase())) &&
+              (filters.diskInitialized === undefined || d.blobstore_initialized === filters.diskInitialized)
+            )
+          } : mockData;
+          setData(filtered);
+          setUsingMockData(true);
+        } else {
+          console.error('Dashboard backend unreachable:', apiError);
+          setConnectionError(apiError instanceof Error ? apiError.message : String(apiError));
+        }
+        return;
       }
+      setConnectionError(null);
+      setUsingMockData(false);
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
-      // Use mock data as fallback
-      setData(mockData);
-      setUsingMockData(true);
+      setConnectionError(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
@@ -851,7 +861,8 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
     loading,
     stats,
     refreshData,
-    usingMockData
+    usingMockData,
+    connectionError
   };
 };
 

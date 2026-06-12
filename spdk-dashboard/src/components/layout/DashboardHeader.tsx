@@ -8,6 +8,7 @@ interface DashboardHeaderProps {
   onRefresh: () => void;
   onLogout: () => void;
   usingMockData?: boolean;
+  connectionError?: string | null;
 }
 
 export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
@@ -15,7 +16,8 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   onAutoRefreshChange,
   onRefresh,
   onLogout,
-  usingMockData = false
+  usingMockData = false,
+  connectionError = null
 }) => {
   const { shouldPauseRefresh } = useOperations();
   return (
@@ -27,10 +29,21 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
               <Database className="w-8 h-8 text-blue-600 mr-3" />
               <h1 className="text-2xl font-bold text-gray-900">Flint Dashboard</h1>
             </div>
+            {connectionError && (
+              <div
+                className="flex items-center gap-2 px-3 py-1 bg-red-100 border border-red-300 rounded-full"
+                title={connectionError}
+              >
+                <AlertTriangle className="w-4 h-4 text-red-600" />
+                <span className="text-sm font-medium text-red-800">
+                  Backend unreachable — showing last known data
+                </span>
+              </div>
+            )}
             {usingMockData && (
               <div className="flex items-center gap-2 px-3 py-1 bg-yellow-100 border border-yellow-300 rounded-full">
                 <AlertTriangle className="w-4 h-4 text-yellow-600" />
-                <span className="text-sm font-medium text-yellow-800">Mock Data</span>
+                <span className="text-sm font-medium text-yellow-800">Mock Data (dev)</span>
               </div>
             )}
           </div>
