@@ -62,6 +62,39 @@ pub const REJOIN_BOUNCE_ANNOTATION: &str = "flint.csi.storage.io/rejoin-bounce";
 /// (event + annotation), and the future in-place repair / bounce fallback.
 pub const DATA_PATH_LOST_ANNOTATION: &str = "flint.csi.storage.io/data-path-lost";
 
+/// NoSchedule taint applied to the bounced workload's node for the duration
+/// of a bounce (scheduling escalation, phase-6 follow-up): without it the
+/// scheduler re-places the pod on the same node about half the time,
+/// kubelet reuses the staged volume, no reassembly happens, and the bounce
+/// bought a workload restart for nothing — observed defeating BOTH bounce
+/// types live. The taint value encodes the application time (unix seconds)
+/// so expiry survives controller restarts; the tick sweeps expired taints.
+/// A taint chosen over cordon so operator cordon state is never touched,
+/// and over pod anti-affinity because RWO replacements come from the
+/// workload's own controller template, which flint cannot mutate. On a
+/// cluster with no alternative node the taint still works: it outlives
+/// kubelet's unstage, so even a same-node replacement must restage.
+pub const BOUNCE_TAINT_KEY: &str = "flint.csi.storage.io/bounce";
+
+/// Bounce taints whose encoded application time is older than `ttl_secs`.
+/// Unparseable values count as expired — never strand a node.
+pub fn expired_bounce_taints(
+    taints: &[(String, String)],
+    now_epoch_secs: u64,
+    ttl_secs: u64,
+) -> Vec<String> {
+    taints
+        .iter()
+        .filter(|(_, value)| {
+            value
+                .parse::<u64>()
+                .map(|applied| now_epoch_secs.saturating_sub(applied) > ttl_secs)
+                .unwrap_or(true)
+        })
+        .map(|(node, _)| node.clone())
+        .collect()
+}
+
 /// One node-agent observation about one attached volume's data path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DataPathAction {
@@ -110,6 +143,13 @@ pub struct CutoverConfig {
     /// synthetic PV to detach before recreating (closes the same-node
     /// reuse race). FLINT_CUTOVER_DETACH_TIMEOUT_SECS, default 120.
     pub detach_timeout: Duration,
+    /// Scheduling escalation: taint the bounced workload's node
+    /// (NoSchedule) so the replacement cannot reuse the staged volume.
+    /// FLINT_CUTOVER_ESCALATION, default on; FLINT_CUTOVER_TAINT_SECS
+    /// sets the taint's lifetime (default 120 — must outlive kubelet's
+    /// unstage so even a same-node landing restages).
+    pub escalation: bool,
+    pub taint_ttl: Duration,
 }
 
 impl Default for CutoverConfig {
@@ -119,6 +159,8 @@ impl Default for CutoverConfig {
             cooldown: Duration::from_secs(900),
             max_lag: 1,
             detach_timeout: Duration::from_secs(120),
+            escalation: true,
+            taint_ttl: Duration::from_secs(120),
         }
     }
 }
@@ -148,6 +190,14 @@ impl CutoverConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.detach_timeout),
+            escalation: std::env::var("FLINT_CUTOVER_ESCALATION")
+                .map(|v| !(v.eq_ignore_ascii_case("disabled") || v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(d.escalation),
+            taint_ttl: std::env::var("FLINT_CUTOVER_TAINT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.taint_ttl),
         }
     }
 }
@@ -326,6 +376,13 @@ pub trait CutoverOps: Sync {
     ) -> bool;
     async fn recreate_pod(&self, pod: Pod) -> Result<(), RpcError>;
     async fn emit(&self, volume_id: &str, event_type: &str, reason: &str, message: &str);
+    /// Apply the bounce NoSchedule taint to `node`; `value` encodes the
+    /// application time (unix seconds) for crash-safe expiry.
+    async fn taint_node(&self, node: &str, value: &str) -> Result<(), RpcError>;
+    /// Remove the bounce taint from `node` (absent is success).
+    async fn untaint_node(&self, node: &str) -> Result<(), RpcError>;
+    /// Nodes currently carrying the bounce taint, with their values.
+    async fn list_bounce_taints(&self) -> Result<Vec<(String, String)>, RpcError>;
 }
 
 /// Execute a planned bounce. Returns whether a bounce was actually issued
@@ -348,6 +405,17 @@ pub async fn execute_cutover(
             let Some(pod) = ops.get_pod(&nfs.namespace, &nfs.name).await? else {
                 return Err("NFS pod disappeared before the bounce".into());
             };
+            // Scheduling escalation: taint the pod's node so the
+            // replacement cannot reuse the staged volume (best-effort —
+            // a failed taint degrades to the pre-escalation coin flip).
+            if cfg.escalation {
+                if let Some(node) = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) {
+                    let value = epoch_secs_now().to_string();
+                    if let Err(e) = ops.taint_node(node, &value).await {
+                        warn!(volume_id = %view.volume_id, node, error = %e, "[CUTOVER] Bounce taint failed (continuing without escalation)");
+                    }
+                }
+            }
             let replacement = sanitized_for_recreate(pod);
             ops.delete_pod(&nfs.namespace, &nfs.name).await?;
 
@@ -377,6 +445,18 @@ pub async fn execute_cutover(
             Ok(true)
         }
         CutoverDecision::BounceWorkloadPods => {
+            // Scheduling escalation: taint the consumer node so the
+            // workload controller's replacement cannot reuse the staged
+            // volume (RWO replacements come from the workload's own
+            // template — a taint is the only steering flint has).
+            if cfg.escalation {
+                if let Some(node) = view.consumer.as_deref() {
+                    let value = epoch_secs_now().to_string();
+                    if let Err(e) = ops.taint_node(node, &value).await {
+                        warn!(volume_id = %view.volume_id, node, error = %e, "[CUTOVER] Bounce taint failed (continuing without escalation)");
+                    }
+                }
+            }
             for pod in &view.workload_pods {
                 ops.delete_pod(&pod.namespace, &pod.name).await?;
             }
@@ -481,6 +561,69 @@ impl CutoverOps for KubeCutoverOps {
         )
         .await;
     }
+
+    async fn taint_node(&self, node: &str, value: &str) -> Result<(), RpcError> {
+        use k8s_openapi::api::core::v1::{Node, Taint};
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let current = nodes.get(node).await?;
+        let mut taints = current
+            .spec
+            .as_ref()
+            .and_then(|s| s.taints.clone())
+            .unwrap_or_default();
+        taints.retain(|t| t.key != BOUNCE_TAINT_KEY);
+        taints.push(Taint {
+            key: BOUNCE_TAINT_KEY.to_string(),
+            value: Some(value.to_string()),
+            effect: "NoSchedule".to_string(),
+            time_added: None,
+        });
+        let patch = serde_json::json!({ "spec": { "taints": taints } });
+        nodes
+            .patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch))
+            .await?;
+        Ok(())
+    }
+
+    async fn untaint_node(&self, node: &str) -> Result<(), RpcError> {
+        use k8s_openapi::api::core::v1::Node;
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let current = match nodes.get(node).await {
+            Ok(n) => n,
+            Err(e) if e.to_string().contains("NotFound") => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut taints = current
+            .spec
+            .as_ref()
+            .and_then(|s| s.taints.clone())
+            .unwrap_or_default();
+        let before = taints.len();
+        taints.retain(|t| t.key != BOUNCE_TAINT_KEY);
+        if taints.len() == before {
+            return Ok(());
+        }
+        let patch = serde_json::json!({ "spec": { "taints": taints } });
+        nodes
+            .patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch))
+            .await?;
+        Ok(())
+    }
+
+    async fn list_bounce_taints(&self) -> Result<Vec<(String, String)>, RpcError> {
+        use k8s_openapi::api::core::v1::Node;
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let mut out = Vec::new();
+        for node in nodes.list(&ListParams::default()).await?.items {
+            let Some(name) = node.metadata.name.clone() else { continue };
+            for t in node.spec.as_ref().and_then(|s| s.taints.as_ref()).into_iter().flatten() {
+                if t.key == BOUNCE_TAINT_KEY {
+                    out.push((name.clone(), t.value.clone().unwrap_or_default()));
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 struct BounceAttempt {
@@ -516,6 +659,14 @@ pub async fn run_cutover_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CutoverCo
     }
 }
 
+/// Seconds since the unix epoch (taint-value clock).
+fn epoch_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 async fn cutover_tick(
     driver: &Arc<SpdkCsiDriver>,
     ops: &KubeCutoverOps,
@@ -523,6 +674,25 @@ async fn cutover_tick(
     bounces: &mut HashMap<String, BounceAttempt>,
     data_path_seen: &mut HashMap<String, Instant>,
 ) -> Result<(), RpcError> {
+    // Sweep expired bounce taints first (crash-safe: the application time
+    // lives in the taint value, so a restarted controller still cleans
+    // up). Runs even with escalation disabled — leftovers must not
+    // strand a node.
+    match ops.list_bounce_taints().await {
+        Ok(taints) if !taints.is_empty() => {
+            for node in
+                expired_bounce_taints(&taints, epoch_secs_now(), cfg.taint_ttl.as_secs())
+            {
+                match ops.untaint_node(&node).await {
+                    Ok(()) => info!(node, "[CUTOVER] Bounce taint expired — removed"),
+                    Err(e) => warn!(node, error = %e, "[CUTOVER] Failed to remove expired bounce taint"),
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "[CUTOVER] Could not list bounce taints"),
+    }
+
     let pvs: Api<PersistentVolume> = Api::all(driver.kube_client.clone());
     let vas: Api<VolumeAttachment> = Api::all(driver.kube_client.clone());
 
@@ -892,7 +1062,22 @@ mod tests {
             cooldown: Duration::from_secs(900),
             max_lag: 1,
             detach_timeout: Duration::from_secs(120),
+            escalation: true,
+            taint_ttl: Duration::from_secs(120),
         }
+    }
+
+    #[test]
+    fn expired_bounce_taints_honors_ttl_and_garbage() {
+        let taints = vec![
+            ("node-a".to_string(), "1000".to_string()),   // 500s old
+            ("node-b".to_string(), "1400".to_string()),   // 100s old
+            ("node-c".to_string(), "garbage".to_string()), // unparseable
+        ];
+        let expired = expired_bounce_taints(&taints, 1500, 120);
+        assert_eq!(expired, vec!["node-a".to_string(), "node-c".to_string()]);
+        // Nothing expired within the ttl.
+        assert!(expired_bounce_taints(&taints[1..2], 1500, 120).is_empty());
     }
 
     fn nfs_view(record: VolumeSyncRecord) -> VolumeCutoverView {
@@ -1054,6 +1239,17 @@ mod tests {
                 .unwrap()
                 .push((reason.to_string(), event_type.to_string()));
         }
+        async fn taint_node(&self, node: &str, _value: &str) -> Result<(), RpcError> {
+            self.log.lock().unwrap().push(format!("taint:{}", node));
+            Ok(())
+        }
+        async fn untaint_node(&self, node: &str) -> Result<(), RpcError> {
+            self.log.lock().unwrap().push(format!("untaint:{}", node));
+            Ok(())
+        }
+        async fn list_bounce_taints(&self) -> Result<Vec<(String, String)>, RpcError> {
+            Ok(vec![])
+        }
     }
 
     #[tokio::test]
@@ -1064,12 +1260,14 @@ mod tests {
             .await
             .unwrap();
         assert!(bounced);
-        // Spec captured before the delete; detach awaited on the synthetic
-        // PV; recreation last.
+        // Spec captured before the delete; the bounce taint lands BEFORE
+        // the delete (scheduling escalation — the replacement must not
+        // reuse the staged volume); detach awaited; recreation last.
         assert_eq!(
             ops.log.lock().unwrap().clone(),
             vec![
                 "get:flint-nfs-vol1",
+                "taint:node-a",
                 "delete:flint-nfs-vol1",
                 "await:flint-nfs-vol1:flint-nfs-pv-vol1",
                 "recreate:flint-nfs-vol1",
@@ -1114,9 +1312,10 @@ mod tests {
             .await
             .unwrap();
         assert!(bounced);
+        // Escalation taints the consumer node before any delete.
         assert_eq!(
             ops.log.lock().unwrap().clone(),
-            vec!["delete:app-0", "delete:app-1"]
+            vec!["taint:node-a", "delete:app-0", "delete:app-1"]
         );
         assert_eq!(
             ops.events.lock().unwrap().clone(),

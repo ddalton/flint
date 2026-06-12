@@ -198,9 +198,32 @@ pinned at stage before it can be retested.
   cross-node restage → flag cleared 16 s later → `CutoverSucceeded`
   ("data path restored") → direct-I/O probe green. **The same-node
   reschedule race defeats data-path bounces exactly as it defeats
-  admission bounces** — the deliberately-deferred scheduling
-  escalation (transient anti-affinity / cordon-lite) is now required
-  for both bounce types and is the next work item.
+  admission bounces** — closed the same day by the scheduling
+  escalation below.
+
+## Scheduling escalation (landed same day)
+
+Every bounce now applies a self-expiring NoSchedule taint
+(`flint.csi.storage.io/bounce`) to the bounced workload's node before
+deleting pods, so the replacement cannot reuse the dead/stale staged
+volume. A taint rather than cordon (operator cordon state is never
+touched) or pod anti-affinity (RWO replacements come from the
+workload's own controller template, which flint cannot mutate). The
+application time is encoded in the taint value, so expiry
+(`FLINT_CUTOVER_TAINT_SECS`, default 120 s) survives controller
+restarts — the tick sweeps expired taints even with escalation
+disabled (`FLINT_CUTOVER_ESCALATION=disabled`). On a cluster with no
+alternative node the taint still works: it outlives kubelet's unstage,
+so even a same-node landing must restage. Validated live with repair
+disabled and NO manual cordon: flag → taint at the debounce boundary →
+replacement steered off-node → restage → flag cleared **on the first
+bounce attempt** → taint auto-expired and swept. The bimodal residual
+is closed: bounces are now deterministic for both admission and
+data-path cases. As an unplanned bonus, the post-validation DaemonSet
+roll restarted the consumer's spdk-tgt mid-probe: a 16 KiB `O_DIRECT`
+write stalled 148 s, the re-enabled in-place repair rebuilt the path,
+and the write completed — no error, no restart — the full layer stack
+riding through a routine driver upgrade.
 
 **Recommendation:** implement the cheap Tier-1 hardening now (consumer
 blindness layers 2+3 above; pod anti-affinity hint or cordon-lite escalation on
