@@ -164,6 +164,23 @@ docker push dilipdalton/spdk-tgt:1.1.0
 unset DOCKER_HOST   # back to the local daemon
 ```
 
+## Releasing
+
+Don't push release images by hand from the list above — it is not the
+source of truth, and 1.2.0 shipped with `spdk-dashboard-frontend:1.2.0`
+unpublished (every install sat in ImagePullBackOff) precisely because the
+image set was maintained by hand. Use the release gate instead, with
+`DOCKER_HOST` still pointing at the build node for the heavy images:
+
+```sh
+scripts/release.sh check    # what does the chart reference, what's missing?
+scripts/release.sh images   # build + push only the missing images
+scripts/release.sh chart    # verify ALL published, then helm-push the chart
+```
+
+It derives the image list from `flint-csi-driver-chart/values.yaml` and
+refuses to push a chart whose image references aren't all on Docker Hub.
+
 No `--platform` flag is needed — the daemon is natively amd64. Builds are
 fully cached on the node across sessions (BuildKit cache lives in the
 data-root).
