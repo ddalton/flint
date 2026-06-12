@@ -54,6 +54,46 @@ pub type RpcError = Box<dyn std::error::Error + Send + Sync>;
 /// PV annotation opting an RWO volume into workload-pod bounces.
 pub const REJOIN_BOUNCE_ANNOTATION: &str = "flint.csi.storage.io/rejoin-bounce";
 
+/// PV annotation set by the node agent when a volume is ATTACHED to a node
+/// but its raid bdev does not exist there — a dead data path the health
+/// monitor cannot see (its stale predicate requires an online raid; phase-6
+/// yield, bug 1). Value = the flagging node's name; only that node clears
+/// it (raid reappeared, or the attachment left). Consumers: operators
+/// (event + annotation), and the future in-place repair / bounce fallback.
+pub const DATA_PATH_LOST_ANNOTATION: &str = "flint.csi.storage.io/data-path-lost";
+
+/// One node-agent observation about one attached volume's data path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataPathAction {
+    /// Set the annotation + Warning event (confirmed lost).
+    Flag,
+    /// Remove this node's annotation + Normal event (healed or moved).
+    Clear,
+    /// Do nothing this tick.
+    Hold,
+}
+
+/// Pure verdict for the node agent's data-path pass. `strikes_with_this`
+/// counts consecutive raid-missing observations INCLUDING the current one;
+/// `threshold` rides out an in-flight NodeStage, whose VA legitimately
+/// precedes the raid by up to the stage-delta budget.
+pub fn data_path_verdict(
+    attached_here: bool,
+    raid_present: bool,
+    flagged_by_me: bool,
+    strikes_with_this: u32,
+    threshold: u32,
+) -> DataPathAction {
+    if !attached_here || raid_present {
+        // Healed, or no longer this node's concern: clear our own flag.
+        return if flagged_by_me { DataPathAction::Clear } else { DataPathAction::Hold };
+    }
+    if strikes_with_this >= threshold && !flagged_by_me {
+        return DataPathAction::Flag;
+    }
+    DataPathAction::Hold
+}
+
 #[derive(Debug, Clone)]
 pub struct CutoverConfig {
     /// FLINT_CUTOVER=enabled — default off.
@@ -656,6 +696,29 @@ mod tests {
     use crate::minimal_models::ReplicaInfo;
     use crate::replica_sync::epoch_name;
     use std::sync::Mutex;
+
+    #[test]
+    fn data_path_verdict_flags_after_threshold_only() {
+        // In-flight stage (strikes below threshold): hold.
+        assert_eq!(data_path_verdict(true, false, false, 1, 3), DataPathAction::Hold);
+        assert_eq!(data_path_verdict(true, false, false, 2, 3), DataPathAction::Hold);
+        // Third consecutive miss: flag.
+        assert_eq!(data_path_verdict(true, false, false, 3, 3), DataPathAction::Flag);
+        // Already flagged by us: nothing to re-do.
+        assert_eq!(data_path_verdict(true, false, true, 5, 3), DataPathAction::Hold);
+    }
+
+    #[test]
+    fn data_path_verdict_clears_only_its_own_flag() {
+        // Raid back: clear ours, hold if not ours.
+        assert_eq!(data_path_verdict(true, true, true, 0, 3), DataPathAction::Clear);
+        assert_eq!(data_path_verdict(true, true, false, 0, 3), DataPathAction::Hold);
+        // Attachment left this node: same rule.
+        assert_eq!(data_path_verdict(false, false, true, 0, 3), DataPathAction::Clear);
+        assert_eq!(data_path_verdict(false, false, false, 0, 3), DataPathAction::Hold);
+        // Healthy steady state: hold.
+        assert_eq!(data_path_verdict(true, true, false, 0, 3), DataPathAction::Hold);
+    }
 
     fn replica(node: &str, uuid: &str) -> ReplicaInfo {
         ReplicaInfo {

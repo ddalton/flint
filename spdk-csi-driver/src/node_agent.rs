@@ -30,6 +30,9 @@ pub struct NodeAgent {
     /// §10-14 orphan-sweep strike counts, persisted across sweep cycles
     /// (shared by clone so the monitor task and HTTP handlers see one).
     orphan_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    /// Data-path-lost strike counts (attached volume, raid missing),
+    /// keyed by PV name — see `detect_lost_data_paths`.
+    data_path_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
 }
 
 impl NodeAgent {
@@ -47,6 +50,7 @@ impl NodeAgent {
             disk_service,
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -68,6 +72,7 @@ impl NodeAgent {
             disk_service,
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -144,12 +149,43 @@ impl NodeAgent {
         let disk_service = self.disk_service.clone();
         let discovery_task = tokio::spawn(async move {
             let mut discovery_interval = interval(Duration::from_secs(30));
+            // Storage-baseline reconcile (phase-6 yield): a lone spdk-tgt
+            // container restart (liveness kill, OOM, crash) comes back as
+            // an empty target — no controllers, no lvstore — because disk
+            // attach previously ran only at DRIVER startup, and the driver
+            // container didn't restart. Detect the collapse (disks were
+            // seen, now none) and re-run full discovery with
+            // auto-recovery, which re-attaches initialized disks and
+            // reloads the lvstore; the 60s reconcile then re-exports.
+            let mut last_disk_count: Option<usize> = None;
             loop {
                 discovery_interval.tick().await;
                 // Use FAST discovery (no auto-recovery) to reduce SPDK RPC spam
-                // Auto-recovery is expensive (400+ RPC calls) and only needed at startup
+                // Auto-recovery is expensive (400+ RPC calls) and is triggered
+                // below only when the baseline collapses.
                 match disk_service.discover_local_disks_fast().await {
                     Ok(disks) => {
+                        if disks.is_empty() && last_disk_count.map(|n| n > 0).unwrap_or(false) {
+                            warn!(
+                                "[DISK_DISCOVERY] Disk baseline collapsed (had {}, now 0) — \
+                                 spdk-tgt likely restarted; re-running discovery with auto-recovery",
+                                last_disk_count.unwrap_or(0)
+                            );
+                            match disk_service.discover_local_disks().await {
+                                Ok(recovered) => {
+                                    info!(
+                                        disk_count = recovered.len(),
+                                        "[DISK_DISCOVERY] Baseline recovery completed"
+                                    );
+                                    last_disk_count = Some(recovered.len());
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "[DISK_DISCOVERY] Baseline recovery failed");
+                                }
+                            }
+                            continue;
+                        }
+                        last_disk_count = Some(disks.len());
                         debug!(disk_count = disks.len(), "[DISK_DISCOVERY] Found disks on node");
                         for disk in &disks {
                             debug!(
@@ -187,6 +223,9 @@ impl NodeAgent {
                 }
                 if let Err(e) = monitor_agent.orphan_sweep().await {
                     warn!(error = %e, "[MONITOR] Orphan sweep failed (non-fatal)");
+                }
+                if let Err(e) = monitor_agent.detect_lost_data_paths().await {
+                    warn!(error = %e, "[MONITOR] Data-path detection failed (non-fatal)");
                 }
             }
         });
@@ -2198,6 +2237,136 @@ impl NodeAgent {
         Ok(())
     }
 
+    /// Consumer-blindness detection (phase-6 yield, bug 1): a volume
+    /// ATTACHED to this node whose raid bdev does not exist here has a
+    /// dead data path the health monitor cannot see (its stale predicate
+    /// requires an online raid). Flag the PV with the data-path-lost
+    /// annotation + a Warning event after 3 consecutive 60s observations
+    /// (an in-flight NodeStage legitimately has VA-before-raid for up to
+    /// the stage-delta budget); clear our own flag (+ Normal event) when
+    /// the raid reappears or the attachment leaves this node.
+    /// Detection only — remediation is layered separately (storage
+    /// baseline recovery, in-place repair, opt-in cutover bounce).
+    async fn detect_lost_data_paths(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::cutover::{data_path_verdict, DataPathAction, DATA_PATH_LOST_ANNOTATION};
+        use k8s_openapi::api::storage::v1::VolumeAttachment;
+
+        // Raids present locally (one RPC).
+        let raids_resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "bdev_raid_get_bdevs", "params": {"category": "all"}}))
+            .await?;
+        let raids: std::collections::HashSet<String> = raids_resp["result"]
+            .as_array()
+            .map(|rs| {
+                rs.iter()
+                    .filter_map(|r| r["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Volumes attached to THIS node.
+        let vas: Api<VolumeAttachment> = Api::all(self.driver.kube_client.clone());
+        let attached_here: std::collections::HashSet<String> = vas
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter(|va| {
+                va.spec.node_name == self.node_name
+                    && va.status.as_ref().map(|s| s.attached).unwrap_or(false)
+            })
+            .filter_map(|va| va.spec.source.persistent_volume_name)
+            .collect();
+
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let mut strikes = self.data_path_strikes.lock().await;
+        let mut still_missing: std::collections::HashSet<String> = Default::default();
+        for pv in pvs.list(&ListParams::default()).await?.items {
+            let Some(pv_name) = pv.metadata.name.clone() else { continue };
+            let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
+            if csi.driver != "flint.csi.storage.io" {
+                continue;
+            }
+            // Single-replica volumes have no raid by design.
+            if !matches!(crate::replica_sync::replicas_from_pv(&pv), Ok(Some(_))) {
+                continue;
+            }
+            let flagged_by_me = pv
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(DATA_PATH_LOST_ANNOTATION))
+                .map(|v| v == &self.node_name)
+                .unwrap_or(false);
+            let attached = attached_here.contains(&pv_name);
+            let raid_present = raids.contains(&format!("raid_{}", csi.volume_handle));
+
+            let strikes_with_this = if attached && !raid_present {
+                still_missing.insert(pv_name.clone());
+                let n = strikes.entry(pv_name.clone()).or_insert(0);
+                *n = n.saturating_add(1);
+                *n
+            } else {
+                0
+            };
+            match data_path_verdict(attached, raid_present, flagged_by_me, strikes_with_this, 3) {
+                DataPathAction::Flag => {
+                    use kube::api::{Patch, PatchParams};
+                    let patch = serde_json::json!({
+                        "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION: self.node_name } }
+                    });
+                    if let Err(e) =
+                        pvs.patch(&pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await
+                    {
+                        warn!(volume_id = %pv_name, error = %e, "[DATA_PATH] Failed to annotate PV");
+                        continue;
+                    }
+                    warn!(volume_id = %pv_name, "[DATA_PATH] Volume attached here but its raid is gone — data path lost");
+                    self.emit_pv_event(
+                        &pv_name,
+                        "Warning",
+                        "VolumeDataPathLost",
+                        &format!(
+                            "Volume is attached to {} but its raid bdev is missing there — the \
+                             mounted filesystem is failing I/O. Likely an spdk-tgt restart; \
+                             bounce the workload pod to restage (or enable rejoin-bounce).",
+                            self.node_name
+                        ),
+                    )
+                    .await;
+                }
+                DataPathAction::Clear => {
+                    use kube::api::{Patch, PatchParams};
+                    let patch = serde_json::json!({
+                        "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION: null } }
+                    });
+                    if let Err(e) =
+                        pvs.patch(&pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await
+                    {
+                        warn!(volume_id = %pv_name, error = %e, "[DATA_PATH] Failed to clear annotation");
+                        continue;
+                    }
+                    info!(volume_id = %pv_name, "[DATA_PATH] Data path restored (or attachment left)");
+                    self.emit_pv_event(
+                        &pv_name,
+                        "Normal",
+                        "VolumeDataPathRestored",
+                        &format!(
+                            "Data-path-lost flag cleared by {}: the raid is back (or the \
+                             attachment moved)",
+                            self.node_name
+                        ),
+                    )
+                    .await;
+                }
+                DataPathAction::Hold => {}
+            }
+        }
+        strikes.retain(|k, _| still_missing.contains(k));
+        Ok(())
+    }
+
     /// Extract replica info from PV volumeAttributes
     fn get_replicas_from_pv(&self, pv: &PersistentVolume) -> Result<Option<Vec<ReplicaInfo>>, Box<dyn std::error::Error + Send + Sync>> {
         crate::replica_sync::replicas_from_pv(pv)
@@ -2386,6 +2555,7 @@ impl Clone for NodeAgent {
             disk_service: self.disk_service.clone(),
             driver: self.driver.clone(),
             orphan_strikes: self.orphan_strikes.clone(),
+            data_path_strikes: self.data_path_strikes.clone(),
         }
     }
 }

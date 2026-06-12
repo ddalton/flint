@@ -68,7 +68,8 @@ cooldown-multiples, decided by the scheduler.**
 ## Bugs found (the phase's yield)
 
 1. **Consumer-side spdk-tgt restart leaves the workload on EIO and the
-   control plane blind.** A node-pod roll on the consumer destroys the
+   control plane blind.** *(Layers 0+1 fixed and cluster-validated later
+   the same day — see "Consumer-blindness fix" below.)* A node-pod roll on the consumer destroys the
    assembled raid and the volume's frontend; the mounted filesystem returns
    I/O errors. Nothing detects it: the health monitor's stale predicate
    requires an *online raid missing a base* — with no raid at all it never
@@ -118,8 +119,51 @@ workload restart, scheduler-independent, residual = detection ticks + final
 delta + a quiesce measured in metadata ops. The catch-up/epoch machinery is
 identical under both; Tier 2 replaces only the admission transport.
 
+## Consumer-blindness fix (landed same day, layers 0+1 of 4)
+
+Designing the fix surfaced a deeper bug and a layered plan. An in-place
+repair experiment (hand-rebuilding the consumer raid + export after a
+lone spdk-tgt kill) failed productively, teaching three things: disk
+attach ran only at DRIVER-container startup, so a lone spdk-tgt restart
+(liveness kill, OOM) bricked the node's entire storage — replicas
+included — until the whole pod was recreated (5.5 min observed just to
+reload, and only with help); a PARTIAL export rebuild is worse than none
+(a listener over a namespace-less subsystem makes the kernel initiator
+conclude the namespace is deleted and kill the device — listener must go
+last, which the convergent export module already orders); and the
+namespace-identity question (does the kernel reattach a rebuilt
+namespace with a new UUID?) remains open, needing deterministic NGUIDs
+pinned at stage before it can be retested.
+
+- **Layer 0 — storage-baseline reconcile (landed):** the 30 s discovery
+  loop detects the disk-count collapse and re-runs discovery with
+  auto-recovery, re-attaching initialized disks and reloading the
+  lvstore; reconcile re-exports on its next tick. Validated live: lone
+  spdk-tgt kill → baseline recovered in **50 s** (previously: bricked
+  indefinitely).
+- **Layer 1 — detection (landed):** the 60 s monitor tick flags any
+  volume ATTACHED to this node whose raid bdev is missing — the case
+  the health monitor's stale predicate (online-raid-missing-a-base)
+  cannot see. Three consecutive strikes (rides out in-flight stages) →
+  `flint.csi.storage.io/data-path-lost: <node>` PV annotation +
+  `VolumeDataPathLost` Warning with the remediation in the message; the
+  flagging node clears it (+`VolumeDataPathRestored`) when the raid
+  returns or the attachment leaves. Validated live: flag at T+3m07s,
+  bounce → restage → flag self-cleared, data intact (the workload
+  STALLED rather than EIO'd this time — layer 0 restored the target
+  fast enough that the kernel kept queueing within its reconnect
+  window).
+- **Layer 2 — in-place repair (follow-up):** reconcile rebuilds the
+  raid + loopback export (convergent module, listener-last) so the
+  kernel reconnects with zero workload disruption; blocked on the
+  namespace-identity retest above.
+- **Layer 3 — bounce fallback (follow-up):** the cutover loop consumes
+  the annotation (RWX: NFS-pod bounce; RWO: `rejoin-bounce` opt-in) for
+  what repair can't reach — fs gone read-only, window expired, ublk
+  frontends.
+
 **Recommendation:** implement the cheap Tier-1 hardening now (consumer
-blindness fix above; pod anti-affinity hint or cordon-lite escalation on
+blindness layers 2+3 above; pod anti-affinity hint or cordon-lite escalation on
 `CutoverIneffective`), and proceed with the Tier-2 patch evaluation —
 the bimodal residual and the per-heal workload restart are structural to
 Tier 1, both disappear with the one verified primitive, and the §7 patch
