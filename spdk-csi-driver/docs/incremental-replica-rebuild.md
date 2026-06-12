@@ -1020,10 +1020,14 @@ Rejected alternatives:
      `ReplicaNeedsFullRebuild` event (phase 5) and the replica stays stale.
      An empty epoch list does nothing at all — a record rebuilt after
      annotation loss must never condemn a healable replica.
-   - **Retention pin** set to `E_b` *before* the revert, cleared on reaching
-     standby; the chase needs no pin because a retired epoch's delta merges
-     into its retained successor (snapshot-delete semantics), so copying the
-     surviving chain still covers the gap.
+   - **Retention pin** set to `E_b` *before* the revert; held through
+     standby and released at phase-4 admission, once no replica still
+     depends on a pinned base — standby or mid-catch-up write-virgin
+     head (changed 2026-06-12 per the §10-14 observation: retiring a
+     standby chain's base is data-safe — a retired epoch's delta merges
+     into its retained successor — but node-side epoch GC then grinds
+     against the chain's clone-parents, warning every cycle until
+     admission frees them anyway).
    - **Revert** deletes the head and re-clones it from the replica's own
      `E_b`, keeping the lvol *name* (the stable `lvs/name` alias makes the
      revert idempotent across crashes). The new uuid is recorded as
@@ -1387,8 +1391,12 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    condemned and the next cycle reaps it. Deliberately out of scope: a
    `temp_pvc_clone_*` under a live PV (deletion-path bug, not an
    orphan), an ephemeral leak with its frontend intact (indistinguishable
-   from in-use), and the pin-until-admission change to epoch GC (still
-   open above). **Cluster-validated 2026-06-12** on a fresh 4-node
+   from in-use). The pin-until-admission change landed separately
+   (2026-06-12): `mark_in_sync` releases the retention pin only when no
+   replica still depends on a pinned base (standby or mid-catch-up
+   write-virgin head; a merely-stale replica holds no claim — its next
+   catch-up pins fresh), and `record_standby` no longer clears it, so
+   retention never retires a chain the GC would grind against. **Cluster-validated 2026-06-12** on a fresh 4-node
    cluster: planted orphan head/epoch/snapshot lvols and an orphan
    subsystem next to a live volume — all four reaped on exactly the
    third cycle; the live volume's lvol, subsystem and data untouched

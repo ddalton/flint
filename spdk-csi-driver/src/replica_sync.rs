@@ -275,7 +275,7 @@ impl VolumeSyncRecord {
         reason: &str,
         now_rfc3339: &str,
     ) -> bool {
-        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+        let mut changed = match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
             Some(rec) => {
                 let mut changed = false;
                 if rec.sync_state != SyncState::InSync {
@@ -294,8 +294,27 @@ impl VolumeSyncRecord {
                 }
                 changed
             }
-            None => false,
+            None => return false,
+        };
+        // §10-14: the retention pin is held until ADMISSION, not copy
+        // completion — retiring a standby chain's base just makes the
+        // node-side epoch GC grind against the chain (the campaign's
+        // per-minute warnings). Release it only when no replica still
+        // depends on a pinned base: a standby (resumes/admits from its
+        // copied chain) or a mid-catch-up write-virgin head
+        // (`reverted_to` set — its revert base must outlive a crash).
+        // A merely-stale replica has no claim: its next catch-up
+        // selects and pins a fresh base.
+        if self.retention_pin.is_some()
+            && !self.replicas.iter().any(|r| {
+                r.sync_state == SyncState::Standby
+                    || (r.sync_state == SyncState::Stale && r.reverted_to.is_some())
+            })
+        {
+            self.retention_pin = None;
+            changed = true;
         }
+        changed
     }
 
     /// Lower the retention pin to `epoch` (§5 retention pinning). A pin only
@@ -1093,6 +1112,37 @@ mod tests {
 
         // Unknown replica: no-op.
         assert!(!record.mark_in_sync("uuid-zz", "epoch-vol1-6", "?", "t5"));
+    }
+
+    #[test]
+    fn pin_held_until_last_dependent_replica_admitted() {
+        // §10-14: the pin survives standby and releases only when no
+        // replica still depends on a pinned base.
+        let mut record = three_replica_record();
+        record.apply_epoch_cut("epoch-vol1-3", &[], "t0");
+        record.apply_epoch_cut("epoch-vol1-4", &[], "t0");
+        record.pin_retention("vol1", "epoch-vol1-3");
+
+        // b: standby. c: mid-catch-up (stale with a write-virgin head).
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_standby("uuid-b", "epoch-vol1-4", "chasing", "t1");
+        record.mark_stale("uuid-c", "leg failed", "t0");
+        record.replicas[2].reverted_to = Some("epoch-vol1-3".to_string());
+
+        // Admitting b releases nothing: c's revert base is still pinned.
+        record.mark_in_sync("uuid-b", "epoch-vol1-4", "admitted", "t2");
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-3"));
+
+        // Admitting c (clears its reverted_to) releases the pin.
+        record.mark_in_sync("uuid-c", "epoch-vol1-4", "admitted", "t3");
+        assert_eq!(record.retention_pin, None);
+
+        // A merely-stale replica holds no claim: re-pin, mark b stale
+        // (no reverted_to), admit a — pin releases despite b being stale.
+        record.pin_retention("vol1", "epoch-vol1-4");
+        record.mark_stale("uuid-b", "leg failed again", "t4");
+        record.mark_in_sync("uuid-a", "epoch-vol1-4", "x", "t5");
+        assert_eq!(record.retention_pin, None);
     }
 
     #[test]

@@ -70,9 +70,12 @@
 //   locked out; phase-4 staging re-flips the fence to the new consumer.
 // - **Retention pinning**: E_b is pinned (record-level, §5) *before* the
 //   revert, so the scheduler cannot retire the catch-up's foundation. The
-//   pin clears when the replica reaches standby; the chase needs no pin —
-//   snapshot-delete merges fold a retired epoch's delta into its retained
-//   descendant, so copying the surviving chain still covers everything.
+//   pin is held through standby and released at phase-4 admission, once
+//   no replica depends on a pinned base (§10-14: retiring a standby
+//   chain's base is data-safe — snapshot-delete merges fold a retired
+//   epoch's delta into its retained descendant — but the node-side epoch
+//   GC then grinds against the chain's clone-parents, warning every
+//   cycle until admission frees them anyway).
 //
 // Phase-4 admission ordering (each step's failure mode considered):
 // - The final epoch is cut on exactly the replicas that ATTACHED at this
@@ -181,14 +184,16 @@ pub trait CatchupStore: Sync {
         base_epoch: &str,
         new_head_uuid: &str,
     ) -> Result<(), RpcError>;
-    /// Transition to standby (or advance an existing standby's mark),
-    /// clearing the catch-up's own retention pin if given.
+    /// Transition to standby (or advance an existing standby's mark).
+    /// The retention pin set before the revert is NOT cleared here: it is
+    /// held until phase-4 admission (§10-14 — retiring a standby chain's
+    /// base just makes the node-side epoch GC grind against the chain);
+    /// `mark_in_sync` releases it once no replica depends on one.
     async fn record_standby(
         &self,
         volume_id: &str,
         replica_uuid: &str,
         caught_up_through: &str,
-        clear_pin: Option<&str>,
     ) -> Result<(), RpcError>;
     /// Update a replica's operator-facing reason without a state change.
     async fn record_reason(
@@ -269,16 +274,11 @@ impl CatchupStore for KubeStore {
         volume_id: &str,
         replica_uuid: &str,
         caught_up_through: &str,
-        clear_pin: Option<&str>,
     ) -> Result<(), RpcError> {
         let (uuid, through) = (replica_uuid.to_string(), caught_up_through.to_string());
-        let pin = clear_pin.map(String::from);
         let now = replica_sync::now_rfc3339();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
             r.mark_standby(&uuid, &through, "caught up; chasing epochs", &now);
-            if let Some(p) = &pin {
-                r.clear_pin_if(p);
-            }
         })
         .await?;
         Ok(())
@@ -1265,7 +1265,7 @@ async fn catchup_stale(
     .await?;
 
     store
-        .record_standby(volume_id, &rec.lvol_uuid, &newest, Some(&pinned))
+        .record_standby(volume_id, &rec.lvol_uuid, &newest)
         .await?;
     store
         .emit(
@@ -1329,7 +1329,7 @@ async fn chase_standby(
         cfg.poll_interval, None,
     )
     .await?;
-    store.record_standby(volume_id, &rec.lvol_uuid, &newest, None).await?;
+    store.record_standby(volume_id, &rec.lvol_uuid, &newest).await?;
     info!(volume_id, node = %identity.node_name, through = %newest, "[CATCHUP] Standby chased to latest epoch");
     Ok(())
 }
@@ -2118,13 +2118,9 @@ mod tests {
             _volume_id: &str,
             replica_uuid: &str,
             caught_up_through: &str,
-            clear_pin: Option<&str>,
         ) -> Result<(), RpcError> {
             let mut record = self.record.lock().unwrap();
             record.mark_standby(replica_uuid, caught_up_through, "caught up; chasing epochs", "t");
-            if let Some(pin) = clear_pin {
-                record.clear_pin_if(pin);
-            }
             self.ops.lock().unwrap().push(format!("standby:{}", caught_up_through));
             Ok(())
         }
@@ -2657,13 +2653,21 @@ mod tests {
         );
 
         // Record end state: standby through epoch 5, live-uuid override,
-        // write-virgin marker, pin cleared.
-        let record = store.record.lock().unwrap();
+        // write-virgin marker — and the pin HELD (§10-14: released at
+        // admission, not copy completion, so retention never grinds the
+        // GC against the standby chain's base).
+        let mut record = store.record.lock().unwrap();
         let rec = record.get("uuid-b").unwrap();
         assert_eq!(rec.sync_state, SyncState::Standby);
         assert_eq!(rec.last_epoch.as_deref(), Some(epoch("vol1", 5).as_str()));
         assert_eq!(rec.active_lvol_uuid.as_deref(), Some("uuid-b-v2"));
         assert_eq!(rec.reverted_to.as_deref(), Some(epoch("vol1", 4).as_str()));
+        assert_eq!(
+            record.retention_pin.as_deref(),
+            Some(epoch("vol1", 4).as_str())
+        );
+        // Phase-4 admission of the last dependent replica releases it.
+        record.mark_in_sync("uuid-b", &epoch("vol1", 6), "admitted", "t");
         assert_eq!(record.retention_pin, None);
         drop(record);
 
@@ -2879,7 +2883,8 @@ mod tests {
         assert_eq!(aligned, vec!["snap_vol1_88", "epoch-vol1-5"]);
 
         // Record end state: standby at 5, live-uuid override, full-build
-        // marker, pin cleared.
+        // marker — pin still anchored at the build's OLDEST retained
+        // epoch until admission (§10-14).
         {
             let record = store.record.lock().unwrap();
             let rec = record.get("uuid-b").unwrap();
@@ -2887,7 +2892,10 @@ mod tests {
             assert_eq!(rec.last_epoch.as_deref(), Some(epoch("vol1", 5).as_str()));
             assert_eq!(rec.active_lvol_uuid.as_deref(), Some("uuid-b-v2"));
             assert_eq!(rec.reverted_to.as_deref(), Some(FULL_BUILD_BASE));
-            assert_eq!(record.retention_pin, None);
+            assert_eq!(
+                record.retention_pin.as_deref(),
+                Some(epoch("vol1", 3).as_str())
+            );
         }
         let reasons: Vec<String> =
             store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
