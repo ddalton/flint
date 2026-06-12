@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.2.0"            # incremental replica rebuild (phases 1-5b) + superblock-less raids
+    tag: "1.3.0"            # self-healing: data-path repair, bounce escalation, RWX identity fixes
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
@@ -166,7 +166,7 @@ dashboard:
     port: 8080
   frontend:
     name: spdk-dashboard-frontend
-    tag: "1.2.0"      # disk-setup page: real per-node status instead of mock fallback
+    tag: "1.3.0"      # honest backend-failure UI; backend /healthz probes
     port: 3000
   resources:
     backend:

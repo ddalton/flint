@@ -14,6 +14,68 @@ covered by the stability guarantee.
 
 _Nothing yet._
 
+## [1.3.0] - 2026-06-12
+
+Self-healing release: every common single-failure (replica node loss,
+consumer spdk-tgt restart, lone container restart, same-node reschedule
+race) now heals autonomously, typically within ~3 minutes and without
+workload restarts. All changes validated live on AWS i4i clusters with
+forced failure injection.
+
+### Added
+
+- **Consumer data-path self-healing (4 layers).** Storage-baseline
+  recovery re-adopts disks after a lone `spdk-tgt` restart (~30 s);
+  data-path-lost detection flags volumes whose raid vanished under a
+  live attachment (3-strike, PV annotation + events); in-place repair
+  rebuilds the raid and loopback export with a **pinned NVMe namespace
+  identity** so the kernel initiator reattaches without a workload
+  restart; and the cutover orchestrator bounces as a last-resort
+  fallback. Escape hatch: `FLINT_DATA_PATH_REPAIR=disabled`.
+- **Scheduling escalation for cutover bounces.** Every bounce applies a
+  self-expiring `NoSchedule` taint (`flint.csi.storage.io/bounce`,
+  TTL `FLINT_CUTOVER_TAINT_SECS`, default 120 s) to the bounced node so
+  the replacement cannot reuse the stale staged volume — reassembly
+  bounces are now deterministic instead of scheduler-dependent.
+- **Orphan sweep (§10-14).** Node agents reap lvols and NVMe-oF
+  subsystems whose owning PV no longer exists (3-strike confirmation,
+  strict parsers, ublk-verified ephemeral handling).
+  `FLINT_ORPHAN_SWEEP=disabled` to opt out.
+- Dashboard backend `/healthz` endpoint; liveness/readiness probes
+  moved off the aggregate `/api/dashboard` endpoint.
+
+### Fixed
+
+- **RWX volume identity aliasing (six fixes).** An RWX volume's three
+  identities (user PV, synthetic backing PV, volumeHandle) corrupted
+  each other: zombie raids at unstage blocked every later restage; a
+  permanent data-path false positive drove endless NFS-pod bounce
+  loops; duplicate epoch/catch-up streams broke snapshot lineage and
+  standby admission; replica exports were squatted under alias NQNs;
+  an RWX consumer's unstage could detach the live raid's legs; and NFS
+  server bounces invalidated every client file handle (now pinned per
+  volume via `PNFS_INSTANCE_ID`; foreign handles answer `NFS4ERR_STALE`
+  so clients recover by re-walking).
+- Retention pin lifecycle: held until standby admission (not copy
+  completion) and advanced with the standby's chase mark — epoch
+  history no longer grows unbounded behind a chasing standby.
+- Dashboard: unreachable nodes can no longer hang the aggregate fetch
+  past the liveness deadline (bounded per-node timeouts), and the
+  frontend no longer substitutes mock data when the backend is
+  unreachable — it keeps last-known data and shows an error banner.
+
+### Known limitations
+
+- **RWX cutover transparency requires clean client state.** A client
+  holding dirty open state (unsynced writes) across an NFS server
+  bounce can have those writes dropped: the server's NFSv4 state is
+  in-memory and does not survive pod replacement. Read-mostly and
+  fsync-disciplined workloads ride through transparently. Persistent
+  state (SQLite backend on the exported volume) is the next milestone.
+- Migration from ≤1.2.0: existing volumes cross onto the pinned
+  namespace identity at their next detach/restage; existing NFS server
+  pods mint stable file-handle ids at their next recreation.
+
 ## [1.0.0] - 2026-05-04
 
 First stable release. Production-ready for SPDK-based deployments;
