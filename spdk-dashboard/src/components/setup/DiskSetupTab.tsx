@@ -545,11 +545,17 @@ export const DiskSetupTab: React.FC = () => {
       ({ nodeName }) => nodeName
     );
 
-    for (const [nodeName, disks] of Object.entries(disksByNode)) {
-      if (disks && disks.length > 0) {
-        await setupDisksOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
-      }
-    }
+    // Fan out across nodes — each request goes to a different machine's
+    // agent, and the wrapper tracks progress/results per node. Disks on
+    // the same node stay batched in one request (the agent sets them up
+    // sequentially; it mutates shared host state like driver binding).
+    await Promise.all(
+      Object.entries(disksByNode).map(async ([nodeName, disks]) => {
+        if (disks && disks.length > 0) {
+          await setupDisksOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
+        }
+      })
+    );
   };
 
   const setupDisksOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
@@ -604,11 +610,15 @@ export const DiskSetupTab: React.FC = () => {
       ({ nodeName }) => nodeName
     );
 
-    for (const [nodeName, disks] of Object.entries(disksByNode)) {
-      if (disks && disks.length > 0) {
-        await initializeLVSOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
-      }
-    }
+    // Fan out across nodes, same as setupSelectedDisks; per-node disks
+    // stay batched in one sequential request.
+    await Promise.all(
+      Object.entries(disksByNode).map(async ([nodeName, disks]) => {
+        if (disks && disks.length > 0) {
+          await initializeLVSOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
+        }
+      })
+    );
   };
 
   const initializeLVSOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
@@ -655,11 +665,15 @@ export const DiskSetupTab: React.FC = () => {
       ({ nodeName }) => nodeName
     );
 
-    for (const [nodeName, disks] of Object.entries(disksByNode)) {
-      if (disks && disks.length > 0) {
-        await unbindDriverOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
-      }
-    }
+    // Fan out across nodes, same as setupSelectedDisks; per-node disks
+    // stay batched in one sequential request.
+    await Promise.all(
+      Object.entries(disksByNode).map(async ([nodeName, disks]) => {
+        if (disks && disks.length > 0) {
+          await unbindDriverOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
+        }
+      })
+    );
   };
 
   const unbindDriverOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
