@@ -1,8 +1,39 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 4**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–4 revised with Claude (Fable 5), 2026-06-10
+**Status:** design / proposal — **revision 5**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 5** (2026-06-12, after the full e2e cluster campaign):
+phases 0–5b were **validated end-to-end on a live 4-node cluster** — epoch
+cadence + retention, stale→standby heal in seconds, chase, fenced no-rebuild
+admission (§5 cornerstone re-pinned), §11 snapshots/restore/tombstones, and
+the phase-5 full build from empty with user snapshots preserved; the standard
+8-test kuttl suite passed before and after (see `e2e-campaign-2026-06-12.md`
+for the full evidence ledger). The campaign surfaced and fixed three driver
+bugs: §11 snapshot names overflowed SPDK's 63-char lvol-name limit (suffix
+now budget-clamped, retry idempotency preserved); re-staging onto a
+replica-hosting node failed `bdev_raid_create` EPERM because the replica's
+own stale NVMe-oF export still write-opened the local base (stale local
+exports are now dropped at local attach); and restoring from a multi-replica
+snapshot silently **destroyed the data** — the clone carried the source
+raid's superblock, so bare-lvol staging found no filesystem at LBA 0 and
+formatted. That last bug was root-fixed by answering §10-7: **raids are now
+created `superblock: false`** (flint never used examine-based auto-assembly;
+the control plane is the sole membership authority per §2), which puts the
+filesystem at LBA 0 of every base lvol, makes restores work with zero
+special-casing, and structurally eliminates the §3 phantom-assembly hazard
+class for new volumes. Pre-release layout break: lvols written by
+superblocked builds are incompatible — recreate, don't upgrade in place.
+NodeStage additionally refuses to format any volume marked
+`filesystem-initialized` (loud failure instead of silent data loss). New
+open questions: §10-13 (re-replication of restored volumes — restores are
+single-replica clones today, SC `numReplicas` ignored) and §10-14
+(deletion-path lvol reaping — observed orphaned heads/epochs/exports after
+volume deletion with a stale replica, and clone-pinned snapshot copies when
+the PV is deleted before tombstone reconcile). Also observed, minor: epoch
+cadence halves under record-patch contention; epoch GC retries noisily while
+chain bases pin retired epochs.
 
 **What changed in rev 4** (same day, after a live-cluster reproduction):
 both §3 hazards were **reproduced end-to-end** on a 3-worker AWS cluster running
@@ -156,6 +187,16 @@ Verified current-state facts the design must account for:
    transparent-cutover lever for RWX volumes.
 
 ## 3. The superblock-examine hazard (pre-existing; REPRODUCED on a live cluster)
+
+> **Resolved for new volumes (rev 5, 2026-06-12):** raids are now created
+> `superblock: false` (§10-7 answered), so new base lvols carry no raid
+> metadata and the examine hook has nothing to assemble — this hazard class
+> is structurally eliminated rather than defended against. The convergence
+> defenses below (`ensure_raid1_bdev`, `wait_for_examine`, `clear_sb`
+> version-gating) are retained as hardening for any pre-rev-5 lvols and as
+> §3 history. Pre-release layout break: superblocked lvols put the
+> filesystem 1 MiB in; superblock-less lvols put it at LBA 0 — recreate
+> volumes, don't upgrade in place.
 
 Discovered while verifying §7 and serious enough to stand alone. The mechanism
 is fully verified in stock SPDK, and **both consequences below were reproduced
@@ -1246,12 +1287,16 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    flush (and does the `lvol-flush` patch provide the right hook) immediately
    before a snapshot cut, so the snapshot captures all completed-and-acked
    writes from the guest's perspective?
-7. **`superblock: false` for new volumes**: removes the §3 hazard class and
-   makes the control plane the sole membership authority (already the §2
-   principle). Needs a split-brain analysis (what stops a stale node assembling
-   raid over lvols without sb protection? — note the sb does not actually
-   prevent this today either, per §3) and a migration story for existing
-   volumes.
+7. ~~**`superblock: false` for new volumes**~~ **Answered and adopted
+   2026-06-12** (rev 5): raids are created without superblocks; the §3
+   hazard class is structurally eliminated and the multi-replica restore
+   data-destruction bug (filesystem hidden at the raid data offset) is
+   root-fixed. Split-brain: unchanged — the sb never prevented stale
+   assembly (per §3); the control plane plus §10-9 fencing remain the sole
+   authority, and the lost sb base-identity check is replaced by the
+   driver's own record-vs-live-uuid verification at attach. Migration:
+   moot pre-release (dev volumes recreated); the layout break is called
+   out in §3.
 8. **Orphan reaping completeness**: enumerate everything a dead consumer node
    can leave behind (raid bdev, nvme controllers, ublk/nvmf frontends, mounted
    filesystems) and make the hygiene pass cover all of it.
@@ -1271,11 +1316,15 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    implemented 2026-06-11 — see §11** (cut on every in-sync replica via the
    epoch machinery; lineage-walk chain copy closing the delta-split hazard;
    align-at-snapshot on heal; presence-verified restore; tombstone-driven
-   deletion). Phase 5b, unit-tested; cluster validation pending. Remaining
-   to validate: the §10-3 locked-op cadence now including user cuts;
-   lineage-replay full-build data movement vs. a flattened copy under
-   rewrite-heavy workloads; restore-clone pinning interplay on healed
-   replicas (a clone pins only its own node's copy).
+   deletion). Phase 5b, unit-tested; **cluster-validated 2026-06-12**
+   (`e2e-campaign-2026-06-12.md`): cut-on-both with identical clamped
+   names, exact-to-the-write restore, align-at-snapshot on a chasing
+   standby, full-build replay preserving the user snapshot, and
+   tombstone-driven deletion including the clone-pinned-pending case
+   (copy held while a restore clone existed, reaped and tombstone cleared
+   once the clone was deleted). Still open: the §10-3 locked-op cadence
+   including user cuts under load; lineage-replay full-build data movement
+   vs. a flattened copy under rewrite-heavy workloads.
 12. **Replica replacement (new node / new identity)** — the part of §9-5
    deliberately not implemented. Replica identity (`node_name`, `node_uid`,
    `lvol_uuid`, lvs) lives in immutable PV volumeAttributes; every consumer
@@ -1292,6 +1341,31 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    must enter stale/empty and full-build); (d) the §6 question of when
    replacement is triggered (operator action vs. node-gone timeout). The
    implemented full build (§9-5) then does the data movement unchanged.
+13. **Re-replication of restored volumes** (found 2026-06-12): a volume
+   restored from a multi-replica snapshot is a single bare clone on one
+   node — the SC's `numReplicas` is silently ignored, because a raid1
+   cannot assemble over one real base plus empty siblings (reads from a
+   blank leg corrupt instantly) and CSI `CreateVolume` cannot block on
+   seeding copies. The machinery for the right answer already exists:
+   create N replica lvols, then replay the snapshot's lineage into each
+   via the §9-5 full-build path, asynchronously after create —
+   record-level states (stale/empty → standby) gate admission exactly as
+   for heals. Needs: async orchestration ownership (catch-up loop is the
+   natural home), `numReplicas` honored in the restore CreateVolume, and
+   the §10-12 identity channel if the clone node ≠ desired placement.
+14. **Deletion-path lvol reaping** (observed live 2026-06-12): DeleteVolume
+   of a volume with a stale replica left both replica heads, six epoch
+   snapshots, a user-snapshot copy, and the NVMe-oF export subsystems
+   behind (the export's write-open blocks head deletion; chained
+   snapshot-of-clone elements then unwind only leaf-first); DeleteSnapshot
+   fan-out converges by tombstone while the PV exists, but a copy pinned
+   by a restore clone whose PV is deleted later has no reconciler left to
+   reap it. Epoch GC also retries forever (once per minute, warning each
+   time) on epochs pinned as a standby chain's base — the retention pin
+   should arguably be held until admission instead of until copy
+   completion. Wants a node-agent orphan sweep (extends §10-8's hygiene
+   pass to lvols and exports keyed by absent PVs) rather than more
+   ordering cleverness in the deletion paths.
 
 ## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
 
@@ -1301,15 +1375,22 @@ The SPDK patch decision moves from "gating dependency, sequence first"
 unit-tested (lineage walks over forests with interleaved user snapshots,
 cut targeting/rollback by live uuid, align-at-user-snapshot replay,
 tombstone convergence incl. unreachable-replica retention, restore source
-selection by verified presence), not yet cluster-validated. Deviations
-from the sketch below, all deliberate:
+selection by verified presence). **Cluster-validated 2026-06-12**
+(`e2e-campaign-2026-06-12.md`): cut/restore/tombstone all live-verified;
+restores are exact to the snapshot cut; restored volumes are single-replica
+clones (re-replication → §10-13). Deviations from the sketch below, all
+deliberate:
 - **The name suffix is not a timestamp**: multi-replica snapshot names are
   `snap_<vol>_<fnv64(csi_request_name)>` — external-snapshotter retries
   carry the same CSI `name`, so the lvol name is stable and the cut
   converges via EEXIST instead of piling up snapshots under fresh
   timestamps (the single-replica path's known idempotency wart, left
   unchanged there). The suffix parses as the same `u64` the strict-name
-  discipline expects.
+  discipline expects. **Live fix (2026-06-12):** the full 20-digit decimal
+  rendering overflowed SPDK's 63-usable-char lvol-name limit on `pvc-<uuid>`
+  ids (65 chars → `-32602` on every cut); the suffix is now reduced modulo
+  the digit budget left by `snap_<vol>_`, preserving determinism and the
+  strict-`u64` parse.
 - **`CreateSnapshot` reports `size_bytes: 0`** (unspecified) for
   multi-replica snapshots — copies are thin per-replica deltas with no
   single meaningful size.
