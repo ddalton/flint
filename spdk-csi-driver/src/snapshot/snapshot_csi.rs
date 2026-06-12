@@ -91,6 +91,19 @@ fn stable_snapshot_suffix(csi_name: &str) -> u64 {
     hash
 }
 
+/// SPDK rejects lvol names of 64+ chars (SPDK_LVOL_NAME_MAX includes the
+/// terminator), so the decimal suffix is reduced modulo the digit budget
+/// left after `snap_<vol>_`. A 40-char `pvc-<uuid>` id leaves 17 digits;
+/// determinism (and so retry idempotency) is unaffected.
+const SPDK_LVOL_NAME_USABLE: usize = 63;
+
+fn multi_replica_snapshot_name(volume_id: &str, csi_name: &str) -> String {
+    let prefix_len = "snap_".len() + volume_id.len() + "_".len();
+    let budget = SPDK_LVOL_NAME_USABLE.saturating_sub(prefix_len).min(19) as u32;
+    let suffix = stable_snapshot_suffix(csi_name) % 10u64.pow(budget.max(1));
+    format!("snap_{}_{}", volume_id, suffix)
+}
+
 /// Snapshot-specific CSI controller
 /// Implements only the snapshot-related RPCs - CreateSnapshot, DeleteSnapshot, ListSnapshots
 pub struct SnapshotController {
@@ -223,11 +236,7 @@ impl SnapshotController {
         // so external-snapshotter retries converge on the SAME copies (via
         // the cut's EEXIST handling) instead of piling up snapshots under
         // fresh timestamps.
-        let snapshot_name = format!(
-            "snap_{}_{}",
-            req.source_volume_id,
-            stable_snapshot_suffix(&req.name)
-        );
+        let snapshot_name = multi_replica_snapshot_name(&req.source_volume_id, &req.name);
         tracing::info!(
             "📸 [SNAPSHOT_CSI] Multi-replica snapshot {} (from CSI name {})",
             snapshot_name, req.name
@@ -689,19 +698,36 @@ mod tests {
 
     #[test]
     fn multi_replica_snapshot_name_is_stable_and_parseable() {
-        // Same CSI request name → same suffix (retry idempotency).
-        let a = stable_snapshot_suffix("snapshot-5c2e9a1f");
-        let b = stable_snapshot_suffix("snapshot-5c2e9a1f");
-        assert_eq!(a, b);
-        assert_ne!(a, stable_snapshot_suffix("snapshot-other"));
+        // Same CSI request name → same name (retry idempotency).
+        let vol = "pvc-abc123";
+        let name = multi_replica_snapshot_name(vol, "snapshot-5c2e9a1f");
+        assert_eq!(name, multi_replica_snapshot_name(vol, "snapshot-5c2e9a1f"));
+        assert_ne!(name, multi_replica_snapshot_name(vol, "snapshot-other"));
 
         // The generated id round-trips through the §11 id parser.
-        let name = format!("snap_pvc-abc123_{}", a);
+        let suffix = name.rsplit('_').next().unwrap().parse::<u64>().unwrap();
         assert_eq!(
             crate::replica_sync::parse_user_snapshot_id(&name),
-            Some(("pvc-abc123", a))
+            Some(("pvc-abc123", suffix))
         );
-        assert_eq!(crate::replica_sync::user_snapshot_ts("pvc-abc123", &name), Some(a));
+        assert_eq!(crate::replica_sync::user_snapshot_ts("pvc-abc123", &name), Some(suffix));
+    }
+
+    #[test]
+    fn multi_replica_snapshot_name_fits_spdk_lvol_name_limit() {
+        // Live-cluster regression (stage-2 e2e, 2026-06-12): a full FNV-1a64
+        // decimal suffix on a `pvc-<uuid>` id produced 65 chars and SPDK
+        // rejected the cut with -32602. The clamp must keep every realistic
+        // id shape within the 63 usable chars.
+        let pvc_id = "pvc-a6846916-3267-404e-bb22-72d820652299";
+        let name = multi_replica_snapshot_name(pvc_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
+        assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", name, name.len());
+
+        // RWX synthetic handles are longer; the suffix shrinks to fit.
+        let rwx_id = "nfs-server-pvc-a6846916-3267-404e-bb22-72d820652299";
+        let name = multi_replica_snapshot_name(rwx_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
+        assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", name, name.len());
+        assert!(crate::replica_sync::parse_user_snapshot_id(&name).is_some());
     }
 }
 
