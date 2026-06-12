@@ -16,6 +16,7 @@ build node needed; ~2 min per iteration).
 | 1.2.0-rc3 | `3c3ac93c…` | + bug #2 fix (stale-local-export drop) |
 | 1.2.0-rc4 | `d2de744d…` | + restore groundwork (superseded by rc5) |
 | 1.2.0-rc5 | `ddbddd9f…` | + bug #3 root fix (`superblock: false`) + format-refusal guard |
+| 1.2.0 | `f84d572b…` | + bug #4 fix (bounded unstage umount) — released as `v1.2.0` |
 
 All rebuild machinery ships default-disabled; campaign knobs were applied
 with `kubectl set env` on the controller (`FLINT_EPOCH_SCHEDULER=enabled`,
@@ -109,6 +110,31 @@ rwo-pvc-migration.
    raid-wrapping the clone (SPDK rejects single-base creates, `-22` for
    raid1 *and* concat on v26.01) and a loop-device offset mount (worked,
    rejected as a permanent extra failure point).
+4. **An unstage `umount` on a dead backing device froze the whole node
+   plugin** (1.2.0, `main.rs`/`node_agent.rs`, new `mount_util.rs`).
+   Found by the release-gate rerun: raid-degraded-mode restarted spdk-tgt
+   under a staged raid; the subsequent NodeUnstage's plain `umount`
+   blocked in uninterruptible sleep on the dead mount, wedging the node
+   server's only runtime thread — kubelet got connection-refused for
+   *every* volume on that node until the NVMe initiator's
+   `ctrl_loss_tmo` (~10 min) errored the I/O and the node self-recovered.
+   A bare `timeout` wrapper is not a fix: its default SIGTERM is
+   undeliverable in D-state, and GNU `timeout` waits for its child, so
+   the wrapper hangs too. `mount_util::bounded_umount` layers three
+   containments: `timeout -k` TERM→KILL escalation (kills the common
+   `TASK_KILLABLE` sleep), a `spawn_blocking` wait abandoned at a tokio
+   deadline (a hard-D-state child parks one blocking-pool thread, never
+   the server), and a lazy `-l` fallback (detach without waiting on
+   in-flight I/O) — the same lazy-first shape that already kept
+   NodeUnpublish from hanging on the identical mount.
+
+## Release gate rerun
+
+With the bug #4 fix rolled to all nodes, the full gate — standard kuttl
+suite in parallel plus the separately-run clean-shutdown suite — passed
+green, and `v1.2.0` was tagged (commit `1de8f45`): chart `1.2.0` on the
+Docker Hub OCI repo, image `1.2.0` with `1.2`/`1` aliases, trove pinned
+to the released chart.
 
 ## Observations for follow-up (none blocking)
 
