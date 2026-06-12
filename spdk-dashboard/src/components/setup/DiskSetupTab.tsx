@@ -309,9 +309,14 @@ export const DiskSetupTab: React.FC = () => {
 
   // Flatten all disks from all nodes
   const allDisks = useMemo(() => {
-    return Object.entries(nodeData).flatMap(([nodeName, data]) => 
+    return Object.entries(nodeData).flatMap(([nodeName, data]) =>
       data.disks.map((disk: UnimplementedDisk) => ({ ...disk, nodeName }))
     );
+  }, [nodeData]);
+
+  // Nodes whose agent could not be reached (e.g. CSI node pod not running)
+  const unreachableNodes = useMemo(() => {
+    return Object.values(nodeData).filter(data => data.error && !data.loading);
   }, [nodeData]);
 
   // Apply filters
@@ -870,6 +875,30 @@ export const DiskSetupTab: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Unreachable Nodes Warning */}
+      {unreachableNodes.length > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="font-medium text-red-800">
+                Disk information unavailable for {unreachableNodes.length} of {knownNodes.length} nodes
+              </p>
+              <ul className="mt-1 text-sm text-red-700 space-y-0.5">
+                {unreachableNodes.map(data => (
+                  <li key={data.node} className="truncate" title={data.error}>
+                    <span className="font-mono font-medium">{data.node}</span>: {data.error}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-xs text-red-600">
+                Check that the flint-csi-node pod is running on these nodes. Only disks from reachable nodes are shown below.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Filters and Controls */}
       <div className="bg-white rounded-lg shadow">

@@ -1106,268 +1106,71 @@ export const useDiskSetup = () => {
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
-    console.log(`🔍 [REFRESH_TRIGGER] Call stack:`, new Error().stack);
-    
+
+    setRefreshing(prev => new Set([...prev, nodeName]));
+    setNodeData(prev => ({
+      ...prev,
+      [nodeName]: {
+        ...prev[nodeName],
+        node: nodeName,
+        disks: prev[nodeName]?.disks ?? [],
+        loading: true,
+        error: undefined
+      }
+    }));
+
     try {
-      setRefreshing(prev => new Set([...prev, nodeName]));
-      setNodeData(prev => ({
-        ...prev,
-        [nodeName]: { ...prev[nodeName], loading: true, error: undefined }
-      }));
+      const response = await fetch(`/api/nodes/${nodeName}/disks/status`);
+      const data = await response.json().catch(() => null);
 
-      // Enhanced mock API call for development/demo with varied disk states
-      const mockDisks: UnimplementedDisk[] = [
-        // FREE DISKS - Need full setup (driver + LVS)
-        {
-          pci_address: "0000:3d:00.0",
-          device_name: "nvme0n1",
-          vendor_id: "0x144d",
-          device_id: "0xa80a",
-          subsystem_vendor_id: "0x144d", 
-          subsystem_device_id: "0xa801",
-          numa_node: 0,
-          driver: "nvme",
-          size_bytes: 1000204886016,
-          model: "Samsung SSD 980 PRO 1TB",
-          serial: "S5P2NG0R123456",
-          firmware_version: "5B2QGXA7",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: false,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: false,
-          blobstore_initialized: false
-        },
-        {
-          pci_address: "0000:3f:00.0",
-          device_name: "nvme2n1",
-          vendor_id: "0x15b7",
-          device_id: "0x5006",
-          subsystem_vendor_id: "0x15b7",
-          subsystem_device_id: "0x5006",
-          numa_node: 1,
-          driver: "nvme",
-          size_bytes: 512110190592,
-          model: "WD Black SN750 500GB",
-          serial: "WDS500G3X0C123",
-          firmware_version: "111130WD",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: false,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: false,
-          blobstore_initialized: false
-        },
-        
-        // DRIVER READY DISKS - Have SPDK driver, need LVS initialization
-        {
-          pci_address: "0000:3e:00.0", 
-          device_name: "nvme1n1",
-          vendor_id: "0x144d",
-          device_id: "0xa80a",
-          subsystem_vendor_id: "0x144d",
-          subsystem_device_id: "0xa801", 
-          numa_node: 0,
-          driver: "kernel",
-          size_bytes: 1000204886016,
-          model: "Samsung SSD 980 PRO 1TB",
-          serial: "S5P2NG0R654321",
-          firmware_version: "5B2QGXA7",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: true,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: true,
-          blobstore_initialized: false
-        },
-        {
-          pci_address: "0000:5a:00.0",
-          device_name: "nvme3n1",
-          vendor_id: "0x15b7",
-          device_id: "0x5006",
-          subsystem_vendor_id: "0x15b7",
-          subsystem_device_id: "0x5006",
-          numa_node: 1,
-          driver: "kernel",
-          size_bytes: 2000398934016,
-          model: "WD Black SN850 2TB",
-          serial: "WDS200T1X0E456",
-          firmware_version: "613000WD",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: true,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: true,
-          blobstore_initialized: false
-        },
-        
-        // LVS READY DISKS - Fully configured and ready for volumes
-        {
-          pci_address: "0000:4b:00.0",
-          device_name: "nvme4n1",
-          vendor_id: "0x144d",
-          device_id: "0xa80a",
-          subsystem_vendor_id: "0x144d",
-          subsystem_device_id: "0xa801",
-          numa_node: 0,
-          driver: "kernel",
-          size_bytes: 1000204886016,
-          model: "Samsung SSD 980 PRO 1TB",
-          serial: "S5P2NG0R789012",
-          firmware_version: "5B2QGXA7",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: true,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: true,
-          blobstore_initialized: true
-        },
-        {
-          pci_address: "0000:6c:00.0",
-          device_name: "nvme5n1",
-          vendor_id: "0x1c5c",
-          device_id: "0x1327",
-          subsystem_vendor_id: "0x1c5c",
-          subsystem_device_id: "0x0000",
-          numa_node: 1,
-          driver: "kernel",
-          size_bytes: 3840755982336,
-          model: "Micron 7450 PRO 3.84TB",
-          serial: "MSA2642KFXG45T",
-          firmware_version: "E013",
-          namespace_id: 1,
-          mounted_partitions: [],
-          filesystem_type: undefined,
-          is_system_disk: false,
-          spdk_ready: true,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: true,
-          blobstore_initialized: true
-        },
-        
-        // NEEDS UNMOUNT - Has mounted filesystems
-        {
-          pci_address: "0000:7d:00.0",
-          device_name: "nvme6n1",
-          vendor_id: "0x144d",
-          device_id: "0xa80a",
-          subsystem_vendor_id: "0x144d",
-          subsystem_device_id: "0xa801",
-          numa_node: 0,
-          driver: "nvme",
-          size_bytes: 500107862016,
-          model: "Samsung SSD 980 500GB",
-          serial: "S5P2NG0R345678",
-          firmware_version: "5B2QGXA7",
-          namespace_id: 1,
-          mounted_partitions: ["/data", "/logs"],
-          filesystem_type: "ext4",
-          is_system_disk: false,
-          spdk_ready: false,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: false,
-          blobstore_initialized: false
-        },
-        
-        // SYSTEM DISK - Cannot be used for SPDK
-        {
-          pci_address: "0000:8e:00.0",
-          device_name: "nvme7n1",
-          vendor_id: "0x144d",
-          device_id: "0xa80a",
-          subsystem_vendor_id: "0x144d",
-          subsystem_device_id: "0xa801",
-          numa_node: 0,
-          driver: "nvme",
-          size_bytes: 256060514304,
-          model: "Samsung SSD 980 256GB",
-          serial: "S5P2NG0R567890",
-          firmware_version: "5B2QGXA7",
-          namespace_id: 1,
-          mounted_partitions: ["/", "/boot", "/var"],
-          filesystem_type: "ext4",
-          is_system_disk: true,
-          spdk_ready: false,
-          discovered_at: new Date().toISOString(),
-          nodeName,
-          driver_ready: false,
-          blobstore_initialized: false
-        }
-      ];
+      if (response.ok && data?.disks) {
+        // Use disk data directly from minimal state API
+        const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
+          const enhancedDisk = { ...disk, nodeName };
 
-      try {
-        const response = await fetch(`/api/nodes/${nodeName}/disks/status`);
-        if (response.ok) {
-          const data = await response.json();
-          if (data.disks) {
-            // Use disk data directly from minimal state API
-            const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
-              const enhancedDisk = { ...disk, nodeName };
-              
-              // Minimal state mode: Use values directly from the API
-              // blobstore_initialized is set by backend when LVS exists
-              enhancedDisk.blobstore_initialized = disk.blobstore_initialized || false;
-              // driver_ready is true if blobstore is initialized OR if bdev exists
-              enhancedDisk.driver_ready = enhancedDisk.blobstore_initialized || !!disk.bdev_name || disk.spdk_ready;
-              enhancedDisk.spdk_ready = enhancedDisk.blobstore_initialized;
-              
-              console.log(`Disk ${disk.device_name}: driver_ready=${enhancedDisk.driver_ready}, blobstore_initialized=${enhancedDisk.blobstore_initialized}, bdev=${disk.bdev_name}`);
-              
-              return enhancedDisk;
-            });
-            
-            setNodeData(prev => ({
-              ...prev,
-              [nodeName]: {
-                node: nodeName,
-                disks: enhancedDisks,
-                loading: false,
-                last_updated: new Date().toISOString()
-              }
-            }));
-            return;
+          // Minimal state mode: Use values directly from the API
+          // blobstore_initialized is set by backend when LVS exists
+          enhancedDisk.blobstore_initialized = disk.blobstore_initialized || false;
+          // driver_ready is true if blobstore is initialized OR if bdev exists
+          enhancedDisk.driver_ready = enhancedDisk.blobstore_initialized || !!disk.bdev_name || disk.spdk_ready;
+          enhancedDisk.spdk_ready = enhancedDisk.blobstore_initialized;
+
+          console.log(`Disk ${disk.device_name}: driver_ready=${enhancedDisk.driver_ready}, blobstore_initialized=${enhancedDisk.blobstore_initialized}, bdev=${disk.bdev_name}`);
+
+          return enhancedDisk;
+        });
+
+        setNodeData(prev => ({
+          ...prev,
+          [nodeName]: {
+            node: nodeName,
+            disks: enhancedDisks,
+            loading: false,
+            last_updated: new Date().toISOString()
           }
-        }
-      } catch (apiError) {
-        console.warn(`Disk setup API not available for ${nodeName}, using mock data:`, apiError);
+        }));
+        return;
       }
 
-      // Fallback to mock data
+      // No usable data from the node agent (pod down, unreachable, or error
+      // response) — surface the failure instead of substituting fake disks
+      throw new Error(
+        data?.error ||
+          (response.ok
+            ? 'Malformed response from node agent'
+            : `Node agent unavailable (HTTP ${response.status})`)
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.warn(`Failed to refresh disks for ${nodeName}: ${message}`);
       setNodeData(prev => ({
         ...prev,
         [nodeName]: {
           node: nodeName,
-          disks: mockDisks,
+          disks: [],
           loading: false,
+          error: message,
           last_updated: new Date().toISOString()
-        }
-      }));
-
-    } catch (error) {
-      console.error(`Failed to refresh disks for ${nodeName}:`, error);
-      setNodeData(prev => ({
-        ...prev,
-        [nodeName]: {
-          ...prev[nodeName],
-          loading: false,
-          error: error instanceof Error ? error.message : 'Unknown error'
         }
       }));
     } finally {
