@@ -2431,7 +2431,12 @@ impl NodeAgent {
             // the in-place repair every tick — including while flagged,
             // so a repair blocked transiently (replica node down) heals
             // later. Flag only when repair fails.
-            if attached && !raid_present && strikes_with_this >= 3 {
+            // FLINT_DATA_PATH_REPAIR=disabled skips straight to flagging
+            // (operational escape hatch; also used to exercise layer 3).
+            let repair_enabled = !std::env::var("FLINT_DATA_PATH_REPAIR")
+                .map(|v| v.eq_ignore_ascii_case("disabled"))
+                .unwrap_or(false);
+            if repair_enabled && attached && !raid_present && strikes_with_this >= 3 {
                 match self.repair_data_path(&pv, &csi.volume_handle).await {
                     Ok(()) => {
                         info!(volume_id = %pv_name, "[DATA_PATH] In-place repair succeeded — raid rebuilt, export restored, kernel reattaches");

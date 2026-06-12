@@ -180,6 +180,11 @@ pub struct VolumeCutoverView {
     pub rwo_bounce_enabled: bool,
     /// Workload pods mounting the volume's claim.
     pub workload_pods: Vec<PodRef>,
+    /// The data-path-lost annotation is set (layer-1 detection flagged a
+    /// dead consumer data path AND the layer-2 in-place repair failed —
+    /// ublk frontend, aborted filesystem, or an unrecoverable export).
+    /// Debounced by the loop before it reaches the planner.
+    pub data_path_lost: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +203,35 @@ pub enum CutoverDecision {
 /// (otherwise the next natural stage admits the standby for free).
 pub fn plan_cutover(view: &VolumeCutoverView, cfg: &CutoverConfig) -> CutoverDecision {
     let vol = &view.volume_id;
+
+    // Layer 3 (phase-6): a dead data path the in-place repair could not
+    // fix. The bounce IS the remediation — a restage rebuilds the raid
+    // from the in-sync replicas — so the standby/lag gates below do not
+    // apply (there is nothing to admit, only a data path to rebuild).
+    if view.data_path_lost {
+        if let Some(nfs) = &view.nfs_pod {
+            if nfs.pvc_backed {
+                return CutoverDecision::BounceNfsPod;
+            }
+            return CutoverDecision::Wait("data path lost but NFS pod is not PVC-backed");
+        }
+        if view.consumer.is_some() {
+            if !view.rwo_bounce_enabled {
+                return CutoverDecision::Wait(
+                    "data path lost and in-place repair failing; rejoin-bounce not enabled — \
+                     operator must bounce the workload (or enable the annotation)",
+                );
+            }
+            if view.workload_pods.is_empty() {
+                return CutoverDecision::Wait("data path lost but no workload pods found");
+            }
+            return CutoverDecision::BounceWorkloadPods;
+        }
+        return CutoverDecision::Wait(
+            "data path lost but volume not attached — the next stage rebuilds it",
+        );
+    }
+
     let standbys: Vec<&_> = view
         .record
         .replicas
@@ -452,6 +486,10 @@ impl CutoverOps for KubeCutoverOps {
 struct BounceAttempt {
     at: Instant,
     standbys: Vec<String>,
+    /// Bounce issued for a dead data path (layer 3) rather than standby
+    /// admission — judged by the data-path-lost annotation clearing, not
+    /// by standby state.
+    data_path: bool,
 }
 
 /// Background cutover loop (controller role, default-disabled).
@@ -463,10 +501,16 @@ pub async fn run_cutover_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CutoverCo
     );
     let ops = KubeCutoverOps { client: driver.kube_client.clone() };
     let mut bounces: HashMap<String, BounceAttempt> = HashMap::new();
+    // First-seen times for data-path-lost annotations: a 90s debounce so
+    // a transient repair failure (replica node briefly down) doesn't cost
+    // a workload bounce the next repair tick would have avoided.
+    let mut data_path_seen: HashMap<String, Instant> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        if let Err(e) = cutover_tick(&driver, &ops, &cfg, &mut bounces).await {
+        if let Err(e) =
+            cutover_tick(&driver, &ops, &cfg, &mut bounces, &mut data_path_seen).await
+        {
             warn!(error = %e, "[CUTOVER] Tick failed (non-fatal)");
         }
     }
@@ -477,6 +521,7 @@ async fn cutover_tick(
     ops: &KubeCutoverOps,
     cfg: &CutoverConfig,
     bounces: &mut HashMap<String, BounceAttempt>,
+    data_path_seen: &mut HashMap<String, Instant>,
 ) -> Result<(), RpcError> {
     let pvs: Api<PersistentVolume> = Api::all(driver.kube_client.clone());
     let vas: Api<VolumeAttachment> = Api::all(driver.kube_client.clone());
@@ -520,8 +565,47 @@ async fn cutover_tick(
             continue;
         };
 
+        let data_path_flagged = pv
+            .metadata
+            .annotations
+            .as_ref()
+            .map(|a| a.contains_key(DATA_PATH_LOST_ANNOTATION))
+            .unwrap_or(false);
+
         // Judge a pending bounce before planning a new one.
         if let Some(attempt) = bounces.get(&volume_id) {
+            // Data-path bounces are judged by the annotation: the node
+            // agent clears it once the restage put the raid back.
+            if attempt.data_path {
+                if !data_path_flagged {
+                    ops.emit(
+                        &volume_id,
+                        "Normal",
+                        "CutoverSucceeded",
+                        "Data path restored after the bounce (restage rebuilt the raid)",
+                    )
+                    .await;
+                    bounces.remove(&volume_id);
+                    data_path_seen.remove(&volume_id);
+                } else if attempt.at.elapsed() >= cfg.cooldown {
+                    ops.emit(
+                        &volume_id,
+                        "Warning",
+                        "CutoverIneffective",
+                        &format!(
+                            "Bounce did not restore the data path within {}s — the restage may \
+                             be failing (check NodeStage errors); eligible to retry",
+                            cfg.cooldown.as_secs()
+                        ),
+                    )
+                    .await;
+                    bounces.remove(&volume_id);
+                    continue;
+                } else {
+                    continue; // verification window still open
+                }
+                continue;
+            }
             let pending = standbys_still_pending(&record, &attempt.standbys);
             if pending.is_empty() {
                 let admitted = attempt
@@ -609,6 +693,16 @@ async fn cutover_tick(
             Vec::new()
         };
 
+        // Debounce the data-path flag: 90s of continuous presence before
+        // the planner sees it (a transient repair failure clears itself).
+        let data_path_lost = if data_path_flagged {
+            let first = data_path_seen.entry(volume_id.clone()).or_insert_with(Instant::now);
+            first.elapsed() >= Duration::from_secs(90)
+        } else {
+            data_path_seen.remove(&volume_id);
+            false
+        };
+
         let view = VolumeCutoverView {
             volume_id: volume_id.clone(),
             record,
@@ -616,6 +710,7 @@ async fn cutover_tick(
             nfs_pod,
             rwo_bounce_enabled,
             workload_pods,
+            data_path_lost,
         };
         match plan_cutover(&view, cfg) {
             CutoverDecision::Wait(reason) => {
@@ -634,7 +729,11 @@ async fn cutover_tick(
                     Ok(true) => {
                         bounces.insert(
                             volume_id.clone(),
-                            BounceAttempt { at: Instant::now(), standbys },
+                            BounceAttempt {
+                                at: Instant::now(),
+                                standbys,
+                                data_path: view.data_path_lost,
+                            },
                         );
                     }
                     Ok(false) => {}
@@ -709,6 +808,42 @@ mod tests {
     }
 
     #[test]
+    fn data_path_lost_bounces_without_any_standby() {
+        // Layer 3: the bounce is the remediation for a dead data path —
+        // no standby is required (all replicas may be in_sync).
+        let record = VolumeSyncRecord::initial(&[
+            replica("node-a", "uuid-a"),
+            replica("node-b", "uuid-b"),
+        ]);
+        let mut v = rwo_view(record.clone());
+        v.data_path_lost = true;
+        assert_eq!(plan_cutover(&v, &CutoverConfig::default()), CutoverDecision::BounceWorkloadPods);
+
+        let mut n = nfs_view(record.clone());
+        n.data_path_lost = true;
+        assert_eq!(plan_cutover(&n, &CutoverConfig::default()), CutoverDecision::BounceNfsPod);
+
+        // RWO without the opt-in: surfaced, not bounced.
+        let mut v2 = rwo_view(record.clone());
+        v2.data_path_lost = true;
+        v2.rwo_bounce_enabled = false;
+        assert!(matches!(
+            plan_cutover(&v2, &CutoverConfig::default()),
+            CutoverDecision::Wait(r) if r.contains("rejoin-bounce")
+        ));
+
+        // Not attached: nothing to bounce; the next stage rebuilds.
+        let mut v3 = rwo_view(record);
+        v3.data_path_lost = true;
+        v3.consumer = None;
+        v3.nfs_pod = None;
+        assert!(matches!(
+            plan_cutover(&v3, &CutoverConfig::default()),
+            CutoverDecision::Wait(r) if r.contains("not attached")
+        ));
+    }
+
+    #[test]
     fn data_path_verdict_clears_only_its_own_flag() {
         // Raid back: clear ours, hold if not ours.
         assert_eq!(data_path_verdict(true, true, true, 0, 3), DataPathAction::Clear);
@@ -772,6 +907,7 @@ mod tests {
             }),
             rwo_bounce_enabled: false,
             workload_pods: vec![],
+            data_path_lost: false,
         }
     }
 
@@ -783,6 +919,7 @@ mod tests {
             nfs_pod: None,
             rwo_bounce_enabled: true,
             workload_pods: vec![PodRef { namespace: "default".to_string(), name: "app-0".to_string() }],
+            data_path_lost: false,
         }
     }
 

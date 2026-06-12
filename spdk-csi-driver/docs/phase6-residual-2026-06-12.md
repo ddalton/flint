@@ -181,10 +181,26 @@ pinned at stage before it can be retested.
   and mint a new one — each existing volume needs one full
   detach/restage cycle (or a workload bounce) to cross onto pinned
   identity safely.
-- **Layer 3 — bounce fallback (follow-up):** the cutover loop consumes
-  the annotation (RWX: NFS-pod bounce; RWO: `rejoin-bounce` opt-in) for
-  what repair can't reach — fs gone read-only, window expired, ublk
-  frontends.
+- **Layer 3 — bounce fallback (landed same day):** the cutover loop
+  consumes the annotation for what repair can't reach (ublk frontends,
+  aborted filesystems, expired reconnect windows; also reachable via
+  the `FLINT_DATA_PATH_REPAIR=disabled` escape hatch). The planner's
+  data-path branch bypasses the standby/lag gates — the bounce IS the
+  remediation, restage rebuilds from in-sync replicas — with the same
+  policy split (RWX: NFS-pod bounce; RWO: `rejoin-bounce` opt-in,
+  otherwise surfaced for the operator). A 90 s debounce keeps a
+  transient repair failure from costing a bounce. Verification judges
+  these attempts by the annotation clearing (the agent clears it when
+  the raid is back), with the cooldown and a distinct
+  `CutoverIneffective` diagnosis. Validated live with repair disabled:
+  flag at T+2m33s → bounce → same-node reuse defeated it →
+  `CutoverIneffective` (correct message) → cordon + retry bounce →
+  cross-node restage → flag cleared 16 s later → `CutoverSucceeded`
+  ("data path restored") → direct-I/O probe green. **The same-node
+  reschedule race defeats data-path bounces exactly as it defeats
+  admission bounces** — the deliberately-deferred scheduling
+  escalation (transient anti-affinity / cordon-lite) is now required
+  for both bounce types and is the next work item.
 
 **Recommendation:** implement the cheap Tier-1 hardening now (consumer
 blindness layers 2+3 above; pod anti-affinity hint or cordon-lite escalation on
