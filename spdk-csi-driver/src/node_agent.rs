@@ -1774,6 +1774,27 @@ impl NodeAgent {
 
             debug!(volume_id, "[RECONCILE] Processing volume");
 
+            // RWX PVs are NFS-mounted; their replica exports belong to the
+            // synthetic backing PV's entry (same replicas, handle-named).
+            // Reconciling both creates a second, alias-named export that
+            // claims the lvol and starves the real one (-32602 forever).
+            if crate::replica_sync::is_rwx_pv(&pv) {
+                debug!(volume_id, "[RECONCILE] RWX PV — exports owned by its nfs-server backing PV, skipping");
+                skip_count += 1;
+                continue;
+            }
+
+            // SPDK object names (export NQNs, raid names) derive from the
+            // volumeHandle, which differs from the PV name for synthetic
+            // NFS backing PVs (flint-nfs-pv-X / nfs-server-X). K8s lookups
+            // (VolumeAttachments) stay keyed on the PV name.
+            let spdk_id = pv
+                .spec
+                .as_ref()
+                .and_then(|s| s.csi.as_ref())
+                .map(|c| c.volume_handle.clone())
+                .unwrap_or_else(|| volume_id.clone());
+
             // Extract replica info from PV volumeAttributes
             let replicas = match self.get_replicas_from_pv(&pv) {
                 Ok(Some(r)) => r,
@@ -1852,7 +1873,7 @@ impl NodeAgent {
             // when SPDK supports it) before exporting.
             let attached_node = self.get_attached_node(&volume_id).await;
             if attached_node.as_deref() != Some(self.node_name.as_str()) {
-                if let Err(e) = self.delete_phantom_raid_local(&volume_id).await {
+                if let Err(e) = self.delete_phantom_raid_local(&spdk_id).await {
                     error!(volume_id, error = %e, "[RECONCILE] Failed to delete phantom raid");
                     error_count += 1;
                     continue;
@@ -1860,7 +1881,7 @@ impl NodeAgent {
             }
 
             // Setup NVMe-oF target for this replica (idempotent)
-            match self.setup_nvmeof_target_for_replica(&volume_id, replica_index, local_replica, &live_uuid, attached_node.as_deref()).await {
+            match self.setup_nvmeof_target_for_replica(&spdk_id, replica_index, local_replica, &live_uuid, attached_node.as_deref()).await {
                 Ok(_) => {
                     debug!(replica_index, "[RECONCILE] NVMe-oF target set up");
                     success_count += 1;
@@ -2406,6 +2427,15 @@ impl NodeAgent {
             }
             // Single-replica volumes have no raid by design.
             if !matches!(crate::replica_sync::replicas_from_pv(&pv), Ok(Some(_))) {
+                continue;
+            }
+            // RWX consumers NFS-mount the volume: they hold an attachment
+            // but never a raid, so "attached here + raid missing" is the
+            // steady state on every workload node — a permanent false
+            // positive that drives endless layer-3 bounces. The synthetic
+            // backing PV (handle nfs-server-…) carries the real raid
+            // coverage on the NFS server's node.
+            if crate::replica_sync::is_rwx_pv(&pv) {
                 continue;
             }
             let flagged_by_me = pv

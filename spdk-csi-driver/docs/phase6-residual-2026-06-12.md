@@ -233,3 +233,132 @@ Tier 1, both disappear with the one verified primitive, and the §7 patch
 shape is already traced. RWX (NFS-pod bounce, detach-awaited — should not
 have the same-node mode) remains to be validated before the RWX story
 rides on cutover.
+
+## RWX cutover round (run same day) — four composable bugs, all fixed
+
+The first-ever live RWX cutover exercise (2-replica `flint-r2` RWX volume,
+NFSv4.1 hard mount, synced write/read-back writer, replica degraded by a
+tight spdk-tgt kill loop on the remote-leg node) found the bounce machinery
+structurally broken for RWX. Root cause of everything: an RWX volume exists
+under **three identities** — the user PV (`pvc-X`), the synthetic backing PV
+(name `flint-nfs-pv-pvc-X`, volumeHandle `nfs-server-pvc-X`), and the
+volumeHandle itself — and different components derived names from different
+ones. Observed live, in firing order:
+
+1. **Zombie raid at unstage (the headline).** `NodeUnstageVolume` strips the
+   `nfs-server-` prefix before calling `teardown_volume_spdk_state`, but
+   stage names every SPDK object from the full handle. Teardown no-ops on
+   names that don't exist; the raid survives with its exclusive claim on
+   the local replica lvol, and every later export of that replica fails
+   `-32602` — a cross-node restage can never assemble. RWO never hit this
+   (no prefix; and in the phase-6 RWO rounds the failure itself had already
+   destroyed the old raid). Each bounce strands a new zombie on the departed
+   node. **Fix:** teardown by full `volume_id`; plus the reconcile's phantom
+   raid deletion now keys on the volumeHandle, so a stray zombie is also
+   swept within a tick (defense in depth).
+2. **Permanent data-path false positive on RWX PVs.** RWX consumers
+   NFS-mount the volume: the workload node holds a VolumeAttachment but by
+   design no raid, so layer-1 detection flags `data-path-lost` ~3 min after
+   any RWX workload attaches, and the flag can never clear (the expected
+   raid name never exists anywhere). Layer 3 then bounces the NFS pod every
+   `FLINT_CUTOVER_COOLDOWN_SECS` forever — combined with bug 1, a permanent
+   ping-pong with the volume unavailable throughout. **Fix:** detection
+   skips RWX PVs; the synthetic backing PV (whose handle names the real
+   raid) keeps full coverage on the NFS server's node, and the cutover tick
+   now folds the backing PV's flag into the parent volume's view — RWX
+   keeps its layer-3 fallback, with verification that actually converges.
+3. **Dual control streams corrupting the snapshot lineage.** The epoch
+   scheduler, catch-up, and cutover iterate "flint multi-replica PVs" by PV
+   name; the synthetic backing PV carries the same replica attributes, so a
+   second epoch family (`epoch-flint-nfs-pv-pvc-X-N`) and a second sync
+   record ran against the same lvols. The interleaved snapshots broke the
+   real record's chase (`lineage element …-4 missing — broken chain`),
+   which blocked standby admission (`N epochs behind (limit 4)`) — restage
+   then refused assembly even after the legs were unblocked. The export
+   reconcile had the same disease: replica exports attempted under three
+   NQN aliases, squatting the lvol under the wrong subsystem and starving
+   the canonical one (and the orphan sweep deleted the canonical subsystem
+   as PV-less while protecting the alias squatters). **Fix:** orchestrators
+   skip the backing PV (`replica_sync::nfs_backing_parent`); the reconcile
+   skips RWX PVs and derives all SPDK names from the volumeHandle.
+4. **EBADHANDLE after every NFS server bounce.** With the data path fully
+   restored, every client write failed with errno 521: the server's
+   `FileHandleManager` embeds a boot-time-nanos instance id in every file
+   handle and rejects foreign ids — deliberately invalidating all handles
+   on restart. NFSv4.1 session recovery succeeded; handle resolution never
+   did. Permanent client-side failure until remount (pod restart). The
+   handles are otherwise self-describing (path embedded), and the
+   `PNFS_INSTANCE_ID` override already existed for pNFS. **Fix:** the NFS
+   server pod now pins `PNFS_INSTANCE_ID` to a stable per-volume hash
+   (`stable_nfs_instance_id`), so any incarnation of the server resolves
+   any predecessor's handles. Pre-fix RWX server pods mint volatile ids
+   until they are recreated once (same migration shape as the pinned
+   namespace identity note above).
+
+Manual surgery used during the round (for the record): delete the zombie
+raid, move the lvol namespace into the canonical subsystem, delete the six
+alias epoch snapshots on both replicas, then race the reconcile's re-squat
+until the stage's raid create won the claim. None of it is needed
+post-fix.
+
+What the round validated despite the bugs: the bounce taint landed on the
+right node both times and auto-expired; the off-node reschedule worked;
+`await_detached` + capture/recreate of the bare NFS pod worked;
+catch-up→standby on the RWX volume's record converged once the lineage was
+clean (chase ~60 s/epoch tick); admission-on-parity marked a fully
+caught-up standby in_sync while the volume was quiesced; and the RWO canary
+(phase6-writer) rode through every spdk-tgt kill via layer-2 in-place
+repair with zero restarts — the RWO stack was never disturbed by any of
+the RWX chaos.
+
+### RWX rounds 2-3 (post-fix validation, same day)
+
+With the four fixes deployed, two more injection rounds ran. Round 3 (all
+components post-fix) delivered the first clean RWX cutover chain end to
+end: replica stale 75 s after injection → catch-up → standby at T0+4 min →
+**standby-gate `BounceNfsPod` decision** (no data-path flag involved) →
+taint on the NFS pod's node → replacement steered to the standby's node →
+restage admitted the standby (`CutoverSucceeded`, both replicas in_sync) —
+the deciding/steering/admission machinery is validated for RWX. The
+handle-stability fix also validated hard: a writer blocked 12 minutes on
+its hard mount resumed through a server-pod replacement onto a different
+node with zero restarts, on handles minted before the bounce (the 1.2.0
+server binary honors `PNFS_INSTANCE_ID`, so the fix is effective without
+an image bump; NFS pods pick up `:latest` — and the BadHandle→STALE
+defense-in-depth — at their next fresh creation since `NFS_IMAGE_TAG` is
+now set).
+
+Two more defects surfaced and one was fixed on the spot:
+
+- **RWX-consumer unstage detached live raid legs (fixed).** The catch-up's
+  replica copy exports are named under the parent PV identity
+  (`…:volume:<pv>_N`), and a restage can attach raid legs through them.
+  An RWX workload pod's NodeUnstage on the same node as the volume's raid
+  consumer ran the SPDK teardown for that same PV identity — its
+  per-replica controller sweep detached the raid's live remote leg within
+  seconds of a scale-down (EIO on the writer, leg → stale). RWX staging is
+  an NFS mount; its unstage is now unmount-only (`main.rs`,
+  `is_rwx_nfs_stage` via findmnt fstype).
+- **NFSv4 open-state recovery is the remaining RWX production blocker
+  (open).** After a server replacement, a client with a pre-bounce open
+  resumed issuing writes that were acked locally but never landed in the
+  file (writeback against dead open state; `sync(2)` hides the error, the
+  app-level read-back caught it). File handles survive now; open/lock
+  state does not — the in-memory `StateManager` + 90 s allow-all grace is
+  insufficient for write-holding clients. Required as already traced in
+  the design doc §cutover-opportunities: wire the SQLite state backend
+  with its DB on the exported volume, and run the final delta before
+  deleting the old pod. Until then, RWX cutover bounces are transparent
+  only to clients without dirty open state (read-mostly, or
+  open-write-close patterns with fsync verification).
+
+Operational notes from the rounds: (a) ~5 rapid spdk-tgt sidecar
+crash-restarts wedged kubelet's new-pod admission on that node (existing
+pods, exec, and heartbeats unaffected; `systemctl restart kubelet` via SSM
+healed it; a node reboot was not authorized for the rolesanywhere role).
+(b) A pre-fix `data-path-lost` flag on an RWX PV is orphaned by the new
+agents (they skip RWX PVs entirely) and held cutover verification open
+until cleared — the cutover tick now clears such stale flags itself.
+(c) Deleting a bare NFS server pod while its volume stays attached leaves
+no recreation path until the next ControllerPublish — worth a controller
+reconcile eventually.

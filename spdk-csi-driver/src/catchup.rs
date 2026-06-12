@@ -1801,6 +1801,12 @@ async fn orchestrator_tick(
         if !is_flint {
             continue;
         }
+        // Skip the synthetic NFS backing PV — its replica attributes mirror
+        // the parent RWX PV's, and a second catch-up stream driven from a
+        // second sync record corrupts the shared snapshot lineage.
+        if replica_sync::nfs_backing_parent(&pv).is_some() {
+            continue;
+        }
         let replicas = match replica_sync::replicas_from_pv(&pv) {
             Ok(Some(r)) => r,
             Ok(None) => continue, // single replica

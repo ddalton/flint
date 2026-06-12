@@ -691,6 +691,17 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   volume is reused — no NodeStage, no reassembly, clients ate a restart for
   nothing. The orchestrator must verify `sync_state` actually flipped and
   retry with a scheduling hint (cordon/anti-affinity) if not.
+  *Validated 2026-06-12 (see `phase6-residual-2026-06-12.md`, RWX round):*
+  the live blocker wasn't grace at all — it was upstream of it. Four
+  composable identity-aliasing bugs (zombie raid at unstage, RWX data-path
+  false positive, dual control streams from the synthetic backing PV, and
+  boot-time file-handle instance ids → permanent `EBADHANDLE` after every
+  bounce) made the RWX bounce a repeating outage. All four fixed; handle
+  ids are now pinned per volume (`PNFS_INSTANCE_ID` =
+  `stable_nfs_instance_id`). The in-memory-state/grace caveat above still
+  stands for long-lived opens/locks and remains the gap to close (SQLite
+  state backend on the exported volume) before claiming lock-holding
+  workloads ride through.
 - **RWO volumes — by policy**: an opt-in knob (per StorageClass or PV
   annotation) to bounce the workload pod during a maintenance window, for
   workloads that tolerate restarts. The same same-node race applies — verify

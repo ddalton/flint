@@ -1678,6 +1678,15 @@ impl FileOperationHandler {
                     status: Nfs4Status::Ok,
                 }
             }
+            // Another incarnation's handle → STALE, which kernel clients
+            // recover from by re-walking the path. BADHANDLE here instead
+            // wedges the mount permanently (clients treat it as fatal).
+            Err(crate::nfs::v4::filehandle::HandleError::Stale) => {
+                warn!("PUTFH: stale handle (other server incarnation) — answering NFS4ERR_STALE");
+                PutFhRes {
+                    status: Nfs4Status::Stale,
+                }
+            }
             Err(e) => {
                 warn!("PUTFH validation failed: {}", e);
                 PutFhRes {

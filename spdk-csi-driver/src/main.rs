@@ -2502,8 +2502,44 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         } else {
             volume_id.clone()
         };
-        
+
         println!("📤 [NODE] Unstaging volume {} from {}", actual_volume_id, staging_target_path);
+
+        // RWX consumers stage an NFS mount, never SPDK objects — their
+        // unstage is unmount-only. Running the block/SPDK cleanup here is
+        // not merely wasted work: the catch-up orchestrator's replica copy
+        // exports are named under this same PV identity (`…:volume:<pv>_N`),
+        // so when a workload pod shares a node with the volume's raid
+        // consumer, the teardown's per-replica controller sweep detaches
+        // the raid's live legs (observed: scale-down ejected a leg within
+        // seconds, RWX round 3, 2026-06-12).
+        let is_rwx_nfs_stage = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "findmnt -n -o FSTYPE --target {} 2>/dev/null | head -1",
+                staging_target_path
+            ))
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with("nfs"))
+            .unwrap_or(false);
+        if is_rwx_nfs_stage {
+            println!("ℹ️ [NODE] RWX/NFS staging detected — unmount-only unstage (no SPDK teardown)");
+            let mut ok = spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, false, 10).await;
+            if !ok {
+                ok = spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, true, 10).await;
+            }
+            if !ok {
+                return Err(tonic::Status::internal(format!(
+                    "Failed to unmount NFS staging path {}",
+                    staging_target_path
+                )));
+            }
+            println!("✅ [NODE] Volume {} unstaged successfully (NFS unmount)", volume_id);
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::NodeUnstageVolumeResponse {},
+            ));
+        }
 
         // Check if staging path is actually mounted before attempting unmount
         if std::path::Path::new(&staging_target_path).exists() {
@@ -2620,11 +2656,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // Full SPDK teardown (phase 0): loopback subsystem, raid bdev (frees
         // the claims that brick later restage), per-replica controllers.
         // Raid-delete failure must fail the unstage so kubelet retries it.
-        if let Err(e) = self.driver.teardown_volume_spdk_state(&actual_volume_id).await {
+        // The FULL volume_id, not the nfs-server-stripped one: stage names
+        // every SPDK object (raid_<id>, nqn …:volume:<id>) from the full
+        // handle, so a stripped teardown no-ops on names that don't exist
+        // and leaves a zombie raid whose claims block every later export
+        // of the replica (found by the RWX cutover round, 2026-06-12).
+        if let Err(e) = self.driver.teardown_volume_spdk_state(&volume_id).await {
             println!("❌ [NODE] SPDK teardown failed: {}", e);
             return Err(tonic::Status::internal(format!(
                 "Failed to tear down SPDK state for volume {}: {}",
-                actual_volume_id, e
+                volume_id, e
             )));
         }
 

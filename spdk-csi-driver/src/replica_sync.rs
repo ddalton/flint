@@ -649,6 +649,35 @@ pub fn record_pv_name(volume_id: &str) -> &str {
     volume_id.strip_prefix("nfs-server-").unwrap_or(volume_id)
 }
 
+/// `Some(parent_pv_name)` when this PV is the synthetic backing PV behind an
+/// RWX volume's NFS server (volumeHandle `nfs-server-<parent>`). The backing
+/// PV carries the same replica volumeAttributes as the parent, so every
+/// control-plane orchestrator that iterates "flint multi-replica PVs" would
+/// otherwise run a second, alias-named control stream (epochs, sync record,
+/// catch-up) against the same lvols — the two streams corrupt each other's
+/// snapshot lineage. Orchestrators must skip these and key everything on the
+/// parent PV; the node-side data plane (stage, export, raid names) keys on
+/// the synthetic volumeHandle.
+pub fn nfs_backing_parent(pv: &PersistentVolume) -> Option<String> {
+    let handle = pv.spec.as_ref()?.csi.as_ref()?.volume_handle.as_str();
+    handle
+        .strip_prefix("nfs-server-")
+        .map(|parent| parent.to_string())
+}
+
+/// RWX PVs are NFS-mounted by their consumers: the workload node holds a
+/// VolumeAttachment but never assembles a raid (the raid lives under the
+/// NFS server pod, staged via the synthetic backing PV). Raid-presence
+/// checks keyed on this PV's attachment are structurally wrong on every
+/// node and must skip it.
+pub fn is_rwx_pv(pv: &PersistentVolume) -> bool {
+    pv.spec
+        .as_ref()
+        .and_then(|s| s.access_modes.as_ref())
+        .map(|m| m.iter().any(|a| a == "ReadWriteMany"))
+        .unwrap_or(false)
+}
+
 /// Extract the immutable replica identity list from a PV's volumeAttributes.
 /// Ok(None) for single-replica volumes (no sync record applies).
 pub fn replicas_from_pv(
@@ -832,6 +861,41 @@ mod tests {
             replica("node-b", "uuid-b"),
             replica("node-c", "uuid-c"),
         ])
+    }
+
+    fn pv_with(handle: &str, access_modes: &[&str]) -> PersistentVolume {
+        use k8s_openapi::api::core::v1::{CSIPersistentVolumeSource, PersistentVolumeSpec};
+        PersistentVolume {
+            spec: Some(PersistentVolumeSpec {
+                access_modes: Some(access_modes.iter().map(|s| s.to_string()).collect()),
+                csi: Some(CSIPersistentVolumeSource {
+                    driver: "flint.csi.storage.io".to_string(),
+                    volume_handle: handle.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nfs_backing_parent_only_for_nfs_server_handles() {
+        let backing = pv_with("nfs-server-pvc-abc", &["ReadWriteOnce"]);
+        assert_eq!(nfs_backing_parent(&backing).as_deref(), Some("pvc-abc"));
+        let regular = pv_with("pvc-abc", &["ReadWriteOnce"]);
+        assert_eq!(nfs_backing_parent(&regular), None);
+        let rwx = pv_with("pvc-abc", &["ReadWriteMany"]);
+        assert_eq!(nfs_backing_parent(&rwx), None);
+    }
+
+    #[test]
+    fn rwx_pv_detected_by_access_mode() {
+        assert!(is_rwx_pv(&pv_with("pvc-abc", &["ReadWriteMany"])));
+        assert!(is_rwx_pv(&pv_with("pvc-abc", &["ReadWriteOnce", "ReadWriteMany"])));
+        assert!(!is_rwx_pv(&pv_with("pvc-abc", &["ReadWriteOnce"])));
+        // The synthetic backing PV is RWO — only the user-facing PV is RWX.
+        assert!(!is_rwx_pv(&pv_with("nfs-server-pvc-abc", &["ReadWriteOnce"])));
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::collections::{HashMap, BTreeMap};
 use std::env;
 use kube::{Api, Client, api::{PostParams, DeleteParams}};
 use k8s_openapi::api::core::v1::{
-    Pod, PodSpec, Container, VolumeMount, Volume,
+    Pod, PodSpec, Container, EnvVar, VolumeMount, Volume,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
     PersistentVolume, PersistentVolumeSpec, ObjectReference,
     CSIPersistentVolumeSource, ContainerPort,
@@ -40,6 +40,22 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use tokio::time::{sleep, Duration};
 use tonic::Status;
+
+/// Stable NFSv4 file-handle instance id for a volume — identical for every
+/// incarnation of the volume's NFS server pod, on any node. The server
+/// embeds the id in every file handle and rejects handles minted under a
+/// different one; its default (startup nanos) deliberately invalidates all
+/// handles on restart, which turns every server bounce into permanent
+/// EBADHANDLE for live client mounts (RWX cutover round, 2026-06-12).
+/// Handles are self-describing (the path is embedded), so under a stable id
+/// a replacement server resolves any handle its predecessors minted.
+pub fn stable_nfs_instance_id(volume_id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "flint-nfs-instance".hash(&mut h);
+    volume_id.hash(&mut h);
+    h.finish()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NfsBackend {
@@ -418,6 +434,15 @@ pub async fn create_nfs_server_pod(
                     mount_path: "/mnt/volume".to_string(),
                     ..Default::default()
                 }]),
+                // Stable per-volume file-handle instance id: without it the
+                // server mints a boot-time id and rejects every handle held
+                // by clients across a pod bounce (permanent EBADHANDLE on
+                // live mounts — the cutover bounce becomes an outage).
+                env: Some(vec![EnvVar {
+                    name: "PNFS_INSTANCE_ID".to_string(),
+                    value: Some(stable_nfs_instance_id(volume_id).to_string()),
+                    ..Default::default()
+                }]),
                 resources: Some(resources),
                 ..Default::default()
             }],
@@ -697,3 +722,20 @@ pub async fn delete_nfs_server_pod(
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nfs_instance_id_stable_and_per_volume() {
+        // Same volume → same id across calls (and across server incarnations);
+        // different volumes → different ids (handles must not cross-resolve).
+        let a1 = stable_nfs_instance_id("pvc-aaa");
+        let a2 = stable_nfs_instance_id("pvc-aaa");
+        let b = stable_nfs_instance_id("pvc-bbb");
+        assert_eq!(a1, a2);
+        assert_ne!(a1, b);
+        assert_ne!(a1, 0);
+    }
+}

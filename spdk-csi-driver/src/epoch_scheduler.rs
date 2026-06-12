@@ -476,6 +476,13 @@ async fn scheduler_tick(driver: &Arc<SpdkCsiDriver>, cfg: &EpochConfig) -> Resul
         if !is_flint {
             continue;
         }
+        // The synthetic NFS backing PV carries the same replica attributes
+        // as its parent RWX PV — ticking both runs two epoch streams with
+        // different names against the same lvols, interleaving the snapshot
+        // lineage until catch-up chains break (RWX round, 2026-06-12).
+        if replica_sync::nfs_backing_parent(&pv).is_some() {
+            continue;
+        }
         let replicas = match replica_sync::replicas_from_pv(&pv) {
             Ok(Some(r)) => r,
             Ok(None) => continue, // single replica

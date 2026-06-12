@@ -711,7 +711,29 @@ async fn cutover_tick(
         .collect();
     let nfs_cfg = crate::rwx_nfs::NfsConfig::from_env();
 
-    for pv in pvs.list(&ListParams::default()).await?.items {
+    let pv_items = pvs.list(&ListParams::default()).await?.items;
+
+    // For RWX volumes the data-path flag lands on the synthetic NFS backing
+    // PV (its volumeHandle names the real raid under the NFS server pod),
+    // while the sync record and the NFS pod hang off the parent RWX PV.
+    // Fold the backing PV's flag into the parent's view; the backing PV
+    // itself runs no cutover stream. Verification works on the same folded
+    // flag: a successful restage puts the raid back under the backing
+    // handle, the node agent clears that flag, and the bounce is judged
+    // succeeded.
+    let alias_flags: std::collections::HashSet<String> = pv_items
+        .iter()
+        .filter(|pv| {
+            pv.metadata
+                .annotations
+                .as_ref()
+                .map(|a| a.contains_key(DATA_PATH_LOST_ANNOTATION))
+                .unwrap_or(false)
+        })
+        .filter_map(|pv| replica_sync::nfs_backing_parent(pv))
+        .collect();
+
+    for pv in pv_items {
         let Some(volume_id) = pv.metadata.name.clone() else { continue };
         let is_flint = pv
             .spec
@@ -721,6 +743,9 @@ async fn cutover_tick(
             .unwrap_or(false);
         if !is_flint {
             continue;
+        }
+        if replica_sync::nfs_backing_parent(&pv).is_some() {
+            continue; // synthetic backing PV — folded into the parent above
         }
         if !matches!(replica_sync::replicas_from_pv(&pv), Ok(Some(_))) {
             continue; // single replica (or unreadable)
@@ -735,12 +760,32 @@ async fn cutover_tick(
             continue;
         };
 
-        let data_path_flagged = pv
+        let own_flag = pv
             .metadata
             .annotations
             .as_ref()
             .map(|a| a.contains_key(DATA_PATH_LOST_ANNOTATION))
             .unwrap_or(false);
+        let is_rwx = replica_sync::is_rwx_pv(&pv);
+        if is_rwx && own_flag {
+            // Pre-fix agents flagged RWX PVs (the workload-attachment false
+            // positive); current agents skip RWX PVs entirely, so nothing
+            // ever clears such a flag and it holds bounce verification open
+            // forever. Clear it here — the live RWX signal is the backing
+            // PV's flag, folded in below.
+            use kube::api::{Patch, PatchParams};
+            let patch = serde_json::json!({
+                "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION: null } }
+            });
+            match pvs.patch(&volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await {
+                Ok(_) => info!(
+                    volume_id,
+                    "[CUTOVER] Cleared stale data-path flag on RWX PV (pre-fix residue)"
+                ),
+                Err(e) => warn!(volume_id, error = %e, "[CUTOVER] Failed to clear stale RWX data-path flag"),
+            }
+        }
+        let data_path_flagged = (own_flag && !is_rwx) || alias_flags.contains(&volume_id);
 
         // Judge a pending bounce before planning a new one.
         if let Some(attempt) = bounces.get(&volume_id) {

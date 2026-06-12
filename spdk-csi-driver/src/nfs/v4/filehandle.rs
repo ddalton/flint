@@ -25,6 +25,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn, info};
 
 /// File handle manager - maps between paths and file handles
+/// Why a file handle failed validation. The distinction is wire-visible
+/// and load-bearing: a `Stale` handle is structurally valid but minted by
+/// another server incarnation — answered with NFS4ERR_STALE, which kernel
+/// clients recover from by re-walking the path and minting fresh handles.
+/// `Malformed` handles get NFS4ERR_BADHANDLE, which clients treat as fatal
+/// (observed as a permanent errno-521/ENOENT loop on live mounts when a
+/// restarted server answered BadHandle for old-incarnation handles — RWX
+/// cutover round, 2026-06-12).
+#[derive(Debug, PartialEq)]
+pub enum HandleError {
+    Stale,
+    Malformed(String),
+}
+
+impl std::fmt::Display for HandleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandleError::Stale => write!(f, "Stale file handle"),
+            HandleError::Malformed(m) => write!(f, "{}", m),
+        }
+    }
+}
+
 pub struct FileHandleManager {
     /// Server instance ID (changes on restart to invalidate old handles)
     instance_id: u64,
@@ -215,25 +238,28 @@ impl FileHandleManager {
     }
 
     /// Validate a file handle (check instance ID)
-    pub fn validate_handle(&self, handle: &Nfs4FileHandle) -> Result<(), String> {
+    pub fn validate_handle(&self, handle: &Nfs4FileHandle) -> Result<(), HandleError> {
         if handle.data.is_empty() {
-            return Err("File handle is empty".to_string());
+            return Err(HandleError::Malformed("File handle is empty".to_string()));
         }
-        
+
         // Check if this is a pseudo-root handle (special case)
         if self.is_pseudo_root(handle) {
             debug!("Validating pseudo-root handle: {} bytes", handle.data.len());
             return Ok(()); // Pseudo-root handles are always valid
         }
-        
+
         // Regular filehandle validation
         if handle.data.len() < 41 {
-            return Err("File handle too short".to_string());
+            return Err(HandleError::Malformed("File handle too short".to_string()));
         }
 
         // Check version
         if handle.data[0] != 1 {
-            return Err(format!("Unsupported file handle version: {}", handle.data[0]));
+            return Err(HandleError::Malformed(format!(
+                "Unsupported file handle version: {}",
+                handle.data[0]
+            )));
         }
 
         // Extract instance ID
@@ -245,7 +271,7 @@ impl FileHandleManager {
         if handle_instance != self.instance_id {
             warn!("Stale file handle detected: instance {} != {}",
                   handle_instance, self.instance_id);
-            return Err("Stale file handle".to_string());
+            return Err(HandleError::Stale);
         }
 
         Ok(())
@@ -334,7 +360,7 @@ impl FileHandleManager {
     /// Parse a file handle to extract the path
     fn parse_handle(&self, handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
         // Validate first
-        self.validate_handle(handle)?;
+        self.validate_handle(handle).map_err(|e| e.to_string())?;
 
         if handle.data.len() < 43 {
             return Err("File handle too short".to_string());
