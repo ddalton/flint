@@ -1422,36 +1422,29 @@ impl NodeAgent {
                             debug!(path = %globalmount.display(), "[FORCE_UNSTAGE] Found mounted staging path");
                             was_staged = true;
 
-                            // Unmount with retry
-                            debug!("[FORCE_UNSTAGE] Attempting to unmount");
-                            let mut unmounted = false;
-
-                            for attempt in 1..=3 {
-                                let result = std::process::Command::new("umount")
-                                    .arg(&globalmount)
-                                    .status();
-
-                                if result.map(|s| s.success()).unwrap_or(false) {
-                                    debug!(attempt, "[FORCE_UNSTAGE] Unmounted");
-                                    unmounted = true;
-                                    operations_performed.push(format!("Unmounted {}", globalmount.display()));
-                                    break;
-                                }
-
-                                if attempt < 3 {
-                                    std::thread::sleep(std::time::Duration::from_millis(100));
-                                }
+                            // Bounded unmount (mount_util): a plain umount
+                            // on a mount whose backing device is gone blocks
+                            // in D-state and would wedge the agent (same
+                            // hazard as the NodeUnstage hang found by the
+                            // 1.2.0 release gate, 2026-06-12).
+                            debug!("[FORCE_UNSTAGE] Attempting bounded unmount");
+                            let globalmount_str = globalmount.display().to_string();
+                            let mut unmounted =
+                                crate::mount_util::bounded_umount(&globalmount_str, false, 10)
+                                    .await;
+                            if unmounted {
+                                debug!("[FORCE_UNSTAGE] Unmounted");
+                                operations_performed.push(format!("Unmounted {}", globalmount.display()));
                             }
 
                             // If normal unmount failed, try lazy unmount
                             if !unmounted {
                                 warn!("[FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount");
-                                let result = std::process::Command::new("umount")
-                                    .arg("-l")
-                                    .arg(&globalmount)
-                                    .status();
+                                let result =
+                                    crate::mount_util::bounded_umount(&globalmount_str, true, 10)
+                                        .await;
 
-                                if result.map(|s| s.success()).unwrap_or(false) {
+                                if result {
                                     debug!("[FORCE_UNSTAGE] Lazy unmount succeeded");
                                     operations_performed.push(format!("Lazy unmounted {}", globalmount.display()));
                                     unmounted = true;

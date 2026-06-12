@@ -10,6 +10,7 @@ pub mod driver;
 pub mod minimal_models;
 pub mod minimal_disk_service;
 pub mod node_agent;
+pub mod mount_util;  // Bounded unmount (D-state hang containment, 2026-06-12)
 pub mod spdk_dashboard_backend_minimal;
 pub mod snapshot;  // Volume snapshot support (isolated module)
 pub mod capacity_cache;  // Capacity caching for scalability

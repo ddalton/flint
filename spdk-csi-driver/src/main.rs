@@ -2517,45 +2517,32 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             if is_mounted {
                 println!("🔧 [NODE] Staging path is mounted, attempting unmount: {}", staging_target_path);
 
-                // Try normal unmount with retry (3 attempts)
-                let mut unmount_success = false;
-                for attempt in 1..=3 {
-                    println!("🔄 [NODE] Unmount attempt {}/3", attempt);
-                    let success = std::process::Command::new("umount")
-                        .arg(&staging_target_path)
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    
-                    if success {
-                        println!("✅ [NODE] Unmount succeeded on attempt {}", attempt);
-                        unmount_success = true;
-                        break;
-                    }
-                    
-                    if attempt < 3 {
-                        println!("⚠️ [NODE] Unmount failed, retrying in 100ms...");
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    }
-                }
-                
-                // If normal unmount failed, try lazy unmount as fallback
-                if !unmount_success {
-                    println!("⚠️ [NODE] Normal unmount failed, trying lazy unmount (-l)...");
-                    let lazy_success = std::process::Command::new("umount")
-                        .arg("-l")
-                        .arg(&staging_target_path)
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false);
-                    
-                    if lazy_success {
+                // One bounded plain-umount attempt (flushes in the healthy
+                // case), then bounded lazy fallback. A plain umount on a
+                // dead backing device blocks in uninterruptible sleep, and
+                // one such hang here froze the whole node plugin — kubelet
+                // got connection-refused for every volume on the node
+                // (found by the 1.2.0 release gate, 2026-06-12). See
+                // mount_util for the containment layers.
+                println!("🔄 [NODE] Bounded unmount attempt");
+                let mut unmount_success =
+                    spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, false, 10)
+                        .await;
+                if unmount_success {
+                    println!("✅ [NODE] Unmount succeeded");
+                } else {
+                    println!("⚠️ [NODE] Plain unmount failed/timed out, trying lazy unmount (-l)...");
+                    unmount_success =
+                        spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, true, 10)
+                            .await;
+                    if unmount_success {
                         println!("✅ [NODE] Lazy unmount succeeded, waiting for cleanup...");
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     } else {
                         println!("❌ [NODE] Lazy unmount also failed");
                     }
                 }
+                let _ = unmount_success;
                 
                 // CRITICAL: Verify unmount was successful before proceeding
                 let still_mounted = std::process::Command::new("mountpoint")

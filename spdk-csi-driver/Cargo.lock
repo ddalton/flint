@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "spdk-csi-driver"
-version = "1.2.0-rc5"
+version = "1.2.0"
 dependencies = [
  "aes",
  "anyhow",
