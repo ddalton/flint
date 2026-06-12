@@ -1027,7 +1027,16 @@ Rejected alternatives:
      standby chain's base is data-safe — a retired epoch's delta merges
      into its retained successor — but node-side epoch GC then grinds
      against the chain's clone-parents, warning every cycle until
-     admission frees them anyway).
+     admission frees them anyway). The pin also **advances with the
+     chase mark** (`advance_retention_pin`, same day, found in the
+     phase-6 run): a standby resumes base-inclusively from `last_epoch`,
+     so it needs nothing older — without the advance, a standby that
+     cannot admit (e.g. an ineffective cutover bounce) holds retention
+     at its original base and the epoch list grows unbounded (observed
+     live: 23 epochs against K=6 in 18 minutes). The advance is bounded
+     by the oldest need across ALL dependent replicas, never moves
+     backward, and a mid-flight full build (`reverted_to: "empty"`)
+     blocks it entirely.
    - **Revert** deletes the head and re-clones it from the replica's own
      `E_b`, keeping the lvol *name* (the stable `lvs/name` alias makes the
      revert idempotent across crashes). The new uuid is recorded as

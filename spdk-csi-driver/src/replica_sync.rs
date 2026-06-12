@@ -350,6 +350,59 @@ impl VolumeSyncRecord {
         false
     }
 
+    /// §10-14 follow-up: advance the retention pin to the oldest epoch a
+    /// dependent replica still needs. A standby resumes base-inclusively
+    /// from its chase mark, so it needs nothing older than `last_epoch`;
+    /// a mid-catch-up write-virgin head (`reverted_to: <epoch>`) needs
+    /// its revert base; a full build (`reverted_to: "empty"`) anchors at
+    /// the oldest recorded epoch and blocks all advance. Advance-only:
+    /// never moves the pin backward, never touches an unparseable
+    /// (pin-everything) pin, and leaves the pin alone when no dependent
+    /// is visible — the pin is set *before* the revert is recorded, and
+    /// that window must not lose it. Without this, a standby that cannot
+    /// admit (e.g. an ineffective cutover bounce) holds retention at its
+    /// original base and the epoch list grows unbounded — one blob per
+    /// cut, cluster-wide after a node event (observed live 2026-06-12:
+    /// 23 epochs against K=6 in 18 minutes on one volume).
+    pub fn advance_retention_pin(&mut self, volume_id: &str) -> bool {
+        let Some(current) = self.retention_pin.as_deref() else {
+            return false;
+        };
+        let Some(current_seq) = epoch_seq(volume_id, current) else {
+            return false;
+        };
+        let mut needs: Vec<u64> = Vec::new();
+        for r in &self.replicas {
+            match r.sync_state {
+                SyncState::Standby => {
+                    match r.last_epoch.as_deref().and_then(|e| epoch_seq(volume_id, e)) {
+                        Some(seq) => needs.push(seq),
+                        None => return false, // unparseable mark: hold everything
+                    }
+                }
+                SyncState::Stale => {
+                    if let Some(base) = r.reverted_to.as_deref() {
+                        match epoch_seq(volume_id, base) {
+                            Some(seq) => needs.push(seq),
+                            // "empty" (full build mid-flight) or
+                            // unparseable: anchored, no advance.
+                            None => return false,
+                        }
+                    }
+                }
+                SyncState::InSync => {}
+            }
+        }
+        let Some(min_need) = needs.into_iter().min() else {
+            return false;
+        };
+        if min_need <= current_seq {
+            return false;
+        }
+        self.retention_pin = Some(epoch_name(volume_id, min_need));
+        true
+    }
+
     /// Highest epoch sequence number recorded for this volume (0 if none).
     /// The next cut uses this + 1, so a sequence number is never reused even
     /// after old epochs are retired.
@@ -1143,6 +1196,67 @@ mod tests {
         record.mark_stale("uuid-b", "leg failed again", "t4");
         record.mark_in_sync("uuid-a", "epoch-vol1-4", "x", "t5");
         assert_eq!(record.retention_pin, None);
+    }
+
+    #[test]
+    fn pin_advances_with_the_chase_mark() {
+        let mut record = three_replica_record();
+        record.pin_retention("vol1", "epoch-vol1-2");
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_standby("uuid-b", "epoch-vol1-5", "chasing", "t1");
+
+        // The standby resumes base-inclusively from its mark: nothing
+        // older than epoch 5 is needed — retention may advance.
+        assert!(record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-5"));
+        // Idempotent; never moves backward.
+        assert!(!record.advance_retention_pin("vol1"));
+        record.mark_standby("uuid-b", "epoch-vol1-7", "chasing", "t2");
+        assert!(record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-7"));
+    }
+
+    #[test]
+    fn pin_advance_bounded_by_every_dependent() {
+        let mut record = three_replica_record();
+        record.pin_retention("vol1", "epoch-vol1-2");
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_standby("uuid-b", "epoch-vol1-6", "chasing", "t1");
+        record.mark_stale("uuid-c", "leg failed", "t0");
+        record.replicas[2].reverted_to = Some("epoch-vol1-3".to_string());
+
+        // c's revert base (3) caps the advance, not b's mark (6).
+        assert!(record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-3"));
+
+        // A full build anchors everything: no advance at all.
+        record.replicas[2].reverted_to = Some("empty".to_string());
+        record.retention_pin = Some("epoch-vol1-2".to_string());
+        assert!(!record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-2"));
+    }
+
+    #[test]
+    fn pin_advance_conservative_edges() {
+        let mut record = three_replica_record();
+        // No pin: nothing to advance.
+        assert!(!record.advance_retention_pin("vol1"));
+        // No dependents: the pin→revert-record window must keep the pin
+        // pin_retention just set.
+        record.pin_retention("vol1", "epoch-vol1-2");
+        assert!(!record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-2"));
+        // A standby whose frozen mark is OLDER than the pin: no backward
+        // move (mark 1, pin 2).
+        record.mark_stale("uuid-b", "x", "t0");
+        record.mark_standby("uuid-b", "epoch-vol1-1", "behind", "t1");
+        assert!(!record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("epoch-vol1-2"));
+        // Unparseable (pin-everything) pin: untouched.
+        record.retention_pin = Some("garbage".to_string());
+        record.mark_standby("uuid-b", "epoch-vol1-5", "chasing", "t2");
+        assert!(!record.advance_retention_pin("vol1"));
+        assert_eq!(record.retention_pin.as_deref(), Some("garbage"));
     }
 
     #[test]

@@ -276,9 +276,12 @@ impl CatchupStore for KubeStore {
         caught_up_through: &str,
     ) -> Result<(), RpcError> {
         let (uuid, through) = (replica_uuid.to_string(), caught_up_through.to_string());
+        let vid = volume_id.to_string();
         let now = replica_sync::now_rfc3339();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
             r.mark_standby(&uuid, &through, "caught up; chasing epochs", &now);
+            // The chase mark moved: retention can advance with it.
+            r.advance_retention_pin(&vid);
         })
         .await?;
         Ok(())
@@ -2121,6 +2124,7 @@ mod tests {
         ) -> Result<(), RpcError> {
             let mut record = self.record.lock().unwrap();
             record.mark_standby(replica_uuid, caught_up_through, "caught up; chasing epochs", "t");
+            record.advance_retention_pin(_volume_id);
             self.ops.lock().unwrap().push(format!("standby:{}", caught_up_through));
             Ok(())
         }
@@ -2655,7 +2659,9 @@ mod tests {
         // Record end state: standby through epoch 5, live-uuid override,
         // write-virgin marker — and the pin HELD (§10-14: released at
         // admission, not copy completion, so retention never grinds the
-        // GC against the standby chain's base).
+        // GC against the standby chain's base) and ADVANCED to the chase
+        // mark (the standby resumes base-inclusively from epoch 5, so
+        // retention may retire everything older).
         let mut record = store.record.lock().unwrap();
         let rec = record.get("uuid-b").unwrap();
         assert_eq!(rec.sync_state, SyncState::Standby);
@@ -2664,7 +2670,7 @@ mod tests {
         assert_eq!(rec.reverted_to.as_deref(), Some(epoch("vol1", 4).as_str()));
         assert_eq!(
             record.retention_pin.as_deref(),
-            Some(epoch("vol1", 4).as_str())
+            Some(epoch("vol1", 5).as_str())
         );
         // Phase-4 admission of the last dependent replica releases it.
         record.mark_in_sync("uuid-b", &epoch("vol1", 6), "admitted", "t");
@@ -2883,8 +2889,10 @@ mod tests {
         assert_eq!(aligned, vec!["snap_vol1_88", "epoch-vol1-5"]);
 
         // Record end state: standby at 5, live-uuid override, full-build
-        // marker — pin still anchored at the build's OLDEST retained
-        // epoch until admission (§10-14).
+        // marker. The pin anchored at the build's OLDEST retained epoch
+        // for the build's duration, then advanced to the chase mark at
+        // standby — once the replay completed, the standby resumes from
+        // its mark and needs nothing older.
         {
             let record = store.record.lock().unwrap();
             let rec = record.get("uuid-b").unwrap();
@@ -2894,7 +2902,7 @@ mod tests {
             assert_eq!(rec.reverted_to.as_deref(), Some(FULL_BUILD_BASE));
             assert_eq!(
                 record.retention_pin.as_deref(),
-                Some(epoch("vol1", 3).as_str())
+                Some(epoch("vol1", 5).as_str())
             );
         }
         let reasons: Vec<String> =
