@@ -1367,6 +1367,29 @@ The SPDK patch decision moves from "gating dependency, sequence first"
    pass to lvols and exports keyed by absent PVs) rather than more
    ordering cleverness in the deletion paths.
 
+   **Implemented 2026-06-12** (`orphan_sweep.rs` + the node agent's 60s
+   monitor tick; default-on, `FLINT_ORPHAN_SWEEP=disabled` escape hatch,
+   `FLINT_ORPHAN_SWEEP_STRIKES` default 3). Safety model: strict
+   flint-shape parsers (the epoch-GC rule generalized — `vol_*`,
+   `epoch-<vol>-<seq>`, `snap_<vol>_<u64>`, `temp_pvc_clone_*`, `eph_*`,
+   `:volume:` NQNs; anything else is invisible); PV absence proved only
+   by a successful full list; ordered candidacy so inline-ephemeral
+   volumes (PV-less by design) are condemned only via verified frontend
+   absence (their own live export or ublk attachment protects them, and
+   an unverifiable ublk listing in ublk mode skips them); a subsystem
+   namespace referencing any present non-condemned bdev (e.g. an
+   assembled raid) keeps the subsystem alive — raid teardown stays
+   NodeUnstage's; three consecutive condemned cycles before deletion
+   (rides out the CreateVolume→PV-object window). Reap order is
+   subsystems first, then lvols in retry passes (leaf-first emerges);
+   clone-pinned copies defer quietly at debug level — the no-reconciler
+   case is thereby closed: the pin's eventual release leaves the copy
+   condemned and the next cycle reaps it. Deliberately out of scope: a
+   `temp_pvc_clone_*` under a live PV (deletion-path bug, not an
+   orphan), an ephemeral leak with its frontend intact (indistinguishable
+   from in-use), and the pin-until-admission change to epoch GC (still
+   open above).
+
 ## 11. Multi-replica user snapshots (`VolumeSnapshot`) — design
 
 *Added 2026-06-11; answers §10-11. Implementation is phase 5b (§9).*

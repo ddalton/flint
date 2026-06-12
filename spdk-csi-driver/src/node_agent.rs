@@ -27,6 +27,9 @@ pub struct NodeAgent {
     pub spdk_socket_path: String,
     pub disk_service: MinimalDiskService,
     pub driver: Arc<SpdkCsiDriver>,
+    /// §10-14 orphan-sweep strike counts, persisted across sweep cycles
+    /// (shared by clone so the monitor task and HTTP handlers see one).
+    orphan_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
 }
 
 impl NodeAgent {
@@ -43,6 +46,7 @@ impl NodeAgent {
             spdk_socket_path,
             disk_service,
             driver,
+            orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -63,6 +67,7 @@ impl NodeAgent {
             spdk_socket_path,
             disk_service,
             driver,
+            orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -179,6 +184,9 @@ impl NodeAgent {
                 }
                 if let Err(e) = monitor_agent.monitor_raid_health().await {
                     warn!(error = %e, "[MONITOR] Raid health check failed (non-fatal)");
+                }
+                if let Err(e) = monitor_agent.orphan_sweep().await {
+                    warn!(error = %e, "[MONITOR] Orphan sweep failed (non-fatal)");
                 }
             }
         });
@@ -1995,6 +2003,201 @@ impl NodeAgent {
         .await
     }
 
+    /// §10-14 orphan sweep — reap flint lvols/exports whose PV is gone.
+    /// See `crate::orphan_sweep` for the safety model (strict parsers,
+    /// PV-absence authority, ordered candidacy, strike confirmation).
+    /// Runs on the 60s monitor tick. `FLINT_ORPHAN_SWEEP=disabled` turns
+    /// it off; `FLINT_ORPHAN_SWEEP_STRIKES` (default 3) is how many
+    /// consecutive condemned cycles precede deletion.
+    async fn orphan_sweep(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if std::env::var("FLINT_ORPHAN_SWEEP").is_ok_and(|v| v.eq_ignore_ascii_case("disabled")) {
+            return Ok(());
+        }
+        let threshold: u32 = std::env::var("FLINT_ORPHAN_SWEEP_STRIKES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3)
+            .max(1);
+
+        // PV absence is the only condemnation authority, and only a
+        // successful full list proves it — any error skips the cycle.
+        let pvs_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let existing_pvs: std::collections::HashSet<String> = pvs_api
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|pv| pv.metadata.name)
+            .collect();
+
+        let mut lvols = Vec::new();
+        let lvstores = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "bdev_lvol_get_lvstores"}))
+            .await?;
+        for lvs in lvstores["result"].as_array().cloned().unwrap_or_default() {
+            let Some(lvs_name) = lvs["name"].as_str() else { continue };
+            let resp = self
+                .disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "bdev_lvol_get_lvols",
+                    "params": {"lvs_name": lvs_name}
+                }))
+                .await?;
+            for l in resp["result"].as_array().cloned().unwrap_or_default() {
+                let Some(name) = l["name"].as_str() else { continue };
+                lvols.push(crate::orphan_sweep::LvolEntry {
+                    lvs: lvs_name.to_string(),
+                    name: name.to_string(),
+                    uuid: l["uuid"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+        }
+
+        let subs_resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "nvmf_get_subsystems", "params": {}}))
+            .await?;
+        let mut subsystems = Vec::new();
+        for s in subs_resp["result"].as_array().cloned().unwrap_or_default() {
+            let Some(nqn) = s["nqn"].as_str() else { continue };
+            let ns_bdevs = s["namespaces"]
+                .as_array()
+                .map(|nss| {
+                    nss.iter()
+                        .filter_map(|n| n["bdev_name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            subsystems.push(crate::orphan_sweep::SubsystemEntry {
+                nqn: nqn.to_string(),
+                ns_bdevs,
+            });
+        }
+
+        let bdevs_resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "bdev_get_bdevs", "params": {}}))
+            .await?;
+        let mut all_bdevs = std::collections::HashSet::new();
+        for b in bdevs_resp["result"].as_array().cloned().unwrap_or_default() {
+            if let Some(n) = b["name"].as_str() {
+                all_bdevs.insert(n.to_string());
+            }
+            if let Some(u) = b["uuid"].as_str() {
+                all_bdevs.insert(u.to_string());
+            }
+            for a in b["aliases"].as_array().cloned().unwrap_or_default() {
+                if let Some(a) = a.as_str() {
+                    all_bdevs.insert(a.to_string());
+                }
+            }
+        }
+
+        // Ephemeral lvols can only be verified idle against the ublk
+        // frontend list. In ublk mode (the BLOCK_DEVICE_BACKEND default)
+        // a failed listing means unverifiable → eph skipped; in nvmf
+        // mode a failure just means the ublk target was never created.
+        let ublk_mode = std::env::var("BLOCK_DEVICE_BACKEND")
+            .unwrap_or("ublk".to_string())
+            .eq_ignore_ascii_case("ublk");
+        let ublk_bdevs = match self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "ublk_get_disks"}))
+            .await
+        {
+            Ok(resp) => resp["result"].as_array().map(|disks| {
+                disks
+                    .iter()
+                    .filter_map(|d| d["bdev_name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            }),
+            Err(_) if !ublk_mode => Some(Vec::new()),
+            Err(_) => None,
+        };
+
+        let input = crate::orphan_sweep::SweepInput {
+            lvols,
+            subsystems,
+            ublk_bdevs,
+            all_bdevs,
+            existing_pvs,
+        };
+        let plan = {
+            let mut strikes = self.orphan_strikes.lock().await;
+            crate::orphan_sweep::plan_sweep(&input, &mut strikes, threshold)
+        };
+        if plan.eph_skipped_unverifiable > 0 {
+            debug!(
+                count = plan.eph_skipped_unverifiable,
+                "[ORPHAN_SWEEP] ephemeral lvols skipped: ublk frontends unverifiable"
+            );
+        }
+        if plan.delete_subsystem_nqns.is_empty() && plan.delete_lvol_aliases.is_empty() {
+            return Ok(());
+        }
+        info!(
+            subsystems = plan.delete_subsystem_nqns.len(),
+            lvols = plan.delete_lvol_aliases.len(),
+            "[ORPHAN_SWEEP] reaping orphans of absent PVs"
+        );
+
+        // Subsystems first: their write-opens block lvol deletion.
+        for nqn in &plan.delete_subsystem_nqns {
+            match self
+                .disk_service
+                .call_spdk_rpc(&json!({"method": "nvmf_delete_subsystem", "params": {"nqn": nqn}}))
+                .await
+            {
+                Ok(_) => info!(nqn = %nqn, "[ORPHAN_SWEEP] deleted orphan subsystem"),
+                Err(e) => {
+                    debug!(nqn = %nqn, error = %e, "[ORPHAN_SWEEP] subsystem delete deferred")
+                }
+            }
+        }
+
+        // Lvols in retry passes: leaf-first order emerges because a
+        // snapshot with clones refuses deletion until its clones are
+        // gone (the campaign's manual sweep needed the same order).
+        // Whatever a cycle can't delete (e.g. a copy pinned by a live
+        // restore clone) stays condemned and is retried next cycle —
+        // at debug level, so a long-lived pin doesn't spam warnings the
+        // way the epoch GC did.
+        let mut remaining = plan.delete_lvol_aliases;
+        for _pass in 0..5 {
+            if remaining.is_empty() {
+                break;
+            }
+            let before = remaining.len();
+            let mut next = Vec::new();
+            for alias in std::mem::take(&mut remaining) {
+                match self
+                    .disk_service
+                    .call_spdk_rpc(&json!({"method": "bdev_lvol_delete", "params": {"name": alias}}))
+                    .await
+                {
+                    Ok(_) => info!(lvol = %alias, "[ORPHAN_SWEEP] deleted orphan lvol"),
+                    Err(e) if e.to_string().contains("No such device") => {}
+                    Err(e) => {
+                        debug!(lvol = %alias, error = %e, "[ORPHAN_SWEEP] lvol delete deferred");
+                        next.push(alias);
+                    }
+                }
+            }
+            remaining = next;
+            if remaining.len() == before {
+                break; // no progress; next cycle retries
+            }
+        }
+        if !remaining.is_empty() {
+            info!(
+                deferred = remaining.len(),
+                "[ORPHAN_SWEEP] orphan lvols deferred to next cycle (likely clone-pinned)"
+            );
+        }
+        Ok(())
+    }
+
     /// Extract replica info from PV volumeAttributes
     fn get_replicas_from_pv(&self, pv: &PersistentVolume) -> Result<Option<Vec<ReplicaInfo>>, Box<dyn std::error::Error + Send + Sync>> {
         crate::replica_sync::replicas_from_pv(pv)
@@ -2182,6 +2385,7 @@ impl Clone for NodeAgent {
             spdk_socket_path: self.spdk_socket_path.clone(),
             disk_service: self.disk_service.clone(),
             driver: self.driver.clone(),
+            orphan_strikes: self.orphan_strikes.clone(),
         }
     }
 }
