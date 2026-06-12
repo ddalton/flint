@@ -14,7 +14,7 @@ use super::v4::state::StateManager;
 // LocalFilesystem removed - NFSv4 uses direct filesystem access via filehandle manager
 use super::xdr::{XdrDecoder, XdrEncoder};
 use bytes::{Bytes, BytesMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -56,6 +56,76 @@ pub struct NfsServer {
     config: NfsConfig,
     dispatcher: Arc<CompoundDispatcher>,
     gss_manager: Arc<RpcSecGssManager>,
+    state_mgr: Arc<StateManager>,
+}
+
+/// Pick the NFSv4 state persistence target.
+///
+/// Default: a SQLite DB on the exported volume
+/// (`<export>/.flint-nfs/state.db`) so clientids, sessions, stateids and
+/// the reclaim-complete flags survive a server pod replacement AND roam
+/// with the PVC to whichever node the next incarnation lands on. Without
+/// this, a client holding dirty open state across a cutover bounce
+/// resumes writes against open state the new server never heard of — the
+/// writes are acked from the client's page cache and silently dropped
+/// (RWX round, 2026-06-12).
+///
+/// `FLINT_NFS_STATE=memory` opts out (tests, throwaway exports);
+/// any other value is used as an explicit DB path.
+///
+/// A DB that fails to open (corrupt file, schema mismatch from a
+/// downgrade) is moved aside and recreated — losing state degrades one
+/// bounce to today's behavior, while refusing to start would take the
+/// volume down entirely.
+fn build_state_backend(
+    config: &NfsConfig,
+) -> Arc<dyn crate::state_backend::StateBackend> {
+    let setting = std::env::var("FLINT_NFS_STATE").unwrap_or_default();
+    select_state_backend(&setting, &config.export_path)
+}
+
+fn select_state_backend(
+    setting: &str,
+    export_path: &Path,
+) -> Arc<dyn crate::state_backend::StateBackend> {
+    use crate::state_backend::{memory_backend, SqliteBackend};
+
+    if setting.eq_ignore_ascii_case("memory") {
+        info!("💾 NFSv4 state: in-memory (FLINT_NFS_STATE=memory) — no restart survival");
+        return memory_backend();
+    }
+    let db_path = if setting.is_empty() {
+        export_path.join(".flint-nfs").join("state.db")
+    } else {
+        PathBuf::from(setting)
+    };
+    if let Some(dir) = db_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::error!("NFSv4 state dir {:?} not creatable ({}) — falling back to in-memory state", dir, e);
+            return memory_backend();
+        }
+    }
+    match SqliteBackend::open_durable(&db_path) {
+        Ok(b) => {
+            info!("💾 NFSv4 state: persistent at {:?} (synchronous=FULL)", db_path);
+            Arc::new(b)
+        }
+        Err(e) => {
+            tracing::error!("NFSv4 state DB {:?} unusable ({}) — moving it aside and recreating", db_path, e);
+            let quarantine = db_path.with_extension("db.unusable");
+            let _ = std::fs::rename(&db_path, &quarantine);
+            match SqliteBackend::open_durable(&db_path) {
+                Ok(b) => {
+                    tracing::warn!("NFSv4 state DB recreated (prior state lost; old file at {:?})", quarantine);
+                    Arc::new(b)
+                }
+                Err(e) => {
+                    tracing::error!("NFSv4 state DB recreate failed ({}) — falling back to in-memory state", e);
+                    memory_backend()
+                }
+            }
+        }
+    }
 }
 
 impl NfsServer {
@@ -63,13 +133,16 @@ impl NfsServer {
     pub fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
         let fh_mgr = Arc::new(FileHandleManager::new(config.export_path.clone()));
-        let state_mgr = Arc::new(StateManager::new_in_memory(&config.volume_id));
+        let state_mgr = Arc::new(StateManager::new(
+            &config.volume_id,
+            build_state_backend(&config),
+        ));
         let lock_mgr = Arc::new(LockManager::new());
 
         // Create COMPOUND dispatcher (creates handlers internally)
         let dispatcher = Arc::new(CompoundDispatcher::new(
             fh_mgr,
-            state_mgr,
+            state_mgr.clone(),
             lock_mgr,
         ));
 
@@ -77,7 +150,7 @@ impl NfsServer {
         let keytab_path = std::env::var("KRB5_KTNAME").ok();
         let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
 
-        Ok(Self { config, dispatcher, gss_manager })
+        Ok(Self { config, dispatcher, gss_manager, state_mgr })
     }
 
     /// Start the NFSv4.2 server (TCP only - NFSv4 doesn't use UDP)
@@ -91,6 +164,21 @@ impl NfsServer {
         info!("🔧 Mount command (from client):");
         info!("   mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point");
         info!("");
+
+        // Restore persisted NFSv4 state BEFORE accepting connections: by
+        // the time a client's TCP reconnect lands, its clientid, session,
+        // stateids and reclaim-complete flag are back — SEQUENCE on the
+        // old session simply succeeds and in-flight writes resume instead
+        // of dying against unknown state. (Same pre-listener hook the
+        // pNFS MDS uses; an unreadable backend degrades to an empty
+        // state table, which is exactly the pre-persistence behavior.)
+        match self.state_mgr.backend().increment_instance_counter().await {
+            Ok(n) => info!("📈 NFSv4 server instance #{} for this volume (persisted counter)", n),
+            Err(e) => tracing::warn!("NFSv4 instance counter unavailable: {}", e),
+        }
+        if let Err(e) = self.state_mgr.load_from_backend().await {
+            tracing::error!("NFSv4 state restore failed ({}) — starting with empty state", e);
+        }
 
         // NFSv4 doesn't need portmapper registration (uses well-known port 2049)
         // and doesn't need separate MOUNT protocol
@@ -636,4 +724,118 @@ async fn handle_gss_continue_init(
           init_res.major_status, init_res.minor_status);
 
     encoder.finish()
+}
+
+#[cfg(test)]
+mod state_persistence_tests {
+    use super::*;
+    use crate::nfs::v4::state::client::ExchangeIdOutcome;
+    use crate::nfs::v4::state::StateType;
+
+    /// The pod-replacement contract behind RWX cutover transparency.
+    ///
+    /// What must survive the export-volume DB round-trip: the client
+    /// record (clientid, confirmed, reclaim-complete) and every stateid.
+    /// Sessions are deliberately NOT restored — `SessionManager::
+    /// load_records` drops them so the reconnecting client gets
+    /// BADSESSION and re-CREATE_SESSIONs against its restored, confirmed
+    /// clientid (no EXCHANGE_ID, no STALE_CLIENTID). Its retransmitted
+    /// WRITEs then carry the restored stateids and land — instead of
+    /// being acked from the client page cache and silently dropped
+    /// against a blank-state server (observed live, 2026-06-12).
+    #[tokio::test]
+    async fn nfsv4_state_survives_server_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let export = dir.path().to_path_buf();
+
+        // ── Incarnation 1 ────────────────────────────────────────────
+        let mgr1 = StateManager::new("vol-rt", select_state_backend("", &export));
+        let outcome = mgr1
+            .clients
+            .exchange_id(b"client-A".to_vec(), 0xfeed, 0, vec![]);
+        let client_id = match outcome {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("unexpected exchange_id outcome: {:?}", other),
+        };
+        let session = mgr1
+            .sessions
+            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000);
+        mgr1.clients.mark_confirmed(client_id);
+        mgr1.clients.mark_reclaim_complete(client_id);
+        let open_stateid =
+            mgr1.stateids
+                .allocate(StateType::Open, client_id, Some(b"/data/log".to_vec()));
+
+        // Persistence is fire-and-forget (spawn_persist); wait for the
+        // backend to observe everything before "killing the pod".
+        let backend = mgr1.backend();
+        for _ in 0..200 {
+            let cs = backend.list_clients().await.unwrap();
+            let st = backend.list_stateids().await.unwrap();
+            if !st.is_empty() && cs.iter().any(|c| c.confirmed && c.reclaim_complete) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let persisted = backend.list_clients().await.unwrap();
+        assert!(
+            persisted.iter().any(|c| c.confirmed && c.reclaim_complete),
+            "client record (confirmed + reclaim_complete) must persist, got {:?}",
+            persisted
+        );
+        drop(mgr1);
+        drop(backend);
+
+        // ── Incarnation 2: same DB file, fresh managers ─────────────
+        let mgr2 = StateManager::new("vol-rt", select_state_backend("", &export));
+        mgr2.load_from_backend().await.unwrap();
+
+        // Stateids survive — a retransmitted WRITE with the pre-bounce
+        // stateid resolves instead of BAD_STATEID.
+        let entry = mgr2.stateids.get_state(&open_stateid);
+        assert!(entry.is_some(), "open stateid must survive replacement");
+        assert_eq!(entry.unwrap().client_id, client_id);
+
+        // The reclaim-complete flag survives, so the client's NEW opens
+        // are not GRACE-blocked during the post-restart window.
+        assert!(mgr2.clients.is_reclaim_complete(client_id));
+
+        // Sessions intentionally do not survive: the client's SEQUENCE
+        // gets BADSESSION and re-creates. The new session must not
+        // collide with the dropped one's id (counter bumped past it).
+        assert!(mgr2.sessions.get_session(&session.session_id).is_none());
+        let session2 = mgr2
+            .sessions
+            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000);
+        assert_ne!(session2.session_id.0, session.session_id.0);
+
+        // A re-issued EXCHANGE_ID with the same owner finds the
+        // confirmed record instead of minting a new clientid.
+        match mgr2.clients.exchange_id(b"client-A".to_vec(), 0xfeed, 0, vec![]) {
+            ExchangeIdOutcome::ExistingConfirmed { client_id: cid, .. } => {
+                assert_eq!(cid, client_id)
+            }
+            other => panic!("expected ExistingConfirmed, got {:?}", other),
+        }
+    }
+
+    /// `FLINT_NFS_STATE=memory` opts out of persistence entirely.
+    #[tokio::test]
+    async fn memory_setting_skips_db_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = select_state_backend("memory", dir.path());
+        assert!(
+            !dir.path().join(".flint-nfs").exists(),
+            "memory backend must not create the state dir"
+        );
+    }
+
+    /// Default placement: the DB lives on the exported volume so state
+    /// roams with the PVC to the next server incarnation's node.
+    #[tokio::test]
+    async fn default_db_lives_on_export_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = select_state_backend("", dir.path());
+        assert!(dir.path().join(".flint-nfs").join("state.db").exists());
+    }
 }

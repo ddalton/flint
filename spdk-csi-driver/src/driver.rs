@@ -1529,9 +1529,9 @@ impl SpdkCsiDriver {
     pub async fn update_pv_filesystem_initialized(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::{Api, api::Patch, api::PatchParams};
-        
+
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        
+
         // Use annotations (mutable) instead of spec (immutable)
         let patch = serde_json::json!({
             "metadata": {
@@ -1540,9 +1540,15 @@ impl SpdkCsiDriver {
                 }
             }
         });
-        
-        pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
-        
+
+        // Resolve through record_pv_name: the synthetic NFS backing volume's
+        // handle (nfs-server-pvc-X) names no PV — annotating by handle
+        // silently failed, so every RWX restage saw "never formatted" and
+        // wipefs'd the live filesystem (data loss, found 2026-06-12). The
+        // marker lives on the user PV, like every other volume-scoped record.
+        let pv_name = crate::replica_sync::record_pv_name(volume_id);
+        pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+
         Ok(())
     }
 
@@ -1550,10 +1556,10 @@ impl SpdkCsiDriver {
     pub async fn check_pv_filesystem_initialized(&self, volume_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;
-        
+
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        
-        match pvs.get(volume_id).await {
+
+        match pvs.get(crate::replica_sync::record_pv_name(volume_id)).await {
             Ok(pv) => {
                 let initialized = pv.metadata.annotations
                     .and_then(|annot| annot.get("flint.csi.storage.io/filesystem-initialized").cloned())

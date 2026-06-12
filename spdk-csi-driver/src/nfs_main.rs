@@ -119,10 +119,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("⚡ Server starting...");
     info!("");
 
-    // Serve (blocks forever)
-    if let Err(e) = server.serve().await {
-        error!("Server error: {}", e);
-        return Err(e.into());
+    // Serve until SIGTERM/SIGINT. Exiting promptly on SIGTERM is
+    // load-bearing for data durability, not just hygiene: if the process
+    // rides out kubelet's grace period holding the export mounted, the
+    // following NodeUnstage's plain umount hits EBUSY and falls back to a
+    // LAZY umount — after which the raid is torn down underneath the
+    // still-flushing filesystem and every unflushed page (server-side
+    // files, the NFSv4 state DB) is lost. A prompt exit lets the unstage
+    // unmount cleanly, which flushes everything (observed live,
+    // 2026-06-12: 30 s SIGKILL → lazy umount → empty state DB after the
+    // bounce).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        r = server.serve() => {
+            if let Err(e) = r {
+                error!("Server error: {}", e);
+                return Err(e.into());
+            }
+        }
+        _ = sigterm.recv() => {
+            info!("SIGTERM — shutting down (open TCP connections dropped; clients recover via persisted state)");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("SIGINT — shutting down");
+        }
     }
 
     Ok(())

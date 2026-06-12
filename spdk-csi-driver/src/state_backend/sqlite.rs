@@ -91,6 +91,27 @@ impl SqliteBackend {
         Self::init(conn)
     }
 
+    /// Like `open`, but with `synchronous=FULL`: every commit fsyncs the
+    /// WAL before returning. Required when the DB lives on a volume whose
+    /// backing device can be torn away without a clean unmount — the
+    /// standalone NFS server's export-volume state DB is unstaged via a
+    /// bounded umount that falls back to LAZY on a busy mount, after
+    /// which the raid is deleted and any commit still in the page cache
+    /// is gone (observed live, 2026-06-12). NORMAL's "durable at the
+    /// checkpoint" promise assumes the filesystem outlives the process;
+    /// here it may not. State mutations are rare (opens/sessions, not
+    /// I/O), so the per-commit fsync cost is irrelevant.
+    pub fn open_durable<P: AsRef<Path>>(path: P) -> StateBackendResult<Self> {
+        let backend = Self::open(path)?;
+        backend
+            .conn
+            .lock()
+            .map_err(|_| StateBackendError::Storage("poisoned lock".into()))?
+            .execute_batch("PRAGMA synchronous=FULL;")
+            .map_err(|e| StateBackendError::Storage(format!("synchronous=FULL: {}", e)))?;
+        Ok(backend)
+    }
+
     /// Open an in-memory DB. Useful for tests; the schema still gets
     /// applied so behaviour matches a real on-disk file. Production
     /// code should use `open` with a path.

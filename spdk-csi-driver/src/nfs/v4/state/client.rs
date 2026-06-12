@@ -13,9 +13,7 @@
 
 use super::lease::LeaseManager;
 use super::super::protocol::SessionId;
-use crate::state_backend::{
-    spawn_persist, CachedCreateSessionResRecord, ClientRecord, StateBackend,
-};
+use crate::state_backend::{CachedCreateSessionResRecord, ClientRecord, StateBackend};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -245,13 +243,21 @@ pub struct ClientManager {
     /// Server scope (our scope identifier)
     server_scope: Vec<u8>,
 
-    /// Persistence target. Every mutation here (`exchange_id`,
-    /// `mark_confirmed`, `record_create_session_reply`, …) fire-and-
-    /// forgets a `put_client` / `delete_client` to this backend so
-    /// the records survive MDS restart. Hot-path reads stay against
-    /// the local DashMap; the backend is only touched on writes and
-    /// on startup (`load_records`).
-    backend: Arc<dyn StateBackend>,
+    /// FIFO persist queue. Client records mutate several times within
+    /// milliseconds at mount (allocate → confirm → reclaim-complete);
+    /// independent `tokio::spawn`s can land those snapshots out of
+    /// order, and last-writer-wins on the same row silently drops the
+    /// later flag — after a server bounce the restored record then
+    /// gates the client behind the full 90 s grace window (or a
+    /// delete/put inversion resurrects a removed client). One queue,
+    /// one worker: call order is apply order.
+    persist_q: tokio::sync::mpsc::UnboundedSender<ClientPersistOp>,
+}
+
+/// Ordered persistence operations for the [`ClientManager`] worker.
+enum ClientPersistOp {
+    Put(ClientRecord),
+    Delete(u64),
 }
 
 impl Client {
@@ -368,9 +374,30 @@ impl ClientManager {
             format!("flint-nfs-{}", volume_id)
         }.into_bytes();
 
-        info!("ClientManager created - mode={:?}, server_owner={}, server_scope={}", 
+        info!("ClientManager created - mode={:?}, server_owner={}, server_scope={}",
               pnfs_mode.as_deref().unwrap_or("standalone"),
               server_owner, String::from_utf8_lossy(&server_scope));
+
+        // FIFO persist worker (see `persist_q` field docs). Outside a
+        // runtime (sync unit tests) the worker never starts and sends
+        // vanish with the receiver — identical to `spawn_persist`'s
+        // no-runtime behavior.
+        let (persist_tx, mut persist_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ClientPersistOp>();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let worker_backend = Arc::clone(&backend);
+            handle.spawn(async move {
+                while let Some(op) = persist_rx.recv().await {
+                    let result = match op {
+                        ClientPersistOp::Put(rec) => worker_backend.put_client(&rec).await,
+                        ClientPersistOp::Delete(id) => worker_backend.delete_client(id).await,
+                    };
+                    if let Err(e) = result {
+                        tracing::error!(target: "state_persist", error = %e, "client persist failed");
+                    }
+                }
+            });
+        }
 
         Self {
             next_client_id: AtomicU64::new(1),
@@ -379,7 +406,7 @@ impl ClientManager {
             lease_manager,
             server_owner,
             server_scope,
-            backend,
+            persist_q: persist_tx,
         }
     }
 
@@ -414,19 +441,13 @@ impl ClientManager {
     /// Fire-and-forget; errors are logged. See `spawn_persist`'s docs
     /// for the lag-bound rationale.
     fn persist(&self, c: &Client) {
-        let backend = Arc::clone(&self.backend);
-        let record = c.to_record();
-        spawn_persist("client", move || async move { backend.put_client(&record).await });
+        let _ = self.persist_q.send(ClientPersistOp::Put(c.to_record()));
     }
 
     /// Persist a client deletion. Used by `remove_client` and the
     /// EXCHANGE_ID replacement paths.
     fn persist_delete(&self, client_id: u64) {
-        let backend = Arc::clone(&self.backend);
-        spawn_persist(
-            "client_delete",
-            move || async move { backend.delete_client(client_id).await },
-        );
+        let _ = self.persist_q.send(ClientPersistOp::Delete(client_id));
     }
 
     /// EXCHANGE_ID operation, implementing RFC 8881 §18.35.5.

@@ -2179,6 +2179,26 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         eprintln!("⚠️ [BLOCKDEV] Flush failed (continuing): {}", e);
                     }
                 }
+            } else if {
+                // Last line of defense before destroying data: a volume can
+                // be formatted yet carry no marker (marker write raced a
+                // crash, pre-fix synthetic NFS volumes whose marker landed
+                // nowhere, operator-restored PVs). A truly new thin lvol
+                // reads zeros, so a present filesystem signature can only
+                // mean real data — never wipe it on the say-so of a missing
+                // annotation (this exact path reformatted live RWX volumes
+                // on every restage, 2026-06-12).
+                let probe = std::process::Command::new("blkid").arg(&device_path).output();
+                matches!(&probe, Ok(o) if o.status.success() && !o.stdout.is_empty())
+            } {
+                eprintln!("🛡️ [WIPEFS_CHECK] No marker but the device carries a filesystem signature — treating as initialized (marker re-recorded after mount)");
+                let _ = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
+                if let Err(e) = self.driver.update_pv_filesystem_initialized(&volume_id).await {
+                    eprintln!("⚠️ [WIPEFS_CHECK] Could not re-record filesystem-initialized: {}", e);
+                }
             } else {
                 // Brand new volume - run wipefs (clears SPDK block reuse + kernel cache)
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2189,7 +2209,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 eprintln!("   Action: wipefs (clears SPDK block reuse + kernel cache)");
                 eprintln!("   Note: PV will be updated after formatting completes");
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                
+
                 let wipefs_output = std::process::Command::new("wipefs")
                     .arg("--all")
                     .arg("--force")
@@ -2572,7 +2592,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                         spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, true, 10)
                             .await;
                     if unmount_success {
-                        println!("✅ [NODE] Lazy unmount succeeded, waiting for cleanup...");
+                        println!("✅ [NODE] Lazy unmount succeeded, flushing before teardown...");
+                        // A lazily-detached fs still holds dirty pages; the
+                        // raid teardown below would discard them. One bounded
+                        // global sync flushes what the device can still take
+                        // (live backend: everything; dead backend: times out
+                        // and the data was unreachable anyway).
+                        if !spdk_csi_driver::mount_util::bounded_sync(15).await {
+                            println!("⚠️ [NODE] Post-lazy-unmount sync did not complete — proceeding (backend likely dead)");
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     } else {
                         println!("❌ [NODE] Lazy unmount also failed");

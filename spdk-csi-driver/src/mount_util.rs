@@ -63,6 +63,39 @@ pub async fn bounded_umount(target: &str, lazy: bool, deadline_secs: u64) -> boo
     }
 }
 
+/// Bounded global `sync`. After a LAZY unmount the filesystem is detached
+/// from the VFS but still alive with dirty pages — tearing its backing
+/// device down at that point loses every acked-but-unflushed write
+/// (observed live 2026-06-12: a busy NFS-server export went lazy at
+/// unstage and the volume came back with its server-side files rolled
+/// back). `sync(2)` still reaches a lazily-detached filesystem, so one
+/// bounded call between the lazy unmount and the device teardown flushes
+/// whatever the backing device can still accept; on a dead device it
+/// times out harmlessly (the data is unreachable either way).
+pub async fn bounded_sync(deadline_secs: u64) -> bool {
+    let join = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("timeout")
+            .args(["-k", "5", &deadline_secs.to_string(), "sync"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    });
+    match tokio::time::timeout(Duration::from_secs(deadline_secs + 10), join).await {
+        Ok(Ok(success)) => success,
+        Ok(Err(join_err)) => {
+            eprintln!("⚠️ [MOUNT_UTIL] sync task failed to join: {}", join_err);
+            false
+        }
+        Err(_) => {
+            eprintln!(
+                "⚠️ [MOUNT_UTIL] sync unresponsive past {}s (dead backing device?) — abandoning",
+                deadline_secs + 10
+            );
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
