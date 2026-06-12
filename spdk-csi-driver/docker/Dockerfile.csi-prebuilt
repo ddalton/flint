@@ -1,0 +1,20 @@
+# Assemble the CSI driver image from binaries cross-compiled on the host
+# (cargo zigbuild --target x86_64-unknown-linux-musl). The base must be a
+# previously published flint-driver image for the same platform — it
+# supplies the apt runtime deps, so this build is COPY-only and needs no
+# emulated execution. Used when no native x86-64 build node is available;
+# see docs/remote-x86-build-node.md for the native path.
+#
+# Build from a staging dir holding the two binaries (repo .dockerignore
+# excludes target/):
+#   stage=$(mktemp -d)
+#   cp target/x86_64-unknown-linux-musl/release/{csi-driver,flint-nfs-server} $stage/
+#   docker buildx build --platform linux/amd64 -f docker/Dockerfile.csi-prebuilt \
+#     -t dilipdalton/flint-driver:<tag> --push $stage
+ARG BASE=dilipdalton/flint-driver:1.2.0-rc1
+FROM ${BASE}
+
+COPY csi-driver /usr/local/bin/
+COPY flint-nfs-server /usr/local/bin/
+
+ENTRYPOINT ["/usr/local/bin/csi-driver"]
