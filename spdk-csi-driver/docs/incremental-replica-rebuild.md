@@ -733,6 +733,14 @@ gap.
 
 ## 7. Tier 2 (optional): hot rejoin with one small carried patch
 
+> **Decision 2026-06-12** (`tier2-evaluation-2026-06-12.md`): GO as a
+> bounded spike (phase 7a — patch + one manual hot rejoin, quiesce window
+> and crash drills measured); orchestration (7b) gated on the spike. Note
+> the evaluation's rev-5 deltas to this section: superblock-less raids
+> moot the sb-flip completion sequence and the examine-divert hazard, and
+> crash safety rides the control-plane record instead of on-disk slot
+> state.
+
 ### Verified: stock SPDK cannot hot-rejoin, full stop
 
 - `bdev_raid_add_base_bdev` takes no options (`bdev_raid_rpc.c:258-261`: only

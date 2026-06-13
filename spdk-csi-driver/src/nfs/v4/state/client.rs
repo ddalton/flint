@@ -842,8 +842,6 @@ impl ClientManager {
 mod tests {
     use super::*;
 
-    use super::*;
-
     fn new_id(o: ExchangeIdOutcome) -> u64 {
         match o {
             ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
