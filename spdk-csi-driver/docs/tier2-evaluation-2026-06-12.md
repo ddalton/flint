@@ -7,6 +7,11 @@ esnap-clone hot-rejoin orchestration (§7), or stop at Tier 1?
 **Deciding metric (§6):** time spent degraded with a ready standby and no
 reassembly opportunity, weighed against one workload restart per heal.
 
+> **Spike executed same session** — all four deliverables pass; verdict
+> upgraded to **GO for 7b** with two named design items (window attach
+> pre-staging, dead-controller reaping). Results, the v2 patch revision
+> the spike forced, and measured numbers: `tier2-spike-2026-06-12.md`.
+
 ## Verdict
 
 **GO — as a bounded spike first.** Write the patch, build the image, drive
