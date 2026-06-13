@@ -41,6 +41,7 @@ COPY ublk-debug.patch /tmp/
 COPY blob-recovery-optimized.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 COPY nvmf-hostlog.patch /tmp/
+COPY raid-skip-rebuild.patch /tmp/
 
 # Clone, configure, and build SPDK v26.05 with full NVMe-oF and ublk support.
 # v26.05 is required for `bdev_raid_delete clear_sb` (phase 0 superblock
@@ -67,6 +68,11 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
+    # Tier-2 hot rejoin (docs/tier2-evaluation-2026-06-12.md): skip_rebuild
+    # flag on bdev_raid_add_base_bdev + leased bdev_raid_quiesce/unquiesce
+    # RPC pair. Ships dark: plain add behavior is unchanged.
+    patch -p1 < /tmp/raid-skip-rebuild.patch && \
+    echo "✅ raid skip_rebuild + leased quiesce patch applied" && \
     rm /tmp/*.patch && \
     ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
     make -j$(nproc)

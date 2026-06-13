@@ -1,0 +1,614 @@
+diff --git a/module/bdev/raid/bdev_raid.c b/module/bdev/raid/bdev_raid.c
+index a62b491..0d1eba0 100644
+--- a/module/bdev/raid/bdev_raid.c
++++ b/module/bdev/raid/bdev_raid.c
+@@ -415,6 +415,7 @@ raid_bdev_deconfigure_base_bdev(struct raid_base_bdev_info *base_info)
+ 	raid_bdev->num_base_bdevs_discovered--;
+ 	base_info->is_configured = false;
+ 	base_info->is_process_target = false;
++	base_info->skip_rebuild = false;
+ }
+ 
+ /*
+@@ -1500,6 +1501,23 @@ static struct spdk_bdev_module g_raid_if = {
+ };
+ SPDK_BDEV_MODULE_REGISTER(raid, &g_raid_if)
+ 
++/*
++ * Quiesce/unquiesce a raid bdev on behalf of the control plane (used by the
++ * bdev_raid_quiesce RPC and the skip_rebuild add). Thin wrappers because
++ * g_raid_if is private to this file.
++ */
++int
++raid_bdev_quiesce(struct raid_bdev *raid_bdev, spdk_bdev_quiesce_cb cb_fn, void *cb_ctx)
++{
++	return spdk_bdev_quiesce(&raid_bdev->bdev, &g_raid_if, cb_fn, cb_ctx);
++}
++
++int
++raid_bdev_unquiesce(struct raid_bdev *raid_bdev, spdk_bdev_quiesce_cb cb_fn, void *cb_ctx)
++{
++	return spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if, cb_fn, cb_ctx);
++}
++
+ /*
+  * brief:
+  * raid_bdev_init is the initialization function for raid bdev module
+@@ -3357,6 +3375,103 @@ raid_bdev_configure_cb(void *ctx, int status)
+ 	raid_bdev_configure_base_bdev_done(base_info, status);
+ }
+ 
++/*
++ * skip_rebuild hot admission: attach an already-in-sync base bdev to an ONLINE
++ * raid bdev without a rebuild process. Mirrors the rebuild-finish sequence
++ * (raid_bdev_process_finish_*): under a bdev quiesce, install the base bdev's
++ * io channel into every existing raid io channel, write the superblock if
++ * enabled, then unquiesce. raid1 routes io purely off non-NULL base channels,
++ * so after unquiesce the new base serves reads and receives every write.
++ */
++static void
++raid_bdev_attach_insync_channel(struct spdk_io_channel_iter *i)
++{
++	struct raid_base_bdev_info *base_info = spdk_io_channel_iter_get_ctx(i);
++	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
++	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
++	uint8_t slot = raid_bdev_base_bdev_slot(base_info);
++	int status = 0;
++
++	/* A channel created after is_configured was set already holds the slot. */
++	if (raid_ch->base_channel[slot] == NULL) {
++		raid_ch->base_channel[slot] = spdk_bdev_get_io_channel(base_info->desc);
++		if (raid_ch->base_channel[slot] == NULL) {
++			status = -ENOMEM;
++		}
++	}
++
++	spdk_for_each_channel_continue(i, status);
++}
++
++static void
++raid_bdev_attach_insync_unquiesced(void *ctx, int status)
++{
++	struct raid_base_bdev_info *base_info = ctx;
++
++	if (status != 0) {
++		SPDK_ERRLOG("Failed to unquiesce raid bdev %s: %s\n",
++			    base_info->raid_bdev->bdev.name, spdk_strerror(-status));
++	}
++
++	raid_bdev_configure_base_bdev_done(base_info, status);
++}
++
++static void
++raid_bdev_attach_insync_channels_done(struct spdk_io_channel_iter *i, int status)
++{
++	struct raid_base_bdev_info *base_info = spdk_io_channel_iter_get_ctx(i);
++	struct raid_bdev *raid_bdev = base_info->raid_bdev;
++	int rc;
++
++	if (status != 0) {
++		/*
++		 * Some channels may hold the new base, others not — remove the base
++		 * bdev so every channel converges back to an empty slot, then fail
++		 * the add (same unwind idiom as the rebuild-start failure path).
++		 */
++		SPDK_ERRLOG("Failed to attach in-sync base bdev %s to all channels of raid bdev %s: %s\n",
++			    base_info->name, raid_bdev->bdev.name, spdk_strerror(-status));
++		_raid_bdev_remove_base_bdev(base_info, NULL, NULL);
++		rc = raid_bdev_unquiesce(raid_bdev, NULL, NULL);
++		if (rc != 0) {
++			SPDK_ERRLOG("Failed to unquiesce raid bdev %s: %s\n",
++				    raid_bdev->bdev.name, spdk_strerror(-rc));
++		}
++		raid_bdev_configure_base_bdev_done(base_info, status);
++		return;
++	}
++
++	SPDK_NOTICELOG("Admitted in-sync base bdev %s to raid bdev %s (rebuild skipped)\n",
++		       base_info->name, raid_bdev->bdev.name);
++
++	if (raid_bdev->superblock_enabled) {
++		raid_bdev_process_finish_write_sb(raid_bdev);
++	}
++
++	rc = raid_bdev_unquiesce(raid_bdev, raid_bdev_attach_insync_unquiesced, base_info);
++	if (rc != 0) {
++		raid_bdev_attach_insync_unquiesced(base_info, rc);
++	}
++}
++
++static void
++raid_bdev_attach_insync_quiesced(void *ctx, int status)
++{
++	struct raid_base_bdev_info *base_info = ctx;
++	struct raid_bdev *raid_bdev = base_info->raid_bdev;
++
++	if (status != 0) {
++		SPDK_ERRLOG("Failed to quiesce raid bdev %s: %s\n",
++			    raid_bdev->bdev.name, spdk_strerror(-status));
++		_raid_bdev_remove_base_bdev(base_info, NULL, NULL);
++		raid_bdev_configure_base_bdev_done(base_info, status);
++		return;
++	}
++
++	spdk_for_each_channel(raid_bdev, raid_bdev_attach_insync_channel, base_info,
++			      raid_bdev_attach_insync_channels_done);
++}
++
+ static void
+ raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
+ {
+@@ -3368,6 +3483,27 @@ raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
+ 		/* TODO: defer if rebuild in progress on another base bdev */
+ 		assert(raid_bdev->process == NULL);
+ 		assert(raid_bdev->state == SPDK_BDEV_RAID_STATE_ONLINE);
++
++		if (base_info->skip_rebuild) {
++			/*
++			 * Admit as already in-sync: no rebuild process. Counters and
++			 * is_configured flip first so io channels created from here on
++			 * include the slot (their io is held by the quiesce until the
++			 * existing channels are populated too).
++			 */
++			base_info->is_configured = true;
++			raid_bdev->num_base_bdevs_discovered++;
++			raid_bdev->num_base_bdevs_operational++;
++			rc = raid_bdev_quiesce(raid_bdev, raid_bdev_attach_insync_quiesced, base_info);
++			if (rc != 0) {
++				SPDK_ERRLOG("Failed to quiesce raid bdev %s: %s\n",
++					    raid_bdev->bdev.name, spdk_strerror(-rc));
++				_raid_bdev_remove_base_bdev(base_info, NULL, NULL);
++				goto out;
++			}
++			return;
++		}
++
+ 		base_info->is_process_target = true;
+ 		/* To assure is_process_target is set before is_configured when checked in raid_bdev_create_cb() */
+ 		spdk_for_each_channel(raid_bdev, raid_bdev_ch_sync, base_info, _raid_bdev_configure_base_bdev_cont);
+@@ -3640,7 +3776,7 @@ out:
+ 
+ int
+ raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, const char *name,
+-			raid_bdev_action_cb cb_fn, void *cb_ctx)
++			bool skip_rebuild, raid_bdev_action_cb cb_fn, void *cb_ctx)
+ {
+ 	struct raid_base_bdev_info *base_info = NULL, *iter;
+ 	int rc;
+@@ -3654,6 +3790,12 @@ raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, const char *name,
+ 		return -EPERM;
+ 	}
+ 
++	if (skip_rebuild && raid_bdev->state != SPDK_BDEV_RAID_STATE_ONLINE) {
++		SPDK_ERRLOG("cannot add base bdev '%s' to raid bdev '%s' with skip_rebuild: "
++			    "raid bdev is not online\n", name, raid_bdev->bdev.name);
++		return -EINVAL;
++	}
++
+ 	if (raid_bdev->state == SPDK_BDEV_RAID_STATE_CONFIGURING) {
+ 		struct spdk_bdev *bdev = spdk_bdev_get_by_name(name);
+ 
+@@ -3694,12 +3836,14 @@ raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, const char *name,
+ 	if (base_info->name == NULL) {
+ 		return -ENOMEM;
+ 	}
++	base_info->skip_rebuild = skip_rebuild;
+ 
+ 	rc = raid_bdev_configure_base_bdev(base_info, false, cb_fn, cb_ctx);
+ 	if (rc != 0 && (rc != -ENODEV || raid_bdev->state != SPDK_BDEV_RAID_STATE_CONFIGURING)) {
+ 		SPDK_ERRLOG("base bdev '%s' configure failed: %s\n", name, spdk_strerror(-rc));
+ 		free(base_info->name);
+ 		base_info->name = NULL;
++		base_info->skip_rebuild = false;
+ 	}
+ 
+ 	return rc;
+diff --git a/module/bdev/raid/bdev_raid.h b/module/bdev/raid/bdev_raid.h
+index f822551..eb899f1 100644
+--- a/module/bdev/raid/bdev_raid.h
++++ b/module/bdev/raid/bdev_raid.h
+@@ -73,6 +73,16 @@ struct raid_base_bdev_info {
+ 	/* Set to true if this base bdev is the target of a background process */
+ 	bool			is_process_target;
+ 
++	/*
++	 * Set to true to admit this base bdev as already in-sync when it is added to
++	 * an ONLINE raid bdev: no background rebuild process is started; instead the
++	 * base bdev is attached to every existing io channel under a bdev quiesce.
++	 * The caller is responsible for guaranteeing that the base bdev holds a
++	 * point-in-time-consistent copy of the array, taken under the same quiesce
++	 * window as the add (see bdev_raid_quiesce). Cleared when the slot empties.
++	 */
++	bool			skip_rebuild;
++
+ 	/* Set to true to indicate that the base bdev is being removed because of a failure */
+ 	bool			is_failed;
+ 
+@@ -241,8 +251,10 @@ int raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bde
+ void raid_bdev_delete(struct raid_bdev *raid_bdev, bool clear_sb, raid_bdev_action_cb cb_fn,
+ 		      void *cb_ctx);
+ int raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, const char *name,
+-			    raid_bdev_action_cb cb_fn, void *cb_ctx);
++			    bool skip_rebuild, raid_bdev_action_cb cb_fn, void *cb_ctx);
+ struct raid_bdev *raid_bdev_find_by_name(const char *name);
++int raid_bdev_quiesce(struct raid_bdev *raid_bdev, spdk_bdev_quiesce_cb cb_fn, void *cb_ctx);
++int raid_bdev_unquiesce(struct raid_bdev *raid_bdev, spdk_bdev_quiesce_cb cb_fn, void *cb_ctx);
+ enum spdk_bdev_raid_level raid_bdev_str_to_level(const char *str);
+ const char *raid_bdev_level_to_str(enum spdk_bdev_raid_level level);
+ const char *raid_bdev_state_to_str(enum spdk_bdev_raid_state state);
+diff --git a/module/bdev/raid/bdev_raid_rpc.c b/module/bdev/raid/bdev_raid_rpc.c
+index b1ba7d8..3f71513 100644
+--- a/module/bdev/raid/bdev_raid_rpc.c
++++ b/module/bdev/raid/bdev_raid_rpc.c
+@@ -10,6 +10,7 @@
+ #include "spdk/string.h"
+ #include "spdk/log.h"
+ #include "spdk/env.h"
++#include "spdk/thread.h"
+ #include "spdk_internal/rpc_autogen.h"
+ 
+ /*
+@@ -258,6 +259,7 @@ SPDK_RPC_REGISTER("bdev_raid_delete", rpc_bdev_raid_delete, SPDK_RPC_RUNTIME)
+ static const struct spdk_json_object_decoder rpc_bdev_raid_add_base_bdev_decoders[] = {
+ 	{"base_bdev", offsetof(struct rpc_bdev_raid_add_base_bdev_ctx, base_bdev), spdk_json_decode_string},
+ 	{"raid_bdev", offsetof(struct rpc_bdev_raid_add_base_bdev_ctx, raid_bdev), spdk_json_decode_string},
++	{"skip_rebuild", offsetof(struct rpc_bdev_raid_add_base_bdev_ctx, skip_rebuild), spdk_json_decode_bool, true},
+ };
+ 
+ static void
+@@ -312,7 +314,8 @@ rpc_bdev_raid_add_base_bdev(struct spdk_jsonrpc_request *request,
+ 		goto cleanup;
+ 	}
+ 
+-	rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, rpc_bdev_raid_add_base_bdev_done, request);
++	rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, req.skip_rebuild,
++				     rpc_bdev_raid_add_base_bdev_done, request);
+ 	if (rc != 0) {
+ 		spdk_jsonrpc_send_error_response_fmt(request, rc,
+ 						     "Failed to add base bdev %s to RAID bdev %s: %s",
+@@ -427,3 +430,266 @@ rpc_bdev_raid_set_options(struct spdk_jsonrpc_request *request, const struct spd
+ }
+ SPDK_RPC_REGISTER("bdev_raid_set_options", rpc_bdev_raid_set_options,
+ 		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
++
++/*
++ * Leased raid bdev quiesce: the control plane quiesces guest io for a short
++ * window spanning several RPCs across nodes (final snapshot -> esnap clone ->
++ * skip_rebuild add). If the orchestrator dies mid-window an unleased quiesce
++ * would leave guest io hung until the initiator escalates to resets, so the
++ * quiesce auto-expires unless renewed: re-issuing bdev_raid_quiesce restarts
++ * the clock, bdev_raid_unquiesce releases it.
++ */
++struct raid_quiesce_lease {
++	char					*raid_name;
++	struct spdk_poller			*expiry_poller;
++	uint64_t				lease_us;
++	/* set while the initial quiesce RPC is in flight */
++	struct spdk_jsonrpc_request		*request;
++	TAILQ_ENTRY(raid_quiesce_lease)		link;
++};
++
++static TAILQ_HEAD(, raid_quiesce_lease) g_raid_quiesce_leases =
++	TAILQ_HEAD_INITIALIZER(g_raid_quiesce_leases);
++
++static struct raid_quiesce_lease *
++raid_quiesce_lease_find(const char *raid_name)
++{
++	struct raid_quiesce_lease *lease;
++
++	TAILQ_FOREACH(lease, &g_raid_quiesce_leases, link) {
++		if (strcmp(lease->raid_name, raid_name) == 0) {
++			return lease;
++		}
++	}
++
++	return NULL;
++}
++
++static void
++raid_quiesce_lease_free(struct raid_quiesce_lease *lease)
++{
++	TAILQ_REMOVE(&g_raid_quiesce_leases, lease, link);
++	spdk_poller_unregister(&lease->expiry_poller);
++	free(lease->raid_name);
++	free(lease);
++}
++
++static void
++raid_quiesce_lease_expired_unquiesced(void *ctx, int status)
++{
++	if (status != 0) {
++		SPDK_ERRLOG("Auto-unquiesce after lease expiry failed: %s\n", spdk_strerror(-status));
++	}
++}
++
++static int
++raid_quiesce_lease_expired(void *ctx)
++{
++	struct raid_quiesce_lease *lease = ctx;
++	struct raid_bdev *raid_bdev = raid_bdev_find_by_name(lease->raid_name);
++	int rc;
++
++	SPDK_WARNLOG("Quiesce lease on raid bdev '%s' expired without renewal - auto-unquiescing\n",
++		     lease->raid_name);
++
++	if (raid_bdev != NULL) {
++		rc = raid_bdev_unquiesce(raid_bdev, raid_quiesce_lease_expired_unquiesced, NULL);
++		if (rc != 0) {
++			SPDK_ERRLOG("Failed to auto-unquiesce raid bdev '%s': %s\n",
++				    lease->raid_name, spdk_strerror(-rc));
++		}
++	}
++
++	raid_quiesce_lease_free(lease);
++
++	return SPDK_POLLER_BUSY;
++}
++
++static const struct spdk_json_object_decoder rpc_bdev_raid_quiesce_decoders[] = {
++	{"name", offsetof(struct rpc_bdev_raid_quiesce_ctx, name), spdk_json_decode_string},
++	{"lease_ms", offsetof(struct rpc_bdev_raid_quiesce_ctx, lease_ms), spdk_json_decode_uint64, true},
++};
++
++static void
++rpc_bdev_raid_quiesce_done(void *ctx, int status)
++{
++	struct raid_quiesce_lease *lease = ctx;
++	struct spdk_jsonrpc_request *request = lease->request;
++	struct raid_bdev *raid_bdev;
++
++	lease->request = NULL;
++
++	if (status != 0) {
++		raid_quiesce_lease_free(lease);
++		spdk_jsonrpc_send_error_response_fmt(request, status, "Failed to quiesce raid bdev: %s",
++						     spdk_strerror(-status));
++		return;
++	}
++
++	lease->expiry_poller = SPDK_POLLER_REGISTER(raid_quiesce_lease_expired, lease, lease->lease_us);
++	if (lease->expiry_poller == NULL) {
++		/* never hold an unleased quiesce */
++		raid_bdev = raid_bdev_find_by_name(lease->raid_name);
++		if (raid_bdev != NULL) {
++			raid_bdev_unquiesce(raid_bdev, NULL, NULL);
++		}
++		raid_quiesce_lease_free(lease);
++		spdk_jsonrpc_send_error_response(request, -ENOMEM,
++						 "Failed to register quiesce lease expiry poller");
++		return;
++	}
++
++	spdk_jsonrpc_send_bool_response(request, true);
++}
++
++static void
++rpc_bdev_raid_quiesce(struct spdk_jsonrpc_request *request,
++		      const struct spdk_json_val *params)
++{
++	struct rpc_bdev_raid_quiesce_ctx req = {};
++	struct raid_quiesce_lease *lease;
++	struct raid_bdev *raid_bdev;
++	int rc;
++
++	if (spdk_json_decode_object(params, rpc_bdev_raid_quiesce_decoders,
++				    SPDK_COUNTOF(rpc_bdev_raid_quiesce_decoders),
++				    &req)) {
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
++						 "spdk_json_decode_object failed");
++		goto cleanup;
++	}
++
++	raid_bdev = raid_bdev_find_by_name(req.name);
++	if (raid_bdev == NULL) {
++		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV, "raid bdev %s not found",
++						     req.name);
++		goto cleanup;
++	}
++
++	if (req.lease_ms == 0) {
++		req.lease_ms = 10000;
++	}
++
++	lease = raid_quiesce_lease_find(req.name);
++	if (lease != NULL) {
++		if (lease->request != NULL) {
++			spdk_jsonrpc_send_error_response_fmt(request, -EBUSY,
++							     "quiesce of raid bdev %s still in progress",
++							     req.name);
++			goto cleanup;
++		}
++		/* renew: restart the expiry clock; the bdev stays quiesced */
++		spdk_poller_unregister(&lease->expiry_poller);
++		lease->lease_us = req.lease_ms * 1000;
++		lease->expiry_poller = SPDK_POLLER_REGISTER(raid_quiesce_lease_expired, lease,
++				       lease->lease_us);
++		if (lease->expiry_poller == NULL) {
++			raid_bdev_unquiesce(raid_bdev, NULL, NULL);
++			raid_quiesce_lease_free(lease);
++			spdk_jsonrpc_send_error_response(request, -ENOMEM,
++							 "Failed to renew quiesce lease expiry poller");
++			goto cleanup;
++		}
++		spdk_jsonrpc_send_bool_response(request, true);
++		goto cleanup;
++	}
++
++	lease = calloc(1, sizeof(*lease));
++	if (lease == NULL) {
++		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
++		goto cleanup;
++	}
++
++	lease->raid_name = strdup(req.name);
++	if (lease->raid_name == NULL) {
++		free(lease);
++		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
++		goto cleanup;
++	}
++
++	lease->lease_us = req.lease_ms * 1000;
++	lease->request = request;
++	TAILQ_INSERT_TAIL(&g_raid_quiesce_leases, lease, link);
++
++	rc = raid_bdev_quiesce(raid_bdev, rpc_bdev_raid_quiesce_done, lease);
++	if (rc != 0) {
++		raid_quiesce_lease_free(lease);
++		spdk_jsonrpc_send_error_response_fmt(request, rc, "Failed to quiesce raid bdev: %s",
++						     spdk_strerror(-rc));
++	}
++
++cleanup:
++	free_rpc_bdev_raid_quiesce(&req);
++}
++SPDK_RPC_REGISTER("bdev_raid_quiesce", rpc_bdev_raid_quiesce, SPDK_RPC_RUNTIME)
++
++static const struct spdk_json_object_decoder rpc_bdev_raid_unquiesce_decoders[] = {
++	{"name", offsetof(struct rpc_bdev_raid_unquiesce_ctx, name), spdk_json_decode_string},
++};
++
++static void
++rpc_bdev_raid_unquiesce_done(void *ctx, int status)
++{
++	struct spdk_jsonrpc_request *request = ctx;
++
++	if (status != 0) {
++		spdk_jsonrpc_send_error_response_fmt(request, status,
++						     "Failed to unquiesce raid bdev: %s",
++						     spdk_strerror(-status));
++		return;
++	}
++
++	spdk_jsonrpc_send_bool_response(request, true);
++}
++
++static void
++rpc_bdev_raid_unquiesce(struct spdk_jsonrpc_request *request,
++			const struct spdk_json_val *params)
++{
++	struct rpc_bdev_raid_unquiesce_ctx req = {};
++	struct raid_quiesce_lease *lease;
++	struct raid_bdev *raid_bdev;
++	int rc;
++
++	if (spdk_json_decode_object(params, rpc_bdev_raid_unquiesce_decoders,
++				    SPDK_COUNTOF(rpc_bdev_raid_unquiesce_decoders),
++				    &req)) {
++		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
++						 "spdk_json_decode_object failed");
++		goto cleanup;
++	}
++
++	lease = raid_quiesce_lease_find(req.name);
++	if (lease == NULL) {
++		spdk_jsonrpc_send_error_response_fmt(request, -ENOENT,
++						     "no quiesce lease held on raid bdev %s",
++						     req.name);
++		goto cleanup;
++	}
++
++	if (lease->request != NULL) {
++		spdk_jsonrpc_send_error_response_fmt(request, -EBUSY,
++						     "quiesce of raid bdev %s still in progress",
++						     req.name);
++		goto cleanup;
++	}
++
++	raid_quiesce_lease_free(lease);
++
++	raid_bdev = raid_bdev_find_by_name(req.name);
++	if (raid_bdev == NULL) {
++		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV, "raid bdev %s not found",
++						     req.name);
++		goto cleanup;
++	}
++
++	rc = raid_bdev_unquiesce(raid_bdev, rpc_bdev_raid_unquiesce_done, request);
++	if (rc != 0) {
++		spdk_jsonrpc_send_error_response_fmt(request, rc, "Failed to unquiesce raid bdev: %s",
++						     spdk_strerror(-rc));
++	}
++
++cleanup:
++	free_rpc_bdev_raid_unquiesce(&req);
++}
++SPDK_RPC_REGISTER("bdev_raid_unquiesce", rpc_bdev_raid_unquiesce, SPDK_RPC_RUNTIME)
+diff --git a/python/spdk/cli/bdev.py b/python/spdk/cli/bdev.py
+index 0c7d13e..8e35b82 100644
+--- a/python/spdk/cli/bdev.py
++++ b/python/spdk/cli/bdev.py
+@@ -1238,12 +1238,30 @@ def add_parser(subparsers):
+     def bdev_raid_add_base_bdev(args):
+         args.client.bdev_raid_add_base_bdev(
+                                          raid_bdev=args.raid_bdev,
+-                                         base_bdev=args.base_bdev)
++                                         base_bdev=args.base_bdev,
++                                         skip_rebuild=args.skip_rebuild)
+     p = subparsers.add_parser('bdev_raid_add_base_bdev', help='Add base bdev to existing raid bdev')
+     p.add_argument('raid_bdev', help='raid bdev name')
+     p.add_argument('base_bdev', help='base bdev name')
++    p.add_argument('--skip-rebuild', dest='skip_rebuild', action='store_true',
++                   help='admit the base bdev as already in-sync; no rebuild is started')
+     p.set_defaults(func=bdev_raid_add_base_bdev)
+ 
++    def bdev_raid_quiesce(args):
++        args.client.bdev_raid_quiesce(name=args.name, lease_ms=args.lease_ms)
++    p = subparsers.add_parser('bdev_raid_quiesce',
++                              help='Quiesce IO on a raid bdev under an auto-expiring lease')
++    p.add_argument('name', help='raid bdev name')
++    p.add_argument('--lease-ms', dest='lease_ms', type=int, default=10000,
++                   help='lease duration in ms; re-issue to renew (default 10000)')
++    p.set_defaults(func=bdev_raid_quiesce)
++
++    def bdev_raid_unquiesce(args):
++        args.client.bdev_raid_unquiesce(name=args.name)
++    p = subparsers.add_parser('bdev_raid_unquiesce', help='Release a raid bdev quiesce lease')
++    p.add_argument('name', help='raid bdev name')
++    p.set_defaults(func=bdev_raid_unquiesce)
++
+     def bdev_raid_remove_base_bdev(args):
+         args.client.bdev_raid_remove_base_bdev(name=args.name)
+     p = subparsers.add_parser('bdev_raid_remove_base_bdev', help='Remove base bdev from existing raid bdev')
+diff --git a/schema/schema.json b/schema/schema.json
+index 0760dee..10c5f95 100644
+--- a/schema/schema.json
++++ b/schema/schema.json
+@@ -5493,6 +5493,38 @@
+           "type": "string",
+           "required": true,
+           "description": "Base bdev name"
++        },
++        {
++          "name": "skip_rebuild",
++          "type": "boolean",
++          "description": "Admit the base bdev as already in-sync: attach it to all io channels under a quiesce instead of starting a rebuild. The caller must guarantee the base bdev holds a point-in-time-consistent copy of the array taken under the same quiesce window"
++        }
++      ]
++    },
++    {
++      "name": "bdev_raid_quiesce",
++      "params": [
++        {
++          "name": "name",
++          "type": "string",
++          "required": true,
++          "description": "RAID bdev name"
++        },
++        {
++          "name": "lease_ms",
++          "type": "uint64",
++          "description": "Lease duration in milliseconds (default 10000). The quiesce auto-expires unless renewed by calling bdev_raid_quiesce again; bdev_raid_unquiesce releases it"
++        }
++      ]
++    },
++    {
++      "name": "bdev_raid_unquiesce",
++      "params": [
++        {
++          "name": "name",
++          "type": "string",
++          "required": true,
++          "description": "RAID bdev name"
+         }
+       ]
+     },
