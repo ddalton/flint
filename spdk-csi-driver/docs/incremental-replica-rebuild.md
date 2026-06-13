@@ -676,11 +676,11 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   pod; its synthetic RWO PVC is re-staged on restart (raid re-assembled with
   the standby included) while clients retry via the stable per-volume Service.
   But "ride through" must be scoped honestly against the shipped server:
-  `flint-nfs-server` holds all NFSv4 state **in memory**
-  (`StateManager::new_in_memory`, `server_v4.rs:66` — the SQLite state backend
-  exists in-tree but is not wired into this binary), so a bounce loses
-  clientids/sessions/opens/locks, and recovery rests on a 90 s allow-all grace
-  window (`lease.rs:22`). Stateless I/O and uncommitted writes ride through
+  `flint-nfs-server` *held* all NFSv4 state **in memory** (the SQLite state
+  backend existed in-tree but was not wired into the binary until
+  2026-06-12 — see the closure note below), so a bounce lost
+  clientids/sessions/opens/locks, and recovery rested on a 90 s allow-all
+  grace window (`lease.rs:22`). Stateless I/O and uncommitted writes ride through
   (the per-boot write verifier forces clients to resend); clients that miss the
   remaining grace — which the unstage + reassembly + final delta all eat into —
   get `NFS4ERR_NO_GRACE` → application errors. Required to make the claim
@@ -698,9 +698,21 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   boot-time file-handle instance ids → permanent `EBADHANDLE` after every
   bounce) made the RWX bounce a repeating outage. All four fixed; handle
   ids are now pinned per volume (`PNFS_INSTANCE_ID` =
-  `stable_nfs_instance_id`). The in-memory-state/grace caveat above still
-  stands for long-lived opens/locks and remains the gap to close (SQLite
-  state backend on the exported volume) before claiming lock-holding
+  `stable_nfs_instance_id`). *Closed later the same day:* the SQLite state
+  backend is wired into the shipped binary with its DB on the exported
+  volume (`.flint-nfs/state.db`, `synchronous=FULL`), exactly as
+  prescribed above — clientids, stateids, `reclaim_complete`, and an
+  instance counter roam with the PVC; sessions are deliberately dropped
+  (kernel clients re-`CREATE_SESSION` on `BADSESSION`). Validated live:
+  a dirty-state client (one long-lived fd, no fsync) rode through a
+  server replacement with its uncommitted writes retransmitted against
+  the restored stateid, no grace stall, gap-free file. Getting there
+  required fixing a four-deep durability chain (SIGTERM ignored →
+  lazy-unmount data loss → `synchronous=NORMAL` → a marker-aliasing bug
+  that reformatted RWX volumes at every restage); see
+  `phase6-residual-2026-06-12.md`, NFSv4 persistence round. Byte-range
+  locks are still memory-only (`LockManager` sits outside
+  `StateManager`) — the remaining gap before claiming lock-holding
   workloads ride through.
 - **RWO volumes — by policy**: an opt-in knob (per StorageClass or PV
   annotation) to bounce the workload pod during a maintenance window, for

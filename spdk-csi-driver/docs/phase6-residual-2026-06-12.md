@@ -340,7 +340,8 @@ Two more defects surfaced and one was fixed on the spot:
   an NFS mount; its unstage is now unmount-only (`main.rs`,
   `is_rwx_nfs_stage` via findmnt fstype).
 - **NFSv4 open-state recovery is the remaining RWX production blocker
-  (open).** After a server replacement, a client with a pre-bounce open
+  (fixed same day — see the persistence round below).** After a server
+  replacement, a client with a pre-bounce open
   resumed issuing writes that were acked locally but never landed in the
   file (writeback against dead open state; `sync(2)` hides the error, the
   app-level read-back caught it). File handles survive now; open/lock
@@ -362,3 +363,68 @@ until cleared — the cutover tick now clears such stale flags itself.
 (c) Deleting a bare NFS server pod while its volume stays attached leaves
 no recreation path until the next ControllerPublish — worth a controller
 reconcile eventually.
+
+### NFSv4 persistent state round (same day, post-1.3.0)
+
+The open-state blocker above is closed. The SQLite `StateBackend` is now
+wired into the shipped server binary, with the DB on the exported volume
+itself (`<export>/.flint-nfs/state.db`) so state roams with the PVC
+exactly as the design doc prescribed. What persists: clientids (confirmed
+flag, `reclaim_complete`), stateids, and a server instance counter;
+sessions are deliberately dropped on restore (the kernel client
+re-`CREATE_SESSION`s on `BADSESSION` — persisting them buys nothing and
+risks seqid skew). `FLINT_NFS_STATE=memory` opts out; an unreadable DB is
+quarantined to `.db.unusable` and never blocks server start.
+
+Getting the DB to actually survive a bounce surfaced a four-deep
+durability chain, each link hiding the next (test harness: a writer pod
+holding ONE long-lived fd, buffered appends, no fsync — the worst-case
+dirty-state client):
+
+1. **The server ignored SIGTERM** — every "graceful" delete rode out the
+   grace period to SIGKILL (delete: 31 s → 1.0 s after wiring a
+   `tokio::select!` on SIGTERM/SIGINT). The unclean death left the export
+   mount busy, forcing every unstage down the lazy-unmount path.
+2. **SQLite ran `synchronous=NORMAL`**, which assumes the device outlives
+   the process — false here, where unstage tears the device away.
+   `open_durable()` pins the export-volume DB to `synchronous=FULL`.
+3. **Lazy unmount + raid teardown lost acked writes**: after `umount -l`
+   the fs is detached but dirty, and the teardown dropped every
+   unflushed page. NodeUnstage now runs a bounded `sync` between a lazy
+   unmount and SPDK teardown (`mount_util::bounded_sync`).
+4. **Every RWX restage reformatted the volume.** The
+   `filesystem-initialized` marker for synthetic NFS volumes was read and
+   written under the volumeHandle (`nfs-server-pvc-X`), which names no PV
+   — so the marker landed nowhere, every restage looked brand-new, and
+   `wipefs --all --force` + mkfs destroyed the live filesystem each time
+   (this retroactively explains the round-1 "rolled-back file" anomalies,
+   which were attributed to writeback against dead open state — that
+   analysis was incomplete; the wipe was doing the destroying). Marker
+   ops now resolve through `record_pv_name()`, and a `blkid` probe guards
+   the wipe branch: a filesystem signature on a thin lvol can only mean
+   real data — never wipe on a missing annotation alone. Pre-fix volumes
+   self-heal: the guard re-records the marker at their next restage.
+
+A fifth bug fell out of unit-testing the restore: persistence was
+fire-and-forget per record, so a `put` could land after a later `delete`
+(live consequence: `reclaim_complete` lost → full 90 s grace stall on
+restore). Client/stateid managers now drain writes through a per-manager
+FIFO queue.
+
+**Validation (live, 2-replica `flint-r2` RWX volume):** controlled bounce
+with ~3 min of accumulated dirty client state — pod delete 1.0 s, plain
+(non-lazy) unmount at unstage, no wipe (`lost+found` mtime unchanged,
+marker found via PV annotation), new server logged `instance #3` and
+restored 1 client/1 stateid, and the kernel client retransmitted its
+uncommitted writes against the **restored stateid** with no grace stall.
+Writer: zero restarts; file: gap-free, zero NUL bytes, line count ==
+counter. An unplanned harsher variant ran first (old-binary pod stuck in
+D-state, kubelet force-proceeded, raid torn down under the live fs): the
+DB still survived, the new instance restored state, and the client's
+retransmit recovered the file — the design holds even under unclean
+death.
+
+Still open after this round: byte-range locks are not persisted (the
+`LockManager` sits outside `StateManager`); the bare-NFS-pod recreation
+gap (c) above; and the design doc's "run the final delta before deleting
+the old pod" ordering remains advisory rather than enforced.
