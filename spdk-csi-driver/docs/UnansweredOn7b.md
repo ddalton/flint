@@ -604,3 +604,88 @@ campaign evidence.
 watch chase → standby → window → localization end-to-end; measure the
 in-controller window p99 vs the 2 s target. That is the first item of
 the 7b-3 validation tail (runbook + §9-8 adversarial campaign).
+
+## 7b-3 first live session (2026-07-02, cluster `runj`) — E2E validated, one P0 bug found & fixed
+
+**Setup.** `flint-driver:tier2-7b3` (e05b650) built on the c5d, rolled to
+the controller and node DS; controller env `FLINT_EPOCH_SCHEDULER=enabled`
+(30 s), `FLINT_CATCHUP=enabled`, `FLINT_HOT_REJOIN=enabled`,
+`FLINT_CUTOVER=disabled`. Fixture: 2 Gi `flint-2r` PVC, busybox writer
+(5 fsync'd appends/s) on the c5d consumer; replicas on `runj-aws-1`
+(idx 0) and `runj-aws-2` (idx 1). Leg kills = `kill 1` in the node pod's
+`spdk-tgt` sidecar.
+
+**Drill 1 — the full pipeline, PASS.** Kill 06:19:42 → `ReplicaStale`
++33 s → catch-up (revert to ep-1, replay to ep-3) → standby +53 s →
+chase advance (catch-up won the 06:21:29 claim race; the trigger won the
+next) → 06:22:29 **intent observed as `stale + MARKER:6`**
+(demote-at-intent) with the scheduler's cut visibly deferred under the
+claim → **window 148 ms** (quiesce 19, cut E_f 10, export+AER E_f 25,
+esnap clone 11, export+AER head 41, renew 11, add 19, unquiesce 12) →
+flip → localized after 4 s of esnap exposure → both `in_sync` at
+06:22:34. Kill→full-redundancy **2 m 52 s**, dominated by detection
+(33 s) and 60 s tick cadences; the mechanism itself is ~5 s of it. The
+writer never restarted and shows a fully contiguous sequence with **zero
+gaps > 1 s** — the window is invisible at this write rate. The spike's
+~10.4 s manual window collapsed exactly as designed: both ~1.2–3 s
+attach handshakes became 25/41 ms AER waits.
+
+**P0 bug found (the reason live runs exist): the orphan sweep reaped the
+serving `_hr` head.** At 06:24:50 — three 60 s strikes after the head's
+creation — `runj-aws-2`'s node agent deleted
+`vol_<pv>_replica_1_hr` as an absent-PV orphan:
+`strip_replica_suffix` rejects the `_hr` tail (digits check), so the
+whole remainder was read as a PV name that doesn't exist. Overlapping
+with drill 2's kill of the other leg it took the raid to total loss
+(writer EIO; `VolumeDataPathLost` correctly flagged). Inspection found
+the same hole for the localization pad export id `<vol>_hrpad<i>` in
+`classify_subsystem_nqn` (would reap the pad export mid-backfill). Both
+fixed in `5feb602` (+ classification pins; the E_f `:hotrejoin:` NQN is
+confirmed invisible to the sweep by prefix); image `tier2-7b3.1` rolled.
+Note the bomb was armed from drill 1 alone — every hot-rejoined volume
+would have died ~3 minutes after localization, no second failure needed.
+
+Two sub-findings from the blast radius, both worth runbook entries:
+1. **Recovery deadlock by design:** with the record claiming `in_sync`
+   but the head deleted out-of-band, stage refuses assembly ("in_sync
+   peer unavailable, below minimum" — correct, the record is authority)
+   and the health monitor cannot re-label without an online raid.
+   Remediation is an operator record patch: mark the replica stale, drop
+   `active_lvol_uuid`. Documented procedure now exists (this session).
+2. **Transparent absorption:** drill 2's own kill (`runj-aws-1`,
+   06:24:41) never even degraded the record — spdk-tgt restarted in 2 s,
+   the node agent re-exported, and nvme-tcp reconnect resumed queued io
+   before any write failed. No stale, no divergence. Tier-0 at its best.
+
+**Recovery doubled as organic validation.** After the record patch and a
+writer bounce: degraded assembly from `runj-aws-1` → catch-up reverted
+the replacement head onto `runj-aws-2`'s OWN surviving chain at ep-8 —
+the chain drill 1's localization built, consumed as a §5 revert base for
+the first time — and the concurrent restage's **phase-4 admission won
+the race against the trigger** (correct: hot rejoin exists for volumes
+with no reassembly in sight; one was in flight). Both `in_sync` again
+without a second window.
+
+**Drill 3 — E2E on the fixed image, PASS, sweep survival proven.** Kill
+06:51:13 → stale +30 s → standby → `MARKER:15` (scheduler deferral
+observed again) → **window 159 ms** → localized after 3 s → both
+`in_sync` at +3 m 42 s. The new `_hr` head then **survived 7+ minutes of
+sweep ticks** (pre-fix TTL was exactly 3), served as a full epoch-stream
+member (its parent advanced with every cut, ep-15 → ep-48 over the
+55-minute steady-state hold), raid `online 2/2`, zero sweep activity on
+the node, writer contiguous end-to-end.
+
+**Scorecard vs targets:** two windows, 148/159 ms — **13× under the 2 s
+bar**; no `HotRejoinWindowSlow` events; localization lag 4 s / 3 s on a
+near-empty volume with the conservative oldest-present base (the
+multi-GB lag measurement is still owed); intent/flip/reconcile record
+choreography behaved exactly per the 7b-1 state table under live races
+(catch-up vs trigger claim alternation adds ≤ ~2 min worst case — fine).
+
+**Still owed for 7b-3:** the §9-8 adversarial set (orchestrator kill
+in-window, R_src kill mid-backfill, crash between add and flip),
+localization lag at data scale, the two-leg scrub with the
+fs-allocated-only methodology, the operator runbook (must include the
+record-repair procedure above), and window p99 over more than two
+samples. Cluster `runj` stands with the fixture running
+(`tier2-7b3.1` everywhere, all three orchestrators on).
