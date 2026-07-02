@@ -266,6 +266,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Hot-rejoin trigger orchestrator (Tier-2 7b-2) — controller role.
+    // Rejoins a converged standby into the LIVE raid through the leased
+    // quiesce window (skip_rebuild patch) instead of waiting for a
+    // reassembly that never comes on attached no-bounce RWO volumes, then
+    // localizes the esnap chain. Decision 1 policy (B): automatic for that
+    // class, per-PV opt-out via flint.csi.storage.io/hot-rejoin=disabled.
+    // Default-disabled: enabling is the operator's acceptance of the
+    // carried SPDK patch.
+    if mode == "controller" || mode == "all" {
+        let hr_cfg = spdk_csi_driver::hot_rejoin::HotRejoinTriggerConfig::from_env();
+        if hr_cfg.enabled {
+            let mech = spdk_csi_driver::hot_rejoin::HotRejoinConfig::from_env();
+            println!(
+                "♻️ [HOT_REJOIN] Hot-rejoin orchestrator enabled (max lag: {} epoch(s), retry backoff: {}s, window target: {}ms)",
+                hr_cfg.max_lag,
+                hr_cfg.retry_backoff.as_secs(),
+                mech.window_target.as_millis()
+            );
+            let hr_driver = driver.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::hot_rejoin::run_hot_rejoin_orchestrator(hr_driver, hr_cfg).await;
+            });
+        } else {
+            println!("ℹ️ [HOT_REJOIN] Hot-rejoin orchestrator disabled (set FLINT_HOT_REJOIN=enabled to activate)");
+        }
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;

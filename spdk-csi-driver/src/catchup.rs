@@ -112,7 +112,7 @@
 // two-stale-replicas question stays open).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -426,8 +426,9 @@ impl CatchupStore for KubeStore {
         ef_epoch: &str,
     ) -> Result<(), RpcError> {
         let (uuid, ef) = (replica_uuid.to_string(), ef_epoch.to_string());
+        let now = replica_sync::now_rfc3339();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
-            r.mark_hot_rejoin_intent(&uuid, &ef);
+            r.mark_hot_rejoin_intent(&uuid, &ef, &now);
         })
         .await?;
         Ok(())
@@ -1905,18 +1906,18 @@ pub async fn run_catchup_for_volume(
 
 /// Background orchestrator loop (controller role). Each volume runs as its
 /// own task — a multi-hour bulk copy on one volume must not stall every
-/// other volume's chase — guarded by an in-flight set so a slow volume is
-/// simply skipped by later ticks until its task finishes.
+/// other volume's chase — guarded by the shared per-volume claim (Tier-2
+/// design item 4): a slow volume is simply skipped by later ticks until its
+/// task finishes, and cutover / hot-rejoin cannot land on it mid-copy.
 pub async fn run_catchup_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CatchupConfig) {
     info!(
         t_back_secs = cfg.t_back.as_secs(),
         "[CATCHUP] Replica catch-up orchestrator started"
     );
-    let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        if let Err(e) = orchestrator_tick(&driver, &cfg, &in_flight).await {
+        if let Err(e) = orchestrator_tick(&driver, &cfg).await {
             warn!(error = %e, "[CATCHUP] Orchestrator tick failed (non-fatal)");
         }
     }
@@ -1925,7 +1926,6 @@ pub async fn run_catchup_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CatchupCo
 async fn orchestrator_tick(
     driver: &Arc<SpdkCsiDriver>,
     cfg: &CatchupConfig,
-    in_flight: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<(), RpcError> {
     use k8s_openapi::api::core::v1::PersistentVolume;
     use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -1977,17 +1977,16 @@ async fn orchestrator_tick(
             }
         };
 
-        {
-            let mut guard = in_flight.lock().expect("in-flight lock poisoned");
-            if !guard.insert(volume_id.clone()) {
-                continue; // previous cycle's task still running
-            }
-        }
+        let Some(claim) = crate::volume_claims::global()
+            .try_claim(&volume_id, crate::volume_claims::OP_CATCHUP)
+        else {
+            continue; // a previous cycle, a cutover, or a hot rejoin holds it
+        };
         let driver = driver.clone();
         let cfg = cfg.clone();
-        let in_flight = in_flight.clone();
         let consumer = consumers.get(&volume_id).cloned();
         tokio::spawn(async move {
+            let _claim = claim; // released when this task ends, however it ends
             let store = KubeStore { client: driver.kube_client.clone() };
             if let Err(e) = run_catchup_for_volume(
                 driver.as_ref(),
@@ -2001,7 +2000,6 @@ async fn orchestrator_tick(
             {
                 warn!(volume_id, error = %e, "[CATCHUP] Volume catch-up cycle failed (non-fatal)");
             }
-            in_flight.lock().expect("in-flight lock poisoned").remove(&volume_id);
         });
     }
     Ok(())
@@ -2010,6 +2008,7 @@ async fn orchestrator_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn replica(node: &str, uuid: &str) -> ReplicaInfo {
         ReplicaInfo {

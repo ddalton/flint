@@ -95,6 +95,11 @@ pub struct HotRejoinConfig {
     pub add_retries: u32,
     /// Shallow-copy poll cadence for the localization backfill.
     pub poll_interval: Duration,
+    /// The window-duration target (§7 / the eval's ~2 s bar). A committed
+    /// window that took longer emits a Warning event — the eval's fallback
+    /// trigger (reconsider the atomic-add variant if p99 cannot hold it).
+    /// FLINT_HOT_REJOIN_WINDOW_TARGET_MS, default 2s.
+    pub window_target: Duration,
 }
 
 impl Default for HotRejoinConfig {
@@ -105,6 +110,7 @@ impl Default for HotRejoinConfig {
             aer_poll: Duration::from_millis(25),
             add_retries: 3,
             poll_interval: Duration::from_millis(500),
+            window_target: Duration::from_secs(2),
         }
     }
 }
@@ -128,6 +134,7 @@ impl HotRejoinConfig {
             aer_poll: d.aer_poll,
             add_retries: d.add_retries,
             poll_interval: d.poll_interval,
+            window_target: ms("FLINT_HOT_REJOIN_WINDOW_TARGET_MS", d.window_target),
         }
     }
 }
@@ -212,14 +219,28 @@ fn resolve<'a>(
     replicas: &'a [ReplicaInfo],
     consumer: &'a str,
 ) -> Result<Topology<'a>, &'static str> {
+    // One rejoin per volume at a time: the E_f export NQN is per-VOLUME, so
+    // a second concurrent window would collide with the first's transport
+    // (and its reconciler owns the marked replica anyway).
+    if record.replicas.iter().any(|r| r.hot_rejoin.is_some()) {
+        return Err("a hot rejoin is already in progress on this volume");
+    }
+    // Target preference: the most-converged standby (the 7b-2 trigger's
+    // class — Tier-1's chase already did the bulk copy, so localization
+    // replays the least), else the first stale replica (manual/drill path;
+    // its cold chain makes localization long but never incorrect).
     let rec = record
         .replicas
         .iter()
-        .find(|r| r.sync_state == SyncState::Stale)
-        .ok_or("no stale replica to rejoin")?;
-    if rec.hot_rejoin.is_some() {
-        return Err("stale replica already claimed by an in-progress hot rejoin");
-    }
+        .filter(|r| r.sync_state == SyncState::Standby)
+        .max_by_key(|r| {
+            r.last_epoch
+                .as_deref()
+                .and_then(|e| epoch_seq(volume_id, e))
+                .unwrap_or(0)
+        })
+        .or_else(|| record.replicas.iter().find(|r| r.sync_state == SyncState::Stale))
+        .ok_or("no stale or standby replica to rejoin")?;
     let (idx, identity) = replicas
         .iter()
         .enumerate()
@@ -298,8 +319,22 @@ pub async fn hot_rejoin_volume(
     let ef = epoch_name(volume_id, ef_seq);
 
     // INTENT before any node mutation: from here every crash point is
-    // marker-recoverable.
+    // marker-recoverable. A standby target is demoted to stale in the same
+    // write (see mark_hot_rejoin_intent). The CAS closure no-ops if the
+    // target changed state under us (e.g. a restage admitted it in_sync
+    // between our load and the write) — verify the marker actually landed
+    // before opening a window on a stranger.
     store.record_hot_rejoin_intent(volume_id, &topo.rec.lvol_uuid, &ef).await?;
+    let intent_landed = store.load(volume_id).await?.is_some_and(|r| {
+        r.replicas
+            .iter()
+            .any(|rec| rec.lvol_uuid == topo.rec.lvol_uuid && rec.hot_rejoin.as_deref() == Some(ef.as_str()))
+    });
+    if !intent_landed {
+        return Ok(HotRejoinOutcome::NotEligible(
+            "target replica changed state before the window opened",
+        ));
+    }
 
     prestage(rpc, &topo).await.inspect_err(|_| {
         // Nothing consumer-visible was touched; the marker-driven scrub
@@ -332,6 +367,22 @@ pub async fn hot_rejoin_volume(
                 )
                 .await;
             info!(volume_id, node = %topo.identity.node_name, window_ms, "[HOT_REJOIN] Window committed");
+            if window_ms > cfg.window_target.as_millis() {
+                store
+                    .emit(
+                        volume_id,
+                        "Warning",
+                        "HotRejoinWindowSlow",
+                        &format!(
+                            "Hot-rejoin quiesce window took {}ms against the {}ms target ({}) — \
+                             if this persists, reconsider the atomic-add variant (§7 option b)",
+                            window_ms,
+                            cfg.window_target.as_millis(),
+                            detail
+                        ),
+                    )
+                    .await;
+            }
 
             // Post-commit: reload the record (the flip changed it) and run
             // localization inline. Failure is retried by the reconciler.
@@ -1336,18 +1387,394 @@ async fn localize(
     // raid write since the add: fully in sync. mark_in_sync clears the
     // marker atomically with the state change.
     store.record_in_sync(volume_id, &rec.lvol_uuid, &ef).await?;
+    // Localization lag (design item 5): how long the leg depended on the
+    // remote E_f export — the new-in-kind SPOF exposure the eval flags.
+    // `since` was stamped at the record flip.
+    let exposure = rec
+        .since
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+        .filter(|secs| *secs >= 0)
+        .map(|secs| format!(" after {}s of esnap exposure", secs))
+        .unwrap_or_default();
     store
         .emit(
             volume_id,
             "Normal",
             "HotRejoinLocalized",
             &format!(
-                "Hot-rejoined replica on {} localized its chain at {} — fully redundant",
-                rec.node_name, ef
+                "Hot-rejoined replica on {} localized its chain at {} — fully redundant{}",
+                rec.node_name, ef, exposure
             ),
         )
         .await;
     info!(volume_id, node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Localization complete");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 7b-2: the trigger loop — plan_hot_rejoin + orchestrator (controller role)
+// ---------------------------------------------------------------------------
+
+/// PV annotation opting a volume OUT of automatic hot rejoin (Decision 1:
+/// policy (B) auto-triggers on the no-opt-in class; this is the surgical
+/// per-volume lever). Only the literal "disabled" (any case) opts out.
+pub const HOT_REJOIN_ANNOTATION: &str = "flint.csi.storage.io/hot-rejoin";
+
+#[derive(Debug, Clone)]
+pub struct HotRejoinTriggerConfig {
+    /// FLINT_HOT_REJOIN=enabled — default off. Turning this on is the
+    /// operator's deliberate acceptance of the carried skip_rebuild patch;
+    /// it is the blast-radius control Decision 1 leans on.
+    pub enabled: bool,
+    /// A standby may trail by at most this many epochs to be rejoined —
+    /// same readiness bar as the cutover planner (the chase has converged;
+    /// localization replays the least). FLINT_HOT_REJOIN_MAX_LAG, default 1.
+    pub max_lag: u64,
+    /// Wall-clock back-off after a FAILED (unwound) window before the
+    /// volume is retried — every attempt costs the consumer a quiesce.
+    /// FLINT_HOT_REJOIN_RETRY_SECS, default 300.
+    pub retry_backoff: Duration,
+}
+
+impl Default for HotRejoinTriggerConfig {
+    fn default() -> Self {
+        HotRejoinTriggerConfig {
+            enabled: false,
+            max_lag: 1,
+            retry_backoff: Duration::from_secs(300),
+        }
+    }
+}
+
+impl HotRejoinTriggerConfig {
+    pub fn from_env() -> Self {
+        let d = HotRejoinTriggerConfig::default();
+        HotRejoinTriggerConfig {
+            enabled: std::env::var("FLINT_HOT_REJOIN")
+                .map(|v| {
+                    v.eq_ignore_ascii_case("enabled")
+                        || v.eq_ignore_ascii_case("true")
+                        || v == "1"
+                })
+                .unwrap_or(d.enabled),
+            max_lag: std::env::var("FLINT_HOT_REJOIN_MAX_LAG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.max_lag),
+            retry_backoff: std::env::var("FLINT_HOT_REJOIN_RETRY_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.retry_backoff),
+        }
+    }
+}
+
+/// Everything the planner needs about one volume, gathered by the tick.
+#[derive(Debug, Clone)]
+pub struct VolumeHotRejoinView {
+    pub volume_id: String,
+    pub record: VolumeSyncRecord,
+    /// Node consuming the volume per its VolumeAttachment.
+    pub consumer: Option<String>,
+    /// The PV is RWX — Tier-1's NFS-pod bounce owns its reassembly.
+    pub rwx: bool,
+    /// The PV is the synthetic backing PV of an RWX volume. It is itself an
+    /// attached multi-replica RWO PV that never opts into rejoin-bounce, so
+    /// a literal policy (B) would hot-rejoin it — Decision 1's explicit
+    /// exclusion: `plan_cutover` owns those bounces.
+    pub nfs_backing: bool,
+    /// `flint.csi.storage.io/rejoin-bounce` == enabled: the volume opted
+    /// into the disruptive Tier-1 path — the two planners stay disjoint.
+    pub rwo_bounce_enabled: bool,
+    /// `flint.csi.storage.io/hot-rejoin` == "disabled" (the opt-out).
+    pub hot_rejoin_disabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HotRejoinDecision {
+    /// Open a window for this volume's rejoin target (the mechanism picks
+    /// the same target `resolve` does: most-converged standby).
+    Rejoin,
+    /// Nothing to do; the reason is for operator-facing logs.
+    Wait(&'static str),
+}
+
+/// Decide whether this volume gets a hot rejoin now — Decision 1, policy
+/// (B): automatic for attached multi-replica RWO volumes that did NOT opt
+/// into `rejoin-bounce`, with a per-PV `hot-rejoin: "disabled"` opt-out and
+/// the synthetic RWX backing PV excluded. Pure; the tick owns the shared
+/// per-volume claim and the retry back-off.
+///
+/// The trigger fires on a READY STANDBY (lag ≤ max_lag), not on a raw stale:
+/// Tier-1's fenced chase stays the bulk-copy engine (no data-path impact
+/// while it runs), and hot rejoin is the admission step that replaces the
+/// reassembly the (B) class never gets. A cold stale rejoined directly would
+/// serve most reads through the remote E_f export for the whole backfill —
+/// a live read-latency regression the chase avoids for free.
+pub fn plan_hot_rejoin(
+    view: &VolumeHotRejoinView,
+    cfg: &HotRejoinTriggerConfig,
+) -> HotRejoinDecision {
+    let vol = &view.volume_id;
+    if view.nfs_backing {
+        return HotRejoinDecision::Wait(
+            "synthetic RWX backing PV — the cutover planner owns its bounce",
+        );
+    }
+    if view.rwx {
+        return HotRejoinDecision::Wait("RWX volume — the Tier-1 NFS bounce owns reassembly");
+    }
+    if view.hot_rejoin_disabled {
+        return HotRejoinDecision::Wait("hot-rejoin disabled by PV annotation");
+    }
+    if view.rwo_bounce_enabled {
+        return HotRejoinDecision::Wait(
+            "volume opted into rejoin-bounce — the cutover planner owns it",
+        );
+    }
+    if view.record.replicas.iter().any(|r| r.hot_rejoin.is_some()) {
+        return HotRejoinDecision::Wait("hot rejoin in progress — the reconciler owns it");
+    }
+    if view.consumer.is_none() {
+        return HotRejoinDecision::Wait(
+            "volume not attached — the next stage admits standbys naturally",
+        );
+    }
+    let latest = view.record.latest_epoch_seq(vol);
+    if latest == 0 {
+        return HotRejoinDecision::Wait("no epoch history");
+    }
+    // Mirror resolve()'s target choice so the decision and the mechanism
+    // agree on which replica a Rejoin means.
+    let standby = view
+        .record
+        .replicas
+        .iter()
+        .filter(|r| r.sync_state == SyncState::Standby)
+        .max_by_key(|r| {
+            r.last_epoch
+                .as_deref()
+                .and_then(|e| epoch_seq(vol, e))
+                .unwrap_or(0)
+        });
+    match standby {
+        Some(rec) => {
+            let Some(seq) = rec.last_epoch.as_deref().and_then(|e| epoch_seq(vol, e)) else {
+                return HotRejoinDecision::Wait("standby mark unreadable — not ready");
+            };
+            if latest.saturating_sub(seq) > cfg.max_lag {
+                return HotRejoinDecision::Wait(
+                    "standby lag above threshold — the chase has not converged",
+                );
+            }
+            HotRejoinDecision::Rejoin
+        }
+        None => {
+            if view.record.replicas.iter().any(|r| r.sync_state == SyncState::Stale) {
+                return HotRejoinDecision::Wait(
+                    "stale replica awaits the Tier-1 catch-up to standby (FLINT_CATCHUP)",
+                );
+            }
+            HotRejoinDecision::Wait("no standby replica to rejoin")
+        }
+    }
+}
+
+/// Background trigger loop (controller role, default-disabled). Each
+/// volume's rejoin (or marker reconcile) runs as its own task under the
+/// shared per-volume claim — a long localization on one volume must not
+/// stall another's two-second window.
+pub async fn run_hot_rejoin_orchestrator(
+    driver: std::sync::Arc<SpdkCsiDriver>,
+    cfg: HotRejoinTriggerConfig,
+) {
+    info!(
+        max_lag = cfg.max_lag,
+        retry_backoff_secs = cfg.retry_backoff.as_secs(),
+        "[HOT_REJOIN] Hot-rejoin orchestrator started"
+    );
+    let backoff: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>> =
+        Default::default();
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        if let Err(e) = hot_rejoin_tick(&driver, &cfg, &backoff).await {
+            warn!(error = %e, "[HOT_REJOIN] Orchestrator tick failed (non-fatal)");
+        }
+    }
+}
+
+async fn hot_rejoin_tick(
+    driver: &std::sync::Arc<SpdkCsiDriver>,
+    cfg: &HotRejoinTriggerConfig,
+    backoff: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>,
+) -> Result<(), RpcError> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    use k8s_openapi::api::storage::v1::VolumeAttachment;
+    use kube::api::ListParams;
+    use kube::Api;
+    use std::collections::HashMap;
+
+    let pvs: Api<PersistentVolume> = Api::all(driver.kube_client.clone());
+    let vas: Api<VolumeAttachment> = Api::all(driver.kube_client.clone());
+
+    let consumers: HashMap<String, String> = vas
+        .list(&ListParams::default())
+        .await?
+        .items
+        .into_iter()
+        .filter(|va| va.status.as_ref().map(|s| s.attached).unwrap_or(false))
+        .filter_map(|va| {
+            va.spec
+                .source
+                .persistent_volume_name
+                .map(|pv| (pv, va.spec.node_name))
+        })
+        .collect();
+
+    for pv in pvs.list(&ListParams::default()).await?.items {
+        let Some(volume_id) = pv.metadata.name.clone() else { continue };
+        let is_flint = pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.csi.as_ref())
+            .map(|c| c.driver == "flint.csi.storage.io")
+            .unwrap_or(false);
+        if !is_flint {
+            continue;
+        }
+        let replicas = match crate::replica_sync::replicas_from_pv(&pv) {
+            Ok(Some(r)) => r,
+            Ok(None) => continue, // single replica
+            Err(e) => {
+                tracing::debug!(volume_id, error = %e, "[HOT_REJOIN] Skipping PV with unreadable replica info");
+                continue;
+            }
+        };
+        let Some(record) = pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(crate::replica_sync::SYNC_STATE_ANNOTATION))
+            .and_then(|s| VolumeSyncRecord::from_annotation(s).ok())
+        else {
+            continue;
+        };
+
+        let annotations = pv.metadata.annotations.as_ref();
+        let view = VolumeHotRejoinView {
+            volume_id: volume_id.clone(),
+            consumer: consumers.get(&volume_id).cloned(),
+            rwx: crate::replica_sync::is_rwx_pv(&pv),
+            nfs_backing: crate::replica_sync::nfs_backing_parent(&pv).is_some(),
+            rwo_bounce_enabled: annotations
+                .and_then(|a| a.get(crate::cutover::REJOIN_BOUNCE_ANNOTATION))
+                .map(|v| v.eq_ignore_ascii_case("enabled") || v == "true" || v == "1")
+                .unwrap_or(false),
+            hot_rejoin_disabled: annotations
+                .and_then(|a| a.get(HOT_REJOIN_ANNOTATION))
+                .map(|v| v.eq_ignore_ascii_case("disabled"))
+                .unwrap_or(false),
+            record,
+        };
+
+        // Marker present: dispatch the reconciler (resume localization,
+        // adopt, scrub…) — this is what keeps a crashed rejoin converging
+        // even when FLINT_CATCHUP is off. The catch-up orchestrator makes
+        // the same dispatch; the shared claim keeps them from overlapping.
+        // Skip the backing-PV/RWX classes: their records belong to Tier-1
+        // streams that never set markers.
+        if !view.nfs_backing
+            && view.record.replicas.iter().any(|r| r.hot_rejoin.is_some())
+        {
+            let Some(claim) = crate::volume_claims::global()
+                .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN)
+            else {
+                continue;
+            };
+            let driver = driver.clone();
+            let view = view.clone();
+            tokio::spawn(async move {
+                let _claim = claim;
+                let store = crate::catchup::KubeStore { client: driver.kube_client.clone() };
+                reconcile_marked(
+                    driver.as_ref(),
+                    &store,
+                    &view.volume_id,
+                    &view.record,
+                    &replicas,
+                    view.consumer.as_deref(),
+                    &CatchupConfig::from_env(),
+                )
+                .await;
+            });
+            continue;
+        }
+
+        match plan_hot_rejoin(&view, cfg) {
+            HotRejoinDecision::Wait(reason) => {
+                tracing::debug!(volume_id, reason, "[HOT_REJOIN] Waiting");
+            }
+            HotRejoinDecision::Rejoin => {
+                // Back off after a failed window — every attempt costs the
+                // consumer a quiesce.
+                let recently_failed = backoff
+                    .lock()
+                    .expect("hot-rejoin backoff lock poisoned")
+                    .get(&volume_id)
+                    .map(|at| at.elapsed() < cfg.retry_backoff)
+                    .unwrap_or(false);
+                if recently_failed {
+                    tracing::debug!(volume_id, "[HOT_REJOIN] In retry back-off — skipping");
+                    continue;
+                }
+                let Some(claim) = crate::volume_claims::global()
+                    .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN)
+                else {
+                    tracing::debug!(volume_id, "[HOT_REJOIN] Volume claimed by another operation — deferring");
+                    continue;
+                };
+                let consumer = view
+                    .consumer
+                    .clone()
+                    .expect("planner only says Rejoin for attached volumes");
+                let driver = driver.clone();
+                let backoff = backoff.clone();
+                let mech_cfg = HotRejoinConfig::from_env();
+                tokio::spawn(async move {
+                    let _claim = claim;
+                    let store = crate::catchup::KubeStore { client: driver.kube_client.clone() };
+                    match hot_rejoin_volume(
+                        driver.as_ref(),
+                        &store,
+                        &volume_id,
+                        &replicas,
+                        &consumer,
+                        &mech_cfg,
+                    )
+                    .await
+                    {
+                        Ok(HotRejoinOutcome::Rejoined { window_ms, localized }) => {
+                            info!(volume_id, window_ms, localized, "[HOT_REJOIN] Rejoin complete");
+                        }
+                        Ok(HotRejoinOutcome::NotEligible(reason)) => {
+                            tracing::debug!(volume_id, reason, "[HOT_REJOIN] Not eligible after claim");
+                        }
+                        Err(e) => {
+                            warn!(volume_id, error = %e, "[HOT_REJOIN] Rejoin failed (unwound) — backing off");
+                            backoff
+                                .lock()
+                                .expect("hot-rejoin backoff lock poisoned")
+                                .insert(volume_id.clone(), Instant::now());
+                        }
+                    }
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1946,7 +2373,10 @@ mod tests {
             ef_epoch: &str,
         ) -> Result<(), RpcError> {
             self.ops.lock().unwrap().push(format!("hr_intent:{}", ef_epoch));
-            self.record.lock().unwrap().mark_hot_rejoin_intent(replica_uuid, ef_epoch);
+            self.record
+                .lock()
+                .unwrap()
+                .mark_hot_rejoin_intent(replica_uuid, ef_epoch, NOW);
             Ok(())
         }
         async fn record_hot_rejoin_flip(
@@ -2028,6 +2458,7 @@ mod tests {
             aer_poll: Duration::ZERO,
             add_retries: 2,
             poll_interval: Duration::ZERO,
+            window_target: Duration::from_secs(2),
         }
     }
 
@@ -2277,7 +2708,7 @@ mod tests {
             );
         }
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         let store = FakeStore::new(record.clone());
 
         reconcile_marked(
@@ -2308,7 +2739,7 @@ mod tests {
                 .or_default();
         }
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         let store = FakeStore::new(record.clone());
 
         reconcile_marked(
@@ -2361,7 +2792,7 @@ mod tests {
             );
         }
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         record.mark_hot_rejoined(
             "uuid-b",
             &epoch_name(VOL, 3),
@@ -2426,7 +2857,7 @@ mod tests {
             );
         }
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         record.mark_hot_rejoined("uuid-b", &epoch_name(VOL, 3), &["uuid-a".into()], "uuid-head", NOW);
         let store = FakeStore::new(record.clone());
 
@@ -2453,7 +2884,7 @@ mod tests {
             Some(&epoch_name(VOL, 3)),
         );
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         record.mark_hot_rejoined("uuid-b", &epoch_name(VOL, 3), &["uuid-a".into()], "uuid-head", NOW);
         let store = FakeStore::new(record.clone());
 
@@ -2479,7 +2910,7 @@ mod tests {
         // Head still esnap (no local parent), no leg: unusable — demote.
         rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head");
         let mut record = stale_b_record();
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         record.mark_hot_rejoined("uuid-b", &epoch_name(VOL, 3), &["uuid-a".into()], "uuid-head", NOW);
         let store = FakeStore::new(record.clone());
 
@@ -2513,5 +2944,206 @@ mod tests {
         // lvol name cap (the 1.2.0-rc2 clamp lesson).
         let vol = "pvc-0123456789abcdef0123456789abcdef0123";
         assert!(head_lvol_name(vol, 2).len() < 64);
+    }
+
+    // -- 7b-2: standby targets + the trigger planner ---------------------------
+
+    /// stale_b_record chased to convergence: replica b standby at epoch 2
+    /// (the record's latest) — the trigger's class.
+    fn standby_b_record() -> VolumeSyncRecord {
+        let mut r = stale_b_record();
+        r.mark_standby("uuid-b", &epoch_name(VOL, 2), "chased", NOW);
+        r
+    }
+
+    fn trigger_cfg() -> HotRejoinTriggerConfig {
+        HotRejoinTriggerConfig {
+            enabled: true,
+            max_lag: 1,
+            retry_backoff: Duration::from_secs(300),
+        }
+    }
+
+    fn hr_view(record: VolumeSyncRecord) -> VolumeHotRejoinView {
+        VolumeHotRejoinView {
+            volume_id: VOL.to_string(),
+            record,
+            consumer: Some("consumer".to_string()),
+            rwx: false,
+            nfs_backing: false,
+            rwo_bounce_enabled: false,
+            hot_rejoin_disabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn standby_target_demotes_at_intent_then_flips_and_localizes() {
+        // The 7b-2 production path: a converged standby (stuck waiting for
+        // a reassembly that never comes) goes through the same window and
+        // ends in_sync — with the intent CAS demoting it to stale+marker so
+        // the crash decode table stays exact.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let store = FakeStore::new(standby_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::Rejoined { localized, .. } => assert!(localized),
+            other => panic!("expected Rejoined, got {:?}", other),
+        }
+
+        // Intent landed before the flip (the demote+claim single write).
+        let ops = store.ops();
+        let pos = |needle: &str| {
+            ops.iter()
+                .position(|o| o.starts_with(needle))
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            pos(&format!("hr_intent:{}", epoch_name(VOL, 3)))
+                < pos(&format!("hr_flip:{}", epoch_name(VOL, 3))),
+            "intent must precede the flip: {:?}",
+            ops
+        );
+
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.hot_rejoin.is_none());
+        assert_eq!(b.last_epoch.as_deref(), Some(epoch_name(VOL, 3).as_str()));
+        assert_eq!(store.events(), vec!["HotRejoinSucceeded", "HotRejoinLocalized"]);
+    }
+
+    #[tokio::test]
+    async fn second_rejoin_refused_while_any_marker_set() {
+        // The E_f export NQN is per-volume: a second concurrent window
+        // would collide with the first's transport. resolve() refuses the
+        // whole volume while any replica carries a marker.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let mut record = stale_b_record();
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
+        let store = FakeStore::new(record);
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::NotEligible(reason) => {
+                assert!(reason.contains("already in progress"), "unexpected: {}", reason)
+            }
+            other => panic!("expected NotEligible, got {:?}", other),
+        }
+        assert!(rpc.calls_of("bdev_raid_quiesce").is_empty(), "no window opened");
+    }
+
+    #[test]
+    fn resolve_prefers_the_most_converged_standby() {
+        let replicas = vec![
+            replica("node-a", "uuid-a"),
+            replica("node-b", "uuid-b"),
+            {
+                let mut c = replica("node-c", "uuid-c");
+                c.lvol_name = format!("vol_{}_replica_2", VOL);
+                c
+            },
+        ];
+        let mut record = VolumeSyncRecord::initial(&replicas);
+        let all: Vec<String> =
+            vec!["uuid-a".into(), "uuid-b".into(), "uuid-c".into()];
+        for seq in 1..=3 {
+            record.apply_epoch_cut(&epoch_name(VOL, seq), &all, NOW);
+        }
+        // b: stale. c: standby at epoch 3. The standby wins even though the
+        // stale comes first in the record.
+        record.mark_stale("uuid-b", "leg failed", NOW);
+        record.mark_stale("uuid-c", "leg failed", NOW);
+        record.mark_standby("uuid-c", &epoch_name(VOL, 3), "chased", NOW);
+
+        let topo = resolve(VOL, &record, &replicas, "consumer").expect("resolves");
+        assert_eq!(topo.rec.lvol_uuid, "uuid-c");
+        assert_eq!(topo.idx, 2);
+    }
+
+    #[test]
+    fn plan_rejoins_the_target_class_and_only_it() {
+        let cfg = trigger_cfg();
+
+        // The (B) class: attached multi-replica RWO, no opt-in/out, ready
+        // standby.
+        assert_eq!(plan_hot_rejoin(&hr_view(standby_b_record()), &cfg), HotRejoinDecision::Rejoin);
+
+        // Synthetic RWX backing PV: cutover owns its bounce.
+        let mut v = hr_view(standby_b_record());
+        v.nfs_backing = true;
+        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("backing")));
+
+        // RWX parent: Tier-1 NFS bounce.
+        let mut v = hr_view(standby_b_record());
+        v.rwx = true;
+        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("RWX")));
+
+        // The surgical opt-out.
+        let mut v = hr_view(standby_b_record());
+        v.hot_rejoin_disabled = true;
+        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("disabled")));
+
+        // Bounce-opted volumes stay on the disjoint Tier-1 path.
+        let mut v = hr_view(standby_b_record());
+        v.rwo_bounce_enabled = true;
+        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("cutover")));
+
+        // Detached: the next stage admits the standby for free.
+        let mut v = hr_view(standby_b_record());
+        v.consumer = None;
+        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("not attached")));
+    }
+
+    #[test]
+    fn plan_requires_a_ready_standby() {
+        let cfg = trigger_cfg();
+
+        // A raw stale belongs to the Tier-1 chase first (read-latency: a
+        // cold esnap leg would forward reads to the source for the whole
+        // backfill).
+        assert!(matches!(
+            plan_hot_rejoin(&hr_view(stale_b_record()), &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("catch-up")
+        ));
+
+        // Lagging standby: the chase has not converged.
+        let mut record = standby_b_record();
+        record.apply_epoch_cut(&epoch_name(VOL, 3), &["uuid-a".into()], NOW);
+        record.apply_epoch_cut(&epoch_name(VOL, 4), &["uuid-a".into()], NOW);
+        assert!(matches!(
+            plan_hot_rejoin(&hr_view(record), &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("lag")
+        ));
+
+        // Marker set: the reconciler owns the volume.
+        let mut record = stale_b_record();
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
+        assert!(matches!(
+            plan_hot_rejoin(&hr_view(record), &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("in progress")
+        ));
+
+        // Fully redundant: nothing to do.
+        let mut record = stale_b_record();
+        record.mark_in_sync("uuid-b", &epoch_name(VOL, 2), "healed", NOW);
+        assert!(matches!(
+            plan_hot_rejoin(&hr_view(record), &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("no standby")
+        ));
+
+        // Unreadable standby mark: never ready.
+        let mut record = standby_b_record();
+        record.replicas[1].last_epoch = Some("garbage".to_string());
+        assert!(matches!(
+            plan_hot_rejoin(&hr_view(record), &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("unreadable")
+        ));
     }
 }

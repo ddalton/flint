@@ -340,14 +340,36 @@ impl VolumeSyncRecord {
         changed
     }
 
-    /// Hot-rejoin intent (Tier-2 7b): claim a STALE replica for the quiesce
-    /// window about to open, recording the E_f epoch name the window will
-    /// cut. Written BEFORE the window so every crash point afterwards is
+    /// Hot-rejoin intent (Tier-2 7b): claim a replica for the quiesce window
+    /// about to open, recording the E_f epoch name the window will cut.
+    /// Written BEFORE the window so every crash point afterwards is
     /// recoverable by the marker-driven reconciler (leg live → complete the
-    /// flip; leg absent → scrub the stranded artifacts). Refuses non-stale
-    /// replicas. Returns true if anything changed.
-    pub fn mark_hot_rejoin_intent(&mut self, lvol_uuid: &str, ef_epoch: &str) -> bool {
+    /// flip; leg absent → scrub the stranded artifacts).
+    ///
+    /// A STANDBY target (the 7b-2 trigger's class: chased to convergence,
+    /// stuck waiting for a reassembly that never comes) is demoted to stale
+    /// in the SAME record write — the marker state machine stays exact:
+    /// stale+marker always means "window not yet flipped" (adopt/scrub),
+    /// standby+marker always means "flipped, localizing" (resume/promote/
+    /// demote). The demote keeps `last_epoch` and `reverted_to`: if the
+    /// window unwinds, the untouched chain re-heals to standby cheaply.
+    /// Refuses in_sync replicas and replicas already carrying a marker.
+    /// Returns true if anything changed.
+    pub fn mark_hot_rejoin_intent(
+        &mut self,
+        lvol_uuid: &str,
+        ef_epoch: &str,
+        now_rfc3339: &str,
+    ) -> bool {
         match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            Some(rec) if rec.sync_state == SyncState::Standby && rec.hot_rejoin.is_none() => {
+                rec.sync_state = SyncState::Stale;
+                rec.since = Some(now_rfc3339.to_string());
+                rec.reason =
+                    Some("hot-rejoin window opening (converged standby target)".to_string());
+                rec.hot_rejoin = Some(ef_epoch.to_string());
+                true
+            }
             Some(rec) if rec.sync_state == SyncState::Stale => {
                 if rec.hot_rejoin.as_deref() != Some(ef_epoch) {
                     rec.hot_rejoin = Some(ef_epoch.to_string());
@@ -1567,20 +1589,57 @@ mod tests {
     // -- Tier-2 7b hot-rejoin marker ------------------------------------------
 
     #[test]
-    fn hot_rejoin_intent_claims_only_stale_replicas() {
+    fn hot_rejoin_intent_claims_stale_and_standby_only() {
         let mut record = three_replica_record();
         // in_sync replicas cannot be claimed.
-        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t"));
         assert!(record.get("uuid-b").unwrap().hot_rejoin.is_none());
 
         record.mark_stale("uuid-b", "leg failed", "2026-07-01T00:00:00Z");
-        assert!(record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+        assert!(record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t"));
         assert_eq!(
             record.get("uuid-b").unwrap().hot_rejoin.as_deref(),
             Some("epoch-vol1-3")
         );
         // Idempotent re-claim of the same E_f is not a change.
-        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t"));
+    }
+
+    #[test]
+    fn hot_rejoin_intent_demotes_a_standby_in_one_write() {
+        // The 7b-2 trigger's class: a converged standby is claimed by
+        // demoting it to stale AND setting the marker in the same record
+        // write — stale+marker must always mean "window not yet flipped".
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_standby("uuid-b", "epoch-vol1-2", "chased", "t1");
+        record
+            .replicas
+            .iter_mut()
+            .find(|r| r.lvol_uuid == "uuid-b")
+            .unwrap()
+            .reverted_to = Some("epoch-vol1-1".to_string());
+
+        assert!(record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t2"));
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert_eq!(b.hot_rejoin.as_deref(), Some("epoch-vol1-3"));
+        assert_eq!(b.since.as_deref(), Some("t2"));
+        // The chain bookkeeping survives the demote: an unwound window
+        // re-heals to standby cheaply.
+        assert_eq!(b.last_epoch.as_deref(), Some("epoch-vol1-2"));
+        assert_eq!(b.reverted_to.as_deref(), Some("epoch-vol1-1"));
+
+        // A marked standby (post-flip, localizing) is never re-claimed.
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", "t0");
+        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t1");
+        record.mark_hot_rejoined("uuid-b", "epoch-vol1-3", &["uuid-a".into()], "uuid-head", "t2");
+        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-4", "t3"));
+        assert_eq!(
+            record.get("uuid-b").unwrap().hot_rejoin.as_deref(),
+            Some("epoch-vol1-3")
+        );
     }
 
     #[test]
@@ -1593,7 +1652,7 @@ mod tests {
             now,
         );
         record.mark_stale("uuid-b", "leg failed", now);
-        record.mark_hot_rejoin_intent("uuid-b", &epoch_name("vol1", 3));
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name("vol1", 3), "t");
 
         assert!(record.mark_hot_rejoined(
             "uuid-b",
@@ -1636,7 +1695,7 @@ mod tests {
         // Scrub of an uncommitted window: marker gone, state untouched.
         let mut record = three_replica_record();
         record.mark_stale("uuid-b", "leg failed", now);
-        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3");
+        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t");
         assert!(record.clear_hot_rejoin("uuid-b", "window died", false, now));
         let b = record.get("uuid-b").unwrap();
         assert_eq!(b.sync_state, SyncState::Stale);
@@ -1658,7 +1717,7 @@ mod tests {
         let now = "2026-07-01T00:00:00Z";
         let mut record = three_replica_record();
         record.mark_stale("uuid-b", "leg failed", now);
-        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3");
+        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", "t");
         let round =
             VolumeSyncRecord::from_annotation(&record.to_annotation()).expect("round trip");
         assert_eq!(round, record);

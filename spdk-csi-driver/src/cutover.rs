@@ -932,6 +932,16 @@ async fn cutover_tick(
                 debug!(volume_id, reason, "[CUTOVER] Waiting");
             }
             decision => {
+                // Shared per-volume claim (Tier-2 design item 4): never
+                // bounce a volume mid-catch-up or mid-hot-rejoin — the
+                // restage would waste their work. Held only for the bounce
+                // itself; verification is passive.
+                let Some(_claim) = crate::volume_claims::global()
+                    .try_claim(&volume_id, crate::volume_claims::OP_CUTOVER)
+                else {
+                    debug!(volume_id, "[CUTOVER] Volume claimed by another operation — deferring bounce");
+                    continue;
+                };
                 let standbys: Vec<String> = view
                     .record
                     .replicas

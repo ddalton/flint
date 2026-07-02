@@ -518,3 +518,89 @@ harness); the in-controller window p99 vs the 2 s target is therefore
 unmeasured (pre-staging removes both attach handshakes from the window —
 the spike's ~1.2 s each becomes two AER waits). **Next: 7b-2 (trigger
 loop + shared claim + events/metrics), then the 7b-3 campaign.**
+
+## 7b-2 implemented (2026-07-01, same session) — trigger loop + shared claim
+
+The trigger loop is code-complete on `main` (suite 503 green): the
+mechanism now has its production caller. Three pieces, per the plan:
+
+**The shared per-volume claim (design item 4)** — `src/volume_claims.rs`,
+a process-global registry (single-controller assumption, same as
+CreateVolume placement): `try_claim(volume, op)` returns an RAII guard, at
+most one long-running operation per volume across catch-up / cutover /
+hot-rejoin. The catch-up orchestrator's private in-flight set is replaced
+by it (same skip-if-busy behavior, now cross-planner); the cutover tick
+claims around the bounce itself (verification stays passive); the
+hot-rejoin tick claims around the window+localization and around marker
+reconciles. The epoch scheduler deliberately does NOT claim — its cuts
+are the chase's designed input and must keep flowing during multi-hour
+catch-ups — it only *consults* the registry and defers a volume's cycle
+while a `hot-rejoin` claim is held (a scheduler cut racing the window's
+strict-fresh E_f cut would abort the window).
+
+**Standby targets (mechanism delta the plan forced into the open).** The
+plan's trigger gate — "ready standby (lag ≤ threshold)" — was written
+before 7b-1, whose `resolve()` only took STALE replicas. The gate is
+right: the eval's motivating limbo is precisely the *converged standby*
+on an attached no-bounce RWO volume (`plan_cutover`'s "waiting for a
+natural reassembly"), and a raw stale rejoined directly would serve most
+reads through the remote E_f export for the entire backfill — a live
+read-latency regression the fenced chase avoids for free. So Tier-1
+stays the bulk-copy engine and hot rejoin is the admission step. The
+mechanism therefore accepts standby targets via **demote-at-intent**:
+`mark_hot_rejoin_intent` moves standby → stale + marker in ONE record
+write, preserving the 7b-1 crash-decode table exactly (stale+marker is
+always "window not yet flipped"; standby+marker always "flipped,
+localizing"). The demote keeps `last_epoch`/`reverted_to`, so an unwound
+window re-heals to standby cheaply. Two more mechanism hardenings found
+writing this: `resolve()` now refuses the whole volume while ANY replica
+carries a marker (the E_f export NQN is per-volume — two concurrent
+windows would share a transport), and the intent write is verified to
+have landed after the CAS (the update closure no-ops silently if a
+restage admitted the target in_sync between load and write — previously
+the window could open on a stranger).
+
+**The planner + loop (Decision 1 (B), verbatim).**
+`plan_hot_rejoin(view, cfg)` is pure and mirrors `plan_cutover`: Wait on
+synthetic-RWX-backing PV → RWX → `hot-rejoin: "disabled"` opt-out →
+`rejoin-bounce` opt-in (disjoint classes; the planners cannot race on
+one volume) → marker present (the reconciler owns it) → not attached →
+no epoch history; then Rejoin iff the most-converged standby (the same
+target `resolve()` picks) trails by ≤ `FLINT_HOT_REJOIN_MAX_LAG`
+(default 1). A raw stale gets an explicit "awaits the Tier-1 catch-up"
+Wait, making the division of labor visible in operator logs. The loop
+(`run_hot_rejoin_orchestrator`, 60 s tick, controller role, spawned in
+`main.rs` behind `FLINT_HOT_REJOIN=enabled`) builds views from
+PV/VolumeAttachment listings, dispatches marker reconciles under the
+claim — so a crashed rejoin converges even with `FLINT_CATCHUP` off —
+and runs each volume's rejoin as its own task (one volume's localization
+must not stall another's two-second window). Failed (unwound) windows
+back off `FLINT_HOT_REJOIN_RETRY_SECS` (default 300) per volume — every
+attempt costs the consumer a quiesce.
+
+**Observability (design item 5)**, event-based (no metrics registry in
+the codebase — a real registry is future work): `HotRejoinSucceeded`
+carries per-step window timings; a committed window slower than
+`FLINT_HOT_REJOIN_WINDOW_TARGET_MS` (default 2000) additionally emits a
+Warning `HotRejoinWindowSlow` naming the eval's fallback (atomic-add
+variant, §7 option b); `HotRejoinLocalized` now reports the esnap
+exposure duration (flip → localized, from the record's `since` stamp) —
+the localization-lag signal for the new-in-kind SPOF window.
+
+**Noted trade-offs:** epoch cuts for a volume pause while its hot-rejoin
+claim is held — bounded and benign for the target class (a converged
+standby's localization replays little), but a cold-stale manual rejoin
+would pause them for the whole backfill (splitting the claim into
+window-scoped vs localization-scoped is the refinement if it ever
+matters). The stale-since→marker carry (smaller localization base) and
+pad copy-progress preservation remain deferred from 7b-1. The 7b-0
+forced-stale-admission takeaway (a policy knob preferring unavailability
+over stale admission once hot rejoin owns the heal path) is NOT in
+7b-2 — it changes 1.3.0 assembly semantics and belongs with the 7b-3
+campaign evidence.
+
+**Not yet done:** the live run on `runj` — enable `FLINT_EPOCH_SCHEDULER`
++ `FLINT_CATCHUP` + `FLINT_HOT_REJOIN` on the controller, fail a leg,
+watch chase → standby → window → localization end-to-end; measure the
+in-controller window p99 vs the 2 s target. That is the first item of
+the 7b-3 validation tail (runbook + §9-8 adversarial campaign).
