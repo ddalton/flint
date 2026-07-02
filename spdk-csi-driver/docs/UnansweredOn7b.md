@@ -351,11 +351,8 @@ being re-provisioned).
   gains `pin_count` / `expired_while_pinned` / `releasing`. Validated
   locally: applies clean on v26.05 + the five other carried patches in
   Dockerfile order; `genrpc.py` schema/CLI/C lints green;
-  `clang -fsyntax-only -Wall` clean on both patched C files. **Pending:**
-  image rebuild on the remote x86 build node
-  (`docs/remote-x86-build-node.md`) and the `scripts/tier2-spike.sh`
-  behavioral re-run (all v2 drills, plus observe `pin_count` in
-  `bdev_raid_quiesce_list` during an add).
+  `clang -fsyntax-only -Wall` clean on both patched C files. **Pending
+  items done same day — see "7b-0 validation complete" below.**
 - **Dead-controller reaping committed** (`72e2731`):
   `src/controller_reap.rs` pure planner (strict flint-shape prefix,
   raid-base guard, positively-dead states only, 3 strikes) + the node
@@ -371,3 +368,76 @@ being re-provisioned).
   survives and its expiry poller retries.
 - **Next up:** finish 7b-0 validation once the cluster is back, then
   phase 7b-1 (`hot_rejoin.rs` mechanism library per the plan above).
+
+## 7b-0 validation complete (2026-07-01 evening, cluster `runj`)
+
+**Cluster.** trove-provisioned `runj`, us-west-1: 3× `i4i.large` SPDK
+workers (435 GiB lvstores, **1 MiB clusters**), 1× `c5d.4xlarge`
+build/consumer node (docker data-root on its NVMe ⇒ SPDK skips the disk,
+so both raid legs stay on i4i workers — June topology), `t3.medium` CP.
+Two provisioning gotchas, both worked around by hand:
+trove keys Flint's install mode off the **control-plane** instance type
+(`provider.rs is_spdk_eligible(cp_instance_type)`) — a t3.medium CP gets
+the NFS-only chart even with all-NVMe workers; re-installed in SPDK mode
+manually and added a control-plane-excluding affinity to the node DS
+(no hugepages on the CP ⇒ its pod otherwise pends and wedges the DS
+rolling update). trove's `MultiProvider::add_node` also aborted AWS
+scale-out when local docker was absent (kind probe used `?`); fixed in
+the trove repo (`multi.rs`, tolerant dispatch like `delete_cluster`).
+
+**Image.** `dilipdalton/spdk-tgt:tier2-spike-v3` (digest `5e6e0e57…`),
+all six patches apply clean, built natively on the c5d and rolled to all
+4 nodes. Portability finding: the published `spdk-tgt:1.1.1` (built on
+an Ice Lake i4i) **crashes DPDK EAL on Skylake** (`c5d`) with
+"unsupported cpu type: VPCLMULQDQ" — build on the oldest-µarch node;
+noted in `remote-x86-build-node.md`.
+
+**Gate.** kuttl standard suite 8/8 PASS + clean-shutdown PASS
+(clean-shutdown needed one rerun: first attempt scheduled its writer on
+the build node while spdk-tgt was still crash-looping on 1.1.1).
+
+**Drills — all PASS (v2 parity + v3 additions):**
+
+| drill | result |
+|---|---|
+| skip_rebuild add, no lease | -EPERM, "requires a held bdev_raid_quiesce lease" |
+| lease auto-release, never renewed | released at **8.001 s / 8.000 s target** (in-container socket timing, ~8 ms poll) |
+| unquiesce after auto-release | **-ENOENT** "no quiesce lease held" — matches the 7b-1 contract note |
+| renewal extends | renew at t+3.007 s → release at t+8.015 s (= renew + 5 s lease) |
+| full rejoin window | **10.421 s** total vs June 10.28 s (same kubectl-exec harness; same ~3 s irreducible: 2 export+attach steps ≈ 3.0 s each); both legs `configured=true`, writer uninterrupted, renew-gate honored |
+| **pin observed (v3)** | `bdev_raid_quiesce_list` sample during the add: `pin_count: 1, poller_armed: true, releasing: false` (1 of 1205 lease-present samples) |
+
+**Scrub (both-leg snapshots cut under one lease).** All
+filesystem-referenced blocks bit-identical across legs. Full-device md5
+**diverges by design on reused lvstores**: exactly one 1 MiB cluster
+differed — survivor exposes stale bytes (prior kuttl-test data) in the
+never-written remainder of a freshly allocated thin cluster, while the
+esnap-clone leg materializes zeros for the same region (COW from
+E_f-unallocated). June's full-device md5 parity was an artifact of
+pristine lvstores. Not a data-path defect; future scrubs must compare
+fs-allocated blocks only (or pre-zero the lvstore).
+
+**Crash contract (spike-specific assertions).** Writer-pod bounce:
+record never flipped ✓; restage discarded the spike leg ✓ (the
+non-flint-named `spike_head` controller correctly survives the
+ownership-filtered teardown and is left to the spike cleanup script).
+Deviation from June: with `FLINT_CATCHUP=disabled` the stale replica was
+never healed to standby, so restage hit 1.3.0's **forced stale
+admission** fallback ("below the 2-base minimum with stale replicas
+excluded — divergence hazard, evented") and the volume served mixed
+stale/current reads until teardown — the documented pre-Tier-1 hazard
+path observed live. June's "data intact" ran through standby admission
+(catch-up enabled). Two takeaways for 7b: (1) strongest live motivation
+yet for the 7b-2 trigger loop; (2) 7b-2 should consider a per-volume
+policy preferring unavailability over stale admission once hot rejoin
+owns the heal path.
+
+**Cluster left standing for 7b-1.** kubeconfig `/tmp/trove-aws-kc-runj`
+(copied to `tests/system/config/kubeconfig`); controller env pinned:
+`FLINT_EPOCH_SCHEDULER=enabled`, `FLINT_EPOCH_INTERVAL_SECS=30`,
+`FLINT_CATCHUP=disabled`, `FLINT_CUTOVER=disabled` (drill config — reset
+before Tier-1-dependent work); SCs `flint` (clone), `flint-spdk`,
+`flint-2r` (2-replica thin); build node has docker + socat proxy pod
+(`kubectl port-forward pod/docker-build-proxy 23750:2375`). Spike and
+scrub artifacts cleaned; fixture PVC deleted. **Next: 7b-1
+(`hot_rejoin.rs`).**

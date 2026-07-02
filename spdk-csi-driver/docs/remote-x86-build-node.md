@@ -196,6 +196,23 @@ artifacts). Without it the context upload through the port-forward is 9.4 GiB;
 with it, ~2.4 MiB. If a new `COPY` in a Dockerfile ever needs a path listed
 there, remove that entry.
 
+## CPU-architecture portability of SPDK images
+
+DPDK builds with `-march=native`, so an `spdk-tgt` image **embeds the
+build host's ISA extensions**. Observed 2026-07-01: `spdk-tgt:1.1.1`,
+built on an Ice Lake node (`i4i`, the original `test-aws-1`), crashes at
+startup on a Skylake `c5d.4xlarge` —
+
+```
+ERROR: This system does not support "VPCLMULQDQ".
+EAL: unsupported cpu type.
+```
+
+Build on the **oldest microarchitecture in the fleet** (an image built
+on Skylake runs on Ice Lake, not vice versa), or pin DPDK's machine type
+in the Dockerfile. `tier2-spike-v3`, built natively on the c5d, runs on
+both generations.
+
 ## Troubleshooting
 
 - **`Cannot connect to the Docker daemon`** — the port-forward died; re-run
