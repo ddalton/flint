@@ -111,11 +111,13 @@ pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
         // volume id, so strip that suffix too.
         Some((id, _)) => strip_replica_suffix(id),
         None => {
-            // `<vol>_replica_<i>` replica volume ids embed their owner —
-            // try that whole suffix before the bare `_<digits>` replica
-            // index (`:volume:<id>_<i>`); plain PV-backed ids
-            // (`pvc-<uuid>`, `nfs-server-…`, `csi-…`) contain neither.
+            // `<vol>_replica_<i>` replica volume ids and `<vol>_hrpad<i>`
+            // localization pad ids embed their owner — try those whole
+            // suffixes before the bare `_<digits>` replica index
+            // (`:volume:<id>_<i>`); plain PV-backed ids (`pvc-<uuid>`,
+            // `nfs-server-…`, `csi-…`) contain none of them.
             let stripped = strip_replica_suffix(rest);
+            let stripped = if stripped != rest { stripped } else { strip_hrpad_suffix(rest) };
             if stripped != rest {
                 stripped
             } else {
@@ -138,8 +140,27 @@ pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
 }
 
 /// `<vol>_replica_<i>` → `<vol>` (replica volume ids embed their owner).
+/// Also the hot-rejoin head shape `<vol>_replica_<i>_hr` (Tier-2 7b-1's
+/// esnap-clone head lvol, `hot_rejoin::head_lvol_name`): the live run
+/// 2026-07-02 caught the sweep deleting a serving raid leg because the
+/// `_hr` tail failed the digits check and the WHOLE name was then treated
+/// as an (absent) PV name — the exact wrong-delete this parser exists to
+/// prevent.
 fn strip_replica_suffix(id: &str) -> &str {
     if let Some((base, idx)) = id.rsplit_once("_replica_") {
+        let idx = idx.strip_suffix("_hr").unwrap_or(idx);
+        if !base.is_empty() && !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) {
+            return base;
+        }
+    }
+    id
+}
+
+/// `<vol>_hrpad<i>` → `<vol>` (Tier-2 7b-1's localization pad export id,
+/// `hot_rejoin::pad_export_volume_id` — the pad's subsystem is live for
+/// the whole backfill and must never read as an absent-PV orphan).
+fn strip_hrpad_suffix(id: &str) -> &str {
+    if let Some((base, idx)) = id.rsplit_once("_hrpad") {
         if !base.is_empty() && !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) {
             return base;
         }
@@ -353,6 +374,32 @@ mod tests {
             Some(Owner::Pv("pvc-new".into()))
         );
         assert_eq!(classify_lvol("eph_csi-0123abcd"), Some(Owner::Ephemeral));
+    }
+
+    #[test]
+    fn classifies_hot_rejoin_shapes_to_their_owner() {
+        // Tier-2 7b shapes, pinned against the actual name builders. The
+        // 2026-07-02 live run: the sweep deleted a SERVING raid leg because
+        // the `_hr` head read as an absent-PV orphan. While the PV exists
+        // these must classify to it (kept); once the PV is truly gone the
+        // same classification makes them reapable — both directions matter.
+        let vol = "pvc-c689";
+        assert_eq!(
+            classify_lvol(&crate::hot_rejoin::head_lvol_name(vol, 1)),
+            Some(Owner::Pv(vol.into()))
+        );
+        assert_eq!(
+            classify_subsystem_nqn(&format!(
+                "nqn.2024-11.com.flint:volume:{}",
+                crate::hot_rejoin::pad_export_volume_id(vol, 1)
+            ))
+            .as_deref(),
+            Some(vol)
+        );
+        // The E_f export NQN is outside the `:volume:` prefix on purpose —
+        // invisible to the sweep (its lifecycle belongs to the hot-rejoin
+        // scrub/localize paths, which own targeted cleanup).
+        assert_eq!(classify_subsystem_nqn(&crate::hot_rejoin::ef_export_nqn(vol)), None);
     }
 
     #[test]
