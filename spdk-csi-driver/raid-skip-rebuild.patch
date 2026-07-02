@@ -1,5 +1,5 @@
 diff --git a/module/bdev/raid/bdev_raid.c b/module/bdev/raid/bdev_raid.c
-index a62b491..eee9a38 100644
+index a62b49150..eee9a38e2 100644
 --- a/module/bdev/raid/bdev_raid.c
 +++ b/module/bdev/raid/bdev_raid.c
 @@ -415,6 +415,7 @@ raid_bdev_deconfigure_base_bdev(struct raid_base_bdev_info *base_info)
@@ -161,7 +161,7 @@ index a62b491..eee9a38 100644
  
  	return rc;
 diff --git a/module/bdev/raid/bdev_raid.h b/module/bdev/raid/bdev_raid.h
-index f822551..eb899f1 100644
+index f8225515f..eb899f16d 100644
 --- a/module/bdev/raid/bdev_raid.h
 +++ b/module/bdev/raid/bdev_raid.h
 @@ -73,6 +73,16 @@ struct raid_base_bdev_info {
@@ -194,7 +194,7 @@ index f822551..eb899f1 100644
  const char *raid_bdev_level_to_str(enum spdk_bdev_raid_level level);
  const char *raid_bdev_state_to_str(enum spdk_bdev_raid_state state);
 diff --git a/module/bdev/raid/bdev_raid_rpc.c b/module/bdev/raid/bdev_raid_rpc.c
-index b1ba7d8..a806aae 100644
+index b1ba7d8f1..07d914b85 100644
 --- a/module/bdev/raid/bdev_raid_rpc.c
 +++ b/module/bdev/raid/bdev_raid_rpc.c
 @@ -10,6 +10,7 @@
@@ -205,7 +205,7 @@ index b1ba7d8..a806aae 100644
  #include "spdk_internal/rpc_autogen.h"
  
  /*
-@@ -252,12 +253,283 @@ cleanup:
+@@ -252,12 +253,421 @@ cleanup:
  }
  SPDK_RPC_REGISTER("bdev_raid_delete", rpc_bdev_raid_delete, SPDK_RPC_RUNTIME)
  
@@ -223,6 +223,23 @@ index b1ba7d8..a806aae 100644
 +	uint64_t				lease_us;
 +	/* set while the initial quiesce RPC is in flight */
 +	struct spdk_jsonrpc_request		*request;
++	/*
++	 * Number of in-flight skip_rebuild adds riding this lease. While pinned
++	 * the lease must not be released: channel installation runs under the
++	 * held quiesce, and releasing mid-install would resume writes onto
++	 * half-populated channels — the divergence the lease exists to prevent.
++	 * Expiry defers to the add's completion; unquiesce returns -EBUSY.
++	 */
++	uint32_t				pin_count;
++	/* the lease expired while pinned; release as soon as the pin drops */
++	bool					expired_while_pinned;
++	/*
++	 * An unquiesce (RPC or expiry) is in flight. The lease is freed only
++	 * after the unquiesce completes successfully — on failure the bdev is
++	 * still quiesced, so the lease (and its armed expiry poller) must
++	 * survive to retry the release.
++	 */
++	bool					releasing;
 +	TAILQ_ENTRY(raid_quiesce_lease)		link;
 +};
 +
@@ -253,10 +270,47 @@ index b1ba7d8..a806aae 100644
 +}
 +
 +static void
-+raid_quiesce_lease_expired_unquiesced(void *ctx, int status)
++raid_quiesce_lease_release_done(void *ctx, int status)
 +{
++	struct raid_quiesce_lease *lease = ctx;
++
 +	if (status != 0) {
-+		SPDK_ERRLOG("Auto-unquiesce after lease expiry failed: %s\n", spdk_strerror(-status));
++		/* Still quiesced: keep the lease; the armed expiry poller retries. */
++		SPDK_ERRLOG("[lease %p] auto-unquiesce of '%s' failed: %s - will retry\n",
++			    (void *)lease, lease->raid_name, spdk_strerror(-status));
++		lease->releasing = false;
++		return;
++	}
++
++	SPDK_NOTICELOG("[lease %p] RELEASED '%s' after expiry (thread %s)\n",
++		       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
++	raid_quiesce_lease_free(lease);
++}
++
++/*
++ * Attempt to unquiesce and free an expired lease. The lease is freed only on
++ * confirmed unquiesce (or when the raid bdev is gone, taking its quiesce state
++ * with it) — never while the bdev could still be quiesced, so a failure leaves
++ * the armed expiry poller to retry instead of stranding a quiesce with no
++ * lease tracking it.
++ */
++static void
++raid_quiesce_lease_try_release(struct raid_quiesce_lease *lease)
++{
++	struct raid_bdev *raid_bdev = raid_bdev_find_by_name(lease->raid_name);
++	int rc;
++
++	if (raid_bdev == NULL) {
++		raid_quiesce_lease_free(lease);
++		return;
++	}
++
++	lease->releasing = true;
++	rc = raid_bdev_unquiesce(raid_bdev, raid_quiesce_lease_release_done, lease);
++	if (rc != 0) {
++		SPDK_ERRLOG("[lease %p] failed to start auto-unquiesce of '%s': %s - will retry\n",
++			    (void *)lease, lease->raid_name, spdk_strerror(-rc));
++		lease->releasing = false;
 +	}
 +}
 +
@@ -264,23 +318,47 @@ index b1ba7d8..a806aae 100644
 +raid_quiesce_lease_expired(void *ctx)
 +{
 +	struct raid_quiesce_lease *lease = ctx;
-+	struct raid_bdev *raid_bdev = raid_bdev_find_by_name(lease->raid_name);
-+	int rc;
++
++	if (lease->releasing) {
++		/* a release attempt is already in flight */
++		return SPDK_POLLER_BUSY;
++	}
++
++	if (lease->pin_count > 0) {
++		/* A skip_rebuild add is installing channels under this quiesce;
++		 * defer — the add's completion releases the lease. */
++		SPDK_NOTICELOG("[lease %p] EXPIRED on '%s' with %u in-flight add(s) - deferring release\n",
++			       (void *)lease, lease->raid_name, lease->pin_count);
++		lease->expired_while_pinned = true;
++		return SPDK_POLLER_BUSY;
++	}
 +
 +	SPDK_NOTICELOG("[lease %p] EXPIRED on '%s' (thread %s) - auto-unquiescing\n",
 +		       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
 +
-+	if (raid_bdev != NULL) {
-+		rc = raid_bdev_unquiesce(raid_bdev, raid_quiesce_lease_expired_unquiesced, NULL);
-+		if (rc != 0) {
-+			SPDK_ERRLOG("Failed to auto-unquiesce raid bdev '%s': %s\n",
-+				    lease->raid_name, spdk_strerror(-rc));
-+		}
-+	}
-+
-+	raid_quiesce_lease_free(lease);
++	raid_quiesce_lease_try_release(lease);
 +
 +	return SPDK_POLLER_BUSY;
++}
++
++static void
++raid_quiesce_lease_pin(struct raid_quiesce_lease *lease)
++{
++	lease->pin_count++;
++}
++
++static void
++raid_quiesce_lease_unpin(struct raid_quiesce_lease *lease)
++{
++	assert(lease->pin_count > 0);
++	lease->pin_count--;
++	if (lease->pin_count == 0 && lease->expired_while_pinned && !lease->releasing) {
++		/* the lease expired during the add; release immediately rather than
++		 * holding guest io gated until the poller's next period */
++		SPDK_NOTICELOG("[lease %p] deferred expiry on '%s' - releasing now\n",
++			       (void *)lease, lease->raid_name);
++		raid_quiesce_lease_try_release(lease);
++	}
 +}
 +
 +static const struct spdk_json_object_decoder rpc_bdev_raid_quiesce_decoders[] = {
@@ -293,7 +371,6 @@ index b1ba7d8..a806aae 100644
 +{
 +	struct raid_quiesce_lease *lease = ctx;
 +	struct spdk_jsonrpc_request *request = lease->request;
-+	struct raid_bdev *raid_bdev;
 +
 +	lease->request = NULL;
 +
@@ -310,11 +387,7 @@ index b1ba7d8..a806aae 100644
 +	lease->expiry_poller = SPDK_POLLER_REGISTER(raid_quiesce_lease_expired, lease, lease->lease_us);
 +	if (lease->expiry_poller == NULL) {
 +		/* never hold an unleased quiesce */
-+		raid_bdev = raid_bdev_find_by_name(lease->raid_name);
-+		if (raid_bdev != NULL) {
-+			raid_bdev_unquiesce(raid_bdev, NULL, NULL);
-+		}
-+		raid_quiesce_lease_free(lease);
++		raid_quiesce_lease_try_release(lease);
 +		spdk_jsonrpc_send_error_response(request, -ENOMEM,
 +						 "Failed to register quiesce lease expiry poller");
 +		return;
@@ -359,16 +432,33 @@ index b1ba7d8..a806aae 100644
 +							     req.name);
 +			goto cleanup;
 +		}
-+		/* renew: restart the expiry clock; the bdev stays quiesced */
++		if (lease->releasing) {
++			/* an unquiesce is in flight and cannot be recalled */
++			spdk_jsonrpc_send_error_response_fmt(request, -EBUSY,
++							     "quiesce lease on raid bdev %s is being released",
++							     req.name);
++			goto cleanup;
++		}
++		/* renew: restart the expiry clock; the bdev stays quiesced. A
++		 * deferred expiry (expired while an add was in flight) is cancelled
++		 * by the renewal — the quiesce was never released. */
 +		SPDK_NOTICELOG("[lease %p] RENEW on '%s' (thread %s)\n",
 +			       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
++		lease->expired_while_pinned = false;
 +		spdk_poller_unregister(&lease->expiry_poller);
 +		lease->lease_us = req.lease_ms * 1000;
 +		lease->expiry_poller = SPDK_POLLER_REGISTER(raid_quiesce_lease_expired, lease,
 +				       lease->lease_us);
 +		if (lease->expiry_poller == NULL) {
-+			raid_bdev_unquiesce(raid_bdev, NULL, NULL);
-+			raid_quiesce_lease_free(lease);
++			SPDK_ERRLOG("[lease %p] failed to re-arm expiry poller on '%s'\n",
++				    (void *)lease, lease->raid_name);
++			if (lease->pin_count > 0) {
++				/* an add is riding the quiesce: must not release it now;
++				 * the add's completion (unpin) performs the release */
++				lease->expired_while_pinned = true;
++			} else {
++				raid_quiesce_lease_try_release(lease);
++			}
 +			spdk_jsonrpc_send_error_response(request, -ENOMEM,
 +							 "Failed to renew quiesce lease expiry poller");
 +			goto cleanup;
@@ -410,17 +500,35 @@ index b1ba7d8..a806aae 100644
 +	{"name", offsetof(struct rpc_bdev_raid_unquiesce_ctx, name), spdk_json_decode_string},
 +};
 +
++struct rpc_raid_unquiesce_ctx {
++	struct spdk_jsonrpc_request	*request;
++	struct raid_quiesce_lease	*lease;
++};
++
 +static void
-+rpc_bdev_raid_unquiesce_done(void *ctx, int status)
++rpc_bdev_raid_unquiesce_done(void *cb_arg, int status)
 +{
-+	struct spdk_jsonrpc_request *request = ctx;
++	struct rpc_raid_unquiesce_ctx *ctx = cb_arg;
++	struct spdk_jsonrpc_request *request = ctx->request;
++	struct raid_quiesce_lease *lease = ctx->lease;
++
++	free(ctx);
 +
 +	if (status != 0) {
++		/* Still quiesced: keep the lease so the armed expiry poller
++		 * retries the release — never strand a quiesce with no lease. */
++		SPDK_ERRLOG("[lease %p] release of '%s' failed: %s - expiry will retry\n",
++			    (void *)lease, lease->raid_name, spdk_strerror(-status));
++		lease->releasing = false;
 +		spdk_jsonrpc_send_error_response_fmt(request, status,
 +						     "Failed to unquiesce raid bdev: %s",
 +						     spdk_strerror(-status));
 +		return;
 +	}
++
++	SPDK_NOTICELOG("[lease %p] RELEASED '%s' (thread %s)\n",
++		       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
++	raid_quiesce_lease_free(lease);
 +
 +	spdk_jsonrpc_send_bool_response(request, true);
 +}
@@ -430,6 +538,7 @@ index b1ba7d8..a806aae 100644
 +			const struct spdk_json_val *params)
 +{
 +	struct rpc_bdev_raid_unquiesce_ctx req = {};
++	struct rpc_raid_unquiesce_ctx *ctx;
 +	struct raid_quiesce_lease *lease;
 +	struct raid_bdev *raid_bdev;
 +	int rc;
@@ -457,19 +566,48 @@ index b1ba7d8..a806aae 100644
 +		goto cleanup;
 +	}
 +
-+	SPDK_NOTICELOG("[lease %p] RELEASE on '%s' (thread %s)\n",
-+		       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
-+	raid_quiesce_lease_free(lease);
++	if (lease->pin_count > 0) {
++		/* channel installation is running under this quiesce */
++		spdk_jsonrpc_send_error_response_fmt(request, -EBUSY,
++						     "cannot release quiesce lease on raid bdev %s: %u skip_rebuild add(s) in flight",
++						     req.name, lease->pin_count);
++		goto cleanup;
++	}
++
++	if (lease->releasing) {
++		spdk_jsonrpc_send_error_response_fmt(request, -EBUSY,
++						     "quiesce lease on raid bdev %s is already being released",
++						     req.name);
++		goto cleanup;
++	}
 +
 +	raid_bdev = raid_bdev_find_by_name(req.name);
 +	if (raid_bdev == NULL) {
++		/* the raid bdev is gone and its quiesce state with it */
++		raid_quiesce_lease_free(lease);
 +		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV, "raid bdev %s not found",
 +						     req.name);
 +		goto cleanup;
 +	}
 +
-+	rc = raid_bdev_unquiesce(raid_bdev, rpc_bdev_raid_unquiesce_done, request);
++	ctx = calloc(1, sizeof(*ctx));
++	if (ctx == NULL) {
++		/* lease untouched — the expiry poller will release it */
++		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
++		goto cleanup;
++	}
++	ctx->request = request;
++	ctx->lease = lease;
++
++	SPDK_NOTICELOG("[lease %p] RELEASE requested on '%s' (thread %s)\n",
++		       (void *)lease, lease->raid_name, spdk_thread_get_name(spdk_get_thread()));
++	lease->releasing = true;
++
++	rc = raid_bdev_unquiesce(raid_bdev, rpc_bdev_raid_unquiesce_done, ctx);
 +	if (rc != 0) {
++		/* keep the lease: the armed expiry poller retries the release */
++		lease->releasing = false;
++		free(ctx);
 +		spdk_jsonrpc_send_error_response_fmt(request, rc, "Failed to unquiesce raid bdev: %s",
 +						     spdk_strerror(-rc));
 +	}
@@ -489,27 +627,83 @@ index b1ba7d8..a806aae 100644
  };
  
  static void
-@@ -312,7 +584,18 @@ rpc_bdev_raid_add_base_bdev(struct spdk_jsonrpc_request *request,
+@@ -274,6 +684,23 @@ rpc_bdev_raid_add_base_bdev_done(void *ctx, int status)
+ 	spdk_jsonrpc_send_bool_response(request, true);
+ }
+ 
++struct rpc_raid_add_pinned_ctx {
++	struct spdk_jsonrpc_request	*request;
++	struct raid_quiesce_lease	*lease;
++};
++
++static void
++rpc_bdev_raid_add_base_bdev_pinned_done(void *cb_arg, int status)
++{
++	struct rpc_raid_add_pinned_ctx *ctx = cb_arg;
++	struct spdk_jsonrpc_request *request = ctx->request;
++	struct raid_quiesce_lease *lease = ctx->lease;
++
++	free(ctx);
++	raid_quiesce_lease_unpin(lease);
++	rpc_bdev_raid_add_base_bdev_done(request, status);
++}
++
+ static void
+ rpc_bdev_raid_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx)
+ {
+@@ -312,7 +739,50 @@ rpc_bdev_raid_add_base_bdev(struct spdk_jsonrpc_request *request,
  		goto cleanup;
  	}
  
 -	rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, rpc_bdev_raid_add_base_bdev_done, request);
-+	if (req.skip_rebuild && raid_quiesce_lease_find(req.raid_bdev) == NULL) {
++	if (req.skip_rebuild) {
++		struct raid_quiesce_lease *lease = raid_quiesce_lease_find(req.raid_bdev);
++		struct rpc_raid_add_pinned_ctx *pin_ctx;
++
 +		/* The §single-window contract: the snapshot that produced this base
-+		 * and this add must sit inside one held quiesce, or writes between
-+		 * them exist nowhere on the new base — silent divergence. */
-+		spdk_jsonrpc_send_error_response_fmt(request, -EPERM,
-+						     "skip_rebuild add requires a held bdev_raid_quiesce lease on %s",
-+						     req.raid_bdev);
++		 * and this add must sit inside one HELD quiesce — armed, not still
++		 * being acquired, not being released — or writes between them exist
++		 * nowhere on the new base: silent divergence. */
++		if (lease == NULL || lease->request != NULL || lease->releasing ||
++		    lease->expiry_poller == NULL) {
++			spdk_jsonrpc_send_error_response_fmt(request, -EPERM,
++							     "skip_rebuild add requires a held bdev_raid_quiesce lease on %s",
++							     req.raid_bdev);
++			goto cleanup;
++		}
++
++		pin_ctx = calloc(1, sizeof(*pin_ctx));
++		if (pin_ctx == NULL) {
++			spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
++			goto cleanup;
++		}
++		pin_ctx->request = request;
++		pin_ctx->lease = lease;
++
++		/* Pin the lease across the add: channel installation must complete
++		 * under the quiesce, so expiry defers to the add's completion and
++		 * unquiesce returns -EBUSY until then. */
++		raid_quiesce_lease_pin(lease);
++
++		rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, true,
++					     rpc_bdev_raid_add_base_bdev_pinned_done, pin_ctx);
++		if (rc != 0) {
++			raid_quiesce_lease_unpin(lease);
++			free(pin_ctx);
++			spdk_jsonrpc_send_error_response_fmt(request, rc,
++							     "Failed to add base bdev %s to RAID bdev %s: %s",
++							     req.base_bdev, req.raid_bdev,
++							     spdk_strerror(-rc));
++		}
 +		goto cleanup;
 +	}
 +
-+	rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, req.skip_rebuild,
++	rc = raid_bdev_add_base_bdev(raid_bdev, req.base_bdev, false,
 +				     rpc_bdev_raid_add_base_bdev_done, request);
  	if (rc != 0) {
  		spdk_jsonrpc_send_error_response_fmt(request, rc,
  						     "Failed to add base bdev %s to RAID bdev %s: %s",
-@@ -427,3 +710,25 @@ rpc_bdev_raid_set_options(struct spdk_jsonrpc_request *request, const struct spd
+@@ -427,3 +897,28 @@ rpc_bdev_raid_set_options(struct spdk_jsonrpc_request *request, const struct spd
  }
  SPDK_RPC_REGISTER("bdev_raid_set_options", rpc_bdev_raid_set_options,
  		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
@@ -529,6 +723,9 @@ index b1ba7d8..a806aae 100644
 +		spdk_json_write_named_uint64(w, "lease_ms", lease->lease_us / 1000);
 +		spdk_json_write_named_bool(w, "poller_armed", lease->expiry_poller != NULL);
 +		spdk_json_write_named_bool(w, "request_in_flight", lease->request != NULL);
++		spdk_json_write_named_uint32(w, "pin_count", lease->pin_count);
++		spdk_json_write_named_bool(w, "expired_while_pinned", lease->expired_while_pinned);
++		spdk_json_write_named_bool(w, "releasing", lease->releasing);
 +		spdk_json_write_object_end(w);
 +	}
 +	spdk_json_write_array_end(w);
@@ -536,7 +733,7 @@ index b1ba7d8..a806aae 100644
 +}
 +SPDK_RPC_REGISTER("bdev_raid_quiesce_list", rpc_bdev_raid_quiesce_list, SPDK_RPC_RUNTIME)
 diff --git a/python/spdk/cli/bdev.py b/python/spdk/cli/bdev.py
-index 0c7d13e..8d5b83f 100644
+index 0c7d13ec9..8d5b83f7c 100644
 --- a/python/spdk/cli/bdev.py
 +++ b/python/spdk/cli/bdev.py
 @@ -1238,12 +1238,35 @@ def add_parser(subparsers):
@@ -577,7 +774,7 @@ index 0c7d13e..8d5b83f 100644
          args.client.bdev_raid_remove_base_bdev(name=args.name)
      p = subparsers.add_parser('bdev_raid_remove_base_bdev', help='Remove base bdev from existing raid bdev')
 diff --git a/schema/schema.json b/schema/schema.json
-index 0760dee..32fcd63 100644
+index 0760dee98..32fcd639b 100644
 --- a/schema/schema.json
 +++ b/schema/schema.json
 @@ -5493,6 +5493,42 @@
