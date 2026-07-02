@@ -441,3 +441,80 @@ before Tier-1-dependent work); SCs `flint` (clone), `flint-spdk`,
 (`kubectl port-forward pod/docker-build-proxy 23750:2375`). Spike and
 scrub artifacts cleaned; fixture PVC deleted. **Next: 7b-1
 (`hot_rejoin.rs`).**
+
+## 7b-1 implemented (2026-07-01, same session) — `hot_rejoin.rs`
+
+The mechanism library is code-complete on `main`, unit-tested against a
+fake transport (suite 495 green). `src/hot_rejoin.rs` beside
+`catchup.rs`/`cutover.rs`, reusing `CatchupRpc`/`CatchupStore`,
+`copy_chain_to` (new target-explicit variant of `copy_chain_and_align`),
+`revert_head`/`revert_head_to_empty`, `lineage_chain` and the §5 record
+discipline.
+
+**Shape.** Pre-stage (E_f export skeleton + host fence + listener on the
+source, namespace-less controller pre-connect on the target, replica
+export convergence + consumer pre-connect) → window (leased quiesce →
+strict-fresh E_f cut on every survivor → `add_ns` E_f, AER-surfaced on
+the pre-connected controller → esnap-clone head → replica-export ns swap
+pad→head with two AER waits → renew → `add --skip-rebuild` with bounded
+EBUSY retry → unquiesce, `-ENOENT` = already-released) → record flip →
+localization (pad revert to a conservative base → base-inclusive replay
+to exactly E_f → pad snapshotted as the LOCAL E_f → `set_parent` →
+pad + transport disposal → `mark_in_sync`). Full unwind ladder on any
+window failure, deepest rung tested.
+
+**Design deltas vs the plan above — each strengthens the crash story:**
+
+1. **The marker is written as INTENT before the window opens** (not only
+   at the flip). This closes a hole found during implementation: a crash
+   between the raid add and the record flip would leave a live head leg
+   with a `stale` record, and the next catch-up tick's
+   `ensure_dst_attached` would swap the replica-export namespace out
+   from under the live leg. With intent-first, every crash point is
+   marker-resolvable: stale+marker+leg-live → adopt (re-flip);
+   stale+marker+leg-dead → scrub; standby+marker+leg-live → resume
+   localization; standby+marker+leg-dead → promote if localized, else
+   demote. This also gives the stranded-E_f export its owner (design
+   item 3) as a *targeted* scrub — no blind per-tick sweeps.
+2. **The window's E_f cut is strict-fresh** — EEXIST aborts and unwinds.
+   `execute_cut`'s EEXIST-tolerance is correct for the scheduler but
+   wrong here: adopting a snapshot cut at some other instant as E_f is
+   precisely the divergent-leg failure the lease exists to prevent
+   (scheduler racing the same seq). Full scheduler/chase/cutover mutual
+   exclusion stays 7b-2's shared per-volume claim (design item 4).
+3. **The E_f export NQN is `nqn.2024-11.com.flint:hotrejoin:<vol>`** —
+   deliberately outside the `:volume:` prefix so 7b-0's dead-controller
+   reaper can never condemn the esnap parent's controller while the
+   source is merely restarting (tested against
+   `controller_reap::flint_controller_prefix`).
+4. **Legless marked standby resolves promote-vs-demote by inspecting the
+   head's parent**: already re-rooted onto the local E_f → plain standby
+   (claim released, phase-4 admission owns it — localization work kept);
+   still esnap → head deleted, demoted to stale for ordinary catch-up.
+
+**Wiring.** `ReplicaSyncRecord.hot_rejoin: Option<String>` (serde-
+optional; pre-7b records parse) + `mark_hot_rejoin_intent` /
+`mark_hot_rejoined` / `clear_hot_rejoin`, cleared by `mark_in_sync` and
+by the chase's `record_revert`. `CatchupStore` grew the three
+transitions (KubeStore impls; trait defaults refuse loudly).
+`run_catchup_for_volume` dispatches marked replicas to
+`hot_rejoin::reconcile_marked` and excludes them from the chase and the
+bulk catch-up. `create_raid_from_replicas` excludes marked replicas from
+assembly whatever their state (revert-first). The health monitor reports
+`replica-health: localizing` instead of clearing the annotation while a
+marker is set (design item 2's redundancy exclusion; the lag metric
+proper stays 7b-2).
+
+**Deliberate conservatisms, noted for later:** the localization backfill
+base is the oldest recorded epoch present on the destination (the
+original stale-since back-off is lost at the flip — over-copies, never
+under-copies; carrying stale-since through the marker is the
+optimization). The pad is re-reverted on localization resume (loses
+partial copy progress, never correctness).
+
+**Not yet done:** a live behavioral run of the library on `runj` — the
+mechanism has no caller until 7b-2's trigger loop (or a small manual
+harness); the in-controller window p99 vs the 2 s target is therefore
+unmeasured (pre-staging removes both attach handshakes from the window —
+the spike's ~1.2 s each becomes two AER waits). **Next: 7b-2 (trigger
+loop + shared claim + events/metrics), then the 7b-3 campaign.**

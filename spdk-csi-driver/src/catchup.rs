@@ -224,6 +224,59 @@ pub trait CatchupStore: Sync {
     async fn clear_snapshot_tombstone(&self, volume_id: &str, name: &str)
         -> Result<(), RpcError>;
     async fn emit(&self, volume_id: &str, event_type: &str, reason: &str, message: &str);
+
+    // --- Tier-2 7b hot-rejoin transitions -----------------------------------
+    // Implemented by KubeStore; test fakes implement what they exercise —
+    // the defaults refuse loudly rather than silently no-op.
+
+    /// Claim a stale replica for the quiesce window about to open (marker =
+    /// intent + the E_f name). Durable BEFORE the window so every later
+    /// crash point is reconciler-recoverable.
+    async fn record_hot_rejoin_intent(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        ef_epoch: &str,
+    ) -> Result<(), RpcError> {
+        Err(format!(
+            "record_hot_rejoin_intent({volume_id}, {replica_uuid}, {ef_epoch}): not implemented by this store"
+        )
+        .into())
+    }
+
+    /// The post-add record flip: E_f becomes a recorded common epoch and the
+    /// replica a standby whose live head is the esnap clone (marker rides).
+    async fn record_hot_rejoin_flip(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        ef_epoch: &str,
+        cut_uuids: &[String],
+        head_uuid: &str,
+    ) -> Result<(), RpcError> {
+        let _ = cut_uuids;
+        Err(format!(
+            "record_hot_rejoin_flip({volume_id}, {replica_uuid}, {ef_epoch}, .., {head_uuid}): not implemented by this store"
+        )
+        .into())
+    }
+
+    /// Drop the marker without localization: scrub of an uncommitted window
+    /// (`demote_to_stale: false`, state untouched) or demotion of a
+    /// committed rejoin whose leg/E_f source is gone (`true`).
+    async fn record_hot_rejoin_cleared(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+        demote_to_stale: bool,
+    ) -> Result<(), RpcError> {
+        let _ = demote_to_stale;
+        Err(format!(
+            "record_hot_rejoin_cleared({volume_id}, {replica_uuid}, {reason}): not implemented by this store"
+        )
+        .into())
+    }
 }
 
 /// Kube-backed store used in production.
@@ -263,6 +316,9 @@ impl CatchupStore for KubeStore {
                 rec.active_lvol_uuid = Some(new_head.clone());
                 rec.reverted_to = Some(base.clone());
                 rec.reason = Some(format!("catch-up: head reverted to {}", base));
+                // A revert supersedes any interrupted hot rejoin: the esnap
+                // head is gone, the chain restarts from a local base.
+                rec.hot_rejoin = None;
             }
         })
         .await?;
@@ -361,6 +417,58 @@ impl CatchupStore for KubeStore {
             message,
         )
         .await;
+    }
+
+    async fn record_hot_rejoin_intent(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        ef_epoch: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, ef) = (replica_uuid.to_string(), ef_epoch.to_string());
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.mark_hot_rejoin_intent(&uuid, &ef);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_hot_rejoin_flip(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        ef_epoch: &str,
+        cut_uuids: &[String],
+        head_uuid: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, ef, cut, head) = (
+            replica_uuid.to_string(),
+            ef_epoch.to_string(),
+            cut_uuids.to_vec(),
+            head_uuid.to_string(),
+        );
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.mark_hot_rejoined(&uuid, &ef, &cut, &head, &now);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_hot_rejoin_cleared(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+        demote_to_stale: bool,
+    ) -> Result<(), RpcError> {
+        let (uuid, reason) = (replica_uuid.to_string(), reason.to_string());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.clear_hot_rejoin(&uuid, &reason, demote_to_stale, &now);
+        })
+        .await?;
+        Ok(())
     }
 }
 
@@ -547,7 +655,7 @@ pub fn select_base_epoch(
 /// after the newest recorded epoch) belong to a later session and are
 /// skipped. A retired epoch's merge into its descendant is reflected by
 /// construction.
-async fn lineage_chain(
+pub(crate) async fn lineage_chain(
     rpc: &dyn CatchupRpc,
     src: &ReplicaInfo,
     target: &str,
@@ -644,7 +752,7 @@ pub fn pick_source<'a>(
         .copied()
 }
 
-async fn get_bdev(
+pub(crate) async fn get_bdev(
     rpc: &dyn CatchupRpc,
     node: &str,
     name: &str,
@@ -661,7 +769,7 @@ async fn get_bdev(
     }
 }
 
-async fn get_raids(rpc: &dyn CatchupRpc, node: &str) -> Result<Vec<Value>, RpcError> {
+pub(crate) async fn get_raids(rpc: &dyn CatchupRpc, node: &str) -> Result<Vec<Value>, RpcError> {
     let payload = json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } });
     let resp = rpc.spdk_rpc(node, &payload).await?;
     Ok(resp
@@ -673,7 +781,7 @@ async fn get_raids(rpc: &dyn CatchupRpc, node: &str) -> Result<Vec<Value>, RpcEr
 
 /// Lvol names on a node's lvolstore (the catch-up's reachability probe
 /// doubles as the present-epochs listing).
-async fn list_lvol_names(
+pub(crate) async fn list_lvol_names(
     rpc: &dyn CatchupRpc,
     node: &str,
     lvs_name: &str,
@@ -696,7 +804,7 @@ async fn list_lvol_names(
 /// stable alias makes this idempotent: a crash between delete and clone, or
 /// between clone and the record write, re-runs cleanly). Returns the new
 /// head's uuid.
-async fn revert_head(
+pub(crate) async fn revert_head(
     rpc: &dyn CatchupRpc,
     node: &str,
     head_alias: &str,
@@ -731,7 +839,7 @@ async fn revert_head(
 /// head leaves them as orphaned, restorable blobs (§9-5 obligation); the
 /// epoch GC retires the epoch-named ones in its own time. Idempotent across
 /// crashes via the stable lvol name, like `revert_head`.
-async fn revert_head_to_empty(
+pub(crate) async fn revert_head_to_empty(
     rpc: &dyn CatchupRpc,
     node: &str,
     head_alias: &str,
@@ -830,7 +938,7 @@ async fn controller_exists(rpc: &dyn CatchupRpc, node: &str, controller: &str) -
     }
 }
 
-async fn detach_controller(rpc: &dyn CatchupRpc, node: &str, controller: &str) {
+pub(crate) async fn detach_controller(rpc: &dyn CatchupRpc, node: &str, controller: &str) {
     let payload = json!({ "method": "bdev_nvme_detach_controller", "params": { "name": controller } });
     if let Err(e) = rpc.spdk_rpc(node, &payload).await {
         debug!(node, controller, error = %e, "[CATCHUP] Stale controller detach failed (continuing)");
@@ -957,7 +1065,7 @@ async fn ensure_dst_attached(
 /// overrun abandons the poll (a started copy keeps running server-side;
 /// epochs are immutable, so the chase's re-copy converges over it) and the
 /// caller stages without the standby.
-async fn shallow_copy(
+pub(crate) async fn shallow_copy(
     rpc: &dyn CatchupRpc,
     src_node: &str,
     src_lvol: &str,
@@ -1029,7 +1137,7 @@ async fn shallow_copy(
 /// (an interrupted later copy leaves the head dirty; the chain re-copy from
 /// this epoch converges it). "Already exists" is a resume after a crash
 /// between align and record write: same head, same content — converged.
-async fn align_head(
+pub(crate) async fn align_head(
     rpc: &dyn CatchupRpc,
     dst_node: &str,
     head_alias: &str,
@@ -1068,6 +1176,32 @@ async fn copy_chain_and_align(
         .latest_epoch(volume_id)
         .ok_or_else(|| format!("no recorded epoch to copy toward for {}", volume_id))?
         .to_string();
+    copy_chain_to(
+        rpc, volume_id, record, src, dst, head_alias, dst_bdev, base, &target, poll_interval,
+        deadline,
+    )
+    .await
+}
+
+/// `copy_chain_and_align` with an explicit replay target instead of the
+/// record's newest epoch — the hot-rejoin backfill (Tier-2 7b) replays the
+/// landing pad exactly to `E_f`, never past it (the esnap head already
+/// carries everything newer via raid writes).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn copy_chain_to(
+    rpc: &dyn CatchupRpc,
+    volume_id: &str,
+    record: &VolumeSyncRecord,
+    src: &ReplicaInfo,
+    dst: &ReplicaInfo,
+    head_alias: &str,
+    dst_bdev: &str,
+    base: Option<&str>,
+    target: &str,
+    poll_interval: Duration,
+    deadline: Option<Instant>,
+) -> Result<String, RpcError> {
+    let target = target.to_string();
     let chain = lineage_chain(rpc, src, &target, base).await?;
     for element in &chain {
         let src_lvol = format!("{}/{}", src.lvs_name, element);
@@ -1339,7 +1473,7 @@ async fn chase_standby(
 
 /// Adapts the catch-up transport to the epoch scheduler's `NodeRpc` so the
 /// final delta reuses `execute_cut` (all-or-abort + rollback) verbatim.
-struct NodeRpcAdapter<'a>(&'a dyn CatchupRpc);
+pub(crate) struct NodeRpcAdapter<'a>(pub(crate) &'a dyn CatchupRpc);
 
 #[async_trait]
 impl NodeRpc for NodeRpcAdapter<'_> {
@@ -1704,7 +1838,30 @@ pub async fn run_catchup_for_volume(
     }
     let raid_name = format!("raid_{}", volume_id);
 
-    for rec in record.replicas.iter().filter(|r| r.sync_state == SyncState::Standby) {
+    // Tier-2 7b: replicas claimed by a hot rejoin (marker set) belong to its
+    // reconciler — resume localization, adopt a committed-but-unflipped
+    // window, or scrub a dead one. They are excluded from the chase and the
+    // bulk catch-up below: that choreography (export swap, head revert)
+    // would fight the live raid leg the marker says they may hold.
+    let record = if record.replicas.iter().any(|r| r.hot_rejoin.is_some()) {
+        crate::hot_rejoin::reconcile_marked(
+            rpc, store, volume_id, &record, replicas, consumer_node, cfg,
+        )
+        .await;
+        // The reconcile may have flipped states — re-read before dispatch.
+        match store.load(volume_id).await? {
+            Some(r) => r,
+            None => return Ok(()),
+        }
+    } else {
+        record
+    };
+
+    for rec in record
+        .replicas
+        .iter()
+        .filter(|r| r.sync_state == SyncState::Standby && r.hot_rejoin.is_none())
+    {
         if let Err(e) = chase_standby(
             rpc, store, volume_id, &record, rec, replicas, consumer_node, &raid_name, cfg,
         )
@@ -1722,7 +1879,11 @@ pub async fn run_catchup_for_volume(
         }
     }
 
-    if let Some(rec) = record.replicas.iter().find(|r| r.sync_state == SyncState::Stale) {
+    if let Some(rec) = record
+        .replicas
+        .iter()
+        .find(|r| r.sync_state == SyncState::Stale && r.hot_rejoin.is_none())
+    {
         if let Err(e) = catchup_stale(
             rpc, store, volume_id, &record, rec, replicas, consumer_node, &raid_name, cfg,
         )

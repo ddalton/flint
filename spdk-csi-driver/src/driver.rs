@@ -1645,6 +1645,20 @@ impl SpdkCsiDriver {
                 .map(|r| r.live_lvol_uuid().to_string())
                 .unwrap_or_else(|| replica.lvol_uuid.clone());
 
+            // Tier-2 7b: a hot-rejoin-marked replica is revert-first at
+            // reassembly — its head may be an esnap clone whose external
+            // parent no longer exists; the marker-driven reconciler owns
+            // it. Never admit it directly, whatever its sync_state.
+            if enforce && rec.map(|r| r.hot_rejoin.is_some()).unwrap_or(false) {
+                println!(
+                    "   Replica {}: HOT-REJOIN in progress on {} — excluded from assembly \
+                     (revert-first; the hot-rejoin reconciler resolves it)",
+                    i + 1,
+                    replica.node_name
+                );
+                excluded_stale.push((i, replica));
+                continue;
+            }
             if enforce && state == SyncState::Standby {
                 println!(
                     "   Replica {}: STANDBY on {} — deferred to final-delta admission",

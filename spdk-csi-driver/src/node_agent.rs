@@ -1983,13 +1983,48 @@ impl NodeAgent {
                 )
                 .await;
             } else {
-                // Clear a previously-set annotation (merge-patch null deletes)
-                let patch = json!({
-                    "metadata": {
-                        "annotations": { "flint.csi.storage.io/replica-health": null }
-                    }
-                });
-                let _ = pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await;
+                // Tier-2 7b: a hot-rejoin-marked replica may be serving in
+                // this raid while its chain is still remote (localization
+                // backfill in flight) — the volume is NOT fully redundant
+                // yet. Report that instead of clearing (the same read idiom
+                // KubeStore::load uses).
+                let localizing = crate::replica_sync::update_sync_record(
+                    &self.driver.kube_client,
+                    volume_id,
+                    |_| {},
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.replicas.iter().filter(|x| x.hot_rejoin.is_some()).count())
+                .unwrap_or(0);
+                if localizing > 0 {
+                    let health = json!({
+                        "state": "localizing",
+                        "configured": configured.len(),
+                        "total": total,
+                        "localizing_replicas": localizing,
+                        "observed_by": self.node_name,
+                    })
+                    .to_string();
+                    let patch = json!({
+                        "metadata": {
+                            "annotations": { "flint.csi.storage.io/replica-health": health }
+                        }
+                    });
+                    let _ =
+                        pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await;
+                } else {
+                    // Clear a previously-set annotation (merge-patch null
+                    // deletes)
+                    let patch = json!({
+                        "metadata": {
+                            "annotations": { "flint.csi.storage.io/replica-health": null }
+                        }
+                    });
+                    let _ =
+                        pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await;
+                }
             }
 
             // Phase 1 (incremental-rebuild §9-1): an online raid serves

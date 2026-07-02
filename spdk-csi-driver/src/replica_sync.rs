@@ -97,6 +97,20 @@ pub struct ReplicaSyncRecord {
     /// writes and a later catch-up must revert again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverted_to: Option<String>,
+    /// Hot-rejoin marker (Tier-2 7b): the E_f epoch of an in-progress hot
+    /// rejoin. Written on the STALE record as intent immediately before the
+    /// quiesce window opens, and carried through the flip to standby while
+    /// the head is an esnap clone whose parent is the REMOTE E_f export —
+    /// the local chain does not reach E_f until localization completes.
+    /// While set, the replica belongs exclusively to the hot-rejoin
+    /// reconciler: excluded from the chase and the bulk catch-up (their
+    /// export/revert choreography would fight the live leg), and never
+    /// admitted directly at reassembly (revert-first: the external parent
+    /// may be gone). Cleared by localization (`mark_in_sync`), by the
+    /// post-crash scrub of an uncommitted window, or by demotion back to
+    /// stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_rejoin: Option<String>,
 }
 
 impl ReplicaSyncRecord {
@@ -168,6 +182,7 @@ impl VolumeSyncRecord {
                     reason: None,
                     active_lvol_uuid: None,
                     reverted_to: None,
+                    hot_rejoin: None,
                 })
                 .collect(),
         }
@@ -204,6 +219,7 @@ impl VolumeSyncRecord {
                         reason: None,
                         active_lvol_uuid: None,
                         reverted_to: None,
+                        hot_rejoin: None,
                     })
             })
             .collect();
@@ -292,6 +308,13 @@ impl VolumeSyncRecord {
                     rec.reverted_to = None;
                     changed = true;
                 }
+                // Hot-rejoin localization complete (or ordinary admission
+                // superseded it): the head's chain is local from here — the
+                // hot-rejoin reconciler's claim on this replica ends.
+                if rec.hot_rejoin.is_some() {
+                    rec.hot_rejoin = None;
+                    changed = true;
+                }
                 changed
             }
             None => return false,
@@ -313,6 +336,89 @@ impl VolumeSyncRecord {
         {
             self.retention_pin = None;
             changed = true;
+        }
+        changed
+    }
+
+    /// Hot-rejoin intent (Tier-2 7b): claim a STALE replica for the quiesce
+    /// window about to open, recording the E_f epoch name the window will
+    /// cut. Written BEFORE the window so every crash point afterwards is
+    /// recoverable by the marker-driven reconciler (leg live → complete the
+    /// flip; leg absent → scrub the stranded artifacts). Refuses non-stale
+    /// replicas. Returns true if anything changed.
+    pub fn mark_hot_rejoin_intent(&mut self, lvol_uuid: &str, ef_epoch: &str) -> bool {
+        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            Some(rec) if rec.sync_state == SyncState::Stale => {
+                if rec.hot_rejoin.as_deref() != Some(ef_epoch) {
+                    rec.hot_rejoin = Some(ef_epoch.to_string());
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Hot-rejoin record flip (Tier-2 7b, after `bdev_raid_add_base_bdev
+    /// --skip-rebuild` succeeded): the E_f cut becomes a recorded common
+    /// epoch, and the replica becomes a standby whose live head is the esnap
+    /// clone — the marker (set at intent time) rides along until
+    /// localization. Returns true if anything changed.
+    pub fn mark_hot_rejoined(
+        &mut self,
+        lvol_uuid: &str,
+        ef_epoch: &str,
+        cut_lvol_uuids: &[String],
+        head_uuid: &str,
+        now_rfc3339: &str,
+    ) -> bool {
+        // Always a change: at minimum current_epoch advances to E_f.
+        self.apply_epoch_cut(ef_epoch, cut_lvol_uuids, now_rfc3339);
+        let mut changed = true;
+        changed |= self.mark_standby(
+            lvol_uuid,
+            ef_epoch,
+            "hot rejoined at E_f via skip_rebuild; localizing the esnap chain",
+            now_rfc3339,
+        );
+        if let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            if rec.active_lvol_uuid.as_deref() != Some(head_uuid) {
+                rec.active_lvol_uuid = Some(head_uuid.to_string());
+                changed = true;
+            }
+            if rec.hot_rejoin.as_deref() != Some(ef_epoch) {
+                rec.hot_rejoin = Some(ef_epoch.to_string());
+                changed = true;
+            }
+            // The esnap head is brand new — no write-virgin resume claim.
+            if rec.reverted_to.is_some() {
+                rec.reverted_to = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Drop a replica's hot-rejoin marker without completing localization:
+    /// an uncommitted window was scrubbed, or a committed rejoin was demoted
+    /// (`demote_to_stale`) because its leg or its E_f source is gone.
+    /// Returns true if anything changed.
+    pub fn clear_hot_rejoin(
+        &mut self,
+        lvol_uuid: &str,
+        reason: &str,
+        demote_to_stale: bool,
+        now_rfc3339: &str,
+    ) -> bool {
+        let mut changed = false;
+        if demote_to_stale {
+            changed |= self.mark_stale(lvol_uuid, reason, now_rfc3339);
+        }
+        if let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            if rec.hot_rejoin.is_some() {
+                rec.hot_rejoin = None;
+                changed = true;
+            }
         }
         changed
     }
@@ -1456,5 +1562,109 @@ mod tests {
         // Unparseable pin pins everything.
         record.retention_pin = Some("garbage".to_string());
         assert!(record.retire_epochs("vol1", &[epoch_name("vol1", 4)]).is_empty());
+    }
+
+    // -- Tier-2 7b hot-rejoin marker ------------------------------------------
+
+    #[test]
+    fn hot_rejoin_intent_claims_only_stale_replicas() {
+        let mut record = three_replica_record();
+        // in_sync replicas cannot be claimed.
+        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+        assert!(record.get("uuid-b").unwrap().hot_rejoin.is_none());
+
+        record.mark_stale("uuid-b", "leg failed", "2026-07-01T00:00:00Z");
+        assert!(record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+        assert_eq!(
+            record.get("uuid-b").unwrap().hot_rejoin.as_deref(),
+            Some("epoch-vol1-3")
+        );
+        // Idempotent re-claim of the same E_f is not a change.
+        assert!(!record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3"));
+    }
+
+    #[test]
+    fn hot_rejoin_flip_records_epoch_standby_and_head() {
+        let now = "2026-07-01T00:00:00Z";
+        let mut record = three_replica_record();
+        record.apply_epoch_cut(
+            &epoch_name("vol1", 2),
+            &["uuid-a".into(), "uuid-b".into(), "uuid-c".into()],
+            now,
+        );
+        record.mark_stale("uuid-b", "leg failed", now);
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name("vol1", 3));
+
+        assert!(record.mark_hot_rejoined(
+            "uuid-b",
+            &epoch_name("vol1", 3),
+            &["uuid-a".into(), "uuid-c".into()],
+            "uuid-head",
+            now,
+        ));
+
+        // E_f is a recorded common epoch, cut on exactly the survivors.
+        assert_eq!(record.current_epoch.as_deref(), Some("epoch-vol1-3"));
+        assert_eq!(record.get("uuid-a").unwrap().last_epoch.as_deref(), Some("epoch-vol1-3"));
+        // The rejoined replica: standby at E_f, live head overridden to the
+        // esnap clone, marker riding, no write-virgin resume claim.
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby);
+        assert_eq!(b.last_epoch.as_deref(), Some("epoch-vol1-3"));
+        assert_eq!(b.active_lvol_uuid.as_deref(), Some("uuid-head"));
+        assert_eq!(b.hot_rejoin.as_deref(), Some("epoch-vol1-3"));
+        assert!(b.reverted_to.is_none());
+    }
+
+    #[test]
+    fn mark_in_sync_clears_hot_rejoin_marker() {
+        let now = "2026-07-01T00:00:00Z";
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", now);
+        record.mark_hot_rejoined("uuid-b", &epoch_name("vol1", 3), &["uuid-a".into()], "h", now);
+        assert!(record.get("uuid-b").unwrap().hot_rejoin.is_some());
+
+        record.mark_in_sync("uuid-b", &epoch_name("vol1", 3), "localized", now);
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.hot_rejoin.is_none());
+    }
+
+    #[test]
+    fn clear_hot_rejoin_scrub_and_demote_paths() {
+        let now = "2026-07-01T00:00:00Z";
+        // Scrub of an uncommitted window: marker gone, state untouched.
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", now);
+        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3");
+        assert!(record.clear_hot_rejoin("uuid-b", "window died", false, now));
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.hot_rejoin.is_none());
+
+        // Demotion of a committed rejoin: standby → stale + marker gone.
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", now);
+        record.mark_hot_rejoined("uuid-b", "epoch-vol1-3", &["uuid-a".into()], "h", now);
+        assert!(record.clear_hot_rejoin("uuid-b", "leg lost", true, now));
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.hot_rejoin.is_none());
+        assert_eq!(b.reason.as_deref(), Some("leg lost"));
+    }
+
+    #[test]
+    fn hot_rejoin_marker_survives_serde_round_trip() {
+        let now = "2026-07-01T00:00:00Z";
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "leg failed", now);
+        record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3");
+        let round =
+            VolumeSyncRecord::from_annotation(&record.to_annotation()).expect("round trip");
+        assert_eq!(round, record);
+        // Records written by pre-7b builds (no marker field) still parse.
+        let legacy = r#"{"replicas":[{"node_name":"n","node_uid":"u","lvol_uuid":"x","sync_state":"in_sync"}]}"#;
+        let parsed = VolumeSyncRecord::from_annotation(legacy).expect("legacy parse");
+        assert!(parsed.replicas[0].hot_rejoin.is_none());
     }
 }
