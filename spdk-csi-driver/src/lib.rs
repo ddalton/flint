@@ -12,6 +12,7 @@ pub mod minimal_disk_service;
 pub mod node_agent;
 pub mod mount_util;  // Bounded unmount (D-state hang containment, 2026-06-12)
 pub mod orphan_sweep;  // §10-14 node-local reaping of lvols/exports keyed by absent PVs
+pub mod controller_reap;  // Dead NVMe-oF controller reaping (Tier-2 7b-0 spike finding)
 pub mod spdk_dashboard_backend_minimal;
 pub mod snapshot;  // Volume snapshot support (isolated module)
 pub mod capacity_cache;  // Capacity caching for scalability

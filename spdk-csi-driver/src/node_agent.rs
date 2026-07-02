@@ -33,6 +33,9 @@ pub struct NodeAgent {
     /// Data-path-lost strike counts (attached volume, raid missing),
     /// keyed by PV name — see `detect_lost_data_paths`.
     data_path_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    /// Dead-controller strike counts (reconnect-looping flint controllers),
+    /// keyed by controller name — see `reap_dead_controllers`.
+    controller_reap_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
 }
 
 impl NodeAgent {
@@ -51,6 +54,7 @@ impl NodeAgent {
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -73,6 +77,7 @@ impl NodeAgent {
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -226,6 +231,9 @@ impl NodeAgent {
                 }
                 if let Err(e) = monitor_agent.detect_lost_data_paths().await {
                     warn!(error = %e, "[MONITOR] Data-path detection failed (non-fatal)");
+                }
+                if let Err(e) = monitor_agent.reap_dead_controllers().await {
+                    warn!(error = %e, "[MONITOR] Dead-controller reap failed (non-fatal)");
                 }
             }
         });
@@ -2384,6 +2392,96 @@ impl NodeAgent {
     /// first; only when it fails, flag the PV with the data-path-lost
     /// annotation + a Warning event. Clear our own flag (+ Normal event)
     /// when the raid reappears or the attachment leaves this node.
+    /// Detach flint controllers that reconnect-loop against exports that
+    /// now reject them (INVALID HOST flood after a replica node's spdk-tgt
+    /// recreation + re-fence — the tier-2 spike's operational finding).
+    /// Decision logic and safety model live in [`crate::controller_reap`];
+    /// this gathers state and executes the plan.
+    async fn reap_dead_controllers(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if std::env::var("FLINT_CONTROLLER_REAP").is_ok_and(|v| v.eq_ignore_ascii_case("disabled")) {
+            return Ok(());
+        }
+        let threshold: u32 = std::env::var("FLINT_CONTROLLER_REAP_STRIKES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3)
+            .max(1);
+
+        let ctrl_resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "bdev_nvme_get_controllers"}))
+            .await?;
+        let controllers: Vec<crate::controller_reap::ControllerEntry> = ctrl_resp["result"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|c| {
+                let name = c["name"].as_str()?.to_string();
+                let states = c["ctrlrs"]
+                    .as_array()
+                    .map(|paths| {
+                        paths
+                            .iter()
+                            .filter_map(|p| p["state"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(crate::controller_reap::ControllerEntry { name, states })
+            })
+            .collect();
+
+        let raids_resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({"method": "bdev_raid_get_bdevs", "params": {"category": "all"}}))
+            .await?;
+        let raid_base_bdevs: std::collections::HashSet<String> = raids_resp["result"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|r| {
+                r["base_bdevs_list"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|b| b["name"].as_str().map(str::to_string))
+            .collect();
+
+        let input = crate::controller_reap::ReapInput {
+            controllers,
+            raid_base_bdevs,
+        };
+        let plan = {
+            let mut strikes = self.controller_reap_strikes.lock().await;
+            crate::controller_reap::plan_reap(&input, &mut strikes, threshold)
+        };
+        if plan.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            count = plan.len(),
+            "[CONTROLLER_REAP] detaching dead reconnect-looping controllers"
+        );
+        for name in &plan {
+            match self
+                .disk_service
+                .call_spdk_rpc(
+                    &json!({"method": "bdev_nvme_detach_controller", "params": {"name": name}}),
+                )
+                .await
+            {
+                Ok(_) => info!(controller = %name, "[CONTROLLER_REAP] detached dead controller"),
+                Err(e) => {
+                    debug!(controller = %name, error = %e, "[CONTROLLER_REAP] detach deferred")
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn detect_lost_data_paths(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use crate::cutover::{data_path_verdict, DataPathAction, DATA_PATH_LOST_ANNOTATION};
         use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -2747,6 +2845,7 @@ impl Clone for NodeAgent {
             driver: self.driver.clone(),
             orphan_strikes: self.orphan_strikes.clone(),
             data_path_strikes: self.data_path_strikes.clone(),
+            controller_reap_strikes: self.controller_reap_strikes.clone(),
         }
     }
 }
