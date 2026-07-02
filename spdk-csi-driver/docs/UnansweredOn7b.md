@@ -689,3 +689,205 @@ fs-allocated-only methodology, the operator runbook (must include the
 record-repair procedure above), and window p99 over more than two
 samples. Cluster `runj` stands with the fixture running
 (`tier2-7b3.1` everywhere, all three orchestrators on).
+
+## 7b-3 adversarial drill session (2026-07-02, cluster runj, image tier2-7b3.1)
+
+The §9-8 set, run against the standing fixture (`hr-e2e`/`hr-writer`,
+5 fsync/s ledger writer, consumer on `runj-aws-3` after the c5d spot
+node was reclaimed overnight; its stale Node object deleted — see the
+starvation finding). 1.5 GiB of bulk data written first so localization
+had a wide target. Bottom line up front: **all three drills produced
+their answers, the writer ledger is contiguous across the entire
+session (zero acked-write loss through 7 windows, 4 controller kills,
+5 leg kills, one full raid collapse), and the session surfaced two P1s,
+one availability gap intrinsic to replicas=2, and four smaller
+findings** — none of which invalidate the 7b mechanism; two of them
+point at a design simplification that could remove the exposure-window
+failure class entirely.
+
+### Window-latency dataset (n=9 committed windows, both sessions)
+
+148, 148, 147, 148, 156, 157, 158, 159, 176 ms — worst observed 176 ms,
+**11× under the 2 s bar**, phase breakdown stable (biggest component is
+always the two export+AER steps at ~65-80 ms combined). No
+`HotRejoinWindowSlow` events all day.
+
+### Finding 1 (P1): hot rejoin is non-repeatable per replica — head-name
+### EEXIST, protected by the sweep fix
+
+The head lvol name is deterministic (`vol_<vol>_replica_<n>_hr`). After
+a successful rejoin the promoted head keeps that name; when the leg
+next dies, the catch-up chase builds a fresh standby clone under the
+canonical name and **abandons the old head without deleting it** (the
+window's ns-swap path deletes the lvol it replaces; the chase path does
+not). The next window's esnap-clone then fails EEXIST, unwinds, and
+backs off 300 s — forever, because the P0 sweep fix (5feb602) maps
+`_hr` shapes to `Owner::Pv`, so the stray is sweep-protected. Observed
+live at 14:41:13; every subsequent drill cycle required a manual
+`bdev_lvol_delete` of the abandoned head (safe once it is neither the
+record's `active_lvol_uuid` nor a raid member — the guarded delete is
+in the runbook section below). Fix direction: the chase should delete
+the lvol it supersedes (mirroring the ns-swap path), and/or the window
+build should scrub-with-guards a non-active, non-member `_hr`
+namesake before cloning (the reconciler's scrub arm already embodies
+the safety rules). Yesterday's drill 3 didn't hit this only because the
+P0 bug had (destructively) deleted drill 1's head in between.
+
+### Finding 2 (P2): unwind-ladder E_f-export leak, self-healing on the
+### second pass
+
+Attempt #1's unwind (EEXIST at the clone step) left the E_f export
+subsystem `nqn…:hotrejoin:<vol>` alive on the source; attempt #2 then
+failed at `nvmf_create_subsystem` on that leftover. Attempt #2's unwind
+*did* remove it (the ladder is idempotent against artifacts it didn't
+create — good), so the leak self-heals after one wasted 300 s cycle.
+Fix: unwind should treat the E_f export as unconditionally-owned.
+
+### Finding 3 (P2): an unwound window's E_f cut leaves the record's
+### epoch stream pointing at a deleted snapshot
+
+The strict-fresh E_f cut advances `current_epoch`; on unwind the source
+snapshot is deleted but the record still names it, so catch-up fails
+("epoch-N not found in the source lineage") until the next scheduler
+cut moves past it — two wasted cycles observed. Fix: keep the E_f
+snapshot on unwind (it is a valid epoch; GC reaps it normally) rather
+than trying to roll back the record.
+
+### Finding 4 (P1): trigger starvation under adverse tick-phase bias
+
+All orchestrator loops tick at boot+60k with sub-second spawn offsets,
+so each minute is a three-way race (scheduler cut vs catch-up claim vs
+trigger evaluation). The trigger fires only when it reads lag ≤ 1 with
+the claim free — i.e. when it beats both. **With the dead spot node
+still present as a Node object, its 3 s node-agent TCP timeouts skewed
+the race enough that the trigger lost 8/8 eligible ticks (~9 min
+starvation, unbounded)**; within seconds of `kubectl delete node` it
+won the very next tick, and post-cleanup it won 8 of 12 eligible races
+(7 of 8 first-eligible-after-standby). Convergence must not depend on
+incidental API latency: give the trigger a deterministic slot (e.g.
+evaluate immediately after a chase completes within the same catch-up
+tick, or offset its phase by +30 s from the scheduler), or let it
+tolerate lag ≤ max_lag+1 while a chase holds the claim.
+
+### Drill B1 — controller death mid-localization: recovers, but by luck
+### (resume walks the source lineage; GC races it)
+
+Setup: leg kill → standby → window 157 ms (E_f 496) → forced pod delete
+timed off the commit log line; SIGKILL landed mid-localization.
+Observed: **raid stayed 2/2 and the writer never gapped through the
+decapitation** (a committed window needs no orchestrator to keep
+serving); replacement pod up in ~5 s; reconciler fired immediately and
+chose the resume arm. But resume attempts #1/#2 failed wanting source
+epochs 490/491 — **already GC-reaped** (the source retains ~5-6). It
+succeeded on attempt #3 only because local GC drift moved the walk base
+into the retained window. Kill→fully-recovered 2 m 11 s; esnap exposure
+133 s (vs 3-4 s undisturbed). Two defects: (a) the resume path walks
+the **source** lineage although the strict-fresh chase guarantees E_f
+exists in the **local** chain — the original localization uses the
+local chain (that's why it is O(delta), see below) and the resume
+should too; (b) while wedged, the head serves raid writes with no epoch
+credit (record standby@496 vs current 497+) — an outage longer than the
+GC horizon wedges the marker permanently (operator remediation below).
+
+### Drill B2 — controller death in-window: scrub arm validated, 30 s to
+### clean standby
+
+Landing a kill inside a ~550 ms intent→commit span took precision
+work: `kubectl delete --force` SIGKILL latency is 1.5-6 s+ and jittery
+(three misses mapped the neighborhood: post-commit+31 ms → in-place
+container restart 1.3 s + resume → localized 13 s, writer clean;
+mid-scheduler-tick and pre-tick kills → benign). The hit came from
+writing `1` to the container's **cgroup v2 `cgroup.kill`** from the
+privileged spdk-tgt container on the same node (host cgroup fs is rw
+there; ±2 ms timing, node-local clock): kill landed between intent-CAS
+and quiesce. The record froze at `stale + marker` ("hot-rejoin window
+opening"); the restarted container's reconciler decoded it and ran the
+**scrub arm** — artifacts cleaned, marker cleared, catch-up re-chased —
+**crash → clean standby in 30 s**, writer unaffected. Combined with B1
+and drill C, three of the four decode arms are now live-validated
+(resume, scrub, demote; adopt was exercised organically yesterday).
+Residual: a kill inside the ~150 ms quiesced sub-span (orphaned-lease
+writer stall, 8 s bound) — still harness-validated only (7b-0), the
+span is too narrow to hit reliably even at ±2 ms because tick-phase
+drift is ±100 ms. The cgroup.kill/cgroup.freeze technique is now the
+standard drill primitive (documented in the runbook).
+
+### Drill C — source death mid-localization: fail-stop, zero acked-write
+### loss; availability gap at replicas=2
+
+Setup: leg kill → standby → window 158 ms (E_f 528) → `kill 1` on the
+**source** spdk-tgt 511 ms after commit (mid-localization). The
+acked-write-loss hypothesis (raid keeps acking on the esnap-only head;
+demote later discards those acks) is **refuted — the failure is
+fail-stop**: the head's esnap parent is an nvme attachment to the
+source's E_f export, so source death killed the head bdev too; with the
+source's own leg also dead the raid dropped to 0/2 and **unregistered
+entirely** — hard EIO to the consumer, nothing acked after the collapse
+second. Ledger proof: the drill generation ends at idx 20459,
+timestamp = the collapse second, with zero discontinuities before it.
+The in-flight localization deferred gracefully ("Rejoin complete
+localized=false" — committed windows don't unwind), and the next
+reconcile correctly ran the **demote arm** ("lost its leg before
+localization — demoted to stale").
+
+Recovery was two-layered: the node agent **reassembled the raid
+autonomously ~2 min after the collapse** and admitted the re-chased
+standby via fenced-delta equalization (`ReplicaAdmitted`, "in_sync, no
+rebuild"), but the **filesystem layer stayed dead** (the mount points
+at the unregistered device instance) until the consumer pod was
+bounced — total writer outage ~4 min. Two follow-on findings:
+
+- **(P1) The health monitor is silent on raid-ABSENT**: no
+  `VolumeDataPathLost` fired during the 2-minute total outage (the
+  phase-6 predicate handles degraded and base-gone, not raid-gone), and
+  the record kept claiming `in_sync` + cutting epochs on the source
+  while zero consumer writes could flow (consumer-blindness again).
+- **(availability, structural) At replicas=2, the source is a single
+  failure domain for the whole volume during esnap exposure** — it
+  hosts both the surviving leg and the head's esnap parent. With 3+
+  replicas an independent leg survives. Options: document as a
+  replicas=2 caveat; gate the trigger on source health; or eliminate
+  the exposure (next paragraph).
+
+### The design question the session converged on
+
+The strict-fresh in-window chase already places E_f in the **local**
+chain on the destination (that is why undisturbed localization is
+**O(delta-since-chase), not O(volume)** — 1.5 GiB localized in 3-4 s,
+same as an empty volume, because the pad clones locally; the earlier
+"500 MB/s backfill" reading of that number was wrong). If the head were
+cloned from the **local E_f snapshot** instead of esnap-cloned to the
+remote E_f export, there would be no remote parent, no localization
+phase, no exposure window — B1's wedge and drill C's collapse both
+become unreachable. Before 7b closes, either identify the correctness
+blocker that forces the remote esnap (crash-consistency of the
+in-window chase? record-authority of the source cut?) or make the
+switch and delete ~half the failure modes in this document.
+
+### Also observed / operational notes
+
+- Consumer-blindness race, live: an epoch cut recorded `in_sync:N` for
+  a dead leg (spdk-tgt restarted between kill and health tick) before
+  stale-marking corrected it — harmless under revert-first, but it is
+  the phase-6 bug surfacing again.
+- Thin-aware full rebuild, live: after drill hygiene eroded the shared
+  local history, the chase correctly fell back to
+  `ReplicaFullBuildStarted` ("head recreated empty, replaying the full
+  source lineage, holes skipped") — ~2 min for 1.5 GiB.
+- spdk-tgt leg kills accumulate kubelet CrashLoop backoff (8 restarts →
+  ~2.5 min revival); drill pacing, not a product issue.
+- Runbook additions: (1) guarded delete of an abandoned `_hr` head
+  (must not be `active_lvol_uuid`, must not be a raid member); (2)
+  post-collapse recovery = wait for autonomous raid reassembly, then
+  bounce the consumer pod to remount; (3) wedged `standby+marker` after
+  a long controller outage = the B1 GC-horizon wedge — either wait for
+  local-GC drift or patch the record (clear marker, mark stale) and let
+  Tier-1 re-chase; (4) `cgroup.kill`/`cgroup.freeze` via a privileged
+  same-node container is the precision crash primitive for drills.
+
+**Remaining for 7b-3 after this session**: the quiesced-span orphaned-
+lease live measurement (narrow; consider a fault-injection env knob
+instead of timing luck), the two-leg fs-allocated-only scrub, the
+operator runbook as a standalone doc, and the local-E_f design decision
+above. Cluster `runj` stands healthy: fixture running, `in_sync×2`,
+all orchestrators on, epoch stream at ~533.
