@@ -336,3 +336,38 @@ Decision 1):
   campaign's checklist: orchestrator kill in-window, R_src kill
   mid-backfill, crash between add and record flip, in-controller window
   p99 vs. the 2 s target.
+
+## Status (2026-07-01, end of session — pickup point)
+
+Phase 7b-0 is code-complete on `main`; its behavioral validation is
+blocked on cluster availability (June's spot build node is gone; cluster
+being re-provisioned).
+
+- **Patch v3 committed** (`da74444`, `raid-skip-rebuild.patch`): both
+  hardening items above, plus the strengthened held-lease check (the add
+  now requires an ARMED lease — not mid-acquire, not mid-release, poller
+  registered — closing a third window where an add could slip in while
+  the initial quiesce RPC was still in flight). `bdev_raid_quiesce_list`
+  gains `pin_count` / `expired_while_pinned` / `releasing`. Validated
+  locally: applies clean on v26.05 + the five other carried patches in
+  Dockerfile order; `genrpc.py` schema/CLI/C lints green;
+  `clang -fsyntax-only -Wall` clean on both patched C files. **Pending:**
+  image rebuild on the remote x86 build node
+  (`docs/remote-x86-build-node.md`) and the `scripts/tier2-spike.sh`
+  behavioral re-run (all v2 drills, plus observe `pin_count` in
+  `bdev_raid_quiesce_list` during an add).
+- **Dead-controller reaping committed** (`72e2731`):
+  `src/controller_reap.rs` pure planner (strict flint-shape prefix,
+  raid-base guard, positively-dead states only, 3 strikes) + the node
+  agent's 60 s monitor-tick pass. Gates: `FLINT_CONTROLLER_REAP=disabled`,
+  `FLINT_CONTROLLER_REAP_STRIKES` (default 3). 9 unit tests; full suite
+  green (476).
+- **Orchestrator contract notes for 7b-1, discovered writing v3:** treat
+  `-ENOENT` from `bdev_raid_unquiesce` as already-released (an expired
+  lease's auto-release may have won); `-EBUSY` during a pinned add means
+  retry after the add's response; renew-immediately-before-add stays a
+  hard invariant (the pin closes the race, the renew keeps the window
+  honest); a failed unquiesce no longer strands the quiesce — the lease
+  survives and its expiry poller retries.
+- **Next up:** finish 7b-0 validation once the cluster is back, then
+  phase 7b-1 (`hot_rejoin.rs` mechanism library per the plan above).
