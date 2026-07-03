@@ -1954,6 +1954,46 @@ async fn admit_one_standby(
         .into());
     }
 
+    // Coverage-probed source selection, BEFORE the final cut so a deferral
+    // has no side effects. The lag gate above bounds the mark in epoch
+    // COUNT, but an attached source that was itself rebuilt roots its
+    // chain at its OWN rebuild base (the second 3-replica-drill wedge,
+    // 2026-07-03) — a chain rooted past the mark can never serve this
+    // base-inclusive session, however fresh the mark. Probe in preference
+    // order (non-consumer first); the first source whose live lineage
+    // holds the mark through the newest epoch wins. None covering →
+    // defer: the stage proceeds degraded and the ordinary chase owns the
+    // heal (it demotes an uncoverable standby to the bulk path). The cut
+    // below appends to the covering chain, so the verdict holds through
+    // the copy.
+    let attached_replicas: Vec<ReplicaInfo> = replicas
+        .iter()
+        .filter(|ri| attached.iter().any(|a| *a == ri.lvol_uuid))
+        .cloned()
+        .collect();
+    let latest = record
+        .latest_epoch(volume_id)
+        .map(String::from)
+        .ok_or("no recorded epoch to admit against")?;
+    let src = match select_covering_source(
+        rpc, &record, &attached_replicas, Some(consumer_node), &latest, Some(&base),
+    )
+    .await?
+    {
+        CoveringSource::Covering(src) => src,
+        CoveringSource::NoneInSync => {
+            return Err("no in-sync source among the attached replicas".into())
+        }
+        CoveringSource::NoneCovering => {
+            return Err(format!(
+                "no attached in-sync source lineage covers the standby's mark {} — \
+                 deferred; the chase re-converges it",
+                base
+            )
+            .into())
+        }
+    };
+
     // Final common epoch on exactly the attached in-sync replicas. With all
     // of them fenced to this node and the raid not yet created, no writer
     // exists: the cut equals each head, and skew is zero.
@@ -2001,14 +2041,7 @@ async fn admit_one_standby(
     record.apply_epoch_cut(&final_epoch, &cut_uuids, &replica_sync::now_rfc3339());
 
     // One more chase session: base-inclusive from the standby's mark through
-    // the final epoch, from an attached source (prefer off the consumer).
-    let attached_replicas: Vec<ReplicaInfo> = replicas
-        .iter()
-        .filter(|ri| attached.iter().any(|a| *a == ri.lvol_uuid))
-        .cloned()
-        .collect();
-    let src = pick_source(&record, &attached_replicas, Some(consumer_node))
-        .ok_or("no in-sync source among the attached replicas")?;
+    // the final epoch, from the coverage-probed source selected above.
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
     let live_uuid = rec.live_lvol_uuid().to_string();
     let dst_bdev = ensure_dst_attached(
@@ -4039,8 +4072,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_fails_over_to_an_attached_source_covering_the_mark() {
+        // The preferred (non-consumer) source node-a was itself rebuilt and
+        // roots at epoch 5 — the standby's mark 4 is unreachable from its
+        // head, however fresh the mark. The consumer node-c holds the full
+        // history: admission must source the final delta from it instead
+        // of failing the stage.
+        let mut record = standby_b_record();
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "one behind", "t");
+        let store = FakeStore::new(record);
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+        // The final epoch (6) is pre-installed like the choreography test's
+        // world — the fake's cut does not extend chains.
+        install_chain(
+            &rpc, "node-c", "lvs0", "lvol-uuid-c",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert_eq!(admitted.len(), 1, "admission must not defer: node-c covers");
+        assert_eq!(admitted[0].final_epoch, epoch("vol1", 6));
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        assert!(!copies.is_empty());
+        assert!(
+            copies.iter().all(|(node, _)| node == "node-c"),
+            "final delta must come from the covering consumer source: {:?}",
+            copies
+        );
+        let record = store.record.lock().unwrap();
+        assert_eq!(record.get("uuid-b").unwrap().sync_state, SyncState::InSync);
+    }
+
+    #[tokio::test]
+    async fn admission_defers_side_effect_free_when_no_source_covers_the_mark() {
+        // Every attached source re-rooted past the standby's mark: the
+        // admission must defer BEFORE cutting the final epoch (no stray
+        // cut, no record write) and leave the heal to the ordinary chase,
+        // which demotes an uncoverable standby to the bulk path.
+        let mut record = standby_b_record();
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "one behind", "t");
+        let store = FakeStore::new(record);
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+        install_chain(&rpc, "node-c", "lvs0", "lvol-uuid-c", &[&epoch("vol1", 5)]);
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        assert!(
+            rpc.calls_of("bdev_lvol_snapshot").is_empty(),
+            "the deferral must precede the final cut"
+        );
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(store.ops.lock().unwrap().is_empty(), "no record writes on deferral");
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+    }
+
+    #[tokio::test]
     async fn admission_defers_when_final_cut_fails_and_rolls_back() {
         let mut rpc = FakeRpc::new("uuid-b-v2");
+        // The coverage probe must pass (node-a holds the mark) so the
+        // admission reaches the cut — this test is about the cut failing.
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
         rpc.fail.insert(
             ("node-c".to_string(), "bdev_lvol_snapshot".to_string()),
             "connection refused".to_string(),
