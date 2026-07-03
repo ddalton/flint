@@ -399,10 +399,12 @@ nothing.
 
 Documented, bounded, not yet fixed — so an operator recognizes them:
 
-- **Esnap localization resume walks the source lineage** (B1): after a
-  controller crash mid-localization, resume can transiently fail against
-  GC until local drift converges it (§6.2 is the backstop). The fix
-  (prefer the local chain, which provably contains `E_f`) is owed.
+- **Esnap localization resume vs. GC** (B1): FIXED 2026-07-03 — the
+  resume now bases its replay at the pad's own chain top (and re-roots
+  directly onto an already-completed local `E_f`), so the source-GC race
+  that could stall a resume for minutes is gone (live-measured: 10 s of
+  exposure across a controller death, vs 133 s pre-fix). On images older
+  than `tier2-7b4.7` the race remains — §6.2 is the backstop there.
 - **Consumer-blind epoch cutting** (phase-6): epochs can be recorded while
   consumer writes cannot flow (e.g. during a repair episode). Harmless
   under revert-first admission, but epoch numbers are not proof of
@@ -433,12 +435,14 @@ standard tools):
   jitter and cannot hit sub-second spans.
 - **In-window fault injection (drill-only):** spans inside the hot-rejoin
   window (~150 ms) are too narrow even for `cgroup.kill`. Set
-  `FLINT_HOT_REJOIN_FAULT=abort_after_quiesce` on the controller to abort
-  the process the instant W1 commits, leaving the quiesce lease orphaned
-  (the auto-release drill; expect a writer stall of restart + reconcile
-  latency, ~3.5 s — the decode's defensive unquiesce — with
-  `FLINT_HOT_REJOIN_LEASE_MS` as the no-controller backstop). **Disarm
-  immediately after the first fire**
+  `FLINT_HOT_REJOIN_FAULT` on the controller to abort the process at a
+  named point: `abort_after_quiesce` (the instant W1 commits — orphaned
+  lease / auto-release drill; expect a writer stall of restart +
+  reconcile latency, ~3.5 s via the decode's defensive unquiesce, with
+  `FLINT_HOT_REJOIN_LEASE_MS` as the no-controller backstop) or
+  `abort_after_flip` (committed + flipped + un-localized — the B1 resume
+  drill; expect localization to complete within seconds of the restart).
+  **Disarm immediately after the first fire**
   (`kubectl set env ... FLINT_HOT_REJOIN_FAULT-`) — the restarted
   container still has the env and will fault every rejoin attempt.
   Never set in production.

@@ -1490,3 +1490,57 @@ clean; builder node torn down after the drill (no stale Node object).
 **Remaining from the 7b list after this:** esnap-resume preferring the
 local chain (B1 residual) and the `admit_standbys_at_stage` coverage
 probe.
+
+## Esnap-resume prefers the local chain (2026-07-03, 72910c1, `tier2-7b4.7`) — B1 residual closed
+
+The last live-found defect. B1's resume based its replay at the
+**oldest** local epoch and demanded source history GC had already
+reaped — recovery hung on GC drift (133 s of exposure) and an outage
+past the GC horizon wedges the marker permanently. Two prongs in
+`localize()`:
+
+1. **Base = the pad's own chain top** when it is an epoch of this
+   volume. The pre-window chase built that chain from a healthy source
+   with the §3 stale-time back-off already applied at its base, so its
+   newest element is trustworthy — and as the youngest possible base it
+   keeps the replay O(un-chased delta) and all but removes the
+   source-retention race. (This deliberately does NOT naively take the
+   newest `record.epochs ∩ present` name: an epoch cut on a zombie leg
+   — the open phase-6 consumer-blindness corner — could exist locally
+   by name while missing acked writes; the pad's chain only contains
+   what the back-off-guarded chase actually built.) Pads without an
+   epoch-shaped chain fall back to the previous oldest-present rule;
+   None still routes to the thin-aware full build. Bonus: every
+   first-pass localization now replays [chain-top..E_f] too, instead
+   of [oldest..E_f].
+2. **Local-E_f short-circuit**: a crash between the backfill's align
+   (local E_f snapshotted) and `set_parent` leaves a COMPLETED local
+   E_f — bit-identical whichever survivor sourced it (§5
+   source-independence) — so the resume re-roots onto it directly:
+   no source, no transport, no data movement. Previously this crash
+   point re-planned and re-ran the entire replay into an align
+   collision.
+
+Suite 544. Unit differentials: B1 reproduction (every source chain
+rooted PAST the dest's oldest epoch — only the chain-top base can
+localize) and the short-circuit against EMPTY source chains (only the
+no-replay path can succeed).
+
+**Live validation — B1 redux via a new fault point** (`abort_after_flip`,
+65c9832: controller aborts right after the esnap record flip — a
+committed, flipped, un-localized window, the exact B1 shape; image
+`tier2-7b4.7`, third transient spot builder): leg kill → standby →
+window committed + flip 14:27:24 → **FAULT** → container restart
++5 s → resume arm decoded standby+marker, replayed, re-rooted →
+**`HotRejoinLocalized` at +10 s of esnap exposure, in_sync ×3 at
+14:27:36**. B1 original: 133 s and three failed attempts; undisturbed
+baseline: 3–5 s. Zero writer impact (the abort lands after unquiesce;
+ledger gapless at **113,704 cumulative appends**), hygiene clean (no
+`:hotrejoin:` NQNs, no pads), builder torn down. As with the dbd781a
+failover arm, the GC-divergence differential itself rides on the unit
+reproduction — the live drill proves the resume path end-to-end
+through a real controller death.
+
+**Remaining from the 7b list after this:** the
+`admit_standbys_at_stage` coverage probe — everything else on the 7b
+validation tail is closed.
