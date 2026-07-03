@@ -202,6 +202,21 @@ pub trait CatchupStore: Sync {
         replica_uuid: &str,
         reason: &str,
     ) -> Result<(), RpcError>;
+    /// Demote a standby to stale: its chase is definitively impossible (no
+    /// in-sync source lineage covers its mark), so the bulk catch-up path
+    /// owns it from here. Default refuses loudly — test fakes implement
+    /// what they exercise.
+    async fn record_stale(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+    ) -> Result<(), RpcError> {
+        Err(format!(
+            "record_stale({volume_id}, {replica_uuid}, {reason}): not implemented by this store"
+        )
+        .into())
+    }
     /// Record a common epoch cut on exactly `cut_uuids` (phase-4 final
     /// delta; identity uuids). Appends the epoch, advances current_epoch,
     /// stamps last_epoch on the cut replicas.
@@ -354,6 +369,21 @@ impl CatchupStore for KubeStore {
             if let Some(rec) = r.replicas.iter_mut().find(|rec| rec.lvol_uuid == uuid) {
                 rec.reason = Some(reason.clone());
             }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_stale(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, reason) = (replica_uuid.to_string(), reason.to_string());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.mark_stale(&uuid, &reason, &now);
         })
         .await?;
         Ok(())
@@ -702,6 +732,12 @@ pub(crate) async fn source_head_bdev(
     })
 }
 
+/// Marker carried by `lineage_chain`'s DEFINITIVE non-coverage errors (the
+/// walk reached the chain root without finding the session's base/target).
+/// `select_covering_source` skips a candidate only on this verdict — never
+/// on a transport error, which may be transient.
+pub(crate) const LINEAGE_NOT_COVERED: &str = "not found in the source lineage";
+
 pub(crate) async fn lineage_chain(
     rpc: &dyn CatchupRpc,
     src: &ReplicaInfo,
@@ -734,13 +770,14 @@ pub(crate) async fn lineage_chain(
                     Ok(chain)
                 }
                 None => Err(format!(
-                    "target {} not found in the source lineage on {}",
-                    target, src.node_name
+                    "target {} {} on {}",
+                    target, LINEAGE_NOT_COVERED, src.node_name
                 )
                 .into()),
                 Some(b) => Err(format!(
-                    "{} not found in the source lineage on {} (walked {} to the chain root)",
+                    "{} {} on {} (walked {} to the chain root)",
                     if collecting { b } else { target },
+                    LINEAGE_NOT_COVERED,
                     src.node_name,
                     head_alias
                 )
@@ -783,17 +820,87 @@ pub fn pick_source<'a>(
     replicas: &'a [ReplicaInfo],
     consumer_node: Option<&str>,
 ) -> Option<&'a ReplicaInfo> {
-    let in_sync: Vec<&ReplicaInfo> = record
+    in_sync_sources(record, replicas, consumer_node).first().copied()
+}
+
+/// Every in-sync replica in source-preference order: non-consumer nodes
+/// first (record order within each group). `pick_source` is the head of
+/// this list; the coverage-aware selection walks all of it.
+fn in_sync_sources<'a>(
+    record: &VolumeSyncRecord,
+    replicas: &'a [ReplicaInfo],
+    consumer_node: Option<&str>,
+) -> Vec<&'a ReplicaInfo> {
+    let mut sources: Vec<&ReplicaInfo> = record
         .replicas
         .iter()
         .filter(|rec| rec.sync_state == SyncState::InSync)
         .filter_map(|rec| replicas.iter().find(|ri| ri.lvol_uuid == rec.lvol_uuid))
         .collect();
-    in_sync
-        .iter()
-        .find(|ri| consumer_node != Some(ri.node_name.as_str()))
-        .or_else(|| in_sync.first())
-        .copied()
+    sources.sort_by_key(|ri| consumer_node == Some(ri.node_name.as_str()));
+    sources
+}
+
+/// Outcome of coverage-aware source selection.
+enum CoveringSource<'a> {
+    Covering(&'a ReplicaInfo),
+    /// No in-sync replica exists at all.
+    NoneInSync,
+    /// Every reachable in-sync lineage walked to its chain root without
+    /// covering the session, and none failed indeterminately — a delta from
+    /// `base` is DEFINITIVELY impossible cluster-wide right now.
+    NoneCovering,
+}
+
+/// Pick the copy source among the in-sync replicas whose live lineage
+/// actually COVERS the session: contains `target`, and `base` when the
+/// session is based. `pick_source`'s single preferred answer is not enough
+/// after staggered multi-failures: the preferred (non-consumer) source may
+/// itself have been rebuilt from a base NEWER than this session's — its
+/// rebuilt chain roots there, so the walk can never reach an older base
+/// (the second 3-replica-drill wedge, 2026-07-03) — while another in-sync
+/// replica still holds the older history (the record's retention pin keeps
+/// a needed base alive on every chain that has it).
+///
+/// Candidates keep `pick_source`'s order (non-consumer first); the first
+/// covering one wins. A candidate is skipped on the definitive
+/// walked-to-root verdict ([`LINEAGE_NOT_COVERED`]) or on a transport error
+/// (failing over past an unreachable node), but `NoneCovering` — the
+/// verdict that licenses demoting a delta to a full rebuild — is returned
+/// only when every candidate was definitive: on any indeterminate error the
+/// cycle fails and retries instead, because a spurious full build on a
+/// transient would be far worse than a 60s delay.
+async fn select_covering_source<'a>(
+    rpc: &dyn CatchupRpc,
+    record: &VolumeSyncRecord,
+    replicas: &'a [ReplicaInfo],
+    consumer_node: Option<&str>,
+    target: &str,
+    base: Option<&str>,
+) -> Result<CoveringSource<'a>, RpcError> {
+    let candidates = in_sync_sources(record, replicas, consumer_node);
+    if candidates.is_empty() {
+        return Ok(CoveringSource::NoneInSync);
+    }
+    let mut indeterminate: Option<RpcError> = None;
+    for src in candidates {
+        match lineage_chain(rpc, src, source_live_uuid(record, src), target, base).await {
+            Ok(_) => return Ok(CoveringSource::Covering(src)),
+            Err(e) if e.to_string().contains(LINEAGE_NOT_COVERED) => {
+                debug!(node = %src.node_name, error = %e,
+                    "[CATCHUP] Source lineage does not cover the session — trying the next in-sync source");
+            }
+            Err(e) => {
+                debug!(node = %src.node_name, error = %e,
+                    "[CATCHUP] Source probe failed — trying the next in-sync source");
+                indeterminate = Some(e);
+            }
+        }
+    }
+    match indeterminate {
+        Some(e) => Err(e),
+        None => Ok(CoveringSource::NoneCovering),
+    }
 }
 
 pub(crate) async fn get_bdev(
@@ -1294,10 +1401,6 @@ async fn catchup_stale(
     else {
         return Ok(()); // identity replaced; reconcile will drop the record
     };
-    let Some(src) = pick_source(record, replicas, consumer_node) else {
-        debug!(volume_id, "[CATCHUP] No in-sync source replica — cannot catch up");
-        return Ok(());
-    };
 
     // Reachability probe + present-epochs listing in one call.
     let names = match list_lvol_names(rpc, &identity.node_name, &identity.lvs_name).await {
@@ -1341,6 +1444,85 @@ async fn catchup_stale(
         }
         return Ok(());
     }
+
+    // Coverage-aware source selection (base first: the probe needs it). A
+    // shared base present on this replica is worthless when no in-sync
+    // lineage reaches back to it — every survivor rebuilt from a newer base
+    // (staggered multi-failure). Fall back to the full build then, exactly
+    // as if no shared history existed.
+    let target = record
+        .latest_epoch(volume_id)
+        .ok_or_else(|| format!("no recorded epoch to copy toward for {}", volume_id))?
+        .to_string();
+    let (src, base) = match select_covering_source(
+        rpc, record, replicas, consumer_node, &target, base.as_deref(),
+    )
+    .await?
+    {
+        CoveringSource::Covering(src) => (src, base),
+        CoveringSource::NoneInSync => {
+            debug!(volume_id, "[CATCHUP] No in-sync source replica — cannot catch up");
+            return Ok(());
+        }
+        CoveringSource::NoneCovering => {
+            let Some(b) = base else {
+                // No in-sync lineage holds even the newest recorded epoch —
+                // anomalous (an in-sync replica carries it by definition);
+                // retry next cycle rather than guess.
+                return Err(format!(
+                    "no in-sync source lineage contains {} on any node",
+                    target
+                )
+                .into());
+            };
+            if !cfg.full_build {
+                let reason = "full rebuild required: no in-sync source lineage covers the \
+                              shared base (full build disabled)"
+                    .to_string();
+                if rec.reason.as_deref() != Some(reason.as_str()) {
+                    store.record_reason(volume_id, &rec.lvol_uuid, &reason).await?;
+                    store
+                        .emit(
+                            volume_id,
+                            "Warning",
+                            "ReplicaNeedsFullRebuild",
+                            &format!(
+                                "Replica {} on {} has shared base {} but no in-sync source \
+                                 lineage reaches back to it; the thin-aware full build is \
+                                 disabled (FLINT_CATCHUP_FULL_BUILD), so it stays stale",
+                                rec.lvol_uuid, identity.node_name, b
+                            ),
+                        )
+                        .await;
+                }
+                return Ok(());
+            }
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaCatchupBaseUncovered",
+                    &format!(
+                        "No in-sync source lineage covers shared base {} for the replica on {} \
+                         — falling back to the thin-aware full build",
+                        b, identity.node_name
+                    ),
+                )
+                .await;
+            match select_covering_source(rpc, record, replicas, consumer_node, &target, None)
+                .await?
+            {
+                CoveringSource::Covering(src) => (src, None),
+                _ => {
+                    return Err(format!(
+                        "no in-sync source lineage contains {} on any node",
+                        target
+                    )
+                    .into())
+                }
+            }
+        }
+    };
 
     // Pin BEFORE the revert: from here the session's foundation must not be
     // retired (§5 retention pinning; survives orchestrator restarts). A
@@ -1520,8 +1702,42 @@ async fn chase_standby(
     if record.latest_epoch_seq(volume_id) <= base_seq {
         return Ok(()); // current — nothing to chase
     }
-    let Some(src) = pick_source(record, replicas, consumer_node) else {
-        return Ok(());
+    let target = record
+        .latest_epoch(volume_id)
+        .ok_or_else(|| format!("no recorded epoch to chase toward for {}", volume_id))?
+        .to_string();
+    let src = match select_covering_source(rpc, record, replicas, consumer_node, &target, Some(base))
+        .await?
+    {
+        CoveringSource::Covering(src) => src,
+        CoveringSource::NoneInSync => return Ok(()),
+        CoveringSource::NoneCovering => {
+            // Every in-sync lineage roots NEWER than this standby's mark —
+            // each surviving source was itself rebuilt from a newer base
+            // (staggered multi-failure), so a delta from `base` is
+            // impossible cluster-wide and every retry would fail the same
+            // way. Demote to stale: the bulk path owns it from here and
+            // ends in the thin-aware full build when no shared base
+            // qualifies.
+            let reason = format!(
+                "standby chase impossible: no in-sync source lineage covers {}",
+                base
+            );
+            store.record_stale(volume_id, &rec.lvol_uuid, &reason).await?;
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaChaseSourcesExhausted",
+                    &format!(
+                        "Standby on {} cannot chase from {}: no in-sync source lineage reaches \
+                         back to it — demoted to stale for rebuild",
+                        identity.node_name, base
+                    ),
+                )
+                .await;
+            return Ok(());
+        }
     };
 
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
@@ -2374,6 +2590,17 @@ mod tests {
                 rec.reason = Some(reason.to_string());
             }
             self.ops.lock().unwrap().push(format!("reason:{}", reason));
+            Ok(())
+        }
+
+        async fn record_stale(
+            &self,
+            _volume_id: &str,
+            replica_uuid: &str,
+            reason: &str,
+        ) -> Result<(), RpcError> {
+            self.record.lock().unwrap().mark_stale(replica_uuid, reason, "t-stale");
+            self.ops.lock().unwrap().push(format!("stale:{}", replica_uuid));
             Ok(())
         }
 
@@ -3400,6 +3627,209 @@ mod tests {
             Some(epoch("vol1", 5).as_str())
         );
         assert_eq!(record.retention_pin, None);
+    }
+
+    #[tokio::test]
+    async fn chase_fails_over_to_a_source_covering_the_base() {
+        // b is a standby caught up through epoch 4. The PREFERRED source
+        // (non-consumer node-a) was itself rebuilt after a staggered
+        // failure: its chain roots at epoch 5, so epoch 4 is unreachable
+        // from its head. The consumer (node-c) still holds the full
+        // history. The chase must fail over to node-c instead of wedging
+        // on node-a forever (the second 3-replica-drill wedge).
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record);
+
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let expected = expected_remote_base_bdev("vol1", 1);
+        for node in ["node-a", "node-c"] {
+            rpc.bdevs.lock().unwrap().insert(
+                (node.to_string(), expected.clone()),
+                json!({ "name": expected, "uuid": "uuid-b-v2" }),
+            );
+        }
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+        install_chain(
+            &rpc, "node-c", "lvs0", "lvol-uuid-c",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), Some("node-c"), &cfg())
+            .await
+            .unwrap();
+
+        // Copied from node-c (base-inclusive), never from node-a.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        assert!(copies.iter().all(|(node, _)| node == "node-c"), "copies: {:?}", copies);
+        let srcs: Vec<&str> = copies
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(srcs, vec!["lvs0/epoch-vol1-4", "lvs0/epoch-vol1-5"]);
+        let record = store.record.lock().unwrap();
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby);
+        assert_eq!(b.last_epoch.as_deref(), Some(epoch("vol1", 5).as_str()));
+    }
+
+    #[tokio::test]
+    async fn chase_fails_over_past_an_unreachable_source() {
+        // The preferred source's node errors on the probe (transient, not a
+        // coverage verdict); node-c covers → the chase proceeds from node-c
+        // this cycle instead of failing it.
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record.clone());
+
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.fail.insert(
+            ("node-a".to_string(), "bdev_get_bdevs".to_string()),
+            "connection refused".to_string(),
+        );
+        let expected = expected_remote_base_bdev("vol1", 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-c".to_string(), expected.clone()),
+            json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+        install_chain(
+            &rpc, "node-c", "lvs0", "lvol-uuid-c",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+
+        chase_standby(
+            &rpc, &store, "vol1", &record,
+            record.get("uuid-b").unwrap(),
+            &replicas3(), None, "raid_vol1", &cfg(),
+        )
+        .await
+        .unwrap();
+
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        assert!(!copies.is_empty());
+        assert!(copies.iter().all(|(node, _)| node == "node-c"), "copies: {:?}", copies);
+    }
+
+    #[tokio::test]
+    async fn chase_demotes_standby_when_no_source_covers_its_mark() {
+        // Rolling failures: the only in-sync survivor (node-a) was itself
+        // rebuilt from epoch 5 — no lineage anywhere reaches the standby's
+        // epoch-4 mark. Retrying can never succeed: demote to stale so the
+        // bulk path rebuilds it.
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        record.mark_stale("uuid-c", "leg failed", "2026-06-11T10:30:00Z");
+        let store = FakeStore::new(record.clone());
+
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+
+        chase_standby(
+            &rpc, &store, "vol1", &record,
+            record.get("uuid-b").unwrap(),
+            &replicas3(), None, "raid_vol1", &cfg(),
+        )
+        .await
+        .unwrap();
+
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(store.ops.lock().unwrap().contains(&"stale:uuid-b".to_string()));
+        assert!(store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(r, t)| r == "ReplicaChaseSourcesExhausted" && t == "Warning"));
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn chase_source_probe_transport_error_retries_without_demotion() {
+        // The sole in-sync source errors on the probe: indeterminate — the
+        // cycle must fail and retry, never demote (a transient must not
+        // cost a full rebuild).
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        record.mark_stale("uuid-c", "leg failed", "2026-06-11T10:30:00Z");
+        let store = FakeStore::new(record.clone());
+
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.fail.insert(
+            ("node-a".to_string(), "bdev_get_bdevs".to_string()),
+            "connection refused".to_string(),
+        );
+
+        let err = chase_standby(
+            &rpc, &store, "vol1", &record,
+            record.get("uuid-b").unwrap(),
+            &replicas3(), None, "raid_vol1", &cfg(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("connection refused"), "got: {}", err);
+        assert!(!store.ops.lock().unwrap().iter().any(|o| o.starts_with("stale:")));
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_catchup_full_build_fallback_when_base_uncovered() {
+        // b is stale with epochs 3 and 4 still present locally — but the
+        // only in-sync survivor's chain roots at epoch 5 (it was itself
+        // rebuilt), so no delta base is coverable anywhere: fall back to
+        // the thin-aware full build from that survivor instead of wedging.
+        let mut record = stale_b_record();
+        record.mark_stale("uuid-c", "leg failed", "2026-06-11T10:30:00Z");
+        let store = FakeStore::new(record.clone());
+
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.lvols.insert(
+            "node-b".to_string(),
+            vec![(epoch("vol1", 3), "e3".to_string()), (epoch("vol1", 4), "e4".to_string())],
+        );
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
+        let expected = expected_remote_base_bdev("vol1", 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected.clone()),
+            json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+
+        catchup_stale(
+            &rpc, &store, "vol1", &record,
+            record.get("uuid-b").unwrap(),
+            &replicas3(), None, "raid_vol1", &cfg(),
+        )
+        .await
+        .unwrap();
+
+        // The full build replayed the survivor's whole (truncated) lineage.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        let srcs: Vec<&str> = copies
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(srcs, vec!["lvs0/epoch-vol1-5"]);
+        let ops = store.ops.lock().unwrap();
+        assert!(
+            ops.iter().any(|o| o == &format!("revert:{}:uuid-b-v2", FULL_BUILD_BASE)),
+            "ops: {:?}",
+            ops
+        );
+        assert!(ops.iter().any(|o| o == &format!("standby:{}", epoch("vol1", 5))));
+        let events = store.events.lock().unwrap();
+        assert!(events.iter().any(|(r, _)| r == "ReplicaCatchupBaseUncovered"));
+        assert!(events.iter().any(|(r, _)| r == "ReplicaFullBuildStarted"));
     }
 
     #[tokio::test]
