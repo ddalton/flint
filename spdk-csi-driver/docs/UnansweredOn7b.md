@@ -889,20 +889,61 @@ the builder as per-session disposable.
   replicas=2 caveat; gate the trigger on source health; or eliminate
   the exposure (next paragraph).
 
-### The design question the session converged on
+### The design question the session converged on — DECIDED (2026-07-02)
 
-The strict-fresh in-window chase already places E_f in the **local**
-chain on the destination (that is why undisturbed localization is
-**O(delta-since-chase), not O(volume)** — 1.5 GiB localized in 3-4 s,
-same as an empty volume, because the pad clones locally; the earlier
-"500 MB/s backfill" reading of that number was wrong). If the head were
-cloned from the **local E_f snapshot** instead of esnap-cloned to the
-remote E_f export, there would be no remote parent, no localization
-phase, no exposure window — B1's wedge and drill C's collapse both
-become unreachable. Before 7b closes, either identify the correctness
-blocker that forces the remote esnap (crash-consistency of the
-in-window chase? record-authority of the source cut?) or make the
-switch and delete ~half the failure modes in this document.
+As posed during the drills: if the head were cloned from a **local E_f
+snapshot** instead of esnap-cloned to the remote E_f export, there
+would be no remote parent, no localization phase, no exposure window —
+B1's wedge and drill C's collapse both become unreachable. Why doesn't
+the window do that?
+
+**The literal local-E_f clone is unsound — rejected.** Code review
+killed the premise: the window does NOT chase the standby to E_f (the
+record's `last_epoch = E_f` mid-window is flip bookkeeping, not a local
+snapshot — the 8-step timings have no chase step). At window time the
+local chain tops out at the last chased epoch E_l; the gap E_l→E_f is
+the un-chased delta, up to ~2 epochs of writes. A local E_f can only
+exist if that delta is copied INSIDE the quiesced window — O(delta)
+with writes frozen — which is June's design and its 10 s windows. The
+remote esnap is not incidental; it is what makes the window O(1)
+(~150 ms at any write rate) by deferring the data movement to the
+post-commit localization. Cloning from local E_l without the delta
+would hand `--skip-rebuild` a diverged leg: silent corruption.
+
+**Decision: adaptive dual-path (7b-4).** The un-chased delta is
+cheaply estimable at trigger time (epoch snapshots carry
+`num_allocated_clusters`; the current-epoch sliver is bounded by
+write-rate × cut interval). Pick the path per rejoin:
+
+- **Small delta** (est. ≤ `FLINT_HOT_REJOIN_INLINE_DELTA_MAX`, default
+  64 MiB): **quiesced fenced-final-delta live admission** — quiesce
+  (the lease IS the fence: no writer exists), cut E_f, chase the
+  standby lvol itself through E_f with the existing §5 delta machinery
+  against the frozen source, `clear_head_sb`, add the STANDBY with
+  `--skip-rebuild`, unquiesce. This is phase-4 admission recombined
+  with 7a's live add — the phase-4 comment ("a base cannot join an
+  ONLINE raid without the stock blind rebuild") predates
+  `--skip-rebuild` and the two mechanisms were simply never rejoined.
+  No head clone, no `_hr` names, no E_f export, no pad, no
+  localization, no exposure window at all: the entire drill-C failure
+  class and the B1 resume/GC-wedge class are unreachable, and the
+  crash-decode table collapses to adopt/scrub. Window = O(delta),
+  bounded by an abort budget (lease/2): overrun → unquiesce-and-abort
+  (nothing target-side mutated beyond an idempotent chase) → esnap
+  path next attempt. Content-identity rests on already-validated
+  ground (phase-4 fenced delta + the 7b-0 scrub).
+- **Large delta**: today's esnap path unchanged — O(1) ~150 ms window,
+  short source-dependent exposure (O(delta) localization), now
+  hardened by the P1 fixes. Residual: the resume arm must prefer the
+  local chain over the source lineage (B1 finding, still owed), and
+  the replicas=2 source-death caveat stands, bounded to the exposure
+  seconds.
+
+With the trigger's lag ≤ 1 gate and 30-60 s cut cadence, the small
+path is the overwhelmingly common case in practice; the esnap path
+remains the guarantee that the window never stretches with write
+rate. Implementation is scoped as **7b-4** (trigger estimator + the
+inline-delta window variant + tests + a drill session).
 
 ### Also observed / operational notes
 
