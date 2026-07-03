@@ -119,6 +119,29 @@ points at.
 
 ### 2a. Live replica sync-state indicator (lead deliverable)
 
+Status (2026-07-02): DONE (564b2fe) and LIVE-VALIDATED on `runj`
+(images `phase2a.0`, backend + frontend) with a live leg-kill drill
+against the standing `hr-e2e` fixture. Backend projects the PV
+`replica-sync-state` annotation into per-replica rows (`sync_state`,
+`last_epoch`, computed `epoch_lag`, `since`, `reason`, `hot_rejoin`)
+plus volume `current_epoch`; replica-set volumes derive state from the
+record (previously read Unknown/0-replicas — the legacy path needs the
+single `node-name` attribute they don't have). Frontend ships
+`SyncStateIndicator`/`VolumeSyncSummary` on `SYNC_STATE_STYLES` tokens
+(ui/status.ts), replacing all three ad-hoc rebuild renderings; polling
+is adaptive (2.5 s while any replica non-in_sync, 30 s baseline).
+Drill evidence (kill 22:36:53 local, spdk-tgt leg on runj-aws-2,
+2 s API poll = the UI cadence): Healthy 2/2 → +23 s Degraded 1/2 with
+`stale` → `stale lag=1` as epoch 1261 cut → `standby` chasing with lag
+visibly oscillating 2→1→2→1 against the 30 s cut cadence → +4 m 12 s
+Healthy 2/2 both `in_sync`. `HotRejoinSucceeded`: 1729 ms window,
+26 MiB estimator → inline fenced-delta path. Zero counter skips across
+1,941 drill-window writer appends. As designed, the sub-2 s window/
+`hot_rejoin` marker was never sampled by a poll (marker span ≈ seconds
+vs 2 s poll + 3 s backend cache TTL) — the "rejoining" chip state is
+data-driven and unit-covered, and completed windows surface via events
+(2c, next).
+
 Motivation (finding, 2026-07-02): every rebuild control in the current
 UI is bound to the field `rebuild_progress` — the *old blind
 full-rebuild* model. The Tier-2 engine no longer does that rebuild. A
