@@ -733,8 +733,13 @@ lvol it supersedes when that lvol holds the `_hr` alias (uuid-matched,
 `catchup.rs`), and the window build scrubs a stranded `_hr` namesake
 pre-intent — refusing with NotEligible when the holder IS the record's
 live lvol (a raw-stale target still serving the previous rejoin's
-data, `hot_rejoin.rs`). Suite 509; live validation owed (needs a
-build node).
+data, `hot_rejoin.rs`). Suite 509. **LIVE-VALIDATED (tier2-7b3.2,
+2026-07-02 evening)**: two consecutive hands-off leg-kill→rejoin
+cycles on the same replica — cycle 1 promoted a head under the `_hr`
+name; cycle 2's chase logged "Reaped the superseded hot-rejoin head
+(revert replaced it)" and its window committed clean in 156 ms
+(pre-fix this exact sequence EEXISTed and needed a manual delete per
+cycle). Windows on the new image: 160/156 ms.
 
 ### Finding 2 (P2): unwind-ladder E_f-export leak, self-healing on the
 ### second pass
@@ -854,6 +859,29 @@ bounced — total writer outage ~4 min. Two follow-on findings:
   episode closes early (`raid_collapse_verdict` in `cutover.rs`,
   wiring in `node_agent.rs`). Repair/flag cadence unchanged. The
   consumer-blind epoch cutting remains the open phase-6 item.
+  **LIVE-VALIDATED (tier2-7b3.2)**: `bdev_raid_delete` under the live
+  attachment → `VolumeDataPathLost` at **+18 s** (first tick; was
+  never emitted at all pre-fix) → `VolumeDataPathRepaired` at
+  +2 m 19 s (strike-3 in-place repair, raid back online 2/2).
+  Operational nuance re-confirmed: a workload actively writing during
+  the outage still needs a bounce after Repaired — ext4 gives up on
+  the vanished device before the kernel initiator's reconnect window
+  (the event text says exactly this). One cosmetic follow-up landed
+  post-validation: repair-success now also closes the warned episode,
+  suppressing a redundant `VolumeDataPathRestored` one tick later.
+
+### Build path replaced (the c5d spot node is gone)
+
+The remote-x86 build node (c5d + socat proxy) died with the spot
+reclaim. New path, proven this session: a **`docker:27-dind`
+privileged pod on a runj worker** + `kubectl port-forward 23750:2375`
++ `DOCKER_HOST=tcp://127.0.0.1:23750` — then the exact runbook build
+commands work unchanged (built and pushed `tier2-7b3.2` in ~17 min
+cold on an i4i.large). CAVEAT: these workers have only ~8 GiB
+ephemeral root — the build cache trips node disk-pressure EVICTIONS
+(it evicted the node DS pod, the controller, and the writer
+mid-roll). **Delete the dind pod immediately after pushing**; treat
+the builder as per-session disposable.
 - **(availability, structural) At replicas=2, the source is a single
   failure domain for the whole volume during esnap exposure** — it
   hosts both the surviving leg and the head's esnap parent. With 3+

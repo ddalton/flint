@@ -2688,6 +2688,11 @@ impl NodeAgent {
                         .await;
                         strikes.remove(&pv_name);
                         still_missing.remove(&pv_name);
+                        // Repaired closes the warned episode too — without
+                        // this the next tick tacks on a redundant
+                        // VolumeDataPathRestored (observed in the live
+                        // validation).
+                        self.data_path_warned.lock().await.remove(&pv_name);
                         if flagged_by_me {
                             use kube::api::{Patch, PatchParams};
                             let patch = serde_json::json!({
