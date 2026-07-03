@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import { useDiskSetup } from '../../hooks/useDashboardData';
+import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
 
 interface NodeDetailViewProps {
@@ -283,29 +284,22 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                   <div className="text-xs text-gray-500 space-y-1">
                     <div>Replicas: {volume.active_replicas}/{volume.replicas}</div>
                     {nodeReplica && (
-                      <div>Node Status: 
+                      <div>Node Status:
                         <span className={`ml-1 font-medium ${
                           nodeReplica.status === 'healthy' ? 'text-green-600' :
                           nodeReplica.status === 'rebuilding' ? 'text-orange-600' :
+                          nodeReplica.status === 'stale' ? 'text-amber-600' :
+                          nodeReplica.status === 'standby' ? 'text-blue-600' :
                           'text-red-600'
                         }`}>
                           {nodeReplica.status}
                         </span>
                       </div>
                     )}
-                    
-                    {nodeReplica?.rebuild_progress && (
+
+                    {nodeReplica?.sync && (
                       <div className="mt-2">
-                        <div className="flex justify-between text-xs mb-1">
-                          <span>Rebuild Progress:</span>
-                          <span>{nodeReplica.rebuild_progress}%</span>
-                        </div>
-                        <div className="w-full bg-gray-200 rounded-full h-1.5">
-                          <div 
-                            className="bg-orange-500 h-1.5 rounded-full transition-all duration-300" 
-                            style={{ width: `${nodeReplica.rebuild_progress}%` }}
-                          />
-                        </div>
+                        <SyncStateIndicator sync={nodeReplica.sync} />
                       </div>
                     )}
                   </div>

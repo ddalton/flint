@@ -55,6 +55,7 @@ struct DashboardVolume {
     ublk_device: Option<serde_json::Value>,
     spdk_validation_status: SpdkValidationStatus,
     pvc_info: Option<PvcInfo>,
+    current_epoch: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -94,6 +95,21 @@ struct DashboardReplicaStatus {
     access_method: String,
     raid_member_slot: Option<u32>,
     raid_member_state: String,
+    sync: Option<ReplicaSyncInfo>,
+}
+
+/// Per-replica sync state projected from the PV `replica-sync-state`
+/// annotation — the Tier-2 engine's live signal. `rebuild_progress` above
+/// tracks the pre-Tier-2 blind-rebuild model and stays for raid-level
+/// rebuild_info only; replica health is judged from here.
+#[derive(Serialize, Debug, Clone)]
+struct ReplicaSyncInfo {
+    sync_state: String,
+    last_epoch: Option<String>,
+    epoch_lag: Option<u64>,
+    since: Option<String>,
+    reason: Option<String>,
+    hot_rejoin: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -667,6 +683,74 @@ async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<se
     }
 }
 
+/// Epochs are named strings ("epoch-<vol>-<n>"), not counters: lag is the
+/// positional distance from `last_epoch` to `current_epoch` in the recorded
+/// epoch history, falling back to the trailing counter in the names when the
+/// history has been trimmed past `last_epoch`.
+fn epoch_lag(record: &crate::replica_sync::VolumeSyncRecord, last_epoch: Option<&str>) -> Option<u64> {
+    let current = record.current_epoch.as_deref()?;
+    let last = last_epoch?;
+    if last == current {
+        return Some(0);
+    }
+    let pos = |name: &str| record.epochs.iter().position(|e| e.name == name);
+    if let (Some(l), Some(c)) = (pos(last), pos(current)) {
+        if c >= l {
+            return Some((c - l) as u64);
+        }
+    }
+    let counter = |name: &str| name.rsplit('-').next().and_then(|n| n.parse::<u64>().ok());
+    match (counter(last), counter(current)) {
+        (Some(l), Some(c)) if c >= l => Some(c - l),
+        _ => None,
+    }
+}
+
+/// Project a `replica-sync-state` record into per-replica dashboard rows:
+/// (replica_statuses, nodes, active_replicas = in_sync count, current_epoch).
+fn project_sync_record(
+    rec: &crate::replica_sync::VolumeSyncRecord,
+    primary_node: &str,
+) -> (Vec<DashboardReplicaStatus>, Vec<String>, i32, Option<String>) {
+    use crate::replica_sync::SyncState;
+    let statuses: Vec<DashboardReplicaStatus> = rec.replicas.iter().map(|r| {
+        DashboardReplicaStatus {
+            node: r.node_name.clone(),
+            status: match r.sync_state {
+                SyncState::InSync => "healthy",
+                SyncState::Stale => "stale",
+                SyncState::Standby => "standby",
+            }.to_string(),
+            is_local: r.node_name == primary_node,
+            last_io_timestamp: None,
+            rebuild_progress: None,
+            rebuild_target: None,
+            is_new_replica: Some(false),
+            nvmf_target: None,
+            access_method: "Direct".to_string(),
+            raid_member_slot: None,
+            raid_member_state: "none".to_string(),
+            sync: Some(ReplicaSyncInfo {
+                sync_state: r.sync_state.as_str().to_string(),
+                last_epoch: r.last_epoch.clone(),
+                epoch_lag: if r.sync_state == SyncState::InSync {
+                    Some(0)
+                } else {
+                    epoch_lag(rec, r.last_epoch.as_deref())
+                },
+                since: r.since.clone(),
+                reason: r.reason.clone(),
+                hot_rejoin: r.hot_rejoin.clone(),
+            }),
+        }
+    }).collect();
+    let in_sync = rec.replicas.iter()
+        .filter(|r| r.sync_state == SyncState::InSync)
+        .count() as i32;
+    let nodes = statuses.iter().map(|s| s.node.clone()).collect();
+    (statuses, nodes, in_sync, rec.current_epoch.clone())
+}
+
 /// Fetch managed volumes from Kubernetes PVs
 async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>, Box<dyn std::error::Error + Send + Sync>> {
     use k8s_openapi::api::core::v1::PersistentVolume;
@@ -738,30 +822,92 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                             })
                         };
                         
+                        // Multi-replica volumes carry the controller-maintained
+                        // replica-sync-state annotation; project it into real
+                        // per-replica rows. Single-replica volumes (no
+                        // annotation) keep the synthetic primary-only row.
+                        let sync_record = pv.metadata.annotations.as_ref()
+                            .and_then(|a| a.get(crate::replica_sync::SYNC_STATE_ANNOTATION))
+                            .and_then(|s| match crate::replica_sync::VolumeSyncRecord::from_annotation(s) {
+                                Ok(rec) => Some(rec),
+                                Err(e) => {
+                                    println!("⚠️ [DASHBOARD] {}: unparseable replica-sync-state annotation: {}", pv_name, e);
+                                    None
+                                }
+                            });
+
+                        let primary_status = DashboardReplicaStatus {
+                            node: node_name.to_string(),
+                            status: if validation_status.has_spdk_backing { "active" } else { "failed" }.to_string(),
+                            is_local: true,
+                            last_io_timestamp: None,
+                            rebuild_progress: None,
+                            rebuild_target: None,
+                            is_new_replica: Some(false),
+                            nvmf_target: None,
+                            access_method: "Direct".to_string(),
+                            raid_member_slot: None,
+                            raid_member_state: "none".to_string(),
+                            sync: None,
+                        };
+
+                        let (replica_statuses, nodes, active_replicas, current_epoch) =
+                            match &sync_record {
+                                Some(rec) if !rec.replicas.is_empty() => {
+                                    project_sync_record(rec, node_name)
+                                }
+                                _ => (
+                                    vec![primary_status],
+                                    vec![node_name.to_string()],
+                                    if validation_status.has_spdk_backing { replica_count } else { 0 },
+                                    None,
+                                ),
+                            };
+
+                        // Replica-set volumes carry no single node-name
+                        // attribute, so the legacy primary-lvol verify reads
+                        // them as Unknown. The sync record is the controller-
+                        // maintained truth: derive state from it — fully
+                        // in_sync → Healthy, partially → Degraded (recovery
+                        // in progress), none → Failed.
+                        let (state_str, validation_status) = match &sync_record {
+                            Some(rec) if !rec.replicas.is_empty() => {
+                                let total = rec.replicas.len() as i32;
+                                let state = if active_replicas == total {
+                                    "Healthy"
+                                } else if active_replicas > 0 {
+                                    "Degraded"
+                                } else {
+                                    "Failed"
+                                };
+                                (state.to_string(), SpdkValidationStatus {
+                                    has_spdk_backing: active_replicas > 0,
+                                    validation_message: if active_replicas == total {
+                                        None
+                                    } else {
+                                        Some(format!("{}/{} replicas in sync", active_replicas, total))
+                                    },
+                                    validation_severity: if active_replicas == total { "info" } else { "warning" }.to_string(),
+                                })
+                            }
+                            _ if state_str == "Healthy" && active_replicas < replica_count => {
+                                ("Degraded".to_string(), validation_status)
+                            }
+                            _ => (state_str, validation_status),
+                        };
+
                         volumes.push(DashboardVolume {
                             id: pv_name.to_string(),
                             name: pvc_info.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pv_name.to_string()),
                             size: size_str.to_string(),
                             state: state_str.clone(),
                             replicas: replica_count,
-                            active_replicas: if validation_status.has_spdk_backing { replica_count } else { 0 },
+                            active_replicas,
                             local_nvme: true, // Flint volumes are always local
                             access_method: "Direct".to_string(),
                             rebuild_progress: None,
-                            nodes: vec![node_name.to_string()],
-                            replica_statuses: vec![DashboardReplicaStatus {
-                                node: node_name.to_string(),
-                                status: if validation_status.has_spdk_backing { "active" } else { "failed" }.to_string(),
-                                is_local: true,
-                                last_io_timestamp: None,
-                                rebuild_progress: None,
-                                rebuild_target: None,
-                                is_new_replica: Some(false),
-                                nvmf_target: None,
-                                access_method: "Direct".to_string(),
-                                raid_member_slot: None,
-                                raid_member_state: "none".to_string(),
-                            }],
+                            nodes,
+                            replica_statuses,
                             nvmeof_targets: Vec::new(),
                             nvmeof_enabled: false,
                             transport_type: "Local".to_string(),
@@ -770,8 +916,9 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                             ublk_device: None,
                             spdk_validation_status: validation_status,
                             pvc_info,
+                            current_epoch,
                         });
-                        
+
                         println!("   Found volume: {} ({})", pv_name, state_str);
                     }
                 }
@@ -897,10 +1044,12 @@ fn filter_volumes(volumes: Vec<DashboardVolume>, query: &DashboardQuery) -> Vec<
             "failed" => filtered.into_iter().filter(|v| v.state == "Failed").collect(),
             "faulted" => filtered.into_iter().filter(|v| v.state == "Degraded" || v.state == "Failed").collect(),
             "rebuilding" => filtered.into_iter().filter(|v| {
-                v.replica_statuses.iter().any(|r| 
-                    r.status == "rebuilding" || 
+                v.replica_statuses.iter().any(|r|
+                    r.status == "rebuilding" ||
                     r.rebuild_progress.is_some() ||
-                    r.is_new_replica == Some(true)
+                    r.is_new_replica == Some(true) ||
+                    // Tier-2 recovery in progress: replica not in_sync
+                    r.sync.as_ref().map(|s| s.sync_state != "in_sync").unwrap_or(false)
                 ) || v.raid_status.as_ref().map(|rs| rs.rebuild_info.is_some()).unwrap_or(false)
             }).collect(),
             "local-nvme" => filtered.into_iter().filter(|v| v.local_nvme).collect(),
@@ -2255,6 +2404,68 @@ mod tests {
         assert_eq!(stats.write_latency_us, 150);
     }
 
+    #[test]
+    fn epoch_lag_from_history_and_name_fallback() {
+        use crate::replica_sync::VolumeSyncRecord;
+        // Positional distance in the recorded history.
+        let rec = VolumeSyncRecord::from_annotation(
+            r#"{"current_epoch":"epoch-v-3",
+                "epochs":[{"name":"epoch-v-1","recorded_at":"t"},
+                          {"name":"epoch-v-2","recorded_at":"t"},
+                          {"name":"epoch-v-3","recorded_at":"t"}],
+                "replicas":[]}"#,
+        ).unwrap();
+        assert_eq!(epoch_lag(&rec, Some("epoch-v-1")), Some(2));
+        assert_eq!(epoch_lag(&rec, Some("epoch-v-3")), Some(0));
+        assert_eq!(epoch_lag(&rec, None), None);
+
+        // History trimmed past last_epoch: falls back to the trailing counter.
+        let trimmed = VolumeSyncRecord::from_annotation(
+            r#"{"current_epoch":"epoch-v-7",
+                "epochs":[{"name":"epoch-v-7","recorded_at":"t"}],
+                "replicas":[]}"#,
+        ).unwrap();
+        assert_eq!(epoch_lag(&trimmed, Some("epoch-v-4")), Some(3));
+        // Non-numeric epoch names with no history entry: honest unknown.
+        assert_eq!(epoch_lag(&trimmed, Some("bootstrap")), None);
+    }
+
+    #[test]
+    fn project_sync_record_maps_replicas_and_counts() {
+        use crate::replica_sync::VolumeSyncRecord;
+        let rec = VolumeSyncRecord::from_annotation(
+            r#"{"current_epoch":"epoch-v-2",
+                "epochs":[{"name":"epoch-v-1","recorded_at":"t"},
+                          {"name":"epoch-v-2","recorded_at":"t"}],
+                "replicas":[
+                  {"node_name":"n1","node_uid":"u1","lvol_uuid":"x1",
+                   "sync_state":"in_sync","last_epoch":"epoch-v-2"},
+                  {"node_name":"n2","node_uid":"u2","lvol_uuid":"x2",
+                   "sync_state":"stale","last_epoch":"epoch-v-1",
+                   "reason":"leg failure","hot_rejoin":"epoch-v-2"}
+                ]}"#,
+        ).unwrap();
+
+        let (statuses, nodes, active, current_epoch) = project_sync_record(&rec, "n1");
+        assert_eq!(nodes, vec!["n1", "n2"]);
+        assert_eq!(active, 1);
+        assert_eq!(current_epoch.as_deref(), Some("epoch-v-2"));
+
+        assert_eq!(statuses[0].status, "healthy");
+        assert!(statuses[0].is_local);
+        let s0 = statuses[0].sync.as_ref().unwrap();
+        assert_eq!(s0.sync_state, "in_sync");
+        assert_eq!(s0.epoch_lag, Some(0));
+
+        assert_eq!(statuses[1].status, "stale");
+        assert!(!statuses[1].is_local);
+        let s1 = statuses[1].sync.as_ref().unwrap();
+        assert_eq!(s1.sync_state, "stale");
+        assert_eq!(s1.epoch_lag, Some(1));
+        assert_eq!(s1.reason.as_deref(), Some("leg failure"));
+        assert_eq!(s1.hot_rejoin.as_deref(), Some("epoch-v-2"));
+    }
+
     // Helper function to create test volumes
     fn create_test_volume(id: &str, state: &str, nodes: Vec<String>, local_nvme: bool, rebuilding: bool) -> DashboardVolume {
         let replica_statuses = nodes.iter().map(|node| DashboardReplicaStatus {
@@ -2269,6 +2480,7 @@ mod tests {
             access_method: "nvmeof".to_string(),
             raid_member_slot: None,
             raid_member_state: "online".to_string(),
+            sync: None,
         }).collect();
 
         DashboardVolume {
@@ -2295,6 +2507,7 @@ mod tests {
                 validation_severity: "info".to_string(),
             },
             pvc_info: None,
+            current_epoch: None,
         }
     }
 

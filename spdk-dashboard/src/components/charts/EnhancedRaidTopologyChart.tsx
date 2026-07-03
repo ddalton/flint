@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
+import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import type { Volume, RaidMember, Disk} from '../../hooks/useDashboardData';
 import { EnhancedRaidMemberCard, RaidArrayPerformanceOverview } from './EnhancedRaidMemberCard';
 
@@ -94,6 +95,9 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
       case 'failed': return 'bg-red-100 text-red-800 border-red-200';
       case 'rebuilding': return 'bg-orange-100 text-orange-800 border-orange-200';
       case 'degraded': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      // Tier-2 sync states (SYNC_STATE_STYLES tokens)
+      case 'stale': return 'bg-amber-100 text-amber-800 border-amber-200';
+      case 'standby': return 'bg-blue-100 text-blue-800 border-blue-200';
       default: return 'bg-gray-100 text-gray-800 border-gray-200';
     }
   };
@@ -101,6 +105,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
   const getReplicaIcon = (replica: any) => {
     if (replica.status === 'failed') return <X className="w-4 h-4 text-red-600" />;
     if (replica.status === 'rebuilding') return <Settings className="w-4 h-4 text-orange-600 animate-spin" />;
+    if (replica.status === 'stale') return <AlertTriangle className="w-4 h-4 text-amber-600" />;
     if (replica.is_local) return <Zap className="w-4 h-4 text-blue-600" />;
     return <Network className="w-4 h-4 text-purple-600" />;
   };
@@ -201,9 +206,9 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                               </span>
                             </div>
                           </div>
-                          {volume.rebuild_progress && (
-                            <div className="ml-3 flex-shrink-0">
-                              <Settings className="w-4 h-4 text-orange-500 animate-spin" />
+                          {volume.replica_statuses.some(r => r.sync && r.sync.sync_state !== 'in_sync') && (
+                            <div className="ml-3 flex-shrink-0" title="Replica recovery in progress">
+                              <AlertTriangle className="w-4 h-4 text-amber-500" />
                             </div>
                           )}
                         </div>
@@ -560,18 +565,10 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                         </div>
                       )}
                       
-                      {replica.status === 'rebuilding' && replica.rebuild_progress && (
-                        <div className="mt-2">
-                          <div className="flex justify-between text-xs mb-1">
-                            <span>Rebuild Progress:</span>
-                            <span>{replica.rebuild_progress}%</span>
-                          </div>
-                          <div className="w-full bg-gray-200 rounded-full h-2">
-                            <div 
-                              className="bg-orange-500 h-2 rounded-full transition-all duration-300" 
-                              style={{ width: `${replica.rebuild_progress}%` }}
-                            />
-                          </div>
+                      {replica.sync && (
+                        <div className="mt-2 flex justify-between items-center">
+                          <span>Sync:</span>
+                          <SyncStateIndicator sync={replica.sync} />
                         </div>
                       )}
                       

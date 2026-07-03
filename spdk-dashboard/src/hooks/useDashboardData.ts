@@ -25,6 +25,20 @@ const fetchDashboard = async (filters?: DashboardFilters): Promise<DashboardData
   return transformBackendData(await response.json());
 };
 
+// A replica is mid-recovery when the Tier-2 engine reports it non-in_sync;
+// volumes without sync data fall back to the legacy rebuild markers.
+export const isReplicaRecovering = (replica: ReplicaStatus): boolean =>
+  replica.sync
+    ? replica.sync.sync_state !== 'in_sync'
+    : replica.status === 'rebuilding' ||
+      replica.rebuild_progress !== null ||
+      !!replica.is_new_replica;
+
+export const hasRecoveringReplicas = (data: DashboardData | undefined): boolean =>
+  !!data?.volumes.some(v =>
+    v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
+  );
+
 export const computeStats = (data: DashboardData): DashboardStats => {
   const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
   const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
@@ -32,11 +46,7 @@ export const computeStats = (data: DashboardData): DashboardStats => {
   const faultedVolumes = degradedVolumes + failedVolumes;
 
   const volumesWithRebuilding = data.volumes.filter(v =>
-    v.replica_statuses.some(replica =>
-      replica.status === 'rebuilding' ||
-      replica.rebuild_progress !== null ||
-      replica.is_new_replica
-    ) || v.raid_status?.rebuild_info !== undefined
+    v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
   ).length;
 
   const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
@@ -97,9 +107,12 @@ export interface Volume {
   
   // SPDK validation status for frontend display
   spdk_validation_status: SpdkValidationStatus;
-  
+
   // PV/PVC information for managed volumes
   pvc_info?: PvcInfo;
+
+  // Volume-level epoch cursor from the replica-sync-state annotation
+  current_epoch?: string | null;
 }
 
 export interface SpdkValidationStatus {
@@ -191,6 +204,23 @@ export interface ReplicaStatus {
   lvol_uuid?: string;
   disk_ref?: string;
   replica_size?: number;
+  // Tier-2 live sync state from the PV replica-sync-state annotation;
+  // absent on single-replica volumes.
+  sync?: ReplicaSyncInfo | null;
+}
+
+export type SyncState = 'in_sync' | 'stale' | 'standby';
+
+export interface ReplicaSyncInfo {
+  sync_state: SyncState;
+  last_epoch: string | null;
+  // Epochs behind current; 0 when in_sync, null when unknowable (epoch
+  // history trimmed and names not comparable). Lag → 0 is the catch-up.
+  epoch_lag: number | null;
+  since: string | null;
+  reason: string | null;
+  // E_f epoch name while a hot rejoin is in flight; null otherwise.
+  hot_rejoin: string | null;
 }
 
 export interface NvmfTarget {
@@ -344,12 +374,23 @@ const buildQueryString = (filters?: DashboardFilters): string => {
   return queryString ? `?${queryString}` : '';
 };
 
+// Poll fast while any replica is mid-recovery (stale/standby/rejoining) so
+// the sync indicator is live; drop back to the 30s baseline once the cluster
+// is fully in_sync. A hot-rejoin window itself is sub-2s — too fast to poll —
+// and surfaces after the fact via events, so 2.5s tracks the observable part
+// (epoch catch-up) without hammering the backend (the 3s aggregate cache
+// absorbs most of it anyway).
+const BASE_POLL_MS = 30_000;
+const RECOVERY_POLL_MS = 2_500;
+
 // Enhanced hook implementation with API integration and backend filtering
 export const useDashboardData = (autoRefresh: boolean = true, filters?: DashboardFilters) => {
   const query = useQuery({
     queryKey: ['dashboard', filters ?? null],
     queryFn: () => fetchDashboard(filters),
-    refetchInterval: autoRefresh ? 30_000 : false,
+    refetchInterval: autoRefresh
+      ? (q) => (hasRecoveringReplicas(q.state.data) ? RECOVERY_POLL_MS : BASE_POLL_MS)
+      : false,
   });
 
   const data = query.data ?? EMPTY_DASHBOARD;

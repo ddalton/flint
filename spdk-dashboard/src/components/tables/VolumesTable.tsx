@@ -3,6 +3,8 @@ import { apiFetch } from '../../api/client';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
+import { isReplicaRecovering } from '../../hooks/useDashboardData';
+import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
 
 interface VolumesTableProps {
@@ -241,13 +243,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     return bInfo.priority - aInfo.priority; // Reverse sort for priority
   });
 
-  // Check if volume has rebuilding activity
+  // Check if volume has recovery activity (Tier-2 sync state or legacy markers)
   const hasRebuildingActivity = (volume: Volume) => {
-    return volume.replica_statuses.some(replica => 
-      replica.status === 'rebuilding' || 
-      replica.rebuild_progress !== null ||
-      replica.is_new_replica
-    );
+    return volume.replica_statuses.some(isReplicaRecovering);
   };
 
   const handleVolumeNameClick = (volume: Volume) => {
@@ -364,7 +362,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">State</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Replicas</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Local NVMe</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rebuild Activity</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sync</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nodes</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               {diskFilter && (
@@ -390,9 +388,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                 const stateInfo = getVolumeStateInfo(volume.state);
                 const StateIcon = stateInfo.icon;
                 const rebuildingActivity = hasRebuildingActivity(volume);
-                const maxRebuildProgress = volume.replica_statuses
-                  .filter(r => r.rebuild_progress !== null)
-                  .reduce((max, r) => Math.max(max, r.rebuild_progress!), 0);
+                const hasSyncData = volume.replica_statuses.some(r => r.sync != null);
 
                 return (
                   <tr key={volume.id} className="hover:bg-gray-50">
@@ -463,23 +459,10 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     <td className="px-6 py-4 whitespace-nowrap">
                       {extVolume.isRaw ? (
                         <span className="text-gray-400">N/A</span>
+                      ) : hasSyncData ? (
+                        <VolumeSyncSummary volume={volume} />
                       ) : rebuildingActivity ? (
-                        <div className="flex items-center gap-2">
-                          <Settings className="w-4 h-4 text-orange-600 animate-spin" />
-                          {maxRebuildProgress > 0 ? (
-                            <div className="flex items-center gap-2">
-                              <div className="w-16 bg-gray-200 rounded-full h-2">
-                                <div 
-                                  className="bg-orange-600 h-2 rounded-full transition-all duration-300" 
-                                  style={{ width: `${maxRebuildProgress}%` }}
-                                />
-                              </div>
-                              <span className="text-xs text-orange-600 font-medium">{maxRebuildProgress}%</span>
-                            </div>
-                          ) : (
-                            <span className="text-xs text-orange-600 font-medium">Active</span>
-                          )}
-                        </div>
+                        <span className="text-xs text-orange-600 font-medium">rebuild active</span>
                       ) : (
                         <span className="text-gray-400 text-sm">-</span>
                       )}
