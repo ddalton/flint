@@ -113,6 +113,31 @@ export interface Volume {
 
   // Volume-level epoch cursor from the replica-sync-state annotation
   current_epoch?: string | null;
+
+  // Tier-2 data plane (2b): the raid each consumer node has assembled from
+  // the replica legs; empty when the volume is not staged anywhere.
+  consumer_raids?: ConsumerRaid[];
+}
+
+export interface ConsumerRaid {
+  node: string;
+  raid_name: string;
+  // SPDK raid state (online/configuring/offline). "online" with
+  // operational < total is the degraded-n/m case.
+  state: string;
+  num_base_bdevs: number;
+  num_base_bdevs_operational: number;
+  base_bdevs: ConsumerRaidMember[];
+}
+
+export interface ConsumerRaidMember {
+  // SPDK nulls name+uuid when a leg fails on an online raid — a null
+  // member IS a failed slot.
+  name: string | null;
+  uuid: string | null;
+  is_configured: boolean;
+  // Replica (by node) this base backs; null when unmatchable.
+  replica_node: string | null;
 }
 
 export interface SpdkValidationStatus {
@@ -281,14 +306,13 @@ export interface RawSpdkVolume {
   is_managed: boolean;
 }
 
+// Matches the backend PvcInfo struct (spdk_dashboard_backend_minimal.rs) —
+// the previous shape here was hand-drifted and matched nothing the API sends.
 export interface PvcInfo {
-  pvc_name: string;
-  pvc_namespace: string;
-  pv_name: string;
+  name: string;
+  namespace: string;
   storage_class: string;
-  access_modes: string[];
-  claim_status: string;
-  created_at: string;
+  creation_timestamp: string;
 }
 
 export interface NodeInfo {
@@ -421,6 +445,7 @@ const transformBackendData = (backendData: any): DashboardData => {
       nvmeof_targets: vol.nvmeof_targets || [],
       replica_statuses: vol.replica_statuses || [],  // Ensure array exists
       nodes: vol.nodes || [],  // Ensure array exists
+      consumer_raids: vol.consumer_raids || [],
     })) || [],
     raw_volumes: backendData.raw_volumes || [],
     disks: backendData.disks?.map((disk: any) => {

@@ -56,6 +56,35 @@ struct DashboardVolume {
     spdk_validation_status: SpdkValidationStatus,
     pvc_info: Option<PvcInfo>,
     current_epoch: Option<String>,
+    consumer_raids: Vec<ConsumerRaid>,
+}
+
+/// Tier-2 data plane (2b): each consumer node that stages the volume
+/// assembles `raid_<pv>` locally from the replica legs — one row per
+/// consumer. Presence of the raid bdev on a node IS the consumer set;
+/// no VolumeAttachment inference.
+#[derive(Serialize, Debug, Clone)]
+struct ConsumerRaid {
+    node: String,
+    raid_name: String,
+    /// SPDK raid state (online/configuring/offline). "online" with
+    /// operational < total is the degraded-n/m case.
+    state: String,
+    num_base_bdevs: u32,
+    num_base_bdevs_operational: u32,
+    base_bdevs: Vec<ConsumerRaidMember>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct ConsumerRaidMember {
+    /// SPDK nulls name+uuid when a leg fails on an online raid
+    /// (raid_bdev_free_base_bdev_resource) — a null member IS a failed slot.
+    name: Option<String>,
+    uuid: Option<String>,
+    is_configured: bool,
+    /// Replica (by node) this base backs, resolved against the sync record;
+    /// None when unmatchable (failed slot, no record).
+    replica_node: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -852,8 +881,142 @@ fn project_sync_record(
     (statuses, nodes, in_sync, rec.current_epoch.clone())
 }
 
+/// Project one node's `bdev_raid_get_bdevs` result into consumer-raid rows.
+/// Only flint volume raids (`raid_<pv>`) are kept.
+fn project_node_raids(node: &str, result: &serde_json::Value) -> Vec<ConsumerRaid> {
+    let Some(raids) = result.as_array() else { return Vec::new() };
+    raids
+        .iter()
+        .filter_map(|raid| {
+            let name = raid.get("name").and_then(|n| n.as_str())?;
+            if !name.starts_with("raid_") {
+                return None;
+            }
+            let count = |key: &str| raid.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let base_bdevs = raid
+                .get("base_bdevs_list")
+                .and_then(|b| b.as_array())
+                .map(|bases| {
+                    bases
+                        .iter()
+                        .map(|b| ConsumerRaidMember {
+                            name: b.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                            uuid: b.get("uuid").and_then(|v| v.as_str()).map(str::to_string),
+                            is_configured: b
+                                .get("is_configured")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            replica_node: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ConsumerRaid {
+                node: node.to_string(),
+                raid_name: name.to_string(),
+                state: raid
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                num_base_bdevs: count("num_base_bdevs"),
+                num_base_bdevs_operational: count("num_base_bdevs_operational"),
+                base_bdevs,
+            })
+        })
+        .collect()
+}
+
+/// Label each configured base with the replica it backs, using the same
+/// matching rules as `replica_sync::replicas_missing_from_raid`: identity or
+/// live uuid, name equal to the lvol uuid (local base), or the deterministic
+/// remote bdev name.
+fn label_consumer_raid_members(
+    raids: &mut [ConsumerRaid],
+    volume_id: &str,
+    record: &crate::replica_sync::VolumeSyncRecord,
+) {
+    for raid in raids.iter_mut() {
+        for member in raid.base_bdevs.iter_mut() {
+            if !member.is_configured {
+                continue;
+            }
+            let uuid = member.uuid.as_deref().unwrap_or("");
+            let name = member.name.as_deref().unwrap_or("");
+            member.replica_node = record
+                .replicas
+                .iter()
+                .enumerate()
+                .find(|(index, rec)| {
+                    let live = rec.live_lvol_uuid();
+                    let remote =
+                        crate::replica_sync::expected_remote_base_bdev(volume_id, *index);
+                    uuid == rec.lvol_uuid
+                        || uuid == live
+                        || name == rec.lvol_uuid
+                        || name == live
+                        || name == remote
+                })
+                .map(|(_, rec)| rec.node_name.clone());
+        }
+    }
+}
+
+/// One `bdev_raid_get_bdevs` per node agent (parallel, 5s timeout), keyed by
+/// raid name. Failures degrade to "no rows from that node", not an error —
+/// a volume with no rows renders as "no consumer" in the UI.
+async fn fetch_consumer_raids(state: &AppState) -> HashMap<String, Vec<ConsumerRaid>> {
+    let node_agents = state.node_agents.read().await;
+    let futures: Vec<_> = node_agents
+        .iter()
+        .map(|(node, url)| {
+            let node = node.clone();
+            let url = url.clone();
+            async move {
+                match query_node_raids(&url).await {
+                    Ok(result) => project_node_raids(&node, &result),
+                    Err(e) => {
+                        println!("   ⚠️ Failed to fetch raid bdevs from {}: {}", node, e);
+                        Vec::new()
+                    }
+                }
+            }
+        })
+        .collect();
+    let mut by_raid: HashMap<String, Vec<ConsumerRaid>> = HashMap::new();
+    for raids in futures::future::join_all(futures).await {
+        for raid in raids {
+            by_raid.entry(raid.raid_name.clone()).or_default().push(raid);
+        }
+    }
+    let consumers: usize = by_raid.values().map(|v| v.len()).sum();
+    println!("✅ [DASHBOARD] Found {} assembled volume raids across consumers", consumers);
+    by_raid
+}
+
+async fn query_node_raids(
+    node_url: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .post(format!("{}/api/spdk/rpc", node_url))
+        .json(&json!({"method": "bdev_raid_get_bdevs", "params": {"category": "all"}}))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()).into());
+    }
+    let data: serde_json::Value = response.json().await?;
+    Ok(data["result"].clone())
+}
+
 /// Fetch managed volumes from Kubernetes PVs
-async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>, Box<dyn std::error::Error + Send + Sync>> {
+async fn fetch_volumes_from_pvs(
+    state: &AppState,
+    consumer_raids_by_name: &HashMap<String, Vec<ConsumerRaid>>,
+) -> Result<Vec<DashboardVolume>, Box<dyn std::error::Error + Send + Sync>> {
     use k8s_openapi::api::core::v1::PersistentVolume;
     
     println!("🔍 [DASHBOARD] Fetching managed volumes from PVs...");
@@ -997,6 +1160,19 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                             _ => (state_str, validation_status),
                         };
 
+                        // Consumer raids observed on the nodes; labeled
+                        // against the sync record when the volume has one.
+                        let consumer_raids = {
+                            let mut raids = consumer_raids_by_name
+                                .get(&format!("raid_{}", pv_name))
+                                .cloned()
+                                .unwrap_or_default();
+                            if let Some(rec) = &sync_record {
+                                label_consumer_raid_members(&mut raids, pv_name, rec);
+                            }
+                            raids
+                        };
+
                         volumes.push(DashboardVolume {
                             id: pv_name.to_string(),
                             name: pvc_info.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pv_name.to_string()),
@@ -1018,6 +1194,7 @@ async fn fetch_volumes_from_pvs(state: &AppState) -> Result<Vec<DashboardVolume>
                             spdk_validation_status: validation_status,
                             pvc_info,
                             current_epoch,
+                            consumer_raids,
                         });
 
                         println!("   Found volume: {} ({})", pv_name, state_str);
@@ -1210,8 +1387,11 @@ async fn build_dashboard_aggregate(state: &AppState) -> Result<DashboardData, Bo
         }
     }
 
+    // Consumer raid assembly state (2b): one cheap RPC per node agent.
+    let consumer_raids_by_name = fetch_consumer_raids(state).await;
+
     // Fetch managed volumes from Kubernetes PVs
-    let dashboard_volumes = fetch_volumes_from_pvs(state).await?;
+    let dashboard_volumes = fetch_volumes_from_pvs(state, &consumer_raids_by_name).await?;
 
     // Per-node memory for ALL discovered nodes (filtering happens on read).
     let node_agents = state.node_agents.read().await;
@@ -2719,6 +2899,105 @@ mod tests {
         assert_eq!(s1.hot_rejoin.as_deref(), Some("epoch-v-2"));
     }
 
+    #[test]
+    fn project_node_raids_maps_states_and_filters_foreign_bdevs() {
+        // Shape per SPDK bdev_raid_get_bdevs: a healthy 2/2 raid, a degraded
+        // raid whose failed slot has name+uuid nulled
+        // (raid_bdev_free_base_bdev_resource), and a non-flint raid.
+        let result = json!([
+            {
+                "name": "raid_pvc-abc", "state": "online", "raid_level": "raid1",
+                "num_base_bdevs": 2, "num_base_bdevs_discovered": 2,
+                "num_base_bdevs_operational": 2,
+                "base_bdevs_list": [
+                    {"name": "11111111-aaaa", "uuid": "11111111-aaaa", "is_configured": true},
+                    {"name": "nvme_remote_1n1", "uuid": "22222222-bbbb", "is_configured": true}
+                ]
+            },
+            {
+                "name": "raid_pvc-deg", "state": "online", "raid_level": "raid1",
+                "num_base_bdevs": 2, "num_base_bdevs_operational": 1,
+                "base_bdevs_list": [
+                    {"name": null, "uuid": null, "is_configured": false},
+                    {"name": "33333333-cccc", "uuid": "33333333-cccc", "is_configured": true}
+                ]
+            },
+            {"name": "cache_bdev", "state": "online", "num_base_bdevs": 1}
+        ]);
+
+        let raids = project_node_raids("consumer-1", &result);
+        assert_eq!(raids.len(), 2);
+
+        assert_eq!(raids[0].node, "consumer-1");
+        assert_eq!(raids[0].raid_name, "raid_pvc-abc");
+        assert_eq!(raids[0].state, "online");
+        assert_eq!(raids[0].num_base_bdevs, 2);
+        assert_eq!(raids[0].num_base_bdevs_operational, 2);
+        assert_eq!(raids[0].base_bdevs.len(), 2);
+        assert!(raids[0].base_bdevs.iter().all(|m| m.is_configured));
+
+        assert_eq!(raids[1].raid_name, "raid_pvc-deg");
+        assert_eq!(raids[1].num_base_bdevs_operational, 1);
+        let failed = &raids[1].base_bdevs[0];
+        assert!(!failed.is_configured);
+        assert!(failed.name.is_none() && failed.uuid.is_none());
+
+        assert!(project_node_raids("n", &json!(null)).is_empty());
+    }
+
+    #[test]
+    fn label_consumer_raid_members_resolves_replica_nodes() {
+        use crate::replica_sync::{expected_remote_base_bdev, VolumeSyncRecord};
+        let vol = "pvc-abc";
+        // r0 has a catch-up-revert uuid override: the base admitted at
+        // reassembly carries the LIVE uuid, not the identity uuid.
+        let rec = VolumeSyncRecord::from_annotation(
+            r#"{"replicas":[
+                  {"node_name":"n1","node_uid":"u1","lvol_uuid":"aaa",
+                   "sync_state":"in_sync","active_lvol_uuid":"aaa-live"},
+                  {"node_name":"n2","node_uid":"u2","lvol_uuid":"bbb",
+                   "sync_state":"in_sync"}
+                ]}"#,
+        )
+        .unwrap();
+
+        let mut raids = vec![ConsumerRaid {
+            node: "n1".to_string(),
+            raid_name: format!("raid_{}", vol),
+            state: "online".to_string(),
+            num_base_bdevs: 2,
+            num_base_bdevs_operational: 2,
+            base_bdevs: vec![
+                // Local base: bdev named by the live lvol uuid.
+                ConsumerRaidMember {
+                    name: Some("aaa-live".to_string()),
+                    uuid: Some("aaa-live".to_string()),
+                    is_configured: true,
+                    replica_node: None,
+                },
+                // Remote base: deterministic attach name, replica index 1.
+                ConsumerRaidMember {
+                    name: Some(expected_remote_base_bdev(vol, 1)),
+                    uuid: Some("something-else".to_string()),
+                    is_configured: true,
+                    replica_node: None,
+                },
+                // Failed slot stays unlabeled.
+                ConsumerRaidMember {
+                    name: None,
+                    uuid: None,
+                    is_configured: false,
+                    replica_node: None,
+                },
+            ],
+        }];
+
+        label_consumer_raid_members(&mut raids, vol, &rec);
+        assert_eq!(raids[0].base_bdevs[0].replica_node.as_deref(), Some("n1"));
+        assert_eq!(raids[0].base_bdevs[1].replica_node.as_deref(), Some("n2"));
+        assert_eq!(raids[0].base_bdevs[2].replica_node, None);
+    }
+
     // Helper function to create test volumes
     fn create_test_volume(id: &str, state: &str, nodes: Vec<String>, local_nvme: bool, rebuilding: bool) -> DashboardVolume {
         let replica_statuses = nodes.iter().map(|node| DashboardReplicaStatus {
@@ -2761,6 +3040,7 @@ mod tests {
             },
             pvc_info: None,
             current_epoch: None,
+            consumer_raids: Vec::new(),
         }
     }
 

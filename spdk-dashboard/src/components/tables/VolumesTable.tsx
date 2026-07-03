@@ -30,13 +30,16 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onReplicaClick,
   onRefresh
 }) => {
-  const [selectedVolumeDetail, setSelectedVolumeDetail] = useState<Volume | null>(null);
+  // Selection is by id: the detail modal derives its volume from the live
+  // query data each render, so it tracks a drill at the polling cadence
+  // instead of freezing a snapshot taken at click time.
+  const [selectedVolumeId, setSelectedVolumeId] = useState<string | null>(null);
   const { setDialogVisible } = useOperations();
-  
+
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  
+
   // Delete dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [volumeToDelete, setVolumeToDelete] = useState<RawSpdkVolume | null>(null);
@@ -44,8 +47,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
-    setDialogVisible(selectedVolumeDetail !== null);
-  }, [selectedVolumeDetail, setDialogVisible]);
+    setDialogVisible(selectedVolumeId !== null);
+  }, [selectedVolumeId, setDialogVisible]);
 
   // Extended volume interface for combining managed and raw volumes
   interface ExtendedVolume extends Volume {
@@ -249,8 +252,11 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   };
 
   const handleVolumeNameClick = (volume: Volume) => {
-    setSelectedVolumeDetail(volume);
+    setSelectedVolumeId(volume.id);
   };
+
+  const selectedVolumeDetail =
+    combinedVolumes.find(v => v.id === selectedVolumeId) ?? null;
 
   const goToPage = (page: number) => {
     setCurrentPage(Math.max(1, Math.min(totalPages, page)));
@@ -606,14 +612,14 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
         </div>
       )}
 
-      {/* Volume Detail Modal */}
+      {/* Volume Detail Modal — volumeData re-derives from live query data */}
       {selectedVolumeDetail && (
         <VolumeDetailAPI
           key={selectedVolumeDetail.id}
           volumeId={selectedVolumeDetail.id}
           volumeName={selectedVolumeDetail.name}
-          volumeData={selectedVolumeDetail} // Pass the full volume
-          onClose={() => setSelectedVolumeDetail(null)}
+          volumeData={selectedVolumeDetail}
+          onClose={() => setSelectedVolumeId(null)}
         />
       )}
 
