@@ -155,6 +155,26 @@ impl HotRejoinConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Drill-only fault injection
+// ---------------------------------------------------------------------------
+
+/// Abort the controller process when FLINT_HOT_REJOIN_FAULT names this
+/// point — SIGABRT semantics: no unwind, no cleanup, exactly a controller
+/// death at that instant. Exists because the quiesced sub-span is ~150 ms
+/// wide with ±100 ms tick-phase drift: no external kill can land inside it
+/// deterministically, and the §9-8 adversarial set re-runs per SPDK bump.
+/// Never set in production; the env is read per call so removing it from
+/// the deployment disarms the next pod. Points:
+///   `abort_after_quiesce` — right after W1 succeeds in either window
+///   path, leaving the quiesce lease orphaned (the auto-release drill).
+fn fault_point(point: &str) {
+    if std::env::var("FLINT_HOT_REJOIN_FAULT").is_ok_and(|v| v == point) {
+        eprintln!("[HOT_REJOIN] FAULT INJECTION '{point}' — aborting the controller process NOW");
+        std::process::abort();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic names — crash recovery and the scrub find artifacts by shape
 // ---------------------------------------------------------------------------
 
@@ -771,6 +791,7 @@ async fn window(
         .await
         .map_err(|e| format!("quiesce: {}", e))?;
         lap("quiesce", &mut t);
+        fault_point("abort_after_quiesce");
 
         // W2: E_f on every survivor — strict, all-or-abort, EEXIST refused
         // (an EEXIST snapshot was cut at some OTHER instant and is not the
@@ -1167,6 +1188,7 @@ async fn window_inline(
         .await
         .map_err(|e| format!("quiesce: {}", e))?;
         lap("quiesce", &mut t);
+        fault_point("abort_after_quiesce");
 
         // W2: strict E_f on every survivor (same all-or-abort as esnap).
         cut_ef_strict(rpc, &topo.survivors, ef).await?;
