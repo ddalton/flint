@@ -1266,6 +1266,36 @@ volume — each rejoiner then becomes a preferred source for the rest,
 fanning load off the survivor. The three fixes are exactly what make
 that cascade correct at N≥3.
 
+**4-replica drill, 3 staggered failures (11:39, `tier2-7b4.4`): PASS
+— the N-scaling claims proven live.** Infrastructure: 4th storage
+worker `runj-aws-1783103570` (i4i.large on-demand) added via trove —
+the 591a325 fresh-token fix held, node Ready in <2 min; its 468 GiB
+instance-store NVMe flint-initialized via the node agent (system disk
+and builder node untouched); SC `flint-4r`, fixture `r4-e2e` +
+`r4-writer` (consumer aws-3), one replica per storage node, Healthy
+4/4 from provisioning. Kills 31 s apart: aws-1, aws-2, new node —
+**raid served `online 1/4` on the consumer's own leg** from 11:40:24.
+Healthy 4/4 at 11:51:11 = **11 m 54 s from first kill, zero
+intervention, 4,516 gapless appends, zero HotRejoinReconcileFailed**;
+windows 170/168/176 ms (all sub-200 ms at N=4), localizations 5/2/4 s,
+hygiene 5-8 epochs/node.
+
+What the events prove that no smaller drill could:
+- **Consumer fallback live**: during the 1/4 phase every chase sourced
+  from runj-aws-3 (the consumer) — and aws-1's catch-up visibly
+  re-sourced mid-recovery (first from the new node while it still
+  stood, then from aws-3 after its kill): both `pick_source` arms in
+  one episode.
+- **Rejoin order inverted kill order** (new node → aws-2 → aws-1):
+  admission goes to the cheapest catch-up, not the queue head.
+- **The cascade fans out**: aws-2, its bases retired after ~6 min
+  stale, took the thin-aware **full build from the freshly-rejoined,
+  `_hr`-headed new node** — the coverage machinery routing a rebuild
+  through a replica that had itself rejoined minutes earlier.
+- **E_f cuts at maximum survivor complexity**: the final window
+  (aws-1, epoch-13) cut E_f across three survivors, two of them
+  `_hr`-headed. 35 ms.
+
 **Follow-ups NOT taken:** the pre-existing B1 esnap-resume residual
 stands; `admit_standbys_at_stage`'s final-delta source and the
 hot-rejoin backfill source still assume fresh marks (safe today — the
