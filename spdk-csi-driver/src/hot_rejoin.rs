@@ -167,6 +167,8 @@ impl HotRejoinConfig {
 /// the deployment disarms the next pod. Points:
 ///   `abort_after_quiesce` — right after W1 succeeds in either window
 ///   path, leaving the quiesce lease orphaned (the auto-release drill).
+///   `abort_after_flip` — right after the esnap record flip: a committed,
+///   flipped, un-localized window (the B1 resume drill).
 fn fault_point(point: &str) {
     if std::env::var("FLINT_HOT_REJOIN_FAULT").is_ok_and(|v| v == point) {
         eprintln!("[HOT_REJOIN] FAULT INJECTION '{point}' — aborting the controller process NOW");
@@ -568,6 +570,9 @@ pub async fn hot_rejoin_volume(
             store
                 .record_hot_rejoin_flip(volume_id, &topo.rec.lvol_uuid, &ef, &cut_uuids, &head_uuid)
                 .await?;
+            // Drill point: controller death with a committed, flipped,
+            // un-localized window — the B1 resume shape.
+            fault_point("abort_after_flip");
             let detail = timings
                 .iter()
                 .map(|(step, ms)| format!("{}={}ms", step, ms))
