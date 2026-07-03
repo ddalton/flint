@@ -1209,12 +1209,38 @@ the coverage-aware selector still prefers the non-consumer source, and
 fails over only when coverage demands it. Both selector arms proven
 live.
 
+**Drill B redux (10:44, `tier2-7b4.3`, clean Healthy start): PASS
+end-to-end, zero intervention.** Same kill sequence (aws-1, aws-2
++31 s; raid served 1/3). aws-1 (killed first) recovered first this
+time — delta catch-up, HR window, in_sync at +3 m 55 s, localized in
+4 s. aws-2's recovery exercised the new machinery for real: its
+shared base epoch-161 had already been retired from every live chain
+(it sat stale ~4 min ≈ 8 cuts; a stale replica pins retention only
+when its catch-up session starts) → **`ReplicaCatchupBaseUncovered`
+fired and correctly fell back to the thin-aware full build, sourced
+from freshly-rejoined `_hr`-headed aws-1** — the exact selector arm
+the fix added, in a scenario nobody scripted. Its first committed
+rejoin window then hit the known not-taken follow-up live:
+`HotRejoinReconcileFailed` ×3 ("epoch-162 not found in the source
+lineage on runj-aws-1") — the backfill's E_f had retired from the
+source chain before localization could replay it. The reconciler's
+backstop converged it: dead window scrubbed, fresh window at
+epoch-168 **succeeded in 157 ms** (E_f cut 24 ms, survivors including
+`_hr`-headed aws-1 — P1 №3's fix again), localized after 246 s,
+Healthy 3/3 at +9 m 24 s. Writer ledger through the redux: **51,368
+appends, zero gaps**. Hygiene: 6/3/6 epoch snapshots per node
+(aws-2's fresh full-built chain refills to the retain count
+naturally). The reconcile-retry episode upgrades the "harden
+backfill/reconcile with the same coverage probe" follow-up from
+theoretical to observed — bounded (self-healed in ~4 min via scrub +
+fresh window), not a wedge, but worth taking.
+
 **Recovery-choice semantics observed (the drill's original question):**
 per-replica and event-driven; hot-rejoin admission serialized per
-volume by the shared claim — the first standby to qualify wins (hence
-second-killed-first-recovered); source selection prefers non-consumer
-in_sync replicas, now subject to lineage coverage, with consumer
-fallback. Multi-failure recovery at any N is a deliberate cascade:
+volume by the shared claim — the first standby to qualify wins (order
+is which bulk slot lands first, not kill order); source selection
+prefers non-consumer in_sync replicas, now subject to lineage
+coverage, with consumer fallback. Multi-failure recovery at any N is a deliberate cascade:
 all failed replicas chase concurrently (cheap epoch deltas), but bulk
 catch-up runs one replica per volume-cycle and admission one per
 volume — each rejoiner then becomes a preferred source for the rest,
