@@ -1386,3 +1386,66 @@ recorded in the operator runbook's drill-primitives appendix.
 orphaned-lease live measurement (fault-injection knob), esnap-resume
 preferring the local chain (B1 residual), and the
 `admit_standbys_at_stage` coverage probe.
+
+## Quiesced-span orphaned-lease drill (2026-07-03, cluster runj) — MEASURED, 10.0 s bound holds
+
+The last unvalidated crash point in the window ladder: controller
+death INSIDE the quiesced sub-span, leaving the lease orphaned —
+writes frozen with nobody alive to unquiesce. B2 established the span
+(~150 ms, ±100 ms tick-phase drift) cannot be hit by external kill
+timing; per that session's recommendation it is now hit
+deterministically via a **drill-only fault-injection knob** (e8c2dd3):
+`FLINT_HOT_REJOIN_FAULT=abort_after_quiesce` aborts the controller
+process (SIGABRT, no unwind) the instant W1 commits in either window
+path. Env read per call; absent = inert. Image `tier2-7b4.5`, built on
+a transient **spot** c5d.4xlarge builder (~11 min incl. push; node
+added and torn down within the hour — the runbook recipe with
+`nodeType: aws_spot`).
+
+**Drill** (r3 fixture, controller-only roll, fault armed): kill aws-2's
+leg 13:08:56 → stale +19 s → standby +80 s → 13:11:09 intent CAS →
+quiesce committed → **FAULT: controller aborted with the lease live**.
+Disarmed by removing the env (fresh pod) before the next eligible tick.
+
+**Measurements** (8 Hz `bdev_raid_quiesce_list` sampler on the consumer
+node + the 5 fsync/s ledger writer):
+
+- **Lease auto-release: 10.0 s ± 0.12 s after acquisition** — exactly
+  `lease_ms`, released by spdk-tgt itself with NO controller process
+  in existence. 85 lease-present samples: `pin_count: 0` throughout
+  (no add in flight), `poller_armed: true`, clean expiry.
+- **Writer stall: 9.8–10.0 s** — last append in the quiesce second
+  (4 of 5 landed), nine fully silent seconds, resumed mid-second at
+  auto-release. No EIO, no fs error, no bounce — far inside the ext4
+  give-up horizon. **Zero seq gaps** (92,124 cumulative appends).
+- **Control-plane recovery: scrub arm at +1.4 s.** The kubelet-restarted
+  container's reconciler decoded stale+marker+no-leg and emitted
+  `HotRejoinScrubbed` at 20:11:13.2 (abort ~20:11:11.8) — marker
+  cleared, pre-staged exports reaped (zero `:hotrejoin:` NQNs
+  post-drill).
+- **Convergence: Healthy 3/3 at kill+4 m 22 s.** The re-chase even
+  exercised the coverage machinery organically (one
+  `ReplicaCatchupBaseUncovered` cycle — the stale mark's base epoch
+  had rolled off during the drama — then a covered revert). Clean
+  window 180 ms, localized after 11 s.
+- Bonus capture: the clean window's lease spanned exactly 2 sampler
+  ticks (~250 ms) and caught **`pin_count: 1` mid-add** — the v3 lease
+  pin observed in production traffic for the second time ever.
+
+**Verdict:** the §7b orphaned-lease story is now measured end-to-end —
+worst-case consumer stall equals `lease_ms` exactly, the data plane
+self-releases, and the crash-decode table cleans up in seconds. The
+runbook's §8 residual is closed; the knob stays as the standard
+primitive for re-running this drill per SPDK bump.
+
+**Follow-up noted, not taken:** the scrub/adopt reconcile arms could
+issue a defensive unquiesce on decode — the control plane was back
+1.4 s after the abort, but the writer stayed frozen the remaining
+~8.5 s waiting for lease expiry. Safe in both decode shapes (an
+uncommitted window mutated nothing; a committed one's own next step
+was unquiesce) and would cut the worst-case stall from `lease_ms` to
+reconciler latency.
+
+**Remaining from the 7b list after this:** esnap-resume preferring the
+local chain (B1 residual) and the `admit_standbys_at_stage` coverage
+probe.

@@ -407,9 +407,14 @@ Documented, bounded, not yet fixed — so an operator recognizes them:
   consumer writes cannot flow (e.g. during a repair episode). Harmless
   under revert-first admission, but epoch numbers are not proof of
   consumer progress.
-- **Controller crash inside the quiesced sub-span** (~150 ms wide):
-  harness-validated only; worst case is the lease auto-release bound
-  (writer stall ≤ `FLINT_HOT_REJOIN_LEASE_MS`, then unwind).
+- **Controller crash inside the quiesced sub-span**: live-measured
+  2026-07-03 via fault injection — worst-case consumer write stall is
+  exactly `FLINT_HOT_REJOIN_LEASE_MS` (measured 10.0 s ± 0.12 s); the
+  data plane auto-releases with no controller alive, the restarted
+  reconciler scrubs the dead window in seconds, and the writer resumes
+  with no error. The stall could be shortened to reconciler latency by
+  a defensive unquiesce in the scrub/adopt arms (improvement noted, not
+  yet taken).
 - **`admit_standbys_at_stage` final-delta source selection** assumes fresh
   standby marks (safe today — the chase gates admission — but not yet
   coverage-probed like the other source-selection sites).
@@ -426,6 +431,15 @@ standard tools):
   `cgroup.kill` file (host cgroup fs is rw there). `cgroup.freeze` is the
   matching pause primitive. `kubectl delete pod --force` has 1.5–6 s of
   jitter and cannot hit sub-second spans.
+- **In-window fault injection (drill-only):** spans inside the hot-rejoin
+  window (~150 ms) are too narrow even for `cgroup.kill`. Set
+  `FLINT_HOT_REJOIN_FAULT=abort_after_quiesce` on the controller to abort
+  the process the instant W1 commits, leaving the quiesce lease orphaned
+  (the auto-release drill; expect a writer stall of exactly
+  `FLINT_HOT_REJOIN_LEASE_MS`). **Disarm immediately after the first
+  fire** (`kubectl set env ... FLINT_HOT_REJOIN_FAULT-`) — the restarted
+  container still has the env and will fault every rejoin attempt.
+  Never set in production.
 - **Acked-write-loss check:** run a writer appending `seq timestamp` lines
   with fsync; after the episode, assert the sequence has no gaps
   (`awk 'NR>1 && $1!=prev+1 {print}; {prev=$1}'`). Every drill gate in the
