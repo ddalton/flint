@@ -1,6 +1,7 @@
 # Flint Dashboard Improvement Plan
 
-Status: DRAFT accepted 2026-07-02. Owner: dashboard workstream.
+Status: accepted 2026-07-02. Phase 0 DONE (f97d9fe, 2026-07-02) — live
+validation on a cluster still owed (needs image build + roll).
 Assessment basis: `spdk-dashboard/` at commit 042b805 (~13k LOC TS/TSX,
 React 19 + Vite + Tailwind 3, nginx → warp backend
 `spdk-csi-driver/src/spdk_dashboard_backend_minimal.rs`, ~2.5k LOC).
