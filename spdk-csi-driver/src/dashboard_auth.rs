@@ -18,7 +18,7 @@ use warp::http::StatusCode;
 use warp::{Filter, Rejection, Reply};
 
 /// Ordering matters: authorization checks are `role >= minimum`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Viewer,
@@ -37,14 +37,14 @@ pub struct AuthState {
     sessions: RwLock<HashMap<String, Session>>,
 }
 
-#[derive(Deserialize)]
-struct LoginRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct LoginRequest {
     username: String,
     password: String,
 }
 
-#[derive(Serialize)]
-struct LoginResponse {
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct LoginResponse {
     token: String,
     role: Role,
     expires_in_secs: u64,

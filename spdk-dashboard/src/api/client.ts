@@ -3,7 +3,10 @@
 // endpoint clears the session and notifies the auth hook so the app returns
 // to the login page.
 
-export type Role = 'viewer' | 'admin';
+import type { components } from './schema';
+
+// "viewer" | "admin", from the backend's Role enum via the generated spec.
+export type Role = components['schemas']['Role'];
 
 interface Session {
   token: string;
@@ -39,7 +42,7 @@ export const login = async (username: string, password: string): Promise<Role> =
       response.status === 401 ? 'Invalid credentials' : `Login failed (HTTP ${response.status})`
     );
   }
-  const body = await response.json();
+  const body: components['schemas']['LoginResponse'] = await response.json();
   session = { token: body.token, role: body.role };
   return body.role;
 };

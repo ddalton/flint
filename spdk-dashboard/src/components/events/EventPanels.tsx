@@ -18,7 +18,7 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
   other: 'Other',
 };
 
-const formatTime = (ts: string | null) => {
+const formatTime = (ts: string | null | undefined) => {
   if (!ts) return '—';
   const d = new Date(ts);
   return isNaN(d.getTime()) ? ts : d.toLocaleString();
@@ -26,8 +26,8 @@ const formatTime = (ts: string | null) => {
 
 const shortVolume = (v: string) => (v.length > 20 ? `${v.slice(0, 20)}…` : v);
 
-const formatMiB = (bytes: number | null) =>
-  bytes === null ? null : `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 1)} MiB`;
+const formatMiB = (bytes: number | null | undefined) =>
+  bytes == null ? null : `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 1)} MiB`;
 
 function WindowRow({ w, showVolume }: { w: HotRejoinWindow; showVolume: boolean }) {
   const overTarget = w.window_ms > WINDOW_TARGET_MS;

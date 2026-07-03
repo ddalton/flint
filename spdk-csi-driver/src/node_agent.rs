@@ -658,48 +658,45 @@ impl NodeAgent {
         match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 // Return ALL disks with complete fields so frontend can categorize them
-                let all_disks: Vec<_> = disks.iter()
+                let all_disks: Vec<NodeDiskListing> = disks.iter()
                     .filter(|d| d.healthy)
-                    .map(|d| json!({
-                        "pci_address": d.pci_address,
-                        "device_name": d.device_name,
-                        "size_bytes": d.size_bytes,
-                        "model": d.model,
-                        "healthy": d.healthy,
-                        // Additional fields expected by frontend
-                        "vendor_id": "0x0000",
-                        "device_id": "0x0000",
-                        "subsystem_vendor_id": "0x0000",
-                        "subsystem_device_id": "0x0000",
-                        "numa_node": 0,
-                        "driver": if d.blobstore_initialized { "vfio-pci" } else { "kernel" },
-                        "serial": "",
-                        "firmware_version": "",
-                        "namespace_id": 1,
-                        "mounted_partitions": &d.mounted_partitions,
-                        "filesystem_type": null,
-                        "is_system_disk": d.is_system_disk,
-                        "spdk_ready": d.blobstore_initialized,  // LVS initialized = ready
+                    .map(|d| NodeDiskListing {
+                        pci_address: d.pci_address.clone(),
+                        device_name: d.device_name.clone(),
+                        size_bytes: d.size_bytes,
+                        model: d.model.clone(),
+                        healthy: d.healthy,
+                        vendor_id: "0x0000".to_string(),
+                        device_id: "0x0000".to_string(),
+                        subsystem_vendor_id: "0x0000".to_string(),
+                        subsystem_device_id: "0x0000".to_string(),
+                        numa_node: 0,
+                        driver: if d.blobstore_initialized { "vfio-pci" } else { "kernel" }.to_string(),
+                        serial: String::new(),
+                        firmware_version: String::new(),
+                        namespace_id: 1,
+                        mounted_partitions: d.mounted_partitions.clone(),
+                        filesystem_type: None,
+                        is_system_disk: d.is_system_disk,
+                        spdk_ready: d.blobstore_initialized, // LVS initialized = ready
                         // Memory disks (malloc) are always driver_ready, physical disks need LVS
-                        "driver_ready": d.pci_address.starts_with("memory:") || d.blobstore_initialized,
-                        "blobstore_initialized": d.blobstore_initialized,
-                        "discovered_at": chrono::Utc::now().to_rfc3339()
-                    }))
+                        driver_ready: d.pci_address.starts_with("memory:") || d.blobstore_initialized,
+                        blobstore_initialized: d.blobstore_initialized,
+                        discovered_at: chrono::Utc::now().to_rfc3339(),
+                    })
                     .collect();
-                
-                let response = json!({
-                    "success": true,
-                    "node": node_agent.node_name,
-                    "uninitialized_disks": all_disks,  // Keep same field name for compatibility
-                    "count": all_disks.len()
-                });
+
+                let response = UninitializedDisksResponse {
+                    success: true,
+                    node: node_agent.node_name.clone(),
+                    count: all_disks.len(),
+                    // Field name kept for compatibility: it carries ALL disks
+                    uninitialized_disks: all_disks,
+                };
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                let error_response = json!({
-                    "success": false,
-                    "error": e.to_string()
-                });
+                let error_response = NodeAgentError { success: false, error: e.to_string() };
                 Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
@@ -714,51 +711,47 @@ impl NodeAgent {
         match node_agent.disk_service.discover_local_disks_fast().await {
             Ok(disks) => {
                 // Return all disks with complete fields for frontend filtering
-                let disk_statuses: Vec<_> = disks.iter()
+                let disk_statuses: Vec<NodeDiskStatus> = disks.iter()
                     .filter(|d| d.healthy)
-                    .map(|d| json!({
-                        "pci_address": d.pci_address,
-                        "device_name": d.device_name,
-                        "size_bytes": d.size_bytes,
-                        "model": d.model,
-                        "healthy": d.healthy,
-                        // Additional fields expected by frontend
-                        "vendor_id": "0x0000",
-                        "device_id": "0x0000",
-                        "subsystem_vendor_id": "0x0000",
-                        "subsystem_device_id": "0x0000",
-                        "numa_node": 0,
-                        "driver": d.driver,
-                        "serial": "",
-                        "firmware_version": "",
-                        "namespace_id": 1,
-                        "mounted_partitions": &d.mounted_partitions,
-                        "filesystem_type": null,
-                        "is_system_disk": d.is_system_disk,
-                        "spdk_ready": d.blobstore_initialized,
+                    .map(|d| NodeDiskStatus {
+                        pci_address: d.pci_address.clone(),
+                        device_name: d.device_name.clone(),
+                        size_bytes: d.size_bytes,
+                        model: d.model.clone(),
+                        healthy: d.healthy,
+                        vendor_id: "0x0000".to_string(),
+                        device_id: "0x0000".to_string(),
+                        subsystem_vendor_id: "0x0000".to_string(),
+                        subsystem_device_id: "0x0000".to_string(),
+                        numa_node: 0,
+                        driver: d.driver.clone(),
+                        serial: String::new(),
+                        firmware_version: String::new(),
+                        namespace_id: 1,
+                        mounted_partitions: d.mounted_partitions.clone(),
+                        filesystem_type: None,
+                        is_system_disk: d.is_system_disk,
+                        spdk_ready: d.blobstore_initialized,
                         // Memory disks (malloc) are always driver_ready, physical disks need LVS
-                        "driver_ready": d.pci_address.starts_with("memory:") || d.blobstore_initialized,
-                        "blobstore_initialized": d.blobstore_initialized,
-                        "discovered_at": chrono::Utc::now().to_rfc3339(),
-                        "free_space": d.free_space,
-                        "temperature": null,
-                        "error_count": 0
-                    }))
+                        driver_ready: d.pci_address.starts_with("memory:") || d.blobstore_initialized,
+                        blobstore_initialized: d.blobstore_initialized,
+                        discovered_at: chrono::Utc::now().to_rfc3339(),
+                        free_space: d.free_space,
+                        temperature: None,
+                        error_count: 0,
+                    })
                     .collect();
-                
-                let response = json!({
-                    "node": node_agent.node_name,
-                    "disks": disk_statuses,
-                    "last_updated": chrono::Utc::now().to_rfc3339()
-                });
-                
+
+                let response = NodeDisksStatusResponse {
+                    node: node_agent.node_name.clone(),
+                    disks: disk_statuses,
+                    last_updated: chrono::Utc::now().to_rfc3339(),
+                };
+
                 Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
             }
             Err(e) => {
-                let error_response = json!({
-                    "success": false,
-                    "error": e.to_string()
-                });
+                let error_response = NodeAgentError { success: false, error: e.to_string() };
                 Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
@@ -775,7 +768,7 @@ impl NodeAgent {
         let mut setup_disks = Vec::new();
         let mut failed_disks = Vec::new();
         let mut warnings = Vec::new();
-        
+
         for pci_address in &disks {
             match node_agent.disk_service.initialize_blobstore(pci_address).await {
                 Ok(_lvs_name) => {
@@ -787,15 +780,15 @@ impl NodeAgent {
                 }
             }
         }
-        
-        let response = json!({
-            "success": failed_disks.is_empty(),
-            "setup_disks": setup_disks,
-            "failed_disks": failed_disks,
-            "warnings": warnings,
-            "completed_at": chrono::Utc::now().to_rfc3339()
-        });
-        
+
+        let response = DiskSetupResponse {
+            success: failed_disks.is_empty(),
+            setup_disks,
+            failed_disks,
+            warnings,
+            completed_at: chrono::Utc::now().to_rfc3339(),
+        };
+
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
     }
 
@@ -816,13 +809,13 @@ impl NodeAgent {
         debug!(disk_count = disks.len(), "[HTTP_API] Handling reset disks request");
 
         // TODO: Implement actual disk reset
-        let response = json!({
-            "success": false,
-            "setup_disks": [],
-            "failed_disks": disks,
-            "warnings": ["Disk reset not yet implemented in minimal state"],
-            "completed_at": chrono::Utc::now().to_rfc3339()
-        });
+        let response = DiskSetupResponse {
+            success: false,
+            setup_disks: Vec::new(),
+            failed_disks: disks,
+            warnings: vec!["Disk reset not yet implemented in minimal state".to_string()],
+            completed_at: chrono::Utc::now().to_rfc3339(),
+        };
 
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::NOT_IMPLEMENTED))
     }
@@ -2929,12 +2922,105 @@ impl NodeAgent {
 }
 
 // Request/Response types for dashboard compatibility
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct DiskSetupRequest {
     pub disks: Option<Vec<String>>,           // For /api/disks/setup
-    pub pci_addresses: Option<Vec<String>>,   // For /api/disks/initialize  
+    pub pci_addresses: Option<Vec<String>>,   // For /api/disks/initialize
     pub force_unmount: Option<bool>,
     pub backup_data: Option<bool>,
+}
+
+/// Disk row served by POST /api/disks/status — the Disk Setup tab's source.
+/// Several fields are fixed compatibility values the agent fabricates for the
+/// frontend (vendor ids, empty serial, numa 0); typed here so the generated
+/// OpenAPI spec documents what is actually sent.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct NodeDiskStatus {
+    pub pci_address: String,
+    pub device_name: String,
+    pub size_bytes: u64,
+    pub model: String,
+    pub healthy: bool,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub subsystem_vendor_id: String,
+    pub subsystem_device_id: String,
+    pub numa_node: u32,
+    pub driver: String,
+    pub serial: String,
+    pub firmware_version: String,
+    pub namespace_id: u32,
+    pub mounted_partitions: Vec<String>,
+    pub filesystem_type: Option<String>,
+    pub is_system_disk: bool,
+    pub spdk_ready: bool,
+    pub driver_ready: bool,
+    pub blobstore_initialized: bool,
+    pub discovered_at: String,
+    pub free_space: u64,
+    pub temperature: Option<f64>,
+    pub error_count: u64,
+}
+
+/// Disk row served by POST /api/disks/uninitialized — same compatibility
+/// shape minus the status-only telemetry fields.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct NodeDiskListing {
+    pub pci_address: String,
+    pub device_name: String,
+    pub size_bytes: u64,
+    pub model: String,
+    pub healthy: bool,
+    pub vendor_id: String,
+    pub device_id: String,
+    pub subsystem_vendor_id: String,
+    pub subsystem_device_id: String,
+    pub numa_node: u32,
+    pub driver: String,
+    pub serial: String,
+    pub firmware_version: String,
+    pub namespace_id: u32,
+    pub mounted_partitions: Vec<String>,
+    pub filesystem_type: Option<String>,
+    pub is_system_disk: bool,
+    pub spdk_ready: bool,
+    pub driver_ready: bool,
+    pub blobstore_initialized: bool,
+    pub discovered_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct NodeDisksStatusResponse {
+    pub node: String,
+    pub disks: Vec<NodeDiskStatus>,
+    pub last_updated: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct UninitializedDisksResponse {
+    pub success: bool,
+    pub node: String,
+    pub uninitialized_disks: Vec<NodeDiskListing>,
+    pub count: usize,
+}
+
+/// Per-disk outcome shape for setup/initialize/reset. `failed_disks` holds
+/// PCI addresses only — human-readable causes ride in `warnings`.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct DiskSetupResponse {
+    pub success: bool,
+    pub setup_disks: Vec<String>,
+    pub failed_disks: Vec<String>,
+    pub warnings: Vec<String>,
+    pub completed_at: String,
+}
+
+/// Agent-level failure envelope (also produced by the dashboard proxy when
+/// an agent is unreachable).
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct NodeAgentError {
+    pub success: bool,
+    pub error: String,
 }
 
 impl DiskSetupRequest {

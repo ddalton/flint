@@ -16,7 +16,8 @@ use k8s_openapi::api::core::v1::Pod;
 use crate::minimal_models::DiskInfo;
 
 // Query parameters for backend filtering
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct DashboardQuery {
     // Volume filters
     volume_filter: Option<String>, // "all", "healthy", "degraded", "failed", "rebuilding", "local-nvme", "orphaned"
@@ -34,7 +35,7 @@ struct DashboardQuery {
 }
 
 // Dashboard data structures - kept compatible with frontend
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardVolume {
     id: String,
     name: String,
@@ -52,6 +53,7 @@ struct DashboardVolume {
     transport_type: String,
     target_port: u16,
     raid_status: Option<DashboardRaidStatus>,
+    #[schema(value_type = Option<Object>)]
     ublk_device: Option<serde_json::Value>,
     spdk_validation_status: SpdkValidationStatus,
     pvc_info: Option<PvcInfo>,
@@ -63,7 +65,7 @@ struct DashboardVolume {
 /// assembles `raid_<pv>` locally from the replica legs — one row per
 /// consumer. Presence of the raid bdev on a node IS the consumer set;
 /// no VolumeAttachment inference.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct ConsumerRaid {
     node: String,
     raid_name: String,
@@ -75,7 +77,7 @@ struct ConsumerRaid {
     base_bdevs: Vec<ConsumerRaidMember>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct ConsumerRaidMember {
     /// SPDK nulls name+uuid when a leg fails on an online raid
     /// (raid_bdev_free_base_bdev_resource) — a null member IS a failed slot.
@@ -87,7 +89,7 @@ struct ConsumerRaidMember {
     replica_node: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardDisk {
     id: String,
     node: String,
@@ -115,7 +117,7 @@ struct DashboardDisk {
     device_type: String, // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardReplicaStatus {
     node: String,
     status: String,
@@ -135,7 +137,7 @@ struct DashboardReplicaStatus {
 /// annotation — the Tier-2 engine's live signal. `rebuild_progress` above
 /// tracks the pre-Tier-2 blind-rebuild model and stays for raid-level
 /// rebuild_info only; replica health is judged from here.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct ReplicaSyncInfo {
     sync_state: String,
     last_epoch: Option<String>,
@@ -145,7 +147,7 @@ struct ReplicaSyncInfo {
     hot_rejoin: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct NvmfTarget {
     nqn: String,
     target_ip: String,
@@ -153,7 +155,7 @@ struct NvmfTarget {
     transport_type: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct NvmeofTargetInfo {
     nqn: String,
     target_ip: String,
@@ -165,7 +167,7 @@ struct NvmeofTargetInfo {
     connection_count: u64,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardRaidStatus {
     raid_level: u32,
     state: String,
@@ -178,7 +180,7 @@ struct DashboardRaidStatus {
     auto_rebuild_enabled: bool,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct RaidMember {
     slot: u32,
     name: String,
@@ -186,7 +188,7 @@ struct RaidMember {
     uuid: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct RebuildInfo {
     state: String,
     target_slot: u32,
@@ -198,14 +200,14 @@ struct RebuildInfo {
     start_time: Option<String>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct SpdkValidationStatus {
     has_spdk_backing: bool,
     validation_message: Option<String>,
     validation_severity: String, // "info", "warning", "error"
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct PvcInfo {
     name: String,
     namespace: String,
@@ -213,7 +215,7 @@ struct PvcInfo {
     creation_timestamp: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct ProvisionedVolume {
     volume_name: String,
     volume_id: String,
@@ -223,7 +225,7 @@ struct ProvisionedVolume {
     status: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct OrphanedVolumeInfo {
     spdk_volume_name: String,
     spdk_volume_uuid: String,
@@ -232,22 +234,76 @@ struct OrphanedVolumeInfo {
     orphaned_since: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardData {
     volumes: Vec<DashboardVolume>,
+    #[schema(value_type = Vec<Object>)]
     raw_volumes: Vec<serde_json::Value>,  // Unmanaged SPDK volumes
     disks: Vec<DashboardDisk>,
     nodes: Vec<String>,
     node_info: HashMap<String, NodeInfo>,  // node_name -> node info with memory details
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct NodeInfo {
     name: String,
     memory_total_mb: u64,
     memory_available_mb: u64,
     memory_used_mb: u64,
     memory_utilization_pct: f64,
+}
+
+// --- Typed endpoint responses ---
+// Handlers serialize these structs rather than ad-hoc json! maps so the
+// generated OpenAPI spec (src/bin/dashboard_openapi.rs) cannot drift from
+// what the API actually sends.
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct VolumesResponse {
+    volumes: Vec<DashboardVolume>,
+    #[schema(value_type = Vec<Object>)]
+    raw_volumes: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct DisksResponse {
+    disks: Vec<DashboardDisk>,
+    nodes: Vec<String>,
+    node_info: HashMap<String, NodeInfo>,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct EventsResponse {
+    events: Vec<DashboardEvent>,
+    windows: Vec<HotRejoinWindow>,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct DashboardOverview {
+    total_volumes: usize,
+    healthy_volumes: usize,
+    degraded_volumes: usize,
+    failed_volumes: usize,
+    faulted_volumes: usize,
+    local_nvme_volumes: usize,
+    total_disks: usize,
+    healthy_disks: usize,
+    initialized_disks: usize,
+    total_nodes: usize,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct RefreshResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct ApiError {
+    error: String,
 }
 
 #[derive(Clone)]
@@ -718,7 +774,7 @@ async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<se
 }
 
 /// A flint engine event projected for the dashboard timeline (2c).
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardEvent {
     timestamp: Option<String>,
     event_type: String,
@@ -729,7 +785,7 @@ struct DashboardEvent {
     reporting_instance: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct WindowStep {
     name: String,
     ms: u64,
@@ -738,7 +794,7 @@ struct WindowStep {
 /// A completed hot-rejoin window parsed from a HotRejoinSucceeded event —
 /// the after-the-fact record of the sub-2s window the 2a indicator cannot
 /// catch live.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct HotRejoinWindow {
     timestamp: Option<String>,
     volume: String,
@@ -1538,14 +1594,15 @@ async fn get_dashboard_data_minimal(
         Err(e) => {
             println!("❌ [DASHBOARD_API] Failed to fetch dashboard data: {}", e);
             Ok(warp::reply::with_status(
-                warp::reply::json(&json!({"error": format!("Failed to fetch dashboard data: {}", e)})),
+                warp::reply::json(&ApiError { error: format!("Failed to fetch dashboard data: {}", e) }),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR
             ))
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct EventsQuery {
     volume: Option<String>,
     limit: Option<usize>,
@@ -1618,14 +1675,14 @@ async fn get_events_minimal(
             events.truncate(limit);
 
             Ok(warp::reply::with_status(
-                warp::reply::json(&json!({ "events": events, "windows": windows })),
+                warp::reply::json(&EventsResponse { events, windows }),
                 warp::http::StatusCode::OK,
             ))
         }
         Err(e) => {
             println!("❌ [EVENTS_API] Failed to list events: {}", e);
             Ok(warp::reply::with_status(
-                warp::reply::json(&json!({"error": format!("Failed to list events: {}", e)})),
+                warp::reply::json(&ApiError { error: format!("Failed to list events: {}", e) }),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
         }
@@ -1643,15 +1700,17 @@ async fn handle_refresh(state: AppState) -> Result<impl warp::Reply, warp::Rejec
     match discover_node_agents(&state.kube_client, &state.target_namespace).await {
         Ok(node_agents) => {
             *state.node_agents.write().await = node_agents;
-            Ok::<_, warp::Rejection>(warp::reply::json(&json!({
-                "status": "success",
-                "message": "Cache invalidated; node agents rediscovered"
-            })))
+            Ok::<_, warp::Rejection>(warp::reply::json(&RefreshResponse {
+                status: "success".to_string(),
+                message: Some("Cache invalidated; node agents rediscovered".to_string()),
+                error: None,
+            }))
         }
-        Err(e) => Ok(warp::reply::json(&json!({
-            "status": "error",
-            "error": e.to_string()
-        }))),
+        Err(e) => Ok(warp::reply::json(&RefreshResponse {
+            status: "error".to_string(),
+            message: None,
+            error: Some(e.to_string()),
+        })),
     }
 }
 
@@ -1662,11 +1721,11 @@ async fn get_volumes_minimal(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match fetch_dashboard_data_minimal(&state, query).await {
         Ok(data) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({ "volumes": data.volumes, "raw_volumes": data.raw_volumes })),
+            warp::reply::json(&VolumesResponse { volumes: data.volumes, raw_volumes: data.raw_volumes }),
             warp::http::StatusCode::OK,
         )),
         Err(e) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({"error": format!("Failed to fetch volumes: {}", e)})),
+            warp::reply::json(&ApiError { error: format!("Failed to fetch volumes: {}", e) }),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         )),
     }
@@ -1679,11 +1738,11 @@ async fn get_disks_minimal(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match fetch_dashboard_data_minimal(&state, query).await {
         Ok(data) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({ "disks": data.disks, "nodes": data.nodes, "node_info": data.node_info })),
+            warp::reply::json(&DisksResponse { disks: data.disks, nodes: data.nodes, node_info: data.node_info }),
             warp::http::StatusCode::OK,
         )),
         Err(e) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({"error": format!("Failed to fetch disks: {}", e)})),
+            warp::reply::json(&ApiError { error: format!("Failed to fetch disks: {}", e) }),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         )),
     }
@@ -1700,28 +1759,28 @@ async fn get_overview_minimal(
             warp::http::StatusCode::OK,
         )),
         Err(e) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({"error": format!("Failed to fetch overview: {}", e)})),
+            warp::reply::json(&ApiError { error: format!("Failed to fetch overview: {}", e) }),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         )),
     }
 }
 
 /// Summary counts derived from the aggregate (mirrors the frontend's stats).
-fn dashboard_overview(data: &DashboardData) -> serde_json::Value {
+fn dashboard_overview(data: &DashboardData) -> DashboardOverview {
     let degraded = data.volumes.iter().filter(|v| v.state == "Degraded").count();
     let failed = data.volumes.iter().filter(|v| v.state == "Failed").count();
-    json!({
-        "total_volumes": data.volumes.len(),
-        "healthy_volumes": data.volumes.iter().filter(|v| v.state == "Healthy").count(),
-        "degraded_volumes": degraded,
-        "failed_volumes": failed,
-        "faulted_volumes": degraded + failed,
-        "local_nvme_volumes": data.volumes.iter().filter(|v| v.local_nvme).count(),
-        "total_disks": data.disks.len(),
-        "healthy_disks": data.disks.iter().filter(|d| d.healthy).count(),
-        "initialized_disks": data.disks.iter().filter(|d| d.blobstore_initialized).count(),
-        "total_nodes": data.nodes.len(),
-    })
+    DashboardOverview {
+        total_volumes: data.volumes.len(),
+        healthy_volumes: data.volumes.iter().filter(|v| v.state == "Healthy").count(),
+        degraded_volumes: degraded,
+        failed_volumes: failed,
+        faulted_volumes: degraded + failed,
+        local_nvme_volumes: data.volumes.iter().filter(|v| v.local_nvme).count(),
+        total_disks: data.disks.len(),
+        healthy_disks: data.disks.iter().filter(|d| d.healthy).count(),
+        initialized_disks: data.disks.iter().filter(|d| d.blobstore_initialized).count(),
+        total_nodes: data.nodes.len(),
+    }
 }
 
 /// Proxy node agent endpoints for dashboard compatibility
@@ -2648,6 +2707,197 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
     Ok(())
 }
 
+// --- OpenAPI document (spdk-dashboard/api/openapi.json source) ---
+// The SPA's TypeScript API types are generated from this document
+// (`npm run gen:api` in spdk-dashboard/), so the schemas below and the
+// typed response structs they reference ARE the frontend contract.
+// Regenerate with: cargo run --bin dashboard-openapi
+mod api_doc {
+    #![allow(dead_code)] // path fns are annotation carriers, never called
+
+    use utoipa::OpenApi;
+
+    use super::*;
+    use crate::dashboard_auth::{LoginRequest, LoginResponse};
+    use crate::node_agent::{
+        DiskSetupRequest, DiskSetupResponse, NodeAgentError, NodeDiskListing, NodeDiskStatus,
+        NodeDisksStatusResponse, UninitializedDisksResponse,
+    };
+
+    // The real handlers are warp filter chains the #[utoipa::path] macro
+    // cannot attach to; these stubs carry the path annotations instead.
+
+    #[utoipa::path(get, path = "/healthz", tag = "system",
+        responses((status = 200, description = "Liveness probe", body = Object)))]
+    fn healthz() {}
+
+    #[utoipa::path(post, path = "/api/login", tag = "auth",
+        request_body = LoginRequest,
+        responses(
+            (status = 200, description = "Session token", body = LoginResponse),
+            (status = 401, description = "Invalid credentials", body = ApiError)))]
+    fn login() {}
+
+    #[utoipa::path(get, path = "/api/dashboard", tag = "aggregate",
+        params(DashboardQuery),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Full aggregate (uncached legacy endpoint)", body = DashboardData),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Aggregate build failed", body = ApiError)))]
+    fn dashboard() {}
+
+    #[utoipa::path(get, path = "/api/overview", tag = "aggregate",
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Summary counts", body = DashboardOverview),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Aggregate build failed", body = ApiError)))]
+    fn overview() {}
+
+    #[utoipa::path(get, path = "/api/volumes", tag = "aggregate",
+        params(DashboardQuery),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Volumes slice of the cached aggregate", body = VolumesResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Aggregate build failed", body = ApiError)))]
+    fn volumes() {}
+
+    #[utoipa::path(get, path = "/api/disks", tag = "aggregate",
+        params(DashboardQuery),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Disks slice of the cached aggregate", body = DisksResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Aggregate build failed", body = ApiError)))]
+    fn disks() {}
+
+    #[utoipa::path(get, path = "/api/events", tag = "events",
+        params(EventsQuery),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Engine event timeline + parsed hot-rejoin windows", body = EventsResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Event list failed", body = ApiError)))]
+    fn events() {}
+
+    #[utoipa::path(post, path = "/api/refresh", tag = "aggregate",
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Cache invalidated; agents rediscovered", body = RefreshResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError)))]
+    fn refresh() {}
+
+    #[utoipa::path(get, path = "/api/snapshots", tag = "snapshots",
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Raw SPDK snapshot objects (untyped passthrough)", body = Vec<Object>),
+            (status = 401, description = "Missing/expired token", body = ApiError)))]
+    fn snapshots() {}
+
+    #[utoipa::path(get, path = "/api/nodes/{node}/disks/status", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "All healthy disks on the node (Disk Setup tab source)", body = NodeDisksStatusResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Agent unreachable or discovery failed", body = NodeAgentError)))]
+    fn node_disk_status() {}
+
+    #[utoipa::path(post, path = "/api/nodes/{node}/disks/uninitialized", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "All healthy disks (field name is historical)", body = UninitializedDisksResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Agent unreachable or discovery failed", body = NodeAgentError)))]
+    fn node_disks_uninitialized() {}
+
+    #[utoipa::path(post, path = "/api/nodes/{node}/disks/setup", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        request_body = DiskSetupRequest,
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Per-disk outcomes; idempotent on initialized disks", body = DiskSetupResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 403, description = "Viewer token on a destructive route", body = ApiError),
+            (status = 500, description = "Agent unreachable", body = NodeAgentError)))]
+    fn node_disks_setup() {}
+
+    #[utoipa::path(post, path = "/api/nodes/{node}/disks/initialize", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        request_body = DiskSetupRequest,
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Alias of /disks/setup", body = DiskSetupResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 403, description = "Viewer token on a destructive route", body = ApiError),
+            (status = 500, description = "Agent unreachable", body = NodeAgentError)))]
+    fn node_disks_initialize() {}
+
+    #[utoipa::path(post, path = "/api/nodes/{node}/disks/reset", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        request_body = DiskSetupRequest,
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 501, description = "Reset not implemented in minimal state", body = DiskSetupResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 403, description = "Viewer token on a destructive route", body = ApiError)))]
+    fn node_disks_reset() {}
+
+    struct SecurityAddon;
+
+    impl utoipa::Modify for SecurityAddon {
+        fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+            use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+            let components = openapi.components.get_or_insert_with(Default::default);
+            components.add_security_scheme(
+                "bearerAuth",
+                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+            );
+        }
+    }
+
+    #[derive(OpenApi)]
+    #[openapi(
+        info(
+            title = "Flint Dashboard API",
+            description = "Dashboard backend served by the flint CSI driver (ENABLE_DASHBOARD=true). \
+                           Sessions are in-memory: tokens invalidate on backend restart.",
+        ),
+        modifiers(&SecurityAddon),
+        paths(
+            healthz, login, dashboard, overview, volumes, disks, events, refresh,
+            snapshots, node_disk_status, node_disks_uninitialized, node_disks_setup,
+            node_disks_initialize, node_disks_reset,
+        ),
+        components(schemas(
+            LoginRequest, LoginResponse, crate::dashboard_auth::Role,
+            DashboardData, DashboardVolume, DashboardDisk, DashboardReplicaStatus,
+            ReplicaSyncInfo, NvmfTarget, NvmeofTargetInfo, DashboardRaidStatus,
+            RaidMember, RebuildInfo, SpdkValidationStatus, PvcInfo, ProvisionedVolume,
+            OrphanedVolumeInfo, ConsumerRaid, ConsumerRaidMember, NodeInfo,
+            DashboardOverview, VolumesResponse, DisksResponse, EventsResponse,
+            RefreshResponse, ApiError, DashboardEvent, WindowStep, HotRejoinWindow,
+            DiskSetupRequest, DiskSetupResponse, NodeDiskStatus, NodeDiskListing,
+            NodeDisksStatusResponse, UninitializedDisksResponse, NodeAgentError,
+        )),
+    )]
+    struct ApiDoc;
+
+    pub fn openapi_json() -> String {
+        ApiDoc::openapi()
+            .to_pretty_json()
+            .expect("OpenAPI document serializes")
+    }
+}
+
+/// Emit the OpenAPI document (used by the dashboard-openapi bin).
+pub fn openapi_json() -> String {
+    api_doc::openapi_json()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3095,15 +3345,27 @@ mod tests {
         };
 
         let ov = dashboard_overview(&data);
-        assert_eq!(ov["total_volumes"], 4);
-        assert_eq!(ov["healthy_volumes"], 2);
-        assert_eq!(ov["degraded_volumes"], 1);
-        assert_eq!(ov["failed_volumes"], 1);
-        assert_eq!(ov["faulted_volumes"], 2);
-        assert_eq!(ov["local_nvme_volumes"], 2);
-        assert_eq!(ov["total_disks"], 2);
-        assert_eq!(ov["initialized_disks"], 1);
-        assert_eq!(ov["total_nodes"], 2);
+        assert_eq!(ov.total_volumes, 4);
+        assert_eq!(ov.healthy_volumes, 2);
+        assert_eq!(ov.degraded_volumes, 1);
+        assert_eq!(ov.failed_volumes, 1);
+        assert_eq!(ov.faulted_volumes, 2);
+        assert_eq!(ov.local_nvme_volumes, 2);
+        assert_eq!(ov.total_disks, 2);
+        assert_eq!(ov.initialized_disks, 1);
+        assert_eq!(ov.total_nodes, 2);
+
+        // The serialized shape is the API contract (see dashboard_openapi):
+        // field names must match what the SPA consumed before the struct
+        // replaced the ad-hoc json! map.
+        let json = serde_json::to_value(&ov).unwrap();
+        for key in [
+            "total_volumes", "healthy_volumes", "degraded_volumes",
+            "failed_volumes", "faulted_volumes", "local_nvme_volumes",
+            "total_disks", "healthy_disks", "initialized_disks", "total_nodes",
+        ] {
+            assert!(json.get(key).is_some(), "overview lost key {key}");
+        }
     }
 
     #[test]

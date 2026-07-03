@@ -1,5 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../api/client';
+import type { components } from '../api/schema';
+
+type Schemas = components['schemas'];
 
 export type EventCategory =
   | 'hot_rejoin'
@@ -10,37 +13,22 @@ export type EventCategory =
   | 'health'
   | 'other';
 
-export interface EngineEvent {
-  timestamp: string | null;
-  event_type: string; // 'Normal' | 'Warning'
-  reason: string;
-  volume: string;
-  message: string;
+// Wire types aliased from the generated OpenAPI schema (api/openapi.json);
+// category/path stay narrowed to the literal unions the backend emits.
+export type EngineEvent = Omit<Schemas['DashboardEvent'], 'category'> & {
   category: EventCategory;
-  reporting_instance: string;
-}
+};
 
-export interface WindowStep {
-  name: string;
-  ms: number;
-}
+export type WindowStep = Schemas['WindowStep'];
 
-export interface HotRejoinWindow {
-  timestamp: string | null;
-  volume: string;
-  node: string;
-  raid: string;
-  epoch: string;
-  window_ms: number;
-  steps: WindowStep[];
+export type HotRejoinWindow = Omit<Schemas['HotRejoinWindow'], 'path'> & {
   path: 'inline' | 'esnap';
-  estimator_bytes: number | null;
-}
+};
 
-export interface EventsData {
+export type EventsData = Omit<Schemas['EventsResponse'], 'events' | 'windows'> & {
   events: EngineEvent[];
   windows: HotRejoinWindow[];
-}
+};
 
 // The engine's hot-rejoin window target (FLINT_HOT_REJOIN default 2s) —
 // windows at or over this get flagged, mirroring HotRejoinWindowSlow.

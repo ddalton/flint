@@ -72,79 +72,41 @@ export const computeStats = (data: DashboardData): DashboardStats => {
 // --- Start of new/updated interfaces ---
 
 // Represents NVMe-oF target information from the backend
-export interface NvmeofTargetInfo {
-  nqn: string;
-  target_ip: string;
-  target_port: number;
-  transport: string;
-  node: string;
-  bdev_name: string;
-  active: boolean;
-  connection_count: number;
-}
+// --- Backend API types ---
+// Generated from the backend's OpenAPI document (api/openapi.json, emitted
+// by `cargo run --bin dashboard-openapi`; regenerate with `npm run gen:api`).
+// Wire types are ALIASES of the generated schemas so they cannot drift from
+// the Rust structs; the few frontend narrowings (string → literal union)
+// are explicit `Omit & override` intersections, visible below.
+import type { components } from '../api/schema';
 
-export interface Volume {
-  id: string;
-  name: string;
-  size: string;
-  state: string;
-  replicas: number;
-  active_replicas: number;
-  local_nvme: boolean;
-  access_method: string;
-  rebuild_progress: number | null;
-  nodes: string[];
-  replica_statuses: ReplicaStatus[];
-  nvmeof_targets: NvmeofTargetInfo[];
-  nvmeof_enabled: boolean;
-  raid_status?: RaidStatus;
-  
-  // Add ublk device information
+type Schemas = components['schemas'];
+
+export type NvmeofTargetInfo = Schemas['NvmeofTargetInfo'];
+
+export type Volume = Omit<
+  Schemas['DashboardVolume'],
+  'replica_statuses' | 'spdk_validation_status' | 'ublk_device'
+> & {
+  replica_statuses: ReplicaStatus[]; // narrowed sync tree (SyncState union)
+  spdk_validation_status: SpdkValidationStatus; // narrowed severity union
+  // Untyped SPDK passthrough on the wire; this shape is a frontend
+  // assumption, not a backend contract.
   ublk_device?: {
     id: number;
-    device_path: string;  // e.g., "/dev/ublkb42"
-  };
-  
-  // SPDK validation status for frontend display
-  spdk_validation_status: SpdkValidationStatus;
+    device_path: string; // e.g., "/dev/ublkb42"
+  } | null;
+};
 
-  // PV/PVC information for managed volumes
-  pvc_info?: PvcInfo;
+export type ConsumerRaid = Schemas['ConsumerRaid'];
+export type ConsumerRaidMember = Schemas['ConsumerRaidMember'];
 
-  // Volume-level epoch cursor from the replica-sync-state annotation
-  current_epoch?: string | null;
-
-  // Tier-2 data plane (2b): the raid each consumer node has assembled from
-  // the replica legs; empty when the volume is not staged anywhere.
-  consumer_raids?: ConsumerRaid[];
-}
-
-export interface ConsumerRaid {
-  node: string;
-  raid_name: string;
-  // SPDK raid state (online/configuring/offline). "online" with
-  // operational < total is the degraded-n/m case.
-  state: string;
-  num_base_bdevs: number;
-  num_base_bdevs_operational: number;
-  base_bdevs: ConsumerRaidMember[];
-}
-
-export interface ConsumerRaidMember {
-  // SPDK nulls name+uuid when a leg fails on an online raid — a null
-  // member IS a failed slot.
-  name: string | null;
-  uuid: string | null;
-  is_configured: boolean;
-  // Replica (by node) this base backs; null when unmatchable.
-  replica_node: string | null;
-}
-
-export interface SpdkValidationStatus {
-  has_spdk_backing: boolean;
-  validation_message?: string;
+export type SpdkValidationStatus = Omit<
+  Schemas['SpdkValidationStatus'],
+  'validation_severity'
+> & {
   validation_severity: 'info' | 'warning' | 'error';
-}
+};
 
 export interface SpdkVolumeDetails {
   volume_name: string;
@@ -178,125 +140,37 @@ export interface SpdkVolumeDetails {
 // --- End of new/updated interfaces ---
 
 
-export interface RaidStatus {
-  raid_level: number;
-  state: string;
-  num_members: number;
-  operational_members: number;
-  discovered_members: number;
-  members: RaidMember[];
-  rebuild_info?: RebuildInfo;
-  superblock_version?: number;
-  auto_rebuild_enabled: boolean;
-}
+export type RaidStatus = Schemas['DashboardRaidStatus'];
+export type RaidMember = Schemas['RaidMember'];
+export type RebuildInfo = Schemas['RebuildInfo'];
 
-export interface RaidMember {
-  slot: number;
-  name: string;
-  state: string;
-  uuid?: string;
-  is_configured: boolean;
-  node?: string;
-  disk_ref?: string;
-  health_status: string;
-}
-
-export interface RebuildInfo {
-  state: string;
-  target_slot: number;
-  source_slot: number;
-  blocks_remaining: number;
-  blocks_total: number;
-
-  progress_percentage: number;
-  estimated_time_remaining?: string;
-  start_time?: string;
-}
-
-export interface ReplicaStatus {
-  node: string;
-  status: string;
-  is_local: boolean;
-  last_io_timestamp: string | null;
-  rebuild_progress: number | null;
-  rebuild_target: string | null;
-  is_new_replica: boolean;
-  nvmf_target: NvmfTarget | null;
-  access_method: string;
-  // Enhanced replica storage details from backend
-  raid_member_slot?: number;
-  raid_member_state: string;
-  lvol_uuid?: string;
-  disk_ref?: string;
-  replica_size?: number;
-  // Tier-2 live sync state from the PV replica-sync-state annotation;
-  // absent on single-replica volumes.
-  sync?: ReplicaSyncInfo | null;
-}
+// Tier-2 live sync state from the PV replica-sync-state annotation;
+// absent on single-replica volumes.
+export type ReplicaStatus = Omit<Schemas['DashboardReplicaStatus'], 'sync'> & {
+  sync?: ReplicaSyncInfo | null; // narrowed SyncState union
+};
 
 export type SyncState = 'in_sync' | 'stale' | 'standby';
 
-export interface ReplicaSyncInfo {
+// epoch_lag: epochs behind current; 0 when in_sync, null when unknowable
+// (epoch history trimmed and names not comparable). Lag → 0 is the catch-up.
+// hot_rejoin: E_f epoch name while a hot rejoin is in flight; null otherwise.
+export type ReplicaSyncInfo = Omit<Schemas['ReplicaSyncInfo'], 'sync_state'> & {
   sync_state: SyncState;
-  last_epoch: string | null;
-  // Epochs behind current; 0 when in_sync, null when unknowable (epoch
-  // history trimmed and names not comparable). Lag → 0 is the catch-up.
-  epoch_lag: number | null;
-  since: string | null;
-  reason: string | null;
-  // E_f epoch name while a hot rejoin is in flight; null otherwise.
-  hot_rejoin: string | null;
-}
+};
 
-export interface NvmfTarget {
-  nqn: string;
-  target_ip: string;
-  target_port: string;
-  transport_type: string;
-}
+export type NvmfTarget = Schemas['NvmfTarget'];
 
-export interface Disk {
-  id: string;
-  node: string;
-  pci_addr: string;
-  capacity: number; // bytes
-  capacity_gb: number; // GB
-  allocated_space: number; // GB (not bytes!)
-  free_space: number; // GB (not bytes!)
-  free_space_display: string;
-  healthy: boolean;
-  blobstore_initialized: boolean; // Matches backend field name
-  is_system_disk: boolean; // Root/boot disk — never an init candidate
-  lvol_count: number;
-  model: string;
-  read_iops: number;
-  write_iops: number;
-  read_latency: number;
-  write_latency: number;
-  brought_online: string;
-  provisioned_volumes: ProvisionedVolume[];
-  // Orphaned SPDK volumes on this disk
-  orphaned_spdk_volumes: OrphanedVolumeInfo[];
-  device_type: string; // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
-}
+// capacity is bytes; capacity_gb / allocated_space / free_space are GB.
+// is_system_disk: root/boot disk — never an init candidate.
+export type Disk = Schemas['DashboardDisk'];
 
-export interface ProvisionedVolume {
-  volume_name: string;
-  volume_id: string;
-  size: number;
-  provisioned_at: string;
-  replica_type: string;
-  status: string;
-}
+export type ProvisionedVolume = Schemas['ProvisionedVolume'];
+export type OrphanedVolumeInfo = Schemas['OrphanedVolumeInfo'];
 
-export interface OrphanedVolumeInfo {
-  spdk_volume_name: string;
-  spdk_volume_uuid: string;
-  size_blocks: number;
-  size_gb: number;
-  orphaned_since: string;
-}
-
+// raw_volumes are an untyped SPDK lvol passthrough on the wire
+// (Vec<serde_json::Value> backend-side); this shape is a frontend
+// assumption, not a backend contract.
 export interface RawSpdkVolume {
   name: string;
   uuid: string;
@@ -307,22 +181,8 @@ export interface RawSpdkVolume {
   is_managed: boolean;
 }
 
-// Matches the backend PvcInfo struct (spdk_dashboard_backend_minimal.rs) —
-// the previous shape here was hand-drifted and matched nothing the API sends.
-export interface PvcInfo {
-  name: string;
-  namespace: string;
-  storage_class: string;
-  creation_timestamp: string;
-}
-
-export interface NodeInfo {
-  name: string;
-  memory_total_mb: number;
-  memory_available_mb: number;
-  memory_used_mb: number;
-  memory_utilization_pct: number;
-}
+export type PvcInfo = Schemas['PvcInfo'];
+export type NodeInfo = Schemas['NodeInfo'];
 
 export interface DashboardData {
   volumes: Volume[];
@@ -435,46 +295,40 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
   };
 };
 
-// Transform backend data structure to frontend interface
-const transformBackendData = (backendData: any): DashboardData => {
+// Normalize the wire aggregate (generated DashboardData schema) into the
+// frontend shape: harden array fields against partial payloads and apply
+// the documented narrowings (SyncState/severity unions, ublk shape) — the
+// three `as` casts below are those narrowings, asserted once at this
+// boundary.
+const transformBackendData = (backendData: Schemas['DashboardData']): DashboardData => {
   return {
-    volumes: backendData.volumes?.map((vol: any) => ({
+    volumes: (backendData.volumes || []).map(vol => ({
       ...vol,
-      // Ensure all fields are properly mapped with safe defaults
-      raid_level: vol.raid_status?.raid_level ? `RAID-${vol.raid_status.raid_level}` : undefined,
-      primary_replica_uuid: vol.primary_lvol_uuid,
       nvmeof_targets: vol.nvmeof_targets || [],
-      replica_statuses: vol.replica_statuses || [],  // Ensure array exists
-      nodes: vol.nodes || [],  // Ensure array exists
+      replica_statuses: (vol.replica_statuses || []) as ReplicaStatus[],
+      nodes: vol.nodes || [],
       consumer_raids: vol.consumer_raids || [],
-    })) || [],
-    raw_volumes: backendData.raw_volumes || [],
-    disks: backendData.disks?.map((disk: any) => {
+      spdk_validation_status: vol.spdk_validation_status as SpdkValidationStatus,
+      ublk_device: vol.ublk_device as Volume['ublk_device'],
+    })),
+    raw_volumes: (backendData.raw_volumes || []) as unknown as RawSpdkVolume[],
+    disks: (backendData.disks || []).map(disk => {
       // Backend already returns capacity_gb and free_space in GB (not bytes!)
       const sizeGB = disk.capacity_gb || Math.round((disk.capacity || 0) / (1024 * 1024 * 1024));
       const freeGB = disk.free_space || 0;  // Already in GB from backend
       const allocatedGB = disk.allocated_space || (sizeGB - freeGB);
-      
+
       return {
         ...disk,
-        // Backend fields are already in correct format
         capacity_gb: sizeGB,
         allocated_space: allocatedGB,
         free_space: freeGB,
         free_space_display: disk.free_space_display || `${freeGB}GB`,
-        // Already correct from backend
-        blobstore_initialized: disk.blobstore_initialized,
-        is_system_disk: disk.is_system_disk ?? false,
-        // Use backend fields (no mapping needed)
-        id: disk.id,
-        node: disk.node,
-        pci_addr: disk.pci_addr,
-        capacity: disk.capacity,
         // Ensure arrays exist to prevent crashes
         provisioned_volumes: disk.provisioned_volumes || [],
         orphaned_spdk_volumes: disk.orphaned_spdk_volumes || []
       };
-    }) || [],
+    }),
     nodes: backendData.nodes || [],
     node_info: backendData.node_info || {}
   };
@@ -617,50 +471,21 @@ export const getRaidHealthStatus = (raidStatus?: RaidStatus): {
 };
 
 // Disk Setup Types and Hook
-export interface UnimplementedDisk {
-  pci_address: string;
-  device_name: string;
-  vendor_id: string;
-  device_id: string;
-  subsystem_vendor_id: string;
-  subsystem_device_id: string;
-  numa_node?: number;
-  driver: string;
-  size_bytes: number;
-  model: string;
-  serial: string;
-  firmware_version: string;
-  namespace_id?: number;
-  mounted_partitions: string[];
-  filesystem_type?: string;
-  is_system_disk: boolean;
-  spdk_ready: boolean;
-  discovered_at: string;
+// The agent's /api/disks/status row plus the node name the tab attaches.
+// (The old hand-written shape claimed bdev_name/lvs_name fields the agent
+// has never sent on this endpoint.)
+export type UnimplementedDisk = Schemas['NodeDiskStatus'] & {
   nodeName?: string; // Added for frontend display
-  // Enhanced status tracking
-  driver_ready?: boolean; // True if driver is SPDK-compatible (original spdk_ready)
-  blobstore_initialized?: boolean; // True if LVS/blobstore is initialized
-  bdev_name?: string; // SPDK bdev name if driver bound
-  lvs_name?: string | null; // LVS name if blobstore initialized
-  free_space?: number; // Free space in bytes
-}
+};
 
-export interface DiskSetupRequest {
-  pci_addresses: string[];
-  force_unmount: boolean;
-  backup_data: boolean;
-  huge_pages_mb?: number;
-  driver_override?: string;
-}
+// What the agent actually accepts (extra fields are silently ignored
+// server-side — the old huge_pages_mb/driver_override options never did
+// anything).
+export type DiskSetupRequest = Schemas['DiskSetupRequest'];
 
-export interface DiskSetupResult {
-  success: boolean;
-  setup_disks: string[];
-  failed_disks: Array<[string, string]>;
-  warnings: string[];
-  huge_pages_configured?: number;
-  completed_at: string;
-}
+// failed_disks holds PCI addresses only; human-readable causes are in
+// warnings (the old tuple shape was fiction).
+export type DiskSetupResult = Schemas['DiskSetupResponse'];
 
 export interface NodeDiskData {
   node: string;
@@ -696,21 +521,9 @@ export const useDiskSetup = () => {
       const data = await response.json().catch(() => null);
 
       if (response.ok && data?.disks) {
-        // Use disk data directly from minimal state API
-        const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => {
-          const enhancedDisk = { ...disk, nodeName };
-
-          // Minimal state mode: Use values directly from the API
-          // blobstore_initialized is set by backend when LVS exists
-          enhancedDisk.blobstore_initialized = disk.blobstore_initialized || false;
-          // driver_ready is true if blobstore is initialized OR if bdev exists
-          enhancedDisk.driver_ready = enhancedDisk.blobstore_initialized || !!disk.bdev_name || disk.spdk_ready;
-          enhancedDisk.spdk_ready = enhancedDisk.blobstore_initialized;
-
-          console.log(`Disk ${disk.device_name}: driver_ready=${enhancedDisk.driver_ready}, blobstore_initialized=${enhancedDisk.blobstore_initialized}, bdev=${disk.bdev_name}`);
-
-          return enhancedDisk;
-        });
+        // Attach the node name; the agent already sends the derived
+        // driver_ready/spdk_ready flags (see NodeDiskStatus in the spec).
+        const enhancedDisks = data.disks.map((disk: UnimplementedDisk) => ({ ...disk, nodeName }));
 
         setNodeData(prev => ({
           ...prev,
@@ -791,7 +604,7 @@ export const useDiskSetup = () => {
         return {
           success: false,
           setup_disks: [],
-          failed_disks: request.pci_addresses.map(addr => [addr, errorMsg]),
+          failed_disks: request.pci_addresses ?? [],
           warnings: [`API error: ${errorMsg}`],
           completed_at: new Date().toISOString()
         };
@@ -804,17 +617,19 @@ export const useDiskSetup = () => {
       return {
         success: false,
         setup_disks: [],
-        failed_disks: request.pci_addresses.map(addr => [addr, errorMsg]),
+        failed_disks: request.pci_addresses ?? [],
         warnings: [`Connection error: ${errorMsg}`],
         completed_at: new Date().toISOString()
       };
     }
   }, [refreshAfterMutation]);
 
+  // Agent-side reset is 501/unimplemented in minimal state; the shape below
+  // mirrors DiskSetupResponse with the legacy reset_disks field.
   const resetDisksOnNode = useCallback(async (
-    nodeName: string, 
+    nodeName: string,
     pciAddresses: string[]
-  ): Promise<any> => {
+  ): Promise<Partial<DiskSetupResult> & { success: boolean; reset_disks?: string[] }> => {
     try {
       const response = await apiFetch(`/api/nodes/${nodeName}/disks/reset`, {
         method: 'POST',
@@ -835,22 +650,24 @@ export const useDiskSetup = () => {
         // Try to get error details from response
         const errorData = await response.json().catch(() => ({}));
         const errorMsg = errorData.error || response.statusText;
-        
+
         return {
           success: false,
           reset_disks: [],
-          failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
+          failed_disks: pciAddresses,
+          warnings: [String(errorMsg)],
           completed_at: new Date().toISOString()
         };
       }
     } catch (apiError) {
       console.error(`Disk reset API error for ${nodeName}:`, apiError);
-      
+
       const errorMsg = apiError instanceof Error ? apiError.message : 'Unknown error';
       return {
         success: false,
         reset_disks: [],
-        failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
+        failed_disks: pciAddresses,
+        warnings: [errorMsg],
         completed_at: new Date().toISOString()
       };
     }
@@ -880,7 +697,6 @@ export const useDiskSetup = () => {
           setup_disks: result.setup_disks || [],
           failed_disks: result.failed_disks || [],
           warnings: result.warnings || (result.error ? [result.error] : []),
-          huge_pages_configured: result.huge_pages_configured,
           completed_at: result.completed_at || new Date().toISOString()
         };
         
@@ -902,7 +718,7 @@ export const useDiskSetup = () => {
       return {
         success: false,
         setup_disks: [],
-        failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
+        failed_disks: pciAddresses,
         warnings: [`Initialize failed: ${errorMsg}`],
         completed_at: new Date().toISOString()
       };
@@ -912,7 +728,7 @@ export const useDiskSetup = () => {
   const deleteDiskOnNode = useCallback(async (
     nodeName: string,
     pciAddress: string
-  ): Promise<any> => {
+  ): Promise<{ success: boolean; error?: string; message?: string; completed_at?: string }> => {
     try {
       const response = await apiFetch(`/api/nodes/${nodeName}/disks/delete`, {
         method: 'POST',

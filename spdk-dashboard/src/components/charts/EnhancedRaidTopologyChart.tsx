@@ -6,7 +6,7 @@ import {
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
-import type { Volume, RaidMember, Disk} from '../../hooks/useDashboardData';
+import type { Volume, RaidMember, ReplicaStatus, Disk } from '../../hooks/useDashboardData';
 import { EnhancedRaidMemberCard, RaidArrayPerformanceOverview } from './EnhancedRaidMemberCard';
 
 interface EnhancedRaidTopologyChartProps {
@@ -102,7 +102,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     }
   };
 
-  const getReplicaIcon = (replica: any) => {
+  const getReplicaIcon = (replica: ReplicaStatus) => {
     if (replica.status === 'failed') return <X className="w-4 h-4 text-red-600" />;
     if (replica.status === 'rebuilding') return <Settings className="w-4 h-4 text-orange-600 animate-spin" />;
     if (replica.status === 'stale') return <AlertTriangle className="w-4 h-4 text-amber-600" />;
@@ -116,7 +116,6 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                     selectedVolumeInfo.access_method === 'nvmeof';
 
   const raidStatus = selectedVolumeInfo.raid_status;
-  const hasDiskRefs = selectedVolumeInfo.replica_statuses.every(r => r.disk_ref);
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
@@ -288,8 +287,8 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
               <div className="w-8 h-1 bg-purple-400"></div>
             </div>
             
-            <VolumeAccessTooltip 
-              ublkDevice={selectedVolumeInfo.ublk_device}
+            <VolumeAccessTooltip
+              ublkDevice={selectedVolumeInfo.ublk_device ?? undefined}
               raidLevel={raidStatus ? getRaidLevelDisplayName(raidStatus.raid_level) : undefined}
             >
               <div className="text-center cursor-help">
@@ -369,8 +368,10 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           </div>
         </div>
 
-        {/* Data Availability Status */}
-        {(!raidStatus || !hasDiskRefs) && (
+        {/* Data Availability Status. (A second warning here used to key on
+            replica disk_ref — a field the API has never sent, so it fired
+            unconditionally; removed when types moved to the generated spec.) */}
+        {!raidStatus && (
           <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400">
             <div className="flex">
               <div className="flex-shrink-0">
@@ -381,8 +382,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   Live metrics are not available for this volume because required data is missing:
                 </p>
                 <ul className="mt-2 list-disc list-inside text-sm text-yellow-700">
-                  {!raidStatus && <li>RAID status information is not defined.</li>}
-                  {!hasDiskRefs && <li>One or more replicas are not linked to a physical disk (`disk_ref` is missing).</li>}
+                  <li>RAID status information is not defined.</li>
                 </ul>
               </div>
             </div>
@@ -513,7 +513,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                         {replica.is_local ? (
                           <span className="font-medium text-sm">Local Replica</span>
                         ) : (
-                          <NVMFTooltip target={replica.nvmf_target}>
+                          <NVMFTooltip target={replica.nvmf_target ?? null}>
                             <div className="flex items-center gap-1">
                               <span className="font-medium text-sm">Remote Replica</span>
                               <Info className="w-3 h-3 text-gray-400" />
@@ -545,15 +545,6 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                           {replica.access_method}
                         </span>
                       </div>
-                      
-                      {showTechnicalDetails && replica.lvol_uuid && (
-                        <div className="mt-2">
-                          <span className="text-gray-600">LVol UUID:</span>
-                          <div className="font-mono text-xs break-all text-gray-500">
-                            {replica.lvol_uuid.substring(0, 8)}...
-                          </div>
-                        </div>
-                      )}
                       
                       {!replica.is_local && replica.nvmf_target && (
                         <div className="mt-2 p-2 bg-white bg-opacity-50 rounded">

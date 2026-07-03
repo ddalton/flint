@@ -2,6 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { Activity, TrendingUp, TrendingDown, BarChart3, Shield, Settings, X, AlertTriangle, HardDrive, Clock, CheckCircle } from 'lucide-react';
 import type { RaidMember, ReplicaStatus, RaidStatus, Disk } from '../../hooks/useDashboardData';
 
+// Fields the pre-minimal backend used to send; the current API never does
+// (see api/openapi.json — DashboardReplicaStatus / RaidMember). The render
+// paths keyed on them are inert and disappear with the Phase 3 breakup of
+// this component.
+type LegacyReplicaStatus = ReplicaStatus & { disk_ref?: string };
+type LegacyRaidMember = RaidMember & {
+  node?: string;
+  is_configured?: boolean;
+  health_status?: string;
+};
+
 // Add these new interfaces for throughput metrics
 interface ThroughputMetrics {
   read_iops: AnimatedMetric;
@@ -17,8 +28,8 @@ interface AnimatedMetric {
 }
 
 interface EnhancedRaidMemberCardProps {
-  member: RaidMember;
-  correspondingReplica?: ReplicaStatus;
+  member: LegacyRaidMember;
+  correspondingReplica?: LegacyReplicaStatus;
   raidStatus: RaidStatus;
   disks: Disk[];
 }
@@ -282,7 +293,7 @@ const EnhancedRaidMemberCard: React.FC<EnhancedRaidMemberCardProps> = ({ member,
 
 interface RaidArrayPerformanceOverviewProps {
     raidStatus: RaidStatus;
-    replicaStatuses: ReplicaStatus[];
+    replicaStatuses: LegacyReplicaStatus[];
     disks: Disk[];
 }
 

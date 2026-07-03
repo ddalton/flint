@@ -269,18 +269,17 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
   // Anchor for shift-click range selection (last individually toggled disk)
   const lastAnchorRef = useRef<string | null>(null);
 
-  // Setup State
+  // Setup State. Only options the agent's DiskSetupRequest actually carries
+  // — the old huge_pages_mb/driver_override "advanced options" were never
+  // read server-side (surfaced by the generated API types).
   const [setupOptions, setSetupOptions] = useState({
     force_unmount: false,
-    backup_data: true,
-    huge_pages_mb: 2048,
-    driver_override: 'kernel'
+    backup_data: true
   });
   const [unbindDriverInProgress, setUnbindDriverInProgress] = useState<Set<string>>(new Set());
   // Some node-agent error responses carry a top-level `error` next to the
   // DiskSetupResult fields; keep it typed instead of casting at render time.
   const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult & { error?: string }>>({});
-  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
   // Bulk init batch state (plan 2d): one confirmed action, per-disk outcomes
   const [batchItems, setBatchItems] = useState<BatchItem[] | null>(null);
@@ -668,9 +667,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
         const request: DiskSetupRequest = {
           pci_addresses: [disk.pci],
           force_unmount: options.force_unmount,
-          backup_data: options.backup_data,
-          huge_pages_mb: options.huge_pages_mb,
-          driver_override: options.driver_override
+          backup_data: options.backup_data
         };
         const response = await apiFetch(`/api/nodes/${disk.node}/disks/setup`, {
           method: 'POST',
@@ -780,8 +777,8 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
       const errorResult: DiskSetupResult = {
         success: false,
         setup_disks: [],
-        failed_disks: diskPciAddresses.map(addr => [addr, error instanceof Error ? error.message : 'Unknown error']),
-        warnings: [],
+        failed_disks: diskPciAddresses,
+        warnings: [error instanceof Error ? error.message : 'Unknown error'],
         completed_at: new Date().toISOString()
       };
       setSetupResults(prev => ({ ...prev, [node]: errorResult }));
@@ -1256,12 +1253,6 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                   )}
                 </button>
               )}
-              <button
-                onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-                className="text-sm text-blue-600 hover:text-blue-800"
-              >
-                {showAdvancedOptions ? 'Hide' : 'Show'} Options
-              </button>
               {eligibleBatchDisks.length > 0 && (
                 <button
                   onClick={() => setShowBulkConfirm(true)}
@@ -1331,38 +1322,6 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               <span className="text-sm font-medium">Backup Data</span>
             </label>
           </div>
-
-          {showAdvancedOptions && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-gray-50 rounded-lg">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Huge Pages (MB)
-                </label>
-                <input
-                  type="number"
-                  value={setupOptions.huge_pages_mb}
-                  onChange={(e) => setSetupOptions(prev => ({ ...prev, huge_pages_mb: parseInt(e.target.value) || 0 }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  min="0"
-                  step="512"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SPDK Driver
-                </label>
-                <select
-                  value={setupOptions.driver_override}
-                  onChange={(e) => setSetupOptions(prev => ({ ...prev, driver_override: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="vfio-pci">vfio-pci (Recommended)</option>
-                  <option value="uio_pci_generic">uio_pci_generic</option>
-                  <option value="igb_uio">igb_uio</option>
-                </select>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
