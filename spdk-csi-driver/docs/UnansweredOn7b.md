@@ -976,7 +976,7 @@ all orchestrators on, epoch stream at ~533.
 ## 7b-4 implemented (2026-07-02 evening)
 
 The adaptive dual-path from the decision above, in `hot_rejoin.rs`.
-Suite 514 green; NOT yet run live.
+Suite 514 green; live drill PASSED same evening (next section).
 
 - **Estimator** (`estimate_unchased_delta` / pure `sum_replay_clusters`):
   one `bdev_lvol_get_lvols` + one `bdev_lvol_get_lvstores` on the source
@@ -1022,3 +1022,61 @@ Suite 514 green; NOT yet run live.
 Owed: the live drill (leg-kill on the standing fixture should route
 inline naturally — the writer's per-epoch deltas are KBs), a window
 timing sample, and the runbook note. The build path (dind pod) is ready.
+
+## 7b-4 live drill (2026-07-02 evening, image tier2-7b4.0) — PASS
+
+Image `dilipdalton/flint-driver:tier2-7b4.0` (fea4801) built on the
+dind-pod path (~26 min cold incl. push; pod deleted at push, zero
+evictions — kubelet image GC held aws-3 at 1.2–1.5 G free throughout)
+and rolled to controller + node DS `flint-csi-driver` containers;
+`spdk-tgt` sidecars stayed on `tier2-spike-v3`. Post-roll the cluster
+restabilized hands-off: the writer blocked ~10 min in `sync` during its
+node's spdk-tgt bounce and then resumed WITHOUT a pod bounce or EIO
+(contrast the raid-delete drill, where ext4 died) — the distinction is
+the DS roll re-assembles promptly, under the fs give-up horizon.
+
+**Drill**: `kill 1` in aws-2's spdk-tgt at 19:26:29 (writer at seq
+19581), fully hands-off from there.
+
+- 19:26:33 — record: aws-2 `stale` (detected ≤4 s).
+- 19:27:02 — catchup revert; **P1-1 reap fired organically**: the
+  serving `_hr` head left by the previous session's esnap rejoin was
+  superseded by the revert clone and reaped ("Reaped the superseded
+  hot-rejoin head"). Second live validation of that fix, unprompted.
+- 19:27:07 — `standby` (chased 1172→1174; +38 s post-kill).
+- 19:28:03 tick — trigger correctly DEFERRED: lag 2 > MAX_LAG 1.
+  After the next chase (lag 1), the 19:29:03 tick planned the rejoin.
+- 19:29:03 — demote-at-intent CAS observed (`stale` + MARKER:1177).
+- 19:29:04.6 — **"Window committed (inline)", window_ms=1730**:
+  quiesce 12 ms · cut E_f 10 ms · **fenced final delta 1656 ms** ·
+  renew 9 ms · add --skip-rebuild 31 ms · unquiesce 12 ms.
+- 19:29:05 — record `in_sync`×2 @1177, marker cleared,
+  `localized=true` immediately. NO HotRejoinLocalized event, no
+  exposure interval at all.
+
+**Estimator routed inline at 27,262,976 bytes (26 MiB)** — not KBs:
+with 1 MiB clusters, ext4 journal/metadata scatter dominates a
+small-write workload's allocated-cluster count. Routing was still
+correct, but note the window is O(allocated clusters): 26 MiB copied
+in 1656 ms (~16 MiB/s effective — shallow-copy poll quantization
+likely dominates at this size, so the rate should improve for larger
+deltas). Extrapolated, the 64 MiB default ceiling lands ~4 s windows —
+past the 2 s target (HotRejoinWindowSlow would fire). Tuning note for
+the runbook: set `FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB=32` where the
+2 s target is strict, or accept slow-window events on the top half.
+
+**Post-window hygiene verified clean**: only the canonical
+`vol_..._replica_1` lvol on aws-2 (no `_hr`, no pad), zero
+`:hotrejoin:` NQNs on any node, aws-2's volume export host list back
+to consumer-only (the dual-host fence's raw `add_host` removed), no
+copy controllers left on aws-1, raid online 2/2.
+
+**Writer ledger: zero seq gaps** (no acked-write loss). The leg-kill
+itself was invisible (<2 s; the raid served on the surviving leg with
+no observable stall) and the only disruption in the whole drill was a
+single ~2 s pause at seq 20330 — the quiesced window itself.
+
+7b-4 is validated end-to-end. Remaining from the 7b list: quiesced-span
+orphaned-lease live measurement (fault-injection knob), fs-allocated-only
+two-leg scrub, the standalone operator runbook, and esnap-resume
+preferring the local chain (B1 residual, esnap path only).
