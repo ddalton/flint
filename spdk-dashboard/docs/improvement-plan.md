@@ -267,6 +267,38 @@ drill's 2 s sync poll sampled the `hot_rejoin` marker live
 
 ### 2d. Operator workflows
 
+Status (2026-07-03): DONE (bd33b8a) and LIVE-VALIDATED on `runj`
+(images `phase2d.0`, surgical `kubectl set image` roll — driver image
+rebuilt only because the aggregate `DashboardDisk` gained
+`is_system_disk`, without which the nav badge would count root disks
+forever). The batch engine is pure logic in `batchSetup.ts`
+(`runInitBatch`): one setup call per disk — the agent's
+`/api/disks/setup` loops per-PCI server-side anyway, so per-disk calls
+cost nothing extra and buy a live per-disk status — serial within a
+node (the agent mutates shared host state), capped cross-node
+concurrency (6), cancel drains the remainder as `skipped`, per-node
+disk-list refresh on queue drain. Verified by a 28-check simulation
+(120 disks / 12 nodes: cap respected, ≤1 in-flight per node, monotonic
+progress, retry-failed subset, throw containment, cancel). Selection
+is the interaction: group by node or disk class with
+`k uninitialized / n total` headers and group-level select,
+cluster-wide + filter-driven "select all uninitialized", shift-click
+ranges; anything ineligible (system / already-initialized / mounted
+without Force Unmount) is excluded from the batch and listed with the
+reason in the confirm modal, which shows node/device/PCI/serial/
+capacity per disk and demands a typed phrase above 10 disks.
+Live-validated: both real per-disk endpoint paths exercised against
+runj agents (bogus PCI → contained per-disk failure with the agent's
+`Disk not found` message; already-initialized PCI → idempotent
+success, no reformat — `initialize_blobstore` early-returns on an
+existing LVS; hr-e2e volume stayed `in_sync/in_sync` throughout);
+landing inputs from live `/api/disks`: 3 initialized lvstores →
+`isFreshCluster=false` → Overview, and the badge counts 1 (the
+builder node's spare NVMe) instead of 5 once system disks are
+excluded. No real bulk init was run: the only uninitialized
+non-system disk on runj backs the dind-builder's scratch — precisely
+the skip-a-disk case the selection model exists for.
+
 - **State-aware landing + onboarding** (Decision 2).
 - **Bulk disk initialization** (Decision 4). Current UI already has
   per-disk checkbox selection and per-node `disks/setup` calls; add:
