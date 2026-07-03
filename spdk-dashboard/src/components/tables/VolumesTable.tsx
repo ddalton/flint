@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { apiFetch } from '../../api/client';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
@@ -207,7 +208,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     setDeleteConfirmText('');
     
     try {
-      const response = await fetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
+      const response = await apiFetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
         method: 'DELETE'
       });
       

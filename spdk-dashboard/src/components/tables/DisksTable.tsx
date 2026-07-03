@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { apiFetch } from '../../api/client';
 import { 
   X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
   Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
@@ -287,7 +288,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
     setIsDeleting(true);
     try {
-      const response = await fetch(`/api/orphans/${volumeToDelete.volume.spdk_volume_uuid}`, {
+      const response = await apiFetch(`/api/orphans/${volumeToDelete.volume.spdk_volume_uuid}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -306,7 +307,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         
         // Invalidate dashboard cache to force refresh
         try {
-          await fetch('/api/refresh', { method: 'POST' });
+          await apiFetch('/api/refresh', { method: 'POST' });
         } catch (e) {
           console.warn('Failed to invalidate cache:', e);
         }

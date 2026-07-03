@@ -1711,13 +1711,22 @@ async fn delete_snapshot_by_id(
     })))
 }
 
-/// Setup all HTTP routes for the minimal dashboard backend  
-pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
-    let cors = warp::cors()
-        .allow_any_origin()
-        .allow_headers(vec!["content-type"])
-        .allow_methods(vec!["GET", "POST", "PUT", "DELETE"]);
-    
+/// Setup all HTTP routes for the minimal dashboard backend.
+///
+/// Every /api route except /api/login requires a bearer token; destructive
+/// routes additionally require the admin role. No CORS layer: the frontend
+/// reaches the API same-origin (nginx in-pod proxy in production, the vite
+/// dev-server proxy in development).
+pub fn setup_minimal_dashboard_routes(
+    app_state: AppState,
+    auth: Arc<crate::dashboard_auth::AuthState>,
+) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
+    use crate::dashboard_auth::{login_route, require, Role};
+
+    let viewer = require(auth.clone(), Role::Viewer);
+    let admin = require(auth.clone(), Role::Admin);
+    let login = login_route(auth);
+
     let state_filter = warp::any().map(move || app_state.clone());
 
     // Liveness/readiness target: answers from the server loop alone, no
@@ -1733,6 +1742,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
     let dashboard_route = warp::path("api")
         .and(warp::path("dashboard"))
         .and(warp::get())
+        .and(viewer.clone())
         .and(warp::query::<DashboardQuery>().map(Some).or(warp::any().map(|| None)).unify())
         .and(state_filter.clone())
         .and_then(get_dashboard_data_minimal);
@@ -1744,6 +1754,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("uninitialized"))
         .and(warp::get())
+        .and(viewer.clone())
         .and(state_filter.clone())
         .and_then(|node: String, state: AppState| {
             // Node agent expects POST with empty body for uninitialized disks
@@ -1756,6 +1767,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("setup"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1769,6 +1781,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("initialize"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1782,6 +1795,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("status"))
         .and(warp::get())
+        .and(viewer.clone())
         .and(state_filter.clone())
         .and_then(|node: String, state: AppState| {
             // Node agent expects POST with empty body for status
@@ -1794,6 +1808,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("reset"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1807,6 +1822,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("disks"))
         .and(warp::path("delete"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1820,6 +1836,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("memory_disks"))
         .and(warp::path("create"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1833,6 +1850,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("memory_disks"))
         .and(warp::path("delete"))
         .and(warp::post())
+        .and(admin.clone())
         .and(warp::body::json())
         .and(state_filter.clone())
         .and_then(|node: String, body: serde_json::Value, state: AppState| {
@@ -1843,6 +1861,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
     let refresh_route = warp::path("api")
         .and(warp::path("refresh"))
         .and(warp::post())
+        .and(viewer.clone())
         .and(state_filter.clone())
         .and_then(handle_refresh);
     
@@ -1851,32 +1870,37 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .and(warp::path("snapshots"))
         .and(warp::path::end())
         .and(warp::get())
+        .and(viewer.clone())
         .and(state_filter.clone())
         .and_then(get_all_snapshots);
-    
+
     let snapshots_tree = warp::path("api")
         .and(warp::path("snapshots"))
         .and(warp::path("tree"))
         .and(warp::get())
+        .and(viewer.clone())
         .and(state_filter.clone())
         .and_then(get_snapshots_tree);
-    
+
     let snapshot_delete = warp::path("api")
         .and(warp::path("snapshots"))
         .and(warp::path::param::<String>())
         .and(warp::delete())
+        .and(admin.clone())
         .and(state_filter.clone())
         .and_then(delete_snapshot_by_id);
-    
+
     // Orphaned volume deletion route
     let orphan_delete = warp::path("api")
         .and(warp::path("orphans"))
         .and(warp::path::param::<String>())
         .and(warp::delete())
+        .and(admin.clone())
         .and(state_filter.clone())
         .and_then(delete_orphaned_lvol);
-    
+
     healthz_route
+        .or(login)
         .or(dashboard_route)
         .or(proxy_uninitialized)
         .or(proxy_setup)
@@ -1891,7 +1915,7 @@ pub fn setup_minimal_dashboard_routes(app_state: AppState) -> impl Filter<Extrac
         .or(snapshots_tree)
         .or(snapshot_delete)
         .or(orphan_delete)
-        .with(cors)
+        .recover(crate::dashboard_auth::handle_rejection)
 }
 
 /// Initialize and start the minimal dashboard backend
@@ -1917,8 +1941,9 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
     *app_state.node_agents.write().await = node_agents;
     
     println!("🔍 [MINIMAL_DASHBOARD] Discovered {} node agents", node_count);
-    
-    let routes = setup_minimal_dashboard_routes(app_state);
+
+    let auth = crate::dashboard_auth::AuthState::from_env();
+    let routes = setup_minimal_dashboard_routes(app_state, auth);
     
     println!("✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:{}", port);
     println!("   Real-time mode: All queries fetch fresh data with parallel node requests");

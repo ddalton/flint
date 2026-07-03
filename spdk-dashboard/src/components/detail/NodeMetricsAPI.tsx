@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../../api/client';
 import { 
   Server, Activity, Database, HardDrive, Network, 
   RefreshCw, AlertTriangle, Info, X, Shield, Settings
@@ -103,7 +104,7 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
       };
 
       try {
-        const response = await fetch(`/api/nodes/${nodeName}/metrics`);
+        const response = await apiFetch(`/api/nodes/${nodeName}/metrics`);
         
         if (response.ok) {
           // Check if response is actually JSON
@@ -134,7 +135,7 @@ export const NodeMetricsAPI: React.FC<NodeMetricsAPIProps> = ({ nodeName, onClos
 
   const fetchRaidStatus = async () => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/raid`);
+      const response = await apiFetch(`/api/nodes/${nodeName}/raid`);
       if (response.ok) {
         const text = await response.text();
         if (text.trim().startsWith('{') || text.trim().startsWith('[')) {

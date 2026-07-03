@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { apiFetch } from '../../api/client';
 import { 
   Camera, RefreshCw, Search, Filter, ChevronDown, FileText, 
   GitBranch, HardDrive, BarChart3, CheckCircle, Layers, Database, 
@@ -52,8 +53,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       
       // Fetch both list and tree data with enhanced storage information
       const [snapshotsResponse, treeResponse] = await Promise.all([
-        fetch('/api/snapshots'),
-        fetch('/api/snapshots/tree')
+        apiFetch('/api/snapshots'),
+        apiFetch('/api/snapshots/tree')
       ]);
 
       const snapshotsContentType = snapshotsResponse.headers.get("content-type");

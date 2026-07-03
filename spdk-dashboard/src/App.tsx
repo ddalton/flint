@@ -6,8 +6,8 @@ import { OperationsProvider } from './contexts/OperationsContext';
 
 // Login Component
 const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) => {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('spdk-admin-2025');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -52,6 +52,7 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoComplete="username"
               required
             />
           </div>
@@ -64,6 +65,7 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoComplete="current-password"
               required
             />
           </div>
@@ -79,12 +81,6 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
             )}
           </button>
         </form>
-        
-        <div className="mt-4 p-3 bg-gray-50 rounded-md">
-          <p className="text-sm text-gray-600">
-            Default credentials: admin / spdk-admin-2025
-          </p>
-        </div>
       </div>
     </div>
   );

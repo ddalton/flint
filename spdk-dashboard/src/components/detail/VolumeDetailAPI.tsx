@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { apiFetch } from '../../api/client';
 import { 
   Database, Settings, Shield, Network, 
   RefreshCw, AlertTriangle, X, HardDrive
@@ -51,7 +52,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         try {
           setSpdkLoading(true);
           const targetNode = volumeData.nodes[0]; // Use first node for primary replica
-          const spdkResponse = await fetch(`/api/volumes/${volumeData.id}/spdk?node=${targetNode}`);
+          const spdkResponse = await apiFetch(`/api/volumes/${volumeData.id}/spdk?node=${targetNode}`);
           if (spdkResponse.ok) {
             const spdkData = await spdkResponse.json();
             baseDetails.spdkDetails = spdkData;

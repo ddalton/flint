@@ -16,6 +16,7 @@ pub mod controller_reap;  // Dead NVMe-oF controller reaping (Tier-2 7b-0 spike 
 pub mod hot_rejoin;  // Tier-2 7b-1/7b-2: hot rejoin into a live raid (skip_rebuild window + localization + trigger loop)
 pub mod volume_claims;  // Tier-2 7b-2: per-volume single-operation claim shared by catch-up/cutover/hot-rejoin
 pub mod spdk_dashboard_backend_minimal;
+pub mod dashboard_auth;  // Bearer-token auth for the dashboard backend (frontend Phase 0)
 pub mod snapshot;  // Volume snapshot support (isolated module)
 pub mod capacity_cache;  // Capacity caching for scalability
 pub mod raid;  // RAID support for multi-replica volumes

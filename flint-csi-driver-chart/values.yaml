@@ -162,6 +162,17 @@ snapshotClass:
 # - Access to all SPDK CRDs and Kubernetes APIs
 dashboard:
   enabled: true
+  # Authentication for the dashboard API (enforced by the backend).
+  auth:
+    # Password for the "admin" user (full access, including destructive disk
+    # operations). Empty = generated at install and preserved across upgrades;
+    # read it from the spdk-dashboard-auth Secret.
+    adminPassword: ""
+    # Password for the optional read-only "viewer" user. Empty = viewer login
+    # disabled.
+    viewerPassword: ""
+    # Session token lifetime in seconds (default 12h).
+    sessionTtlSecs: 43200
   backend:
     port: 8080
   frontend:

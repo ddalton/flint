@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import * as api from '../api/client';
+import { apiFetch } from '../api/client';
 
 // --- Start of new/updated interfaces ---
 
@@ -786,7 +788,7 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
       
       // Try to fetch from API, fall back to mock data
       try {
-        const response = await fetch(`/api/dashboard${queryString}`);
+        const response = await apiFetch(`/api/dashboard${queryString}`);
         const contentType = response.headers.get("content-type");
         if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
           const dashboardData = await response.json();
@@ -912,48 +914,39 @@ const transformBackendData = (backendData: any): DashboardData => {
 // Authentication hook (unchanged)
 export const useAuth = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [role, setRole] = useState<api.Role | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Any API call answering 401 (expired/revoked token, backend restart)
+  // drops the app back to the login page.
+  useEffect(() => {
+    api.setOnSessionExpired(() => {
+      setIsAuthenticated(false);
+      setRole(null);
+    });
+    return () => api.setOnSessionExpired(null);
+  }, []);
 
   const login = useCallback(async (username: string, password: string) => {
     setLoading(true);
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      if (username === 'admin' && password === 'spdk-admin-2025') {
-        setIsAuthenticated(true);
-        // Note: In production, avoid localStorage for sensitive auth tokens
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('spdk_auth', 'true');
-        }
-      } else {
-        throw new Error('Invalid credentials');
-      }
-    } catch (error) {
-      throw error;
+      const grantedRole = await api.login(username, password);
+      setRole(grantedRole);
+      setIsAuthenticated(true);
     } finally {
       setLoading(false);
     }
   }, []);
 
   const logout = useCallback(() => {
+    api.logout();
     setIsAuthenticated(false);
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('spdk_auth');
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('spdk_auth');
-      if (stored === 'true') {
-        setIsAuthenticated(true);
-      }
-    }
+    setRole(null);
   }, []);
 
   return {
     isAuthenticated,
+    role,
     loading,
     login,
     logout
@@ -1131,7 +1124,7 @@ export const useDiskSetup = () => {
     }));
 
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/disks/status`);
+      const response = await apiFetch(`/api/nodes/${nodeName}/disks/status`);
       const data = await response.json().catch(() => null);
 
       if (response.ok && data?.disks) {
@@ -1198,7 +1191,7 @@ export const useDiskSetup = () => {
     request: DiskSetupRequest
   ): Promise<DiskSetupResult> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/disks/setup`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/disks/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request)
@@ -1247,7 +1240,7 @@ export const useDiskSetup = () => {
     pciAddresses: string[]
   ): Promise<any> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/disks/reset`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/disks/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pci_addresses: pciAddresses })
@@ -1292,7 +1285,7 @@ export const useDiskSetup = () => {
     pciAddresses: string[]
   ): Promise<DiskSetupResult> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/disks/initialize`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/disks/initialize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -1350,7 +1343,7 @@ export const useDiskSetup = () => {
     pciAddress: string
   ): Promise<any> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/disks/delete`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/disks/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pci_address: pciAddress })
@@ -1422,7 +1415,7 @@ export const useDiskSetup = () => {
     blockSize?: number
   ): Promise<{ success: boolean; error?: string; bdev_name?: string }> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/create`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/memory_disks/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, size_mb: sizeMB, block_size: blockSize })
@@ -1448,7 +1441,7 @@ export const useDiskSetup = () => {
     name: string
   ): Promise<{ success: boolean; error?: string }> => {
     try {
-      const response = await fetch(`/api/nodes/${nodeName}/memory_disks/delete`, {
+      const response = await apiFetch(`/api/nodes/${nodeName}/memory_disks/delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name })

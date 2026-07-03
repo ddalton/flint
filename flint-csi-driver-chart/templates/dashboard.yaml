@@ -1,4 +1,35 @@
 {{- if .Values.dashboard.enabled }}
+{{- $auth := .Values.dashboard.auth | default dict }}
+{{- $adminPassword := $auth.adminPassword | default "" }}
+{{- if not $adminPassword }}
+{{- /* Generate once and preserve across upgrades: reuse the live Secret's
+       value if present (lookup returns an empty map under `helm template`,
+       in which case the backend generates and logs a one-time password). */}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "spdk-dashboard-auth" }}
+{{- if and $existing $existing.data (hasKey $existing.data "admin-password") }}
+{{- $adminPassword = index $existing.data "admin-password" | b64dec }}
+{{- else }}
+{{- $adminPassword = randAlphaNum 24 }}
+{{- end }}
+{{- end }}
+# Credentials for the dashboard API (enforced by the backend).
+# Read the admin password with:
+#   kubectl -n {{ .Release.Namespace }} get secret spdk-dashboard-auth -o jsonpath='{.data.admin-password}' | base64 -d
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spdk-dashboard-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    component: dashboard
+type: Opaque
+stringData:
+  admin-password: {{ $adminPassword | quote }}
+  {{- if $auth.viewerPassword }}
+  viewer-password: {{ $auth.viewerPassword | quote }}
+  {{- end }}
+---
 # Dashboard Deployment for SPDK CSI Driver
 apiVersion: apps/v1
 kind: Deployment
@@ -40,6 +71,20 @@ spec:
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: NODE_AGENT_PORT
               value: {{ .Values.healthCheck.nodeAgentPort | default 9081 | quote }}
+            - name: DASHBOARD_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spdk-dashboard-auth
+                  key: admin-password
+            {{- if $auth.viewerPassword }}
+            - name: DASHBOARD_VIEWER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spdk-dashboard-auth
+                  key: viewer-password
+            {{- end }}
+            - name: DASHBOARD_SESSION_TTL_SECS
+              value: {{ $auth.sessionTtlSecs | default 43200 | quote }}
           ports:
             - name: api
               containerPort: 8080
@@ -130,15 +175,14 @@ metadata:
     {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
     component: dashboard
 spec:
+  # ClusterIP + nginx-only on purpose: the backend API port is NOT exposed on
+  # the Service — everything goes through the frontend's /api/ proxy, and the
+  # backend enforces bearer-token auth regardless.
   type: ClusterIP
   ports:
     - name: http
       port: 80
       targetPort: http
-      protocol: TCP
-    - name: api
-      port: 8080
-      targetPort: api
       protocol: TCP
   selector:
     app: spdk-dashboard

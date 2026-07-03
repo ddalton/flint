@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { apiFetch } from '../../api/client';
 import { 
   HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, 
   Play, Database, Shield, Info, ChevronLeft, ChevronRight,
@@ -681,7 +682,7 @@ export const DiskSetupTab: React.FC = () => {
 
     try {
       // Call reset/unbind API endpoint
-      const response = await fetch(`/api/nodes/${node}/disks/reset`, {
+      const response = await apiFetch(`/api/nodes/${node}/disks/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pci_addresses: diskPciAddresses })
