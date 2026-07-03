@@ -199,6 +199,27 @@ entirely from the dashboard.
   degraded n/m). Uses the 2a indicator component per replica.
 ### 2c. Events + windows
 
+Status (2026-07-02): DONE (c903f5c) and LIVE-VALIDATED on `runj`
+(images `phase2c.0`) with a second leg-kill drill watched through the
+new endpoint at the tab's own 10 s cadence. `/api/events`
+(viewer-gated) lists the engine's PV events from the `default`
+namespace (single K8s list, no node fan-out, uncached), categorized by
+reason family, newest first, capped 200; `HotRejoinSucceeded` messages
+parse into structured windows (node, raid, E_f, window_ms, per-step
+timings, inline-vs-esnap, estimator bytes) — parser unit-tested
+against the verbatim drill payload. Frontend Events tab: windows panel
+(bar vs the 2 s target, path chip, estimator, step breakdown) +
+category-filterable timeline, 10 s polling. Drill evidence (kill
+23:02:51 local): EpochCutFailed +11 s → VolumeDegraded/ReplicaStale
++23 s → ReplicaCatchupStarted +71 s → ReplicaStandby +76 s →
+HotRejoinSucceeded +2 m 13 s, each appearing in the endpoint within
+one 10 s poll; windows[] grew 1→2 with the new 1720 ms inline window
+(30 MiB estimator, steps summing exactly); volume back to Healthy 2/2
+in_sync; zero writer counter skips (1,642 appends). Bonus: this
+drill's 2 s sync poll sampled the `hot_rejoin` marker live
+(`stale + marker` at 23:05:03 — the "rejoining" chip state), so every
+2a indicator state has now been observed on a live cluster.
+
 - **Event timeline**: `HotRejoin*`, `VolumeDataPath*`, catchup
   transitions, per volume and cluster-wide (K8s events already carry
   all of it, including window step timings). This is where a completed
@@ -206,6 +227,8 @@ entirely from the dashboard.
 - **Windows panel**: hot-rejoin window durations vs the 2 s target,
   inline-vs-esnap routing with estimator bytes — straight from
   `HotRejoinSucceeded` event payloads.
+- Deferred within 2c: per-volume timeline embedding in the volume
+  detail view (rides 2b, `/api/events?volume=` already supports it).
 
 ### 2d. Operator workflows
 
