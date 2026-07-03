@@ -1235,6 +1235,25 @@ backfill/reconcile with the same coverage probe" follow-up from
 theoretical to observed — bounded (self-healed in ~4 min via scrub +
 fresh window), not a wedge, but worth taking.
 
+**Reconcile hardening (dbd781a, `tier2-7b4.4`) + Drill B redux №2
+(11:18): PASS, cleanest run of the day.** The localization backfill
+now selects its source through the same coverage probe
+(`select_covering_source`, target=E_f + pad base): fail over past a
+source that re-rooted past the epoch; on a definitive all-sources
+verdict fail the cycle WITHOUT demoting (the leg may still be serving
+— the leg-gone reconcile arm stays the demote path). Pad-transport
+cleanup detaches from every in-sync node (failover means the attach
+can outlive the preference order). Two 3-replica reconcile tests;
+suite 540 lib / 592 total. Redux №2 (same staggered double-kill,
+clean start): **Healthy 3/3 in 7 m 14 s**, both windows sub-200 ms
+(141/161 ms; E_f cuts 12/20 ms on `_hr`-survivor sets), **both
+localized in 5 s** of esnap exposure, **zero
+HotRejoinReconcileFailed**, both catch-ups delta'd from aws-3 (bases
+still covered — no full-build needed this run, so the failover arm's
+correctness rides on the unit tests), 60,609 cumulative gapless
+appends, hygiene 5/7/7. Faster and cleaner than №1 across every
+number.
+
 **Recovery-choice semantics observed (the drill's original question):**
 per-replica and event-driven; hot-rejoin admission serialized per
 volume by the shared claim — the first standby to qualify wins (order
