@@ -33,6 +33,11 @@ pub struct NodeAgent {
     /// Data-path-lost strike counts (attached volume, raid missing),
     /// keyed by PV name — see `detect_lost_data_paths`.
     data_path_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    /// PVs whose raid this agent has observed PRESENT (so a later absence
+    /// is a collapse, not an in-flight NodeStage) and PVs already warned
+    /// this episode — see `raid_collapse_verdict` (7b-3 P1).
+    data_path_raid_seen: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    data_path_warned: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Dead-controller strike counts (reconnect-looping flint controllers),
     /// keyed by controller name — see `reap_dead_controllers`.
     controller_reap_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
@@ -54,6 +59,8 @@ impl NodeAgent {
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            data_path_raid_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -77,6 +84,8 @@ impl NodeAgent {
             driver,
             orphan_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             data_path_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            data_path_raid_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -2518,7 +2527,10 @@ impl NodeAgent {
     }
 
     async fn detect_lost_data_paths(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::cutover::{data_path_verdict, DataPathAction, DATA_PATH_LOST_ANNOTATION};
+        use crate::cutover::{
+            data_path_verdict, raid_collapse_verdict, CollapseEvent, DataPathAction,
+            DATA_PATH_LOST_ANNOTATION,
+        };
         use k8s_openapi::api::storage::v1::VolumeAttachment;
 
         // Raids present locally (one RPC).
@@ -2580,6 +2592,65 @@ impl NodeAgent {
                 .unwrap_or(false);
             let attached = attached_here.contains(&pv_name);
             let raid_present = raids.contains(&format!("raid_{}", csi.volume_handle));
+
+            // Collapse visibility (7b-3 P1): a raid previously observed
+            // present that vanishes under a live attachment is announced
+            // on the FIRST strike — the 3-strike cadence below only gates
+            // repair and layer-3 flagging, and layer-2 repair winning that
+            // race used to make a total outage silent.
+            {
+                let mut seen = self.data_path_raid_seen.lock().await;
+                let mut warned = self.data_path_warned.lock().await;
+                match raid_collapse_verdict(
+                    attached,
+                    raid_present,
+                    seen.contains(&pv_name),
+                    warned.contains(&pv_name),
+                ) {
+                    CollapseEvent::Lost => {
+                        warned.insert(pv_name.clone());
+                        warn!(volume_id = %pv_name, "[DATA_PATH] Raid bdev vanished under a live attachment — data path lost, in-place repair pending confirmation");
+                        self.emit_pv_event(
+                            &pv_name,
+                            "Warning",
+                            "VolumeDataPathLost",
+                            &format!(
+                                "The raid bdev for this attached volume vanished on {} — the \
+                                 mounted filesystem is failing I/O. In-place repair runs after \
+                                 confirmation strikes; if the workload keeps erroring after \
+                                 VolumeDataPathRepaired, bounce it to remount.",
+                                self.node_name
+                            ),
+                        )
+                        .await;
+                    }
+                    CollapseEvent::Restored => {
+                        warned.remove(&pv_name);
+                        if !flagged_by_me {
+                            self.emit_pv_event(
+                                &pv_name,
+                                "Normal",
+                                "VolumeDataPathRestored",
+                                &format!(
+                                    "The raid bdev for this volume is back on {} (repaired or \
+                                     reassembled before escalation)",
+                                    self.node_name
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                    CollapseEvent::None => {}
+                }
+                if raid_present {
+                    seen.insert(pv_name.clone());
+                } else if !attached {
+                    // Unstaged: a later re-stage legitimately precedes its
+                    // raid again — forget, or we would false-positive.
+                    seen.remove(&pv_name);
+                    warned.remove(&pv_name);
+                }
+            }
 
             let strikes_with_this = if attached && !raid_present {
                 still_missing.insert(pv_name.clone());
@@ -2880,6 +2951,8 @@ impl Clone for NodeAgent {
             driver: self.driver.clone(),
             orphan_strikes: self.orphan_strikes.clone(),
             data_path_strikes: self.data_path_strikes.clone(),
+            data_path_raid_seen: self.data_path_raid_seen.clone(),
+            data_path_warned: self.data_path_warned.clone(),
             controller_reap_strikes: self.controller_reap_strikes.clone(),
         }
     }

@@ -726,12 +726,15 @@ backs off 300 s — forever, because the P0 sweep fix (5feb602) maps
 live at 14:41:13; every subsequent drill cycle required a manual
 `bdev_lvol_delete` of the abandoned head (safe once it is neither the
 record's `active_lvol_uuid` nor a raid member — the guarded delete is
-in the runbook section below). Fix direction: the chase should delete
-the lvol it supersedes (mirroring the ns-swap path), and/or the window
-build should scrub-with-guards a non-active, non-member `_hr`
-namesake before cloning (the reconciler's scrub arm already embodies
-the safety rules). Yesterday's drill 3 didn't hit this only because the
+in the runbook section below). Yesterday's drill 3 didn't hit this only because the
 P0 bug had (destructively) deleted drill 1's head in between.
+**FIXED same day** (both belts): the §5 revert now reaps the exact
+lvol it supersedes when that lvol holds the `_hr` alias (uuid-matched,
+`catchup.rs`), and the window build scrubs a stranded `_hr` namesake
+pre-intent — refusing with NotEligible when the holder IS the record's
+live lvol (a raw-stale target still serving the previous rejoin's
+data, `hot_rejoin.rs`). Suite 509; live validation owed (needs a
+build node).
 
 ### Finding 2 (P2): unwind-ladder E_f-export leak, self-healing on the
 ### second pass
@@ -838,10 +841,19 @@ at the unregistered device instance) until the consumer pod was
 bounced — total writer outage ~4 min. Two follow-on findings:
 
 - **(P1) The health monitor is silent on raid-ABSENT**: no
-  `VolumeDataPathLost` fired during the 2-minute total outage (the
-  phase-6 predicate handles degraded and base-gone, not raid-gone), and
-  the record kept claiming `in_sync` + cutting epochs on the source
-  while zero consumer writes could flow (consumer-blindness again).
+  `VolumeDataPathLost` fired during the 2-minute total outage, and the
+  record kept claiming `in_sync` + cutting epochs on the source while
+  zero consumer writes could flow (consumer-blindness again). Root
+  cause: the event only fired when layer-3 FLAGGING ran (3 strikes AND
+  in-place repair failed) — layer-2 repair winning that race made the
+  whole outage invisible. **FIXED same day**: the node agent remembers
+  which raids it has observed present; a previously-seen raid vanishing
+  under a live attachment emits `VolumeDataPathLost` on the FIRST
+  strike (a never-seen raid is an in-flight NodeStage and stays on the
+  3-strike cadence), paired with `VolumeDataPathRestored` when the
+  episode closes early (`raid_collapse_verdict` in `cutover.rs`,
+  wiring in `node_agent.rs`). Repair/flag cadence unchanged. The
+  consumer-blind epoch cutting remains the open phase-6 item.
 - **(availability, structural) At replicas=2, the source is a single
   failure domain for the whole volume during esnap exposure** — it
   hosts both the surviving leg and the head's esnap parent. With 3+

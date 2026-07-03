@@ -1358,6 +1358,35 @@ async fn catchup_stale(
             }
         };
         store.record_revert(volume_id, &rec.lvol_uuid, resume_marker, &new_uuid).await?;
+        // The revert supersedes the record's previous live head. When that
+        // head was a promoted hot-rejoin clone it holds the `_hr` alias —
+        // not `identity.lvol_name`, so revert_head's delete-by-name never
+        // touched it — and the orphan sweep protects `_hr` shapes while the
+        // PV exists (§10-14). Left behind it holds the head name hostage:
+        // every later rejoin window EEXISTs at the esnap clone (7b-3 P1).
+        // The record no longer references it and a stale replica is not a
+        // raid member, so reap it here; the uuid match guarantees this only
+        // ever removes the exact lvol the revert just superseded.
+        let superseded = rec.live_lvol_uuid();
+        if superseded != new_uuid {
+            let hr_alias = format!(
+                "{}/{}",
+                identity.lvs_name,
+                crate::hot_rejoin::head_lvol_name(volume_id, index)
+            );
+            if let Some(holder) = get_bdev(rpc, &identity.node_name, &hr_alias).await? {
+                if holder.get("uuid").and_then(|u| u.as_str()) == Some(superseded) {
+                    let del = json!({ "method": "bdev_lvol_delete", "params": { "name": hr_alias } });
+                    match rpc.spdk_rpc(&identity.node_name, &del).await {
+                        Ok(_) => info!(volume_id, node = %identity.node_name, head = %hr_alias,
+                            "[CATCHUP] Reaped the superseded hot-rejoin head (revert replaced it)"),
+                        Err(e) if is_missing(&e.to_string()) => {}
+                        Err(e) => warn!(volume_id, node = %identity.node_name, head = %hr_alias, error = %e,
+                            "[CATCHUP] Failed to reap the superseded hot-rejoin head — the next window scrubs it"),
+                    }
+                }
+            }
+        }
         match &base {
             Some(b) => {
                 store
@@ -2867,6 +2896,93 @@ mod tests {
         let events = store.events.lock().unwrap().clone();
         let reasons: Vec<&str> = events.iter().map(|(r, _)| r.as_str()).collect();
         assert_eq!(reasons, vec!["ReplicaCatchupStarted", "ReplicaStandby"]);
+    }
+
+    #[tokio::test]
+    async fn revert_reaps_the_superseded_hot_rejoin_head() {
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![
+                    ("lvol-uuid-b".to_string(), "uuid-b".to_string()),
+                    (epoch("vol1", 3), "s3".to_string()),
+                    (epoch("vol1", 4), "s4".to_string()),
+                ],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        // A promoted hot-rejoin head from an earlier window is the record's
+        // live lvol; the revert supersedes it and must reap it, or it holds
+        // the head name hostage against every later window (7b-3 P1).
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-b".to_string(), "lvs0/vol_vol1_replica_1_hr".to_string()),
+            json!({ "name": "lvs0/vol_vol1_replica_1_hr", "uuid": "uuid-head-old" }),
+        );
+        let mut record = stale_b_record();
+        record
+            .replicas
+            .iter_mut()
+            .find(|r| r.lvol_uuid == "uuid-b")
+            .unwrap()
+            .active_lvol_uuid = Some("uuid-head-old".to_string());
+        let store = FakeStore::new(record);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert!(
+            deletes.iter().any(|(node, p)| node == "node-b"
+                && p["params"]["name"].as_str() == Some("lvs0/vol_vol1_replica_1_hr")),
+            "superseded head must be reaped, got {:?}",
+            deletes
+        );
+    }
+
+    #[tokio::test]
+    async fn revert_leaves_an_unrelated_hr_namesake_alone() {
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![
+                    ("lvol-uuid-b".to_string(), "uuid-b".to_string()),
+                    (epoch("vol1", 3), "s3".to_string()),
+                    (epoch("vol1", 4), "s4".to_string()),
+                ],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        // An `_hr` namesake exists but is NOT the lvol this revert
+        // supersedes (the record's live lvol is the canonical uuid-b):
+        // the uuid guard must keep the reap away from it.
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-b".to_string(), "lvs0/vol_vol1_replica_1_hr".to_string()),
+            json!({ "name": "lvs0/vol_vol1_replica_1_hr", "uuid": "uuid-someone-else" }),
+        );
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert!(
+            !deletes.iter().any(|(_, p)| p["params"]["name"].as_str()
+                == Some("lvs0/vol_vol1_replica_1_hr")),
+            "unrelated namesake must survive, got {:?}",
+            deletes
+        );
     }
 
     #[tokio::test]

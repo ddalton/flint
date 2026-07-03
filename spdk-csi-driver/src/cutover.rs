@@ -127,6 +127,42 @@ pub fn data_path_verdict(
     DataPathAction::Hold
 }
 
+/// First-observation visibility for a total data-path collapse (7b-3 P1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CollapseEvent {
+    /// Emit the Warning event NOW — a raid this agent has previously
+    /// observed present just vanished under a live attachment.
+    Lost,
+    /// The raid returned; close the warned episode (Normal event).
+    Restored,
+    /// Nothing to say this tick.
+    None,
+}
+
+/// The strike threshold above exists to ride out an in-flight NodeStage,
+/// whose VA legitimately precedes the raid — but it also made a TOTAL
+/// collapse (raid bdev unregistered under a mounted filesystem) silent
+/// whenever layer-2 repair won the race to the third strike (drill C: a
+/// 2-minute hard EIO outage produced no event at all). `previously_seen`
+/// distinguishes the two: a raid this agent has observed present for this
+/// volume cannot be "still staging" — its absence is a collapse, and the
+/// operator hears about it on the FIRST strike. One event per episode
+/// (`already_warned`); flagging/repair cadence is unchanged.
+pub fn raid_collapse_verdict(
+    attached_here: bool,
+    raid_present: bool,
+    previously_seen: bool,
+    already_warned: bool,
+) -> CollapseEvent {
+    if attached_here && !raid_present && previously_seen && !already_warned {
+        CollapseEvent::Lost
+    } else if raid_present && already_warned {
+        CollapseEvent::Restored
+    } else {
+        CollapseEvent::None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CutoverConfig {
     /// FLINT_CUTOVER=enabled — default off.
@@ -1078,6 +1114,24 @@ mod tests {
         assert_eq!(data_path_verdict(false, false, false, 0, 3), DataPathAction::Hold);
         // Healthy steady state: hold.
         assert_eq!(data_path_verdict(true, true, false, 0, 3), DataPathAction::Hold);
+    }
+
+    #[test]
+    fn raid_collapse_verdict_first_strike_visibility() {
+        use CollapseEvent::*;
+        // A previously-seen raid vanishing under a live attachment is a
+        // collapse: warn on the FIRST observation (7b-3 P1).
+        assert_eq!(raid_collapse_verdict(true, false, true, false), Lost);
+        // …but only once per episode.
+        assert_eq!(raid_collapse_verdict(true, false, true, true), None);
+        // Never seen present = in-flight NodeStage: stay silent (the strike
+        // threshold owns that case).
+        assert_eq!(raid_collapse_verdict(true, false, false, false), None);
+        // Raid back after a warning: close the episode.
+        assert_eq!(raid_collapse_verdict(true, true, true, true), Restored);
+        // Healthy steady state / detached: nothing to say.
+        assert_eq!(raid_collapse_verdict(true, true, true, false), None);
+        assert_eq!(raid_collapse_verdict(false, false, true, false), None);
     }
 
     fn replica(node: &str, uuid: &str) -> ReplicaInfo {

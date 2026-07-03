@@ -318,6 +318,36 @@ pub async fn hot_rejoin_volume(
     }
     let ef = epoch_name(volume_id, ef_seq);
 
+    // The head name may still be held by the promoted head of an EARLIER
+    // rejoin (7b-3 P1): the §5 revert supersedes it in the record but a
+    // pre-fix chase left the lvol behind, and the orphan sweep protects
+    // `_hr` shapes while the PV exists. W4 would EEXIST on it forever. If
+    // the holder IS the record's live lvol, the previous rejoin's head is
+    // still serving the leg's data — not ours to delete; refuse and let
+    // catch-up supersede it first. Any other holder is a stranded stray:
+    // delete it here, pre-intent, so every crash point stays marker-free.
+    let head_name = head_lvol_name(volume_id, topo.idx);
+    let head_alias = format!("{}/{}", topo.identity.lvs_name, head_name);
+    if let Some(holder) = get_bdev(rpc, &topo.identity.node_name, &head_alias).await? {
+        if holder.get("uuid").and_then(|u| u.as_str()) == Some(topo.rec.live_lvol_uuid()) {
+            return Ok(HotRejoinOutcome::NotEligible(
+                "head name held by the replica's live lvol (previous rejoin not yet superseded by catch-up)",
+            ));
+        }
+        match rpc
+            .spdk_rpc(
+                &topo.identity.node_name,
+                &json!({ "method": "bdev_lvol_delete", "params": { "name": head_alias } }),
+            )
+            .await
+        {
+            Ok(_) => info!(volume_id, node = %topo.identity.node_name, head = %head_alias,
+                "[HOT_REJOIN] Deleted the stranded head of a superseded rejoin before the window"),
+            Err(e) if is_missing(&e.to_string()) => {}
+            Err(e) => return Err(format!("stranded head {} delete: {}", head_alias, e).into()),
+        }
+    }
+
     // INTENT before any node mutation: from here every crash point is
     // marker-recoverable. A standby target is demoted to stale in the same
     // write (see mark_hot_rejoin_intent). The CAS closure no-ops if the
@@ -341,7 +371,6 @@ pub async fn hot_rejoin_volume(
         // owns whatever skeleton half-landed.
     })?;
 
-    let head_name = head_lvol_name(volume_id, topo.idx);
     match window(rpc, &topo, &ef, &head_name, cfg).await {
         Ok((timings, head_uuid)) => {
             let window_ms: u128 = timings.iter().map(|(_, ms)| ms).sum();
@@ -2569,6 +2598,68 @@ mod tests {
         drop(w);
 
         assert_eq!(store.events(), vec!["HotRejoinSucceeded", "HotRejoinLocalized"]);
+    }
+
+    #[tokio::test]
+    async fn stranded_head_is_deleted_before_the_window() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // A previous rejoin's promoted head, superseded by a chase (the
+        // record's live lvol is uuid-b), still holds the head name — the
+        // 7b-3 P1 trap that EEXISTed every later window.
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-stray");
+        let store = FakeStore::new(stale_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }), "got {:?}", out);
+
+        // The stray died BEFORE the window opened, and nothing with its
+        // uuid survives (the head at that alias now is the fresh clone).
+        let methods = rpc.methods_in_order();
+        let idx = |m: &str| methods.iter().position(|x| x == m).unwrap_or(usize::MAX);
+        assert!(idx("bdev_lvol_delete") < idx("bdev_raid_quiesce"), "stray deleted pre-window");
+        let w = rpc.world.lock().unwrap();
+        assert!(
+            !w.bdevs.values().any(|b| b["uuid"].as_str() == Some("uuid-stray")),
+            "stray head must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn head_name_held_by_the_live_lvol_defers_to_catchup() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // The previous rejoin's head IS still the record's live lvol (no
+        // chase has superseded it): it holds the leg's only data — the
+        // guard must refuse the window rather than delete it.
+        rpc.seed_lvol(
+            "node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head-live",
+        );
+        let mut record = stale_b_record();
+        record
+            .replicas
+            .iter_mut()
+            .find(|r| r.lvol_uuid == "uuid-b")
+            .unwrap()
+            .active_lvol_uuid = Some("uuid-head-live".to_string());
+        let store = FakeStore::new(record);
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::NotEligible(why) => {
+                assert!(why.contains("held by the replica's live lvol"), "{}", why)
+            }
+            other => panic!("expected NotEligible, got {:?}", other),
+        }
+        // No window opened, no marker landed, the serving head untouched.
+        assert!(!rpc.methods_in_order().contains(&"bdev_raid_quiesce".to_string()));
+        assert!(rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1_hr", VOL)));
+        let rec = store.record.lock().unwrap();
+        assert!(rec.replicas.iter().all(|r| r.hot_rejoin.is_none()));
     }
 
     #[tokio::test]
