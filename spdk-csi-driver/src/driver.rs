@@ -1473,6 +1473,24 @@ impl SpdkCsiDriver {
     }
 
     /// Get volume info from PV volumeAttributes (fast path)
+    /// Access modes of the PV named `pv_name` (empty when unset). Used by
+    /// NodeUnstage to classify shared (RWX/ROX = NFS-consumer) volumes by
+    /// the API's authority instead of sniffing mount state.
+    pub async fn pv_access_modes(
+        &self,
+        pv_name: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv = pvs.get(pv_name).await?;
+        Ok(pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.access_modes.clone())
+            .unwrap_or_default())
+    }
+
     async fn get_volume_info_from_pv(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;
