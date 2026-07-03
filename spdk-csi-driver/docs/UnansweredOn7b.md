@@ -1318,3 +1318,71 @@ drill primitives appendix.
 orphaned-lease live measurement (fault-injection knob), the
 fs-allocated-only two-leg scrub, esnap-resume preferring the local
 chain (B1 residual), and the `admit_standbys_at_stage` coverage probe.
+
+## fs-allocated-only scrub, three legs (2026-07-03, cluster runj) — PASS
+
+The scrub methodology owed since 7b-0 (full-device md5 diverges by
+design on reused lvstores), executed against the standing r3 fixture —
+at three legs instead of the originally-scoped two, and against maximal
+provenance diversity: ~35 min before the scrub the volume had absorbed
+yet another unattended staggered double failure (aws-2 then aws-1,
+windows 172/176 ms, localized 5/4 s — its third self-heal episode), so
+two of the three legs were freshly-rebuilt `_hr`-headed products of
+full-builds + hot rejoins while aws-3 had never failed.
+
+**Payload.** 1 GiB of `/dev/urandom` written to the volume first
+(214 MB/s through the 3-leg raid; live md5 `b5f9fe51…` recorded as
+ground truth), on top of the drill ledger.
+
+**Cut.** All three leg snapshots under ONE `bdev_raid_quiesce` lease:
+**window 60 ms total** (quiesce 19 ms → 3 `bdev_lvol_snapshot` in
+parallel 25 ms → unquiesce 16 ms), sources resolved by the record's
+`live_lvol_uuid` (two of them `_hr` heads — the P1 №3 pattern again).
+The 5 fsync/s writer's cadence is unbroken through the quiesce second
+(five appends stamped :12, three :13); ledger gapless end-to-end
+(77,544 appends).
+
+**Methodology refinement found doing it: a quiesced snapshot is
+crash-consistent, not checkpointed.** The superblock in the snapshots
+claimed ~26k blocks allocated — the 1 GiB bulk's bitmap updates were
+still journal-only (ext4 commits ≠ checkpoints; data blocks were on
+disk per data=ordered + fsync, metadata home locations stale). A naive
+dumpe2fs allocated-map would have skipped the payload entirely. Fix:
+clone ONE leg's snapshot (writable, thin), `e2fsck -fy` the clone —
+journal replay; it found only lazy-counter staleness, itself evidence
+the quiesced image is a valid crash-consistent fs — and extract the
+POST-REPLAY allocated map (288,615 blocks / 1,127 MiB / 9 extents).
+Hashing the three PRISTINE snapshots over that one map is sound
+because bitmap blocks are themselves allocated: a leg with divergent
+metadata cannot escape the digest.
+
+**Results.**
+
+| digest | aws-1 (rebuilt) | aws-2 (rebuilt) | aws-3 (never failed) |
+|---|---|---|---|
+| full device (2 GiB) | `14712369…` | `14712369…` | **`f895fb03…` differs** |
+| fs-allocated only (1,127 MiB) | `559196c5…` | `559196c5…` | `559196c5…` — **identical** |
+
+The full-device split lands exactly on the 7b-0 class, now precisely
+characterized: the two REBUILT legs agree with each other bit-for-bit
+(esnap-COW/replay materializes zeros in the unwritten remainders of
+allocated thin clusters) while the never-failed leg exposes stale
+lvstore bytes in those same remainders — bytes no filesystem read can
+ever return. Over every block the filesystem can read, all three legs
+are identical. Ground-truth ties: the bulk file inside the mounted
+replayed clone hashes to the live `b5f9fe51…`, and the snapshot's
+ledger ends at seq 76152 stamped with the exact quiesce second — the
+cut captured everything acked up to the drain instant.
+
+**Hygiene.** All scrub artifacts removed and verified gone (0 scrub
+lvols, 0 `:scrub:` NQNs, 0 kernel connections on all nodes); the
+`scrub-*` lvol names and `nqn.…:scrub:*` NQNs are outside every
+classifier the sweep/reaper use (checked against `orphan_sweep.rs`
+before cutting). The 1 GiB bulk file is left on the fixture
+deliberately — future drills exercise realistic data mass. Recipe
+recorded in the operator runbook's drill-primitives appendix.
+
+**Remaining from the 7b list after this:** the quiesced-span
+orphaned-lease live measurement (fault-injection knob), esnap-resume
+preferring the local chain (B1 residual), and the
+`admit_standbys_at_stage` coverage probe.

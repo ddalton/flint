@@ -433,3 +433,21 @@ standard tools):
 - **Narration:** poll the dashboard API (`/api/volumes`, `/api/events`) at
   ~2 s cadence for replica-state transitions; grab the admin password from
   the controller pod log after any roll.
+- **Integrity scrub (fs-allocated-only):** cut a snapshot of every leg
+  under ONE `bdev_raid_quiesce` lease (source each snapshot from the
+  record's `live_lvol_uuid`, never the canonical name; a 3-leg cut takes
+  ~60 ms). Export the snapshots over NVMe-oF (`:scrub:` NQNs and
+  `scrub-*` lvol names are invisible to the sweep/reaper) and attach them
+  on one node. **Do not trust the snapshots' fs metadata directly** — a
+  quiesced snapshot is crash-consistent, not checkpointed; recent
+  allocations live only in the ext4 journal. Instead: clone one leg's
+  snapshot, `e2fsck -fy` the clone (journal replay), take the allocated
+  block map from the replayed clone (`dumpe2fs` free-block complement),
+  then hash the *pristine* snapshot devices over exactly those extents
+  and compare. Full-device digests are expected to diverge benignly on
+  reused lvstores (unwritten thin-cluster remainders: stale bytes on
+  organically-grown legs vs zeros on rebuilt legs); the fs-allocated
+  digests must be identical. Clean up: disconnect, delete the scrub
+  subsystems, delete the clone before its parent snapshot, delete the
+  snapshots. Worked example: `UnansweredOn7b.md`, "fs-allocated-only
+  scrub" (2026-07-03).
