@@ -23,6 +23,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   const [snapshotTree, setSnapshotTree] = useState<Record<string, SnapshotTreeNode>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<SnapshotViewMode>('storage'); // Default to storage view
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<SnapshotTypeFilter>('all');
@@ -48,418 +49,42 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   }, []);
 
   const fetchSnapshotData = async () => {
+    setRefreshing(true);
+    setError(null);
     try {
-      setRefreshing(true);
-      
       // Fetch both list and tree data with enhanced storage information
       const [snapshotsResponse, treeResponse] = await Promise.all([
         apiFetch('/api/snapshots'),
         apiFetch('/api/snapshots/tree')
       ]);
 
-      const snapshotsContentType = snapshotsResponse.headers.get("content-type");
-      if (snapshotsResponse.ok && snapshotsContentType && snapshotsContentType.indexOf("application/json") !== -1) {
+      const snapshotsContentType = snapshotsResponse.headers.get("content-type") || '';
+      if (snapshotsResponse.ok && snapshotsContentType.indexOf("application/json") !== -1) {
         const snapshotsData = await snapshotsResponse.json();
-        // Transform backend data to include storage relationships
-        const enhancedSnapshots = enhanceSnapshotsWithRelationships(snapshotsData);
-        setSnapshots(enhancedSnapshots);
+        setSnapshots(enhanceSnapshotsWithRelationships(snapshotsData));
       } else {
-        setSnapshots(mockSnapshotsWithStorage);
+        throw new Error(
+          snapshotsResponse.ok ? 'Snapshots: non-JSON response' : `Snapshots unavailable (HTTP ${snapshotsResponse.status})`
+        );
       }
 
-      const treeContentType = treeResponse.headers.get("content-type");
-      if (treeResponse.ok && treeContentType && treeContentType.indexOf("application/json") !== -1) {
+      const treeContentType = treeResponse.headers.get("content-type") || '';
+      if (treeResponse.ok && treeContentType.indexOf("application/json") !== -1) {
         const treeData = await treeResponse.json();
-        // Transform tree data to include storage analytics
-        const enhancedTree = enhanceTreeWithStorageAnalytics(treeData);
-        setSnapshotTree(enhancedTree);
+        setSnapshotTree(enhanceTreeWithStorageAnalytics(treeData));
       } else {
-        // Use enhanced mock tree data
-        setSnapshotTree(mockSnapshotTreeWithStorage);
+        throw new Error(
+          treeResponse.ok ? 'Snapshot tree: non-JSON response' : `Snapshot tree unavailable (HTTP ${treeResponse.status})`
+        );
       }
     } catch (error) {
+      // Never substitute fabricated snapshots for a failed backend — surface
+      // the failure and keep whatever real data is already on screen.
       console.error('Failed to fetch snapshot data:', error);
-      // Use enhanced mock data for development
-      setSnapshots(mockSnapshotsWithStorage);
-      setSnapshotTree(mockSnapshotTreeWithStorage);
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
       setRefreshing(false);
-    }
-  };
-
-  // Enhanced mock data with storage consumption information
-  const mockSnapshotsWithStorage: SnapshotDetails[] = [
-    {
-      snapshot_id: 'snap-postgres-20250101-120000',
-      source_volume_id: 'pvc-postgres-data',
-      creation_time: '2025-01-01T12:00:00Z',
-      ready_to_use: true,
-      size_bytes: 107374182400,
-      snapshot_type: 'Bdev',
-      storage_consumption: {
-        consumed_bytes: 15728640000, // 14.6GB actual consumption
-        cluster_size: 4194304, // 4MB clusters
-        allocated_clusters: 3750,
-        actual_storage_overhead: 8354758400, // ~7.8GB overhead beyond logical data
-        compression_ratio: 1.2,
-        deduplication_savings: 2147483648 // 2GB saved through dedup
-      },
-      replica_bdev_details: [
-        {
-          node: 'worker-node-1',
-          name: 'snap_postgres_replica_0',
-          aliases: ['postgres_snap_primary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'postgres_replica_0',
-          storage_info: {
-            consumed_bytes: 5242880000,
-            cluster_size: 4194304,
-            allocated_clusters: 1250
-          }
-        },
-        {
-          node: 'worker-node-2', 
-          name: 'snap_postgres_replica_1',
-          aliases: ['postgres_snap_secondary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'postgres_replica_1',
-          storage_info: {
-            consumed_bytes: 5242880000,
-            cluster_size: 4194304,
-            allocated_clusters: 1250
-          }
-        },
-        {
-          node: 'worker-node-3',
-          name: 'snap_postgres_replica_2',
-          aliases: ['postgres_snap_tertiary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'postgres_replica_2',
-          storage_info: {
-            consumed_bytes: 5242880000,
-            cluster_size: 4194304,
-            allocated_clusters: 1250
-          }
-        }
-      ]
-    },
-    {
-      snapshot_id: 'snap-redis-20241231-140000', // Has a parent snapshot
-      source_volume_id: 'pvc-redis-cache',
-      creation_time: '2024-12-31T14:00:00Z',
-      ready_to_use: true,
-      size_bytes: 53687091200,
-      snapshot_type: 'Bdev',
-      storage_consumption: {
-        consumed_bytes: 10737418240,
-        cluster_size: 4194304,
-        allocated_clusters: 2560,
-        actual_storage_overhead: 16106127360, // ~15GB overhead - needs attention!
-        compression_ratio: 0.8, // Poor compression
-        deduplication_savings: 1073741824 // 1GB dedup
-      },
-      replica_bdev_details: [
-        {
-          node: 'worker-node-1',
-          name: 'snap_redis_replica_0',
-          aliases: ['redis_snap_primary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'redis_replica_0',
-          storage_info: {
-            consumed_bytes: 10737418240,
-            cluster_size: 4194304,
-            allocated_clusters: 2560
-          }
-        },
-        {
-          node: 'worker-node-2',
-          name: 'snap_redis_replica_1', 
-          aliases: ['redis_snap_secondary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'redis_replica_1',
-          storage_info: {
-            consumed_bytes: 10737418240,
-            cluster_size: 4194304,
-            allocated_clusters: 2560
-          }
-        }
-      ],
-      parent_snapshot_id: 'snap-redis-20250101-140000',
-    },
-    {
-      snapshot_id: 'snap-redis-20250101-140000',
-      source_volume_id: 'pvc-redis-cache',
-      creation_time: '2025-01-01T14:00:00Z',
-      ready_to_use: true,
-      size_bytes: 53687091200,
-      snapshot_type: 'Bdev',
-      storage_consumption: {
-        consumed_bytes: 21474836480, // 20GB actual consumption (high overhead!)
-        cluster_size: 4194304,
-        allocated_clusters: 5120,
-        actual_storage_overhead: 16106127360, // ~15GB overhead - needs attention!
-        compression_ratio: 0.8, // Poor compression
-        deduplication_savings: 1073741824 // 1GB dedup
-      },
-      replica_bdev_details: [
-        {
-          node: 'worker-node-1',
-          name: 'snap_redis_replica_0',
-          aliases: ['redis_snap_primary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'redis_replica_0',
-          storage_info: {
-            consumed_bytes: 10737418240,
-            cluster_size: 4194304,
-            allocated_clusters: 2560
-          }
-        },
-        {
-          node: 'worker-node-2',
-          name: 'snap_redis_replica_1', 
-          aliases: ['redis_snap_secondary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'redis_replica_1',
-          storage_info: {
-            consumed_bytes: 10737418240,
-            cluster_size: 4194304,
-            allocated_clusters: 2560
-          }
-        }
-      ],
-    },
-
-    {
-      snapshot_id: 'snap-mysql-clone-20250102-090000',
-      source_volume_id: 'pvc-mysql-data',
-      creation_time: '2025-01-02T09:00:00Z',
-      ready_to_use: true,
-      size_bytes: 85899345920,
-      snapshot_type: 'LvolClone',
-      clone_source_snapshot_id: 'snap-mysql-20250101-180000',
-      storage_consumption: {
-        consumed_bytes: 4294967296, // 4GB - very efficient clone
-        cluster_size: 4194304,
-        allocated_clusters: 1024,
-        actual_storage_overhead: 85895051264, // Most is shared with parent
-        compression_ratio: 2.1, // Excellent compression
-        deduplication_savings: 81604378624 // Massive dedup from parent
-      },
-      replica_bdev_details: [
-        {
-          node: 'worker-node-1',
-          name: 'clone_mysql_replica_0',
-          aliases: ['mysql_clone_primary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'mysql_replica_0',
-          storage_info: {
-            consumed_bytes: 2147483648,
-            cluster_size: 4194304,
-            allocated_clusters: 512
-          }
-        },
-        {
-          node: 'worker-node-3',
-          name: 'clone_mysql_replica_1',
-          aliases: ['mysql_clone_secondary'],
-          driver: 'lvol',
-          snapshot_source_bdev: 'mysql_replica_1',
-          storage_info: {
-            consumed_bytes: 2147483648,
-            cluster_size: 4194304,
-            allocated_clusters: 512
-          }
-        }
-      ],
-    }
-  ];
-
-  const mockSnapshotTreeWithStorage: Record<string, SnapshotTreeNode> = {
-    'pvc-redis-cache': {
-      volume_name: 'redis-cache-pvc',
-      volume_id: 'pvc-redis-cache',
-      volume_size: 53687091200, // 50GB logical
-      snapshot_chain: {
-        active_lvol: 'lvs_redis/redis-active-lvol',
-        chain_depth: 4,
-        snapshots: [
-          {
-            bdev_name: 'lvs_redis/redis-active-lvol',
-            snapshot_id: 'current-active-volume',
-            details: { creation_time: '2025-01-02T00:00:00Z' },
-            children: [
-              {
-                bdev_name: 'snap_redis_replica_0',
-                snapshot_id: 'snap-redis-20250101-140000',
-                details: { creation_time: '2025-01-01T14:00:00Z' },
-                children: [
-                  {
-                    bdev_name: 'snap_redis_old_replica_0',
-                    snapshot_id: 'snap-redis-20241231-140000',
-                    details: { creation_time: '2024-12-31T14:00:00Z' },
-                    children: [],
-                    storage_info: {
-                      consumed_bytes: 10737418240,
-                      cluster_size: 4194304,
-                      allocated_clusters: 2560
-                    },
-                    creation_order: 2,
-                    is_active_volume: false
-                  }
-                ],
-                storage_info: {
-                  consumed_bytes: 21474836480,
-                  cluster_size: 4194304,
-                  allocated_clusters: 5120
-                },
-                creation_order: 1,
-                is_active_volume: false
-              }
-            ],
-            storage_info: {
-              consumed_bytes: 17179869184, // 16GB active data
-              cluster_size: 4194304,
-              allocated_clusters: 4096
-            },
-            creation_order: 0,
-            is_active_volume: true
-          }
-        ],
-        error: undefined
-      },
-      storage_analytics: {
-        total_volume_size: 53687091200,
-        actual_data_size: 17179869184, // Only 16GB actual data
-        total_snapshot_overhead: 32212254720, // ~30GB in snapshots - HIGH!
-        snapshot_efficiency_ratio: 0.60, // 60% overhead - needs attention!
-        storage_breakdown: {
-          active_volume_consumption: 17179869184,
-          snapshot_consumption: 32212254720,
-          metadata_overhead: 268435456, // 256MB metadata
-          free_space_in_volume: 4026531840 // ~3.8GB free
-        },
-        recommendations: [
-          'HIGH PRIORITY: 60% snapshot overhead detected',
-          'Delete snapshots older than 7 days immediately',
-          'Review snapshot retention policy for high-churn workloads',
-          'Consider reducing snapshot frequency',
-          'Potential storage savings: ~25GB by cleaning old snapshots'
-        ]
-      }
-    },
-    'pvc-mysql-data': {
-      volume_name: 'mysql-data-pvc',
-      volume_id: 'pvc-mysql-data',
-      volume_size: 85899345920, // 80GB logical
-      snapshot_chain: {
-        active_lvol: 'lvs_mysql/mysql-active-lvol',
-        chain_depth: 2,
-        snapshots: [
-          {
-            bdev_name: 'lvs_mysql/mysql-active-lvol',
-            snapshot_id: 'current-active-volume',
-            details: { creation_time: '2025-01-03T00:00:00Z' },
-            children: [
-              {
-                bdev_name: 'clone_mysql_replica_0',
-                snapshot_id: 'snap-mysql-clone-20250102-090000',
-                details: { creation_time: '2025-01-02T09:00:00Z' },
-                children: [],
-                storage_info: {
-                  consumed_bytes: 15728640000,
-                  cluster_size: 4194304,
-                  allocated_clusters: 3750
-                },
-                creation_order: 1,
-                is_active_volume: false
-              }
-            ],
-            storage_info: {
-              consumed_bytes: 85899345920, // 80GB active data
-              cluster_size: 4194304,
-              allocated_clusters: 20480
-            },
-            creation_order: 0,
-            is_active_volume: true
-          }
-        ],
-        error: undefined
-      },
-      storage_analytics: {
-        total_volume_size: 107374182400,
-        actual_data_size: 85899345920, // 80GB actual data
-        total_snapshot_overhead: 15728640000, // ~14.6GB in snapshots
-        snapshot_efficiency_ratio: 0.146, // 14.6% overhead - reasonable
-        storage_breakdown: {
-          active_volume_consumption: 85899345920,
-          snapshot_consumption: 15728640000,
-          metadata_overhead: 536870912, // 512MB metadata
-          free_space_in_volume: 5209292800 // ~4.8GB free
-        },
-        recommendations: [
-          'Storage efficiency is good at 14.6% snapshot overhead',
-          'Consider archiving snapshots older than 30 days',
-          'Monitor for snapshot chain depth > 10'
-        ]
-      }
-    },
-    'pvc-postgres-data': {
-      volume_name: 'postgres-data-pvc',
-      volume_id: 'pvc-postgres-data',
-      volume_size: 107374182400, // 100GB logical
-      snapshot_chain: {
-        active_lvol: 'lvs_postgres/postgres-active-lvol',
-        chain_depth: 3,
-        snapshots: [
-          {
-            bdev_name: 'lvs_postgres/postgres-active-lvol',
-            snapshot_id: 'current-active-volume',
-            details: { creation_time: '2025-01-02T00:00:00Z' },
-            children: [
-              {
-                bdev_name: 'snap_postgres_replica_0',
-                snapshot_id: 'snap-postgres-20250101-120000',
-                details: { creation_time: '2025-01-01T12:00:00Z' },
-                children: [],
-                storage_info: {
-                  consumed_bytes: 4294967296, // 4GB - very efficient
-                  cluster_size: 4194304,
-                  allocated_clusters: 1024
-                },
-                creation_order: 1,
-                is_active_volume: false
-              }
-            ],
-            storage_info: {
-              consumed_bytes: 75161927680, // 70GB active data
-              cluster_size: 4194304,
-              allocated_clusters: 17920
-            },
-            creation_order: 0,
-            is_active_volume: true
-          }
-        ],
-        error: undefined
-      },
-      storage_analytics: {
-        total_volume_size: 85899345920,
-        actual_data_size: 75161927680, // 70GB actual data
-        total_snapshot_overhead: 4294967296, // Only 4GB in snapshots - excellent!
-        snapshot_efficiency_ratio: 0.05, // 5% overhead - very efficient
-        storage_breakdown: {
-          active_volume_consumption: 75161927680,
-          snapshot_consumption: 4294967296,
-          metadata_overhead: 134217728, // 128MB metadata
-          free_space_in_volume: 6308233216 // ~5.9GB free
-        },
-        recommendations: [
-          'Excellent storage efficiency at 5% snapshot overhead',
-          'Clone-based snapshots are working very efficiently',
-          'Continue current snapshot strategy',
-          'Good candidate for additional snapshot frequency if needed'
-        ]
-      }
     }
   };
 
@@ -707,6 +332,13 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
+
+        {error && (
+          <div className="mb-6 flex items-center gap-2 p-3 bg-red-50 border border-red-200 text-red-700 rounded-md text-sm">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            <span>Could not load snapshot data: {error}. Showing last known data.</span>
+          </div>
+        )}
 
         {/* Enhanced Statistics with Storage Information */}
         <div className="grid grid-cols-2 md:grid-cols-6 gap-4">

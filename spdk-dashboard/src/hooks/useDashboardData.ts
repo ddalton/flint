@@ -1,6 +1,63 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import * as api from '../api/client';
 import { apiFetch } from '../api/client';
+
+const EMPTY_DASHBOARD: DashboardData = {
+  volumes: [],
+  raw_volumes: [],
+  disks: [],
+  nodes: [],
+};
+
+// Fetch + transform the aggregate; throws on any non-JSON / non-OK response so
+// react-query surfaces the error and keeps the last good data on screen. No
+// mock fallback — a healthy-looking dashboard during an outage hides the
+// outage (2026-06-12 incident).
+const fetchDashboard = async (filters?: DashboardFilters): Promise<DashboardData> => {
+  const response = await apiFetch(`/api/dashboard${buildQueryString(filters)}`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!response.ok || contentType.indexOf('application/json') === -1) {
+    throw new Error(
+      response.ok ? 'Received non-JSON response from backend' : `Backend error (HTTP ${response.status})`
+    );
+  }
+  return transformBackendData(await response.json());
+};
+
+export const computeStats = (data: DashboardData): DashboardStats => {
+  const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
+  const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
+  const failedVolumes = data.volumes.filter(v => v.state === 'Failed').length;
+  const faultedVolumes = degradedVolumes + failedVolumes;
+
+  const volumesWithRebuilding = data.volumes.filter(v =>
+    v.replica_statuses.some(replica =>
+      replica.status === 'rebuilding' ||
+      replica.rebuild_progress !== null ||
+      replica.is_new_replica
+    ) || v.raid_status?.rebuild_info !== undefined
+  ).length;
+
+  const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
+  const orphanedVolumes = data.raw_volumes.length;
+  const healthyDisks = data.disks.filter(d => d.healthy).length;
+  const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
+
+  return {
+    totalVolumes: data.volumes.length + data.raw_volumes.length,
+    healthyVolumes,
+    degradedVolumes,
+    failedVolumes,
+    faultedVolumes,
+    volumesWithRebuilding,
+    localNVMeVolumes,
+    orphanedVolumes,
+    totalDisks: data.disks.length,
+    healthyDisks,
+    formattedDisks,
+  };
+};
 
 // --- Start of new/updated interfaces ---
 
@@ -247,448 +304,6 @@ export type VolumeFilter =
 export type DiskFilter = string | null;
 export type VolumeReplicaFilter = string | null;
 
-// Enhanced mock data with RAID status and NVMe-oF details
-const mockData: DashboardData = {
-  volumes: [
-    {
-      id: "pvc-single-replica-volume",
-      name: "single-replica-volume",
-      size: "20GB",
-      state: "Healthy",
-      replicas: 1,
-      active_replicas: 1,
-      local_nvme: true,
-      access_method: "nvmeof", // Set to nvmeof
-      rebuild_progress: null,
-      nodes: ["worker-node-1"],
-      // Add ublk device info
-      ublk_device: {
-        id: 42,
-        device_path: "/dev/ublkb42"
-      },
-      
-      // Remove or keep nvmeof_targets for backward compatibility
-      nvmeof_enabled: false,
-      nvmeof_targets: [],
-      replica_statuses: [
-        {
-          node: "worker-node-1",
-          status: "healthy",
-          is_local: true,
-          last_io_timestamp: "2025-06-01T11:00:00Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: null,
-          access_method: "local-nvme",
-          raid_member_state: "online",
-          lvol_uuid: "77777777-7777-7777-7777-777777777777",
-          disk_ref: "nvme0n1",
-          replica_size: 21474836480
-        }
-      ],
-      spdk_validation_status: {
-        has_spdk_backing: true,
-        validation_message: "Volume validated successfully",
-        validation_severity: "info"
-      }
-    },
-    {
-      id: "pvc-12345678-1234-1234-1234-123456789abc",
-      name: "postgres-data-pvc",
-      size: "100GB",
-      state: "Healthy",
-      replicas: 3,
-      active_replicas: 3,
-      local_nvme: true,
-      access_method: "nvmeof",
-      rebuild_progress: null,
-      nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      // Add ublk device info
-      ublk_device: {
-        id: 123,
-        device_path: "/dev/ublkb123"
-      },
-      
-      nvmeof_enabled: false,
-      nvmeof_targets: [],
-      raid_status: {
-        raid_level: 1,
-        state: "online",
-        num_members: 3,
-        operational_members: 3,
-        discovered_members: 3,
-        members: [
-          {
-            slot: 0,
-            name: "nvme0n1",
-            state: "online",
-            uuid: "11111111-1111-1111-1111-111111111111",
-            is_configured: true,
-            node: "worker-node-1",
-            disk_ref: "nvme0n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 1,
-            name: "nvme1n1",
-            state: "online",
-            uuid: "22222222-2222-2222-2222-222222222222",
-            is_configured: true,
-            node: "worker-node-2",
-            disk_ref: "nvme1n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 2,
-            name: "nvme2n1",
-            state: "online",
-            uuid: "33333333-3333-3333-3333-333333333333",
-            is_configured: true,
-            node: "worker-node-3",
-            disk_ref: "nvme2n1",
-            health_status: "healthy"
-          }
-        ],
-        auto_rebuild_enabled: true,
-        superblock_version: 1
-      },
-      replica_statuses: [
-        {
-          node: "worker-node-1",
-          status: "healthy",
-          is_local: true,
-          last_io_timestamp: "2025-06-01T10:30:00Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: null,
-          access_method: "local-nvme",
-          raid_member_slot: 0,
-          raid_member_state: "online",
-          lvol_uuid: "11111111-1111-1111-1111-111111111111",
-          disk_ref: "nvme0n1",
-          replica_size: 107374182400
-        },
-        {
-          node: "worker-node-2",
-          status: "healthy",
-          is_local: false,
-          last_io_timestamp: "2025-06-01T10:29:55Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: {
-            nqn: "nqn.2016-06.io.spdk:cnode2",
-            target_ip: "192.168.1.102",
-            target_port: "4420",
-            transport_type: "TCP"
-          },
-          access_method: "remote-nvmf",
-          raid_member_slot: 1,
-          raid_member_state: "online",
-          lvol_uuid: "22222222-2222-2222-2222-222222222222",
-          disk_ref: "nvme1n1",
-          replica_size: 107374182400
-        },
-        {
-          node: "worker-node-3",
-          status: "healthy",
-          is_local: false,
-          last_io_timestamp: "2025-06-01T10:29:50Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: {
-            nqn: "nqn.2016-06.io.spdk:cnode3",
-            target_ip: "192.168.1.103",
-            target_port: "4420",
-            transport_type: "TCP"
-          },
-          access_method: "remote-nvmf",
-          raid_member_slot: 2,
-          raid_member_state: "online",
-          lvol_uuid: "33333333-3333-3333-3333-333333333333",
-          disk_ref: "nvme2n1",
-          replica_size: 107374182400
-        }
-      ],
-      spdk_validation_status: {
-        has_spdk_backing: true,
-        validation_message: "Volume validated successfully",
-        validation_severity: "info"
-      }
-    },
-    {
-      id: "pvc-87654321-4321-4321-4321-cba987654321",
-      name: "redis-cache-pvc",
-      size: "50GB",
-      state: "Degraded",
-      replicas: 3,
-      active_replicas: 2,
-      local_nvme: true,
-      access_method: "nvmeof",
-      rebuild_progress: 75.5,
-      nodes: ["worker-node-1", "worker-node-2", "worker-node-3"],
-      // Add ublk device info
-      ublk_device: {
-        id: 12,
-        device_path: "/dev/ublkb12"
-      },
-      
-      nvmeof_enabled: false,
-      nvmeof_targets: [],
-      raid_status: {
-        raid_level: 1,
-        state: "degraded",
-        num_members: 3,
-        operational_members: 2,
-        discovered_members: 3,
-        members: [
-          {
-            slot: 0,
-            name: "nvme0n1",
-            state: "online",
-            uuid: "44444444-4444-4444-4444-444444444444",
-            is_configured: true,
-            node: "worker-node-1",
-            disk_ref: "nvme0n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 1,
-            name: "nvme1n1",
-            state: "online",
-            uuid: "55555555-5555-5555-5555-555555555555",
-            is_configured: true,
-            node: "worker-node-2",
-            disk_ref: "nvme1n1",
-            health_status: "healthy"
-          },
-          {
-            slot: 2,
-            name: "nvme2n1",
-            state: "rebuilding",
-            uuid: "66666666-6666-6666-6666-666666666666",
-            is_configured: true,
-            node: "worker-node-3",
-            disk_ref: "nvme2n1",
-            health_status: "rebuilding"
-          }
-        ],
-        rebuild_info: {
-          state: "rebuilding",
-          target_slot: 2,
-          source_slot: 0,
-          blocks_remaining: 12800000,
-          blocks_total: 52428800,
-          progress_percentage: 75.5,
-          estimated_time_remaining: "15m",
-          start_time: "2025-06-01T10:00:00Z"
-        },
-        auto_rebuild_enabled: true,
-        superblock_version: 1
-      },
-      replica_statuses: [
-        {
-          node: "worker-node-1",
-          status: "healthy",
-          is_local: true,
-          last_io_timestamp: "2025-06-01T10:30:00Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: null,
-          access_method: "local-nvme",
-          raid_member_slot: 0,
-          raid_member_state: "online"
-        },
-        {
-          node: "worker-node-2",
-          status: "healthy",
-          is_local: false,
-          last_io_timestamp: "2025-06-01T10:29:55Z",
-          rebuild_progress: null,
-          rebuild_target: null,
-          is_new_replica: false,
-          nvmf_target: {
-            nqn: "nqn.2016-06.io.spdk:cnode2",
-            target_ip: "192.168.1.102",
-            target_port: "4420",
-            transport_type: "TCP"
-          },
-          access_method: "remote-nvmf",
-          raid_member_slot: 1,
-          raid_member_state: "online"
-        },
-        {
-          node: "worker-node-3",
-          status: "rebuilding",
-          is_local: false,
-          last_io_timestamp: "2025-06-01T10:29:50Z",
-          rebuild_progress: 75.5,
-          rebuild_target: null,
-          is_new_replica: true,
-          nvmf_target: {
-            nqn: "nqn.2016-06.io.spdk:cnode3",
-            target_ip: "192.168.1.103",
-            target_port: "4420",
-            transport_type: "TCP"
-          },
-          access_method: "remote-nvmf",
-          raid_member_slot: 2,
-          raid_member_state: "rebuilding"
-        }
-      ],
-      spdk_validation_status: {
-        has_spdk_backing: false,
-        validation_message: "SPDK backing not found - phantom volume",
-        validation_severity: "error"
-      }
-    }
-  ],
-  disks: [
-    {
-      id: "nvme0n1",
-      node: "worker-node-1",
-      pci_addr: "0000:3b:00.0",
-      capacity: 1024000000000,
-      capacity_gb: 1000,
-      allocated_space: 512,
-      free_space: 488,
-      free_space_display: "488GB",
-      healthy: true,
-      blobstore_initialized: true,
-      lvol_count: 2,
-      model: "Samsung SSD 980 PRO 1TB",
-      read_iops: 45000,
-      write_iops: 32000,
-      read_latency: 120,
-      write_latency: 180,
-      brought_online: "2025-06-01T08:00:00Z",
-      provisioned_volumes: [
-        {
-          volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
-          size: 100,
-          provisioned_at: "2025-06-01T08:15:00Z",
-          replica_type: "Local NVMe",
-          status: "healthy"
-        },
-        {
-          volume_name: "redis-cache-pvc",
-          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
-          size: 50,
-          provisioned_at: "2025-06-01T08:20:00Z",
-          replica_type: "Local NVMe",
-          status: "healthy"
-        }
-      ],
-      orphaned_spdk_volumes: [],
-      device_type: "NVMe"
-    },
-    {
-      id: "nvme1n1",
-      node: "worker-node-2",
-      pci_addr: "0000:3b:00.0",
-      capacity: 1024000000000,
-      capacity_gb: 1000,
-      allocated_space: 150,
-      free_space: 850,
-      free_space_display: "850GB",
-      healthy: true,
-      blobstore_initialized: true,
-      lvol_count: 2,
-      model: "Samsung SSD 980 PRO 1TB",
-      read_iops: 43000,
-      write_iops: 30000,
-      read_latency: 125,
-      write_latency: 185,
-      brought_online: "2025-06-01T08:00:00Z",
-      provisioned_volumes: [
-        {
-          volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
-          size: 100,
-          provisioned_at: "2025-06-01T08:15:00Z",
-          replica_type: "Remote NVMe-oF",
-          status: "healthy"
-        },
-        {
-          volume_name: "redis-cache-pvc",
-          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
-          size: 50,
-          provisioned_at: "2025-06-01T08:20:00Z",
-          replica_type: "Remote NVMe-oF",
-          status: "healthy"
-        }
-      ],
-      orphaned_spdk_volumes: [
-        {
-          spdk_volume_name: "orphaned_vol_123",
-          spdk_volume_uuid: "abc12345-def6-7890-abcd-ef1234567890",
-          size_blocks: 50331648,
-          size_gb: 25.50,
-          orphaned_since: "2025-06-01T10:00:00Z"
-        }
-      ],
-      device_type: "NVMe"
-    },
-    {
-      id: "nvme2n1",
-      node: "worker-node-3",
-      pci_addr: "0000:3b:00.0",
-      capacity: 1024000000000,
-      capacity_gb: 1000,
-      allocated_space: 100,
-      free_space: 900,
-      free_space_display: "900GB",
-      healthy: true,
-      blobstore_initialized: true,
-      lvol_count: 1,
-      model: "Samsung SSD 980 PRO 1TB",
-      read_iops: 41000,
-      write_iops: 28000,
-      read_latency: 130,
-      write_latency: 190,
-      brought_online: "2025-06-01T08:00:00Z",
-      provisioned_volumes: [
-        {
-          volume_name: "postgres-data-pvc",
-          volume_id: "pvc-12345678-1234-1234-1234-123456789abc",
-          size: 100,
-          provisioned_at: "2025-06-01T08:15:00Z",
-          replica_type: "Remote NVMe-oF",
-          status: "healthy"
-        },
-        {
-          volume_name: "redis-cache-pvc",
-          volume_id: "pvc-87654321-4321-4321-4321-cba987654321",
-          size: 50,
-          provisioned_at: "2025-06-01T08:15:00Z",
-          replica_type: "Remote NVMe-oF",
-          status: "rebuilding"
-        }
-      ],
-      orphaned_spdk_volumes: [],
-      device_type: "NVMe"
-    }
-  ],
-
-  raw_volumes: [
-    {
-      name: "old_test_volume",
-      uuid: "raw-12345678-1234-1234-1234-123456789abc",
-      node: "worker-node-2",
-      lvs_name: "lvs_worker-node-2-nvme1n1",
-      size_blocks: 104857600,
-      size_gb: 50.0,
-      is_managed: false
-    }
-  ],
-
-  nodes: ["worker-node-1", "worker-node-2", "worker-node-3"]
-};
 
 // Backend filter options interface
 export interface DashboardFilters {
@@ -731,140 +346,26 @@ const buildQueryString = (filters?: DashboardFilters): string => {
 
 // Enhanced hook implementation with API integration and backend filtering
 export const useDashboardData = (autoRefresh: boolean = true, filters?: DashboardFilters) => {
-  const [data, setData] = useState<DashboardData>({
-    volumes: [],
-    raw_volumes: [],
-    disks: [],
-    nodes: []
+  const query = useQuery({
+    queryKey: ['dashboard', filters ?? null],
+    queryFn: () => fetchDashboard(filters),
+    refetchInterval: autoRefresh ? 30_000 : false,
   });
-  const [loading, setLoading] = useState(true);
-  const [usingMockData, setUsingMockData] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  
-  // No need for complex pause logic - auto-refresh checkbox is managed automatically
 
-  const stats = useMemo((): DashboardStats => {
-    const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
-    const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
-    const failedVolumes = data.volumes.filter(v => v.state === 'Failed').length;
-    const faultedVolumes = degradedVolumes + failedVolumes;
-    
-    const volumesWithRebuilding = data.volumes.filter(v => 
-      v.replica_statuses.some(replica => 
-        replica.status === 'rebuilding' || 
-        replica.rebuild_progress !== null ||
-        replica.is_new_replica
-      ) || v.raid_status?.rebuild_info !== undefined
-    ).length;
-    
-    const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
-    const orphanedVolumes = data.raw_volumes.length;
-    
-    const healthyDisks = data.disks.filter(d => d.healthy).length;
-    const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
-
-    return {
-      totalVolumes: data.volumes.length + data.raw_volumes.length,
-      healthyVolumes,
-      degradedVolumes,
-      failedVolumes,
-      faultedVolumes,
-      volumesWithRebuilding,
-      localNVMeVolumes,
-      orphanedVolumes,
-      totalDisks: data.disks.length,
-      healthyDisks,
-      formattedDisks,
-    };
-  }, [data]);
-
-  const refreshData = useCallback(async () => {
-    try {
-      setLoading(true);
-      
-      // Build query string with filters for backend filtering
-      const queryString = buildQueryString(filters);
-      console.log(`[DASHBOARD] Fetching with backend filters: ${queryString || 'none'}`);
-      
-      // Try to fetch from API, fall back to mock data
-      try {
-        const response = await apiFetch(`/api/dashboard${queryString}`);
-        const contentType = response.headers.get("content-type");
-        if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
-          const dashboardData = await response.json();
-          // Transform backend data to match frontend interface if needed
-          const transformedData = transformBackendData(dashboardData);
-          setData(transformedData);
-          console.log(`[DASHBOARD] Received ${transformedData.volumes.length} volumes, ${transformedData.disks.length} disks from backend`);
-        } else {
-          // Fallback if the response is not ok or not JSON
-          throw new Error(response.ok ? 'Received non-JSON response' : `HTTP error! status: ${response.status}`);
-         }
-
-      } catch (apiError) {
-        // Never substitute fake data for a failed backend: a populated,
-        // healthy-looking dashboard during a real outage hides the outage
-        // (2026-06-12 incident). Keep the last real data on screen and
-        // surface the failure. Mock data remains available for local UI
-        // development only (vite dev server without a backend).
-        if (import.meta.env.DEV) {
-          console.warn('DEV: API not available, using mock data:', apiError);
-          const filtered = filters ? {
-            ...mockData,
-            volumes: filterVolumesByType(mockData.volumes, filters.volumeFilter || 'all'),
-            disks: mockData.disks.filter(d =>
-              (!filters.diskNode || d.node.toLowerCase().includes(filters.diskNode.toLowerCase())) &&
-              (filters.diskInitialized === undefined || d.blobstore_initialized === filters.diskInitialized)
-            )
-          } : mockData;
-          setData(filtered);
-          setUsingMockData(true);
-        } else {
-          console.error('Dashboard backend unreachable:', apiError);
-          setConnectionError(apiError instanceof Error ? apiError.message : String(apiError));
-        }
-        return;
-      }
-      setConnectionError(null);
-      setUsingMockData(false);
-    } catch (error) {
-      console.error('Failed to fetch dashboard data:', error);
-      setConnectionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [filters]);
-
-  useEffect(() => {
-    refreshData();
-  }, [refreshData]);
-
-  useEffect(() => {
-    if (!autoRefresh) return;
-
-    const interval = setInterval(() => {
-      console.log('✅ [DASHBOARD_AUTO_REFRESH] Running main dashboard auto-refresh');
-      refreshData();
-    }, 30000); // Refresh every 30 seconds
-    
-    return () => clearInterval(interval);
-  }, [autoRefresh, refreshData]);
-  
-  // Refresh when filters change
-  useEffect(() => {
-    if (filters) {
-      console.log('[DASHBOARD] Filters changed, refreshing data');
-      refreshData();
-    }
-  }, [filters, refreshData]);
+  const data = query.data ?? EMPTY_DASHBOARD;
+  const stats = useMemo(() => computeStats(data), [data]);
 
   return {
     data,
-    loading,
+    // Only "loading" before the first successful fetch; a refetch keeps the
+    // prior data visible rather than flashing a spinner.
+    loading: query.isLoading,
     stats,
-    refreshData,
-    usingMockData,
-    connectionError
+    refreshData: query.refetch,
+    // Mock data is gone; kept in the return shape as a constant so existing
+    // consumers compile unchanged (removed from the UI in a follow-up).
+    usingMockData: false,
+    connectionError: query.isError ? (query.error as Error).message : null,
   };
 };
 
@@ -1105,8 +606,7 @@ export interface NodeDiskData {
 export const useDiskSetup = () => {
   const [nodeData, setNodeData] = useState<Record<string, NodeDiskData>>({});
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
-  
-  // No need for complex pause logic - auto-refresh checkbox is managed automatically
+  const queryClient = useQueryClient();
 
   const refreshNodeDisks = useCallback(async (nodeName: string) => {
     console.log(`🚨 [REFRESH_TRIGGER] refreshNodeDisks called for: ${nodeName}`);
@@ -1186,6 +686,14 @@ export const useDiskSetup = () => {
     }
   }, []);
 
+  // Post-mutation reconcile: the node ops await backend completion, so refresh
+  // the node's disks immediately (no timing guess) and invalidate the main
+  // dashboard query, whose LVS/volume counts a disk op may have changed.
+  const refreshAfterMutation = useCallback(async (nodeName: string) => {
+    await refreshNodeDisks(nodeName);
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+  }, [refreshNodeDisks, queryClient]);
+
   const setupDisksOnNode = useCallback(async (
     nodeName: string, 
     request: DiskSetupRequest
@@ -1202,7 +710,7 @@ export const useDiskSetup = () => {
         
         // Refresh node data after setup to show new status
         if (result.success) {
-          setTimeout(() => refreshNodeDisks(nodeName), 2000);
+          await refreshAfterMutation(nodeName);
         }
         
         return result;
@@ -1233,7 +741,7 @@ export const useDiskSetup = () => {
         completed_at: new Date().toISOString()
       };
     }
-  }, [refreshNodeDisks]);
+  }, [refreshAfterMutation]);
 
   const resetDisksOnNode = useCallback(async (
     nodeName: string, 
@@ -1251,7 +759,7 @@ export const useDiskSetup = () => {
         
         // Refresh node data after reset to show new status
         if (result.success) {
-          setTimeout(() => refreshNodeDisks(nodeName), 2000);
+          await refreshAfterMutation(nodeName);
         }
         
         return result;
@@ -1278,7 +786,7 @@ export const useDiskSetup = () => {
         completed_at: new Date().toISOString()
       };
     }
-  }, [refreshNodeDisks, setNodeData]);
+  }, [refreshAfterMutation]);
 
   const initializeBlobstoreOnNode = useCallback(async (
     nodeName: string, 
@@ -1310,33 +818,28 @@ export const useDiskSetup = () => {
         
         // Refresh node data after initialization to show new status
         if (normalizedResult.success) {
-          setTimeout(() => refreshNodeDisks(nodeName), 2000);
+          await refreshAfterMutation(nodeName);
         }
         
         return normalizedResult;
       } else {
-        throw new Error(`Initialize blobstore request failed: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Initialize blobstore request failed: ${response.statusText}`);
       }
     } catch (apiError) {
-      console.warn(`Disk initialize blobstore API not available for ${nodeName}, using mock result:`, apiError);
-      
-      // Mock successful initialization for demo
-      const mockResult: DiskSetupResult = {
-        success: true,
-        setup_disks: pciAddresses,
-        failed_disks: [],
-        warnings: ["This is a mock result for development"],
+      // Never fabricate success for a destructive/provisioning op: report the
+      // real failure so the operator sees it.
+      const errorMsg = apiError instanceof Error ? apiError.message : String(apiError);
+      console.error(`Disk initialize blobstore failed for ${nodeName}:`, errorMsg);
+      return {
+        success: false,
+        setup_disks: [],
+        failed_disks: pciAddresses.map(addr => [addr, errorMsg]),
+        warnings: [`Initialize failed: ${errorMsg}`],
         completed_at: new Date().toISOString()
       };
-
-      // Simulate progress updates
-      setTimeout(() => {
-        mockResult.warnings.push("Blobstore initialization completed (mock)");
-      }, 1000);
-
-      return mockResult;
     }
-  }, [refreshNodeDisks]);
+  }, [refreshAfterMutation]);
 
   const deleteDiskOnNode = useCallback(async (
     nodeName: string,
@@ -1354,59 +857,26 @@ export const useDiskSetup = () => {
         
         // Refresh node data after deletion to show new status
         if (result.success) {
-          setTimeout(() => refreshNodeDisks(nodeName), 2000);
+          await refreshAfterMutation(nodeName);
         }
         
         return result;
       } else {
-        throw new Error(`Delete request failed: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Delete request failed: ${response.statusText}`);
       }
     } catch (apiError) {
-      console.warn(`Disk delete API not available for ${nodeName}, using mock result:`, apiError);
-      
-      // Mock successful deletion for demo
-      const mockResult = {
-        success: true,
-        message: 'SPDK disk successfully deleted and reset to kernel mode',
-        deleted_volumes: [],
-        cleanup_performed: {
-          lvs_deleted: true,
-          volumes_deleted: 0,
-          disk_reset: true
-        },
+      // Never fabricate success for a destructive op.
+      const errorMsg = apiError instanceof Error ? apiError.message : String(apiError);
+      console.error(`Disk delete failed for ${nodeName}:`, errorMsg);
+      return {
+        success: false,
+        error: errorMsg,
+        message: `Disk delete failed: ${errorMsg}`,
         completed_at: new Date().toISOString()
       };
-
-      // Simulate the deletion by updating local state
-      setTimeout(() => {
-        setNodeData(prev => {
-          const nodeDisks = prev[nodeName]?.disks || [];
-          const updatedDisks = nodeDisks.map(disk => {
-            if (disk.pci_address === pciAddress) {
-              return {
-                ...disk,
-                driver: 'nvme',
-                spdk_ready: false,
-                mounted_partitions: []
-              };
-            }
-            return disk;
-          });
-
-          return {
-            ...prev,
-            [nodeName]: {
-              ...prev[nodeName],
-              disks: updatedDisks,
-              last_updated: new Date().toISOString()
-            }
-          };
-        });
-      }, 1000);
-
-      return mockResult;
     }
-  }, [refreshNodeDisks, setNodeData]);
+  }, [refreshAfterMutation]);
 
   const createMemoryDisk = useCallback(async (
     nodeName: string,
@@ -1425,7 +895,7 @@ export const useDiskSetup = () => {
 
       if (response.ok && result.success) {
         // Refresh node disks after creating memory disk
-        setTimeout(() => refreshNodeDisks(nodeName), 1000);
+        await refreshAfterMutation(nodeName);
         return { success: true, bdev_name: result.bdev_name };
       } else {
         return { success: false, error: result.error || 'Failed to create memory disk' };
@@ -1434,7 +904,7 @@ export const useDiskSetup = () => {
       console.error('Error creating memory disk:', err);
       return { success: false, error: String(err) };
     }
-  }, [refreshNodeDisks]);
+  }, [refreshAfterMutation]);
 
   const deleteMemoryDisk = useCallback(async (
     nodeName: string,
@@ -1451,7 +921,7 @@ export const useDiskSetup = () => {
 
       if (response.ok && result.success) {
         // Refresh node disks after deleting memory disk
-        setTimeout(() => refreshNodeDisks(nodeName), 1000);
+        await refreshAfterMutation(nodeName);
         return { success: true };
       } else {
         return { success: false, error: result.error || 'Failed to delete memory disk' };
@@ -1460,7 +930,7 @@ export const useDiskSetup = () => {
       console.error('Error deleting memory disk:', err);
       return { success: false, error: String(err) };
     }
-  }, [refreshNodeDisks]);
+  }, [refreshAfterMutation]);
 
   return {
     nodeData,

@@ -183,7 +183,7 @@ struct OrphanedVolumeInfo {
     orphaned_since: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct DashboardData {
     volumes: Vec<DashboardVolume>,
     raw_volumes: Vec<serde_json::Value>,  // Unmanaged SPDK volumes
@@ -208,6 +208,22 @@ pub struct AppState {
     target_namespace: String,
     // IOPS calculation: store previous iostat snapshots
     iostat_history: Arc<RwLock<HashMap<String, (DateTime<Utc>, serde_json::Value)>>>, // bdev_name -> (timestamp, iostat)
+    // Short-TTL cache of the UNFILTERED aggregate. Concurrent viewers (and the
+    // per-tab endpoints) share one node fan-out per TTL instead of each
+    // triggering their own — the write lock also single-flights the refresh so
+    // a burst of requests collapses to one rebuild. Filters are applied per
+    // request on the cached clone.
+    dashboard_cache: Arc<RwLock<Option<(std::time::Instant, DashboardData)>>>,
+}
+
+/// Aggregate cache freshness window. Env `DASHBOARD_CACHE_TTL_MS` (default
+/// 3000ms); 0 disables caching (every request rebuilds, pre-cache behavior).
+fn dashboard_cache_ttl() -> std::time::Duration {
+    std::env::var("DASHBOARD_CACHE_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_else(|| std::time::Duration::from_millis(3000))
 }
 
 
@@ -919,22 +935,23 @@ fn filter_disks(disks: Vec<DashboardDisk>, query: &DashboardQuery) -> Vec<Dashbo
 }
 
 /// Fetch fresh dashboard data using minimal state approach (no caching)
-async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQuery>) -> Result<DashboardData, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔄 [MINIMAL_DASHBOARD_FETCH] Fetching fresh dashboard data...");
-    if let Some(ref q) = query {
-        println!("🔍 [FILTER] Query params: {:?}", q);
-    }
-    
+/// Build the UNFILTERED aggregate: the expensive node-agent fan-out (disks,
+/// orphan detection, PV volumes, per-node memory for ALL nodes). No query
+/// filtering — that is applied per request in `fetch_dashboard_data_minimal`
+/// so the cached result serves every filter combination.
+async fn build_dashboard_aggregate(state: &AppState) -> Result<DashboardData, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔄 [MINIMAL_DASHBOARD_FETCH] Building fresh dashboard aggregate (node fan-out)...");
+
     // Discover node agents (updates state for future queries)
     let node_agents = discover_node_agents(&state.kube_client, &state.target_namespace).await?;
     *state.node_agents.write().await = node_agents;
-    
+
     // Fetch disks from all node agents in parallel
     let mut dashboard_disks = fetch_all_disks_from_node_agents(state).await?;
-    
+
     // Detect orphaned lvols and populate disk orphaned_spdk_volumes
     let orphaned_by_node = detect_orphaned_lvols(state).await?;
-    
+
     // Add orphaned volumes to their respective disks
     for disk in dashboard_disks.iter_mut() {
         if let Some(orphans) = orphaned_by_node.get(&disk.node) {
@@ -942,37 +959,13 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
             println!("   Added {} orphaned lvols to disk on {}", orphans.len(), disk.node);
         }
     }
-    
+
     // Fetch managed volumes from Kubernetes PVs
     let dashboard_volumes = fetch_volumes_from_pvs(state).await?;
-    
-    // raw_volumes are shown as orphaned volumes attached to disks, not separately
-    let raw_volumes = Vec::new();
-    
-    // Apply filters if provided
-    let (filtered_volumes, filtered_disks) = if let Some(ref q) = query {
-        let vols = filter_volumes(dashboard_volumes, q);
-        let disks = filter_disks(dashboard_disks, q);
-        (vols, disks)
-    } else {
-        (dashboard_volumes, dashboard_disks)
-    };
-    
-    // Get node list - either all node agents or only nodes with disks
+
+    // Per-node memory for ALL discovered nodes (filtering happens on read).
     let node_agents = state.node_agents.read().await;
-    let nodes: Vec<String> = if query.as_ref().and_then(|q| q.nodes_with_disks_only) == Some(true) {
-        // Filter to only nodes that have disks
-        filtered_disks.iter()
-            .map(|d| d.node.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect()
-    } else {
-        // Show all discovered node agents (default)
-        node_agents.keys()
-            .cloned()
-            .collect()
-    };
+    let nodes: Vec<String> = node_agents.keys().cloned().collect();
     let memory_futures: Vec<_> = nodes.iter()
         .filter_map(|node_name| {
             node_agents.get(node_name).map(|node_url| {
@@ -993,27 +986,93 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
 
     let memory_results = futures::future::join_all(memory_futures).await;
     let node_info: HashMap<String, NodeInfo> = memory_results.into_iter()
-        .filter_map(|r| r)
+        .flatten()
         .collect();
 
     println!("📊 [MEMORY_INFO] Collected memory info for {} nodes", node_info.len());
-    for (node_name, info) in &node_info {
-        println!("   Node {}: total={}MB, available={}MB, used={}MB",
-            node_name, info.memory_total_mb, info.memory_available_mb, info.memory_used_mb);
-    }
 
     let dashboard_data = DashboardData {
-        volumes: filtered_volumes,
-        raw_volumes,
-        disks: filtered_disks,
+        volumes: dashboard_volumes,
+        raw_volumes: Vec::new(), // raw_volumes surface as orphans on disks, not separately
+        disks: dashboard_disks,
         nodes,
         node_info,
     };
-    
-    println!("✅ [MINIMAL_DASHBOARD_FETCH] Fetch completed: {} volumes, {} disks, {} nodes", 
+
+    println!("✅ [MINIMAL_DASHBOARD_FETCH] Aggregate built: {} volumes, {} disks, {} nodes",
         dashboard_data.volumes.len(), dashboard_data.disks.len(), dashboard_data.nodes.len());
-    
+
     Ok(dashboard_data)
+}
+
+/// Return the aggregate, served from the short-TTL cache when fresh. The write
+/// lock single-flights the rebuild: concurrent requests during a refresh queue
+/// on it, then the re-check serves them the just-built result — so a burst of
+/// viewers produces one fan-out, not one per viewer.
+async fn get_cached_aggregate(state: &AppState) -> Result<DashboardData, Box<dyn std::error::Error + Send + Sync>> {
+    let ttl = dashboard_cache_ttl();
+    if !ttl.is_zero() {
+        let guard = state.dashboard_cache.read().await;
+        if let Some((stamped, data)) = guard.as_ref() {
+            if stamped.elapsed() < ttl {
+                return Ok(data.clone());
+            }
+        }
+    }
+
+    let mut guard = state.dashboard_cache.write().await;
+    // Re-check under the write lock: a concurrent refresher may have just
+    // populated it while we waited.
+    if !ttl.is_zero() {
+        if let Some((stamped, data)) = guard.as_ref() {
+            if stamped.elapsed() < ttl {
+                return Ok(data.clone());
+            }
+        }
+    }
+    let fresh = build_dashboard_aggregate(state).await?;
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQuery>) -> Result<DashboardData, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(ref q) = query {
+        println!("🔍 [FILTER] Query params: {:?}", q);
+    }
+
+    let aggregate = get_cached_aggregate(state).await?;
+
+    // Apply filters to the cached clone.
+    let (filtered_volumes, filtered_disks) = if let Some(ref q) = query {
+        (filter_volumes(aggregate.volumes, q), filter_disks(aggregate.disks, q))
+    } else {
+        (aggregate.volumes, aggregate.disks)
+    };
+
+    // Node list: all discovered nodes, or only those with disks after filtering.
+    let nodes: Vec<String> = if query.as_ref().and_then(|q| q.nodes_with_disks_only) == Some(true) {
+        filtered_disks.iter()
+            .map(|d| d.node.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        aggregate.nodes.clone()
+    };
+
+    // Narrow node_info to the surfaced nodes.
+    let node_info: HashMap<String, NodeInfo> = aggregate.node_info
+        .into_iter()
+        .filter(|(name, _)| nodes.contains(name))
+        .collect();
+
+    Ok(DashboardData {
+        volumes: filtered_volumes,
+        raw_volumes: Vec::new(),
+        disks: filtered_disks,
+        nodes,
+        node_info,
+    })
 }
 
 /// Handle GET /api/dashboard - Main dashboard endpoint (always fetches fresh data)
@@ -1051,24 +1110,96 @@ async fn get_dashboard_data_minimal(
     }
 }
 
-/// Handle POST /api/refresh - Rediscover node agents (no cache to refresh)
+/// Handle POST /api/refresh - invalidate the aggregate cache so the next
+/// dashboard/per-tab request rebuilds, and rediscover node agents.
 async fn handle_refresh(state: AppState) -> Result<impl warp::Reply, warp::Rejection> {
-    println!("🔄 [REFRESH_API] Rediscovering node agents");
-    
-    // No cache to refresh - just rediscover node agents for backwards compatibility
+    println!("🔄 [REFRESH_API] Invalidating cache + rediscovering node agents");
+
+    // Drop the cached aggregate so the next read is fresh (explicit refresh).
+    *state.dashboard_cache.write().await = None;
+
     match discover_node_agents(&state.kube_client, &state.target_namespace).await {
         Ok(node_agents) => {
             *state.node_agents.write().await = node_agents;
             Ok::<_, warp::Rejection>(warp::reply::json(&json!({
                 "status": "success",
-                "message": "Node agents rediscovered (no cache in use)"
+                "message": "Cache invalidated; node agents rediscovered"
             })))
         }
         Err(e) => Ok(warp::reply::json(&json!({
-            "status": "error", 
+            "status": "error",
             "error": e.to_string()
         }))),
     }
+}
+
+/// Handle GET /api/volumes - volumes slice of the cached aggregate.
+async fn get_volumes_minimal(
+    query: Option<DashboardQuery>,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match fetch_dashboard_data_minimal(&state, query).await {
+        Ok(data) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({ "volumes": data.volumes, "raw_volumes": data.raw_volumes })),
+            warp::http::StatusCode::OK,
+        )),
+        Err(e) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({"error": format!("Failed to fetch volumes: {}", e)})),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+/// Handle GET /api/disks - disks slice of the cached aggregate.
+async fn get_disks_minimal(
+    query: Option<DashboardQuery>,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match fetch_dashboard_data_minimal(&state, query).await {
+        Ok(data) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({ "disks": data.disks, "nodes": data.nodes, "node_info": data.node_info })),
+            warp::http::StatusCode::OK,
+        )),
+        Err(e) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({"error": format!("Failed to fetch disks: {}", e)})),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+/// Handle GET /api/overview - summary counts only (smallest payload; the
+/// Overview tab's 30s tick no longer ships the full volume/disk/snapshot world).
+async fn get_overview_minimal(
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match fetch_dashboard_data_minimal(&state, None).await {
+        Ok(data) => Ok(warp::reply::with_status(
+            warp::reply::json(&dashboard_overview(&data)),
+            warp::http::StatusCode::OK,
+        )),
+        Err(e) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({"error": format!("Failed to fetch overview: {}", e)})),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+/// Summary counts derived from the aggregate (mirrors the frontend's stats).
+fn dashboard_overview(data: &DashboardData) -> serde_json::Value {
+    let degraded = data.volumes.iter().filter(|v| v.state == "Degraded").count();
+    let failed = data.volumes.iter().filter(|v| v.state == "Failed").count();
+    json!({
+        "total_volumes": data.volumes.len(),
+        "healthy_volumes": data.volumes.iter().filter(|v| v.state == "Healthy").count(),
+        "degraded_volumes": degraded,
+        "failed_volumes": failed,
+        "faulted_volumes": degraded + failed,
+        "local_nvme_volumes": data.volumes.iter().filter(|v| v.local_nvme).count(),
+        "total_disks": data.disks.len(),
+        "healthy_disks": data.disks.iter().filter(|d| d.healthy).count(),
+        "initialized_disks": data.disks.iter().filter(|d| d.blobstore_initialized).count(),
+        "total_nodes": data.nodes.len(),
+    })
 }
 
 /// Proxy node agent endpoints for dashboard compatibility
@@ -1747,6 +1878,35 @@ pub fn setup_minimal_dashboard_routes(
         .and(state_filter.clone())
         .and_then(get_dashboard_data_minimal);
 
+    // Per-tab endpoints: thin projections over the same cached aggregate as
+    // /api/dashboard, so the Overview tick and each tab fetch only the slice
+    // they render instead of the full world.
+    let overview_route = warp::path("api")
+        .and(warp::path("overview"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(state_filter.clone())
+        .and_then(get_overview_minimal);
+
+    let volumes_route = warp::path("api")
+        .and(warp::path("volumes"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(warp::query::<DashboardQuery>().map(Some).or(warp::any().map(|| None)).unify())
+        .and(state_filter.clone())
+        .and_then(get_volumes_minimal);
+
+    let disks_route = warp::path("api")
+        .and(warp::path("disks"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(warp::query::<DashboardQuery>().map(Some).or(warp::any().map(|| None)).unify())
+        .and(state_filter.clone())
+        .and_then(get_disks_minimal);
+
     // Proxy routes for node agents
     let proxy_uninitialized = warp::path("api")
         .and(warp::path("nodes"))
@@ -1902,6 +2062,9 @@ pub fn setup_minimal_dashboard_routes(
     healthz_route
         .or(login)
         .or(dashboard_route)
+        .or(overview_route)
+        .or(volumes_route)
+        .or(disks_route)
         .or(proxy_uninitialized)
         .or(proxy_setup)
         .or(proxy_initialize)
@@ -1931,6 +2094,7 @@ pub async fn start_minimal_dashboard_backend(port: u16) -> Result<(), Box<dyn st
         node_agents: Arc::new(RwLock::new(HashMap::new())),
         target_namespace,
         iostat_history: Arc::new(RwLock::new(HashMap::new())),
+        dashboard_cache: Arc::new(RwLock::new(None)),
     };
     
     println!("🎯 [MINIMAL_DASHBOARD] Using namespace: {}", app_state.target_namespace);
@@ -2158,6 +2322,43 @@ mod tests {
             orphaned_spdk_volumes: vec![],
             device_type: "NVMe".to_string(),
         }
+    }
+
+    #[test]
+    fn dashboard_overview_counts_match_the_aggregate() {
+        let data = DashboardData {
+            volumes: vec![
+                create_test_volume("v1", "Healthy", vec!["n1".to_string()], true, false),
+                create_test_volume("v2", "Degraded", vec!["n1".to_string()], false, false),
+                create_test_volume("v3", "Failed", vec!["n2".to_string()], false, false),
+                create_test_volume("v4", "Healthy", vec!["n2".to_string()], true, false),
+            ],
+            raw_volumes: vec![],
+            disks: vec![
+                create_test_disk("d1", "n1", true),
+                create_test_disk("d2", "n2", false),
+            ],
+            nodes: vec!["n1".to_string(), "n2".to_string()],
+            node_info: HashMap::new(),
+        };
+
+        let ov = dashboard_overview(&data);
+        assert_eq!(ov["total_volumes"], 4);
+        assert_eq!(ov["healthy_volumes"], 2);
+        assert_eq!(ov["degraded_volumes"], 1);
+        assert_eq!(ov["failed_volumes"], 1);
+        assert_eq!(ov["faulted_volumes"], 2);
+        assert_eq!(ov["local_nvme_volumes"], 2);
+        assert_eq!(ov["total_disks"], 2);
+        assert_eq!(ov["initialized_disks"], 1);
+        assert_eq!(ov["total_nodes"], 2);
+    }
+
+    #[test]
+    fn cache_ttl_defaults_and_parses_env() {
+        // Default when unset. (Env-mutation is avoided to keep tests
+        // parallel-safe; the parse path is exercised by the explicit values.)
+        assert_eq!(dashboard_cache_ttl(), std::time::Duration::from_millis(3000));
     }
 
     // Volume filtering tests

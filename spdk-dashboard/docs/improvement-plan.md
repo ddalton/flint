@@ -73,25 +73,34 @@ cannot invoke destructive endpoints; no secret material in the bundle.
 
 ## Phase 1 — Data layer
 
-- Adopt TanStack Query. Split `useDashboardData.ts` into per-domain
-  hooks: `useDashboard`, `useDiskOps`, `useMemoryDisks`,
-  `useSnapshots`, `useAuth` (own file).
-- Replace every `setTimeout`-based post-op refresh with query
-  invalidation on mutation success.
-- Generate TS types from the backend: annotate warp handlers with
-  utoipa → OpenAPI spec → `openapi-typescript`. Frontend/backend drift
-  becomes a compile error. CI check that the generated types are
-  current.
-- Delete `mockData` (Decision 1); add MSW with the same fixtures for
-  dev/test.
-- Backend: split `/api/dashboard` into per-tab endpoints
-  (`/api/overview`, `/api/volumes`, `/api/disks`, `/api/snapshots`) so
-  a 30 s Overview tick stops re-shipping the snapshot world; add a
-  short-TTL (2–5 s) aggregate cache so concurrent viewers share one
-  node fan-out instead of each triggering their own.
+Status (2026-07-02): frontend + backend cache DONE (uncommitted, pending
+the phase1 image roll); OpenAPI codegen deferred to its own task.
 
-Acceptance: no `setTimeout` refreshes; only the active tab's query
-polls; N browser tabs produce ~1× node-agent fan-out per TTL, not N×.
+- [DONE] Adopt TanStack Query; `useDashboardData` reimplemented as a
+  `useQuery` (30 s `refetchInterval`, keeps last good data, no blanking).
+  `useDiskSetup` mutations now await a direct refresh + invalidate the
+  `['dashboard']` query instead of guessing with `setTimeout(…, 2000)`.
+  (Full per-domain hook *file* split deferred to Phase 3 component
+  breakup to avoid churning the many type imports.)
+- [DONE] Deleted `mockData` and the two mock-**success** fallbacks in
+  disk init/delete (they reported success while doing nothing) and the
+  snapshots-tab mock fixtures; all views now show honest errors and keep
+  last-known-good data. (MSW dev fixtures: optional follow-up; the vite
+  dev proxy already points at a real backend.)
+- [DONE] Backend: short-TTL aggregate cache (`DASHBOARD_CACHE_TTL_MS`,
+  default 3000 ms) with write-lock single-flight, so a burst of viewers
+  collapses to one node fan-out; `/api/refresh` invalidates it. Per-tab
+  projections `/api/overview` (counts only), `/api/volumes`, `/api/disks`
+  serve slices of the same cached aggregate (ready for the Phase 2
+  per-domain queries to adopt; the SPA still uses `/api/dashboard`, now
+  cache-cheap).
+- [DEFERRED → own task] Generate TS types from the backend via
+  utoipa → OpenAPI → `openapi-typescript` with a CI freshness check.
+  Separable; blocks nothing; done deliberately rather than rushed.
+
+Acceptance: no `setTimeout` refreshes (met); N browser tabs produce ~1×
+node-agent fan-out per TTL, not N× (met via the cache — validate live on
+the phase1 roll).
 
 ## Phase 2 — Surface the self-healing engine + operator workflows
 
