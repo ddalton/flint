@@ -9,7 +9,7 @@ POST), `/healthz` open. Phase 1 DONE (9a6623c) and LIVE-VALIDATED
 auth-gated, projections consistent with the aggregate, cache
 single-flight proven from backend logs — 12 concurrent requests
 across 4 endpoints → exactly 1 node fan-out (125 ms build), repeat
-burst within TTL → 0. OpenAPI types remain deferred.
+burst within TTL → 0. OpenAPI types DONE 2026-07-03 (f753a8c).
 Assessment basis: `spdk-dashboard/` at commit 042b805 (~13k LOC TS/TSX,
 React 19 + Vite + Tailwind 3, nginx → warp backend
 `spdk-csi-driver/src/spdk_dashboard_backend_minimal.rs`, ~2.5k LOC).
@@ -104,9 +104,22 @@ own task.
   serve slices of the same cached aggregate (ready for the Phase 2
   per-domain queries to adopt; the SPA still uses `/api/dashboard`, now
   cache-cheap).
-- [DEFERRED → own task] Generate TS types from the backend via
+- [DONE 2026-07-03 (f753a8c)] Generate TS types from the backend via
   utoipa → OpenAPI → `openapi-typescript` with a CI freshness check.
-  Separable; blocks nothing; done deliberately rather than rushed.
+  Backend payload structs derive ToSchema and the ad-hoc `json!`
+  responses became typed structs (byte-shape identical), so the spec
+  is enforced by construction; `dashboard-openapi` bin emits
+  `api/openapi.json` (3.1, 14 paths / 36 schemas); `npm run gen:api`
+  produces `src/api/schema.d.ts`; frontend wire types are aliases with
+  the deliberate literal-union narrowings as visible Omit-overrides;
+  `scripts/check-api-types.sh` is the freshness gate (CI in Phase 3).
+  The compiler then surfaced and we removed real drift: phantom
+  `disk_ref`/`lvol_uuid`/`health_status`/`bdev_name` fields, tuple-shaped
+  `failed_disks`, a topology warning that fired unconditionally, and
+  the never-read Disk Setup advanced options (huge pages / driver
+  override). Live-validated on runj: all 9 exercised endpoint
+  responses conform to the generated schemas and contain no
+  undocumented keys — the spec matches the deployed wire format.
 
 Acceptance: no `setTimeout` refreshes (met); N browser tabs produce ~1×
 node-agent fan-out per TTL, not N× (met via the cache — validate live on
