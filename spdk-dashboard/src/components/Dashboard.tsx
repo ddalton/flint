@@ -12,6 +12,7 @@ import { DisksTable } from './tables/DisksTable';
 import { FilteredNodesView } from './nodes/FilteredNodesView';
 import { DiskSetupTab } from './setup/DiskSetupTab';
 import { EnhancedSnapshotsTab } from './snapshots/EnhancedSnapshotsTab';
+import { EventsTab } from './events/EventsTab';
 import RemoteStorageTab from './storage/RemoteStorageTab';
 
 interface DashboardProps {
@@ -263,6 +264,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
             onShowNodesWithDisksOnlyChange={onShowNodesWithDisksOnlyChange}
           />
         );
+
+      case 'events':
+        return <EventsTab />;
 
       case 'snapshots':
         return <EnhancedSnapshotsTab />;

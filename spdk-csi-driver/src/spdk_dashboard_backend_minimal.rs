@@ -683,6 +683,107 @@ async fn fetch_lvols_from_node(node_url: &str, node_name: &str) -> Result<Vec<se
     }
 }
 
+/// A flint engine event projected for the dashboard timeline (2c).
+#[derive(Serialize, Debug, Clone)]
+struct DashboardEvent {
+    timestamp: Option<String>,
+    event_type: String,
+    reason: String,
+    volume: String,
+    message: String,
+    category: String,
+    reporting_instance: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct WindowStep {
+    name: String,
+    ms: u64,
+}
+
+/// A completed hot-rejoin window parsed from a HotRejoinSucceeded event —
+/// the after-the-fact record of the sub-2s window the 2a indicator cannot
+/// catch live.
+#[derive(Serialize, Debug, Clone)]
+struct HotRejoinWindow {
+    timestamp: Option<String>,
+    volume: String,
+    node: String,
+    raid: String,
+    epoch: String,
+    window_ms: u64,
+    steps: Vec<WindowStep>,
+    path: String,
+    estimator_bytes: Option<u64>,
+}
+
+fn categorize_event_reason(reason: &str) -> &'static str {
+    if reason.starts_with("HotRejoin") {
+        "hot_rejoin"
+    } else if reason.starts_with("VolumeDataPath") {
+        "data_path"
+    } else if reason.starts_with("Cutover") {
+        "cutover"
+    } else if reason.starts_with("Epoch") {
+        "epoch"
+    } else if reason.starts_with("Replica") || reason == "StandbyAdmissionDeferred" {
+        "catchup"
+    } else if reason == "VolumeDegraded" {
+        "health"
+    } else {
+        "other"
+    }
+}
+
+/// Parse a HotRejoinSucceeded message (hot_rejoin.rs emit format):
+/// "Replica on {node} hot-rejoined raid {raid} at {ef} in {N}ms
+///  ({step}={n}ms {step}={n}ms ...); <inline tail with estimator | esnap tail>"
+/// Step names contain spaces ("cut E_f", "fenced final delta") but never '=',
+/// so segments split on "ms " and names rsplit on '='.
+fn parse_hot_rejoin_window(
+    volume: &str,
+    timestamp: Option<String>,
+    message: &str,
+) -> Option<HotRejoinWindow> {
+    let rest = message.strip_prefix("Replica on ")?;
+    let (node, rest) = rest.split_once(" hot-rejoined raid ")?;
+    let (raid, rest) = rest.split_once(" at ")?;
+    let (epoch, rest) = rest.split_once(" in ")?;
+    let (window_ms, rest) = rest.split_once("ms (")?;
+    let window_ms: u64 = window_ms.trim().parse().ok()?;
+    let (detail, tail) = rest.split_once(");")?;
+    let steps: Vec<WindowStep> = detail
+        .split("ms ")
+        .filter_map(|seg| {
+            let (name, ms) = seg.trim().trim_end_matches("ms").rsplit_once('=')?;
+            Some(WindowStep {
+                name: name.trim().to_string(),
+                ms: ms.trim().parse().ok()?,
+            })
+        })
+        .collect();
+    let (path, estimator_bytes) = if tail.contains("inline") {
+        let est = tail
+            .split_once(" bytes est.")
+            .and_then(|(before, _)| before.rsplit_once('('))
+            .and_then(|(_, n)| n.trim().parse().ok());
+        ("inline", est)
+    } else {
+        ("esnap", None)
+    };
+    Some(HotRejoinWindow {
+        timestamp,
+        volume: volume.to_string(),
+        node: node.to_string(),
+        raid: raid.to_string(),
+        epoch: epoch.to_string(),
+        window_ms,
+        steps,
+        path: path.to_string(),
+        estimator_bytes,
+    })
+}
+
 /// Epochs are named strings ("epoch-<vol>-<n>"), not counters: lag is the
 /// positional distance from `last_epoch` to `current_epoch` in the recorded
 /// epoch history, falling back to the trailing counter in the names when the
@@ -1254,6 +1355,93 @@ async fn get_dashboard_data_minimal(
             Ok(warp::reply::with_status(
                 warp::reply::json(&json!({"error": format!("Failed to fetch dashboard data: {}", e)})),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    volume: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Handle GET /api/events - the flint engine event timeline plus parsed
+/// hot-rejoin windows. One namespaced Event list per request (the engine
+/// emits all PV events into "default"); no node fan-out, so uncached.
+async fn get_events_minimal(
+    query: EventsQuery,
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    use k8s_openapi::api::core::v1::Event;
+
+    let events_api: Api<Event> = Api::namespaced(state.kube_client.clone(), "default");
+    let lp = ListParams::default().fields("involvedObject.kind=PersistentVolume");
+    match events_api.list(&lp).await {
+        Ok(list) => {
+            let mut events: Vec<DashboardEvent> = list
+                .items
+                .iter()
+                .filter_map(|e| {
+                    let flint_emitter = e
+                        .reporting_component
+                        .as_deref()
+                        .map(|c| c.starts_with("flint.csi.storage.io"))
+                        .unwrap_or(false);
+                    if !flint_emitter {
+                        return None;
+                    }
+                    let volume = e.involved_object.name.clone().unwrap_or_default();
+                    if let Some(want) = &query.volume {
+                        if &volume != want {
+                            return None;
+                        }
+                    }
+                    let reason = e.reason.clone().unwrap_or_default();
+                    let timestamp = e
+                        .event_time
+                        .as_ref()
+                        .map(|t| t.0.to_string())
+                        .or_else(|| e.last_timestamp.as_ref().map(|t| t.0.to_string()))
+                        .or_else(|| {
+                            e.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string())
+                        });
+                    Some(DashboardEvent {
+                        timestamp,
+                        event_type: e.type_.clone().unwrap_or_default(),
+                        category: categorize_event_reason(&reason).to_string(),
+                        reason,
+                        volume,
+                        message: e.message.clone().unwrap_or_default(),
+                        reporting_instance: e.reporting_instance.clone().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            // Newest first (RFC3339 UTC strings sort chronologically).
+            events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+            // Windows come from the full filtered set, before the event-list
+            // cap, so a recent window is never dropped by timeline volume.
+            let windows: Vec<HotRejoinWindow> = events
+                .iter()
+                .filter(|e| e.reason == "HotRejoinSucceeded")
+                .filter_map(|e| parse_hot_rejoin_window(&e.volume, e.timestamp.clone(), &e.message))
+                .take(50)
+                .collect();
+
+            let limit = query.limit.unwrap_or(200).min(1000);
+            events.truncate(limit);
+
+            Ok(warp::reply::with_status(
+                warp::reply::json(&json!({ "events": events, "windows": windows })),
+                warp::http::StatusCode::OK,
+            ))
+        }
+        Err(e) => {
+            println!("❌ [EVENTS_API] Failed to list events: {}", e);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&json!({"error": format!("Failed to list events: {}", e)})),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
         }
     }
@@ -2047,6 +2235,15 @@ pub fn setup_minimal_dashboard_routes(
         .and(state_filter.clone())
         .and_then(get_volumes_minimal);
 
+    let events_route = warp::path("api")
+        .and(warp::path("events"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(warp::query::<EventsQuery>())
+        .and(state_filter.clone())
+        .and_then(get_events_minimal);
+
     let disks_route = warp::path("api")
         .and(warp::path("disks"))
         .and(warp::path::end())
@@ -2214,6 +2411,7 @@ pub fn setup_minimal_dashboard_routes(
         .or(overview_route)
         .or(volumes_route)
         .or(disks_route)
+        .or(events_route)
         .or(proxy_uninitialized)
         .or(proxy_setup)
         .or(proxy_initialize)
@@ -2402,6 +2600,61 @@ mod tests {
         assert_eq!(stats.write_iops, 500);
         assert_eq!(stats.read_latency_us, 100);
         assert_eq!(stats.write_latency_us, 150);
+    }
+
+    #[test]
+    fn parse_hot_rejoin_window_inline_real_drill_message() {
+        // Verbatim HotRejoinSucceeded payload from the 2026-07-02 2a drill.
+        let msg = "Replica on runj-aws-2 hot-rejoined raid raid_pvc-c6896f1f-1ad2-4bbc-bbd1-11c14fc32aef at epoch-pvc-c6896f1f-1ad2-4bbc-bbd1-11c14fc32aef-1264 in 1729ms (quiesce=12ms cut E_f=10ms fenced final delta=1655ms lease renew=9ms add --skip-rebuild=31ms unquiesce=12ms); inline fenced final delta (27262976 bytes est.) — no esnap exposure, fully redundant immediately";
+        let w = parse_hot_rejoin_window("pvc-c6896f1f", Some("t".into()), msg).unwrap();
+        assert_eq!(w.node, "runj-aws-2");
+        assert_eq!(w.raid, "raid_pvc-c6896f1f-1ad2-4bbc-bbd1-11c14fc32aef");
+        assert_eq!(w.epoch, "epoch-pvc-c6896f1f-1ad2-4bbc-bbd1-11c14fc32aef-1264");
+        assert_eq!(w.window_ms, 1729);
+        assert_eq!(w.path, "inline");
+        assert_eq!(w.estimator_bytes, Some(27262976));
+        let steps: Vec<(&str, u64)> = w.steps.iter().map(|s| (s.name.as_str(), s.ms)).collect();
+        assert_eq!(steps, vec![
+            ("quiesce", 12),
+            ("cut E_f", 10),
+            ("fenced final delta", 1655),
+            ("lease renew", 9),
+            ("add --skip-rebuild", 31),
+            ("unquiesce", 12),
+        ]);
+        assert_eq!(w.steps.iter().map(|s| s.ms).sum::<u64>(), 1729);
+    }
+
+    #[test]
+    fn parse_hot_rejoin_window_esnap_variant() {
+        let msg = "Replica on n1 hot-rejoined raid raid_v at epoch-v-3 in 148ms (quiesce=19ms cut E_f=10ms export+AER E_f=25ms esnap clone=11ms export+AER head=41ms renew=11ms add=19ms unquiesce=12ms); localizing the esnap chain";
+        let w = parse_hot_rejoin_window("v", None, msg).unwrap();
+        assert_eq!(w.window_ms, 148);
+        assert_eq!(w.path, "esnap");
+        assert_eq!(w.estimator_bytes, None);
+        assert_eq!(w.steps.len(), 8);
+        assert_eq!(w.steps[2].name, "export+AER E_f");
+        assert_eq!(w.steps[2].ms, 25);
+    }
+
+    #[test]
+    fn parse_hot_rejoin_window_rejects_other_messages() {
+        assert!(parse_hot_rejoin_window("v", None, "Replica on n1 is a warm standby").is_none());
+        assert!(parse_hot_rejoin_window("v", None, "").is_none());
+    }
+
+    #[test]
+    fn categorize_event_reasons() {
+        assert_eq!(categorize_event_reason("HotRejoinSucceeded"), "hot_rejoin");
+        assert_eq!(categorize_event_reason("HotRejoinWindowSlow"), "hot_rejoin");
+        assert_eq!(categorize_event_reason("VolumeDataPathLost"), "data_path");
+        assert_eq!(categorize_event_reason("ReplicaCatchupStarted"), "catchup");
+        assert_eq!(categorize_event_reason("ReplicaStale"), "catchup");
+        assert_eq!(categorize_event_reason("StandbyAdmissionDeferred"), "catchup");
+        assert_eq!(categorize_event_reason("CutoverSucceeded"), "cutover");
+        assert_eq!(categorize_event_reason("EpochCutFailed"), "epoch");
+        assert_eq!(categorize_event_reason("VolumeDegraded"), "health");
+        assert_eq!(categorize_event_reason("SomethingElse"), "other");
     }
 
     #[test]
