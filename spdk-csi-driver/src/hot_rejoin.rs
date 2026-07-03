@@ -231,7 +231,21 @@ struct Topology<'a> {
     src: &'a ReplicaInfo,
     /// Every in-sync replica (E_f must be cut on all of them to be a
     /// common epoch).
-    survivors: Vec<&'a ReplicaInfo>,
+    survivors: Vec<Survivor<'a>>,
+}
+
+/// An in-sync survivor plus the bdev name addressing its LIVE head for the
+/// E_f cut — the record's live uuid, exactly the epoch scheduler's
+/// `snapshot_source`. The canonical `{lvs}/{lvol_name}` alias is NOT
+/// authoritative for a survivor that itself hot-rejoined (its live head is
+/// the promoted `_hr` clone): cutting by name fails with "No such device",
+/// unwinds the window, demotes the rejoiner to stale, and the cycle repeats
+/// — a livelock. Third instance of the name-vs-uuid aliasing class
+/// (3-replica drill, 2026-07-03).
+struct Survivor<'a> {
+    info: &'a ReplicaInfo,
+    /// `bdev_lvol_snapshot` target for the E_f cut.
+    snapshot_source: String,
 }
 
 fn resolve<'a>(
@@ -267,11 +281,16 @@ fn resolve<'a>(
         .enumerate()
         .find(|(_, ri)| ri.lvol_uuid == rec.lvol_uuid)
         .ok_or("stale replica's identity is not in the replica list")?;
-    let survivors: Vec<&ReplicaInfo> = record
+    let survivors: Vec<Survivor> = record
         .replicas
         .iter()
         .filter(|r| r.sync_state == SyncState::InSync)
-        .filter_map(|r| replicas.iter().find(|ri| ri.lvol_uuid == r.lvol_uuid))
+        .filter_map(|r| {
+            replicas.iter().find(|ri| ri.lvol_uuid == r.lvol_uuid).map(|ri| Survivor {
+                info: ri,
+                snapshot_source: r.live_lvol_uuid().to_string(),
+            })
+        })
         .collect();
     if survivors.is_empty() {
         return Err("no in-sync survivor to cut E_f on");
@@ -422,7 +441,7 @@ pub async fn hot_rejoin_volume(
             Ok((timings, live_uuid)) => {
                 let window_ms: u128 = timings.iter().map(|(_, ms)| ms).sum();
                 let cut_uuids: Vec<String> =
-                    topo.survivors.iter().map(|s| s.lvol_uuid.clone()).collect();
+                    topo.survivors.iter().map(|s| s.info.lvol_uuid.clone()).collect();
                 store
                     .record_hot_rejoin_flip(
                         volume_id,
@@ -524,7 +543,7 @@ pub async fn hot_rejoin_volume(
         Ok((timings, head_uuid)) => {
             let window_ms: u128 = timings.iter().map(|(_, ms)| ms).sum();
             let cut_uuids: Vec<String> =
-                topo.survivors.iter().map(|s| s.lvol_uuid.clone()).collect();
+                topo.survivors.iter().map(|s| s.info.lvol_uuid.clone()).collect();
             store
                 .record_hot_rejoin_flip(volume_id, &topo.rec.lvol_uuid, &ef, &cut_uuids, &head_uuid)
                 .await?;
@@ -914,10 +933,10 @@ async fn window(
                 // E_f never became a recorded epoch — reap it now rather
                 // than leaving EEXIST-convergence litter.
                 for s in &topo.survivors {
-                    let alias = format!("{}/{}", s.lvs_name, ef);
+                    let alias = format!("{}/{}", s.info.lvs_name, ef);
                     let _ = rpc
                         .spdk_rpc(
-                            &s.node_name,
+                            &s.info.node_name,
                             &json!({ "method": "bdev_lvol_delete", "params": { "name": alias } }),
                         )
                         .await;
@@ -1240,10 +1259,10 @@ async fn window_inline(
             if cut_done {
                 // E_f never became a recorded epoch — reap it.
                 for s in &topo.survivors {
-                    let alias = format!("{}/{}", s.lvs_name, ef);
+                    let alias = format!("{}/{}", s.info.lvs_name, ef);
                     let _ = rpc
                         .spdk_rpc(
-                            &s.node_name,
+                            &s.info.node_name,
                             &json!({ "method": "bdev_lvol_delete", "params": { "name": alias } }),
                         )
                         .await;
@@ -1269,16 +1288,17 @@ async fn window_inline(
 
 async fn cut_ef_strict(
     rpc: &dyn CatchupRpc,
-    survivors: &[&ReplicaInfo],
+    survivors: &[Survivor<'_>],
     ef: &str,
 ) -> Result<(), RpcError> {
     let mut cut: Vec<(&str, String)> = Vec::new();
     for s in survivors {
-        let alias = format!("{}/{}", s.lvs_name, s.lvol_name);
+        // The record's live head — never the canonical alias, which does
+        // not exist on a survivor that itself hot-rejoined (see Survivor).
         let payload = json!({ "method": "bdev_lvol_snapshot",
-                              "params": { "lvol_name": alias, "snapshot_name": ef } });
-        match rpc.spdk_rpc(&s.node_name, &payload).await {
-            Ok(_) => cut.push((&s.node_name, format!("{}/{}", s.lvs_name, ef))),
+                              "params": { "lvol_name": s.snapshot_source, "snapshot_name": ef } });
+        match rpc.spdk_rpc(&s.info.node_name, &payload).await {
+            Ok(_) => cut.push((&s.info.node_name, format!("{}/{}", s.info.lvs_name, ef))),
             Err(e) => {
                 for (node, alias) in &cut {
                     let _ = rpc
@@ -1293,7 +1313,7 @@ async fn cut_ef_strict(
                 } else {
                     "E_f cut failed"
                 };
-                return Err(format!("{} on {}: {}", kind, s.node_name, e).into());
+                return Err(format!("{} on {}: {}", kind, s.info.node_name, e).into());
             }
         }
     }
@@ -2600,7 +2620,18 @@ mod tests {
                 }
                 "bdev_get_bdevs" => {
                     let name = params["name"].as_str().unwrap_or("");
-                    match w.bdevs.get(&(node_s.clone(), name.to_string())) {
+                    // Exact key first, then by uuid (an lvol bdev's name IS
+                    // its uuid) — mirrors SPDK's dual addressability.
+                    let hit = w.bdevs.get(&(node_s.clone(), name.to_string())).or_else(|| {
+                        (!name.contains('/'))
+                            .then(|| {
+                                w.bdevs.iter().find_map(|((n, _), b)| {
+                                    (n == &node_s && b["uuid"].as_str() == Some(name)).then_some(b)
+                                })
+                            })
+                            .flatten()
+                    });
+                    match hit {
                         Some(b) => json!({ "result": [b] }),
                         None => return Err(format!("bdev {} not found: No such device", name).into()),
                     }
@@ -2625,8 +2656,31 @@ mod tests {
                     json!({ "result": names })
                 }
                 "bdev_lvol_snapshot" => {
-                    let lvol = params["lvol_name"].as_str().unwrap().to_string();
+                    let lvol_arg = params["lvol_name"].as_str().unwrap().to_string();
                     let snap = params["snapshot_name"].as_str().unwrap().to_string();
+                    // SPDK resolves an lvol by `lvs/name` alias OR by bdev
+                    // name (an lvol's name IS its uuid) — mirror that: a
+                    // bare uuid resolves to the seeded alias key, and an
+                    // unknown uuid is a hard miss (the live E_f-cut bug).
+                    let lvol = if lvol_arg.contains('/') {
+                        lvol_arg
+                    } else {
+                        match w.bdevs.iter().find_map(|((n, key), b)| {
+                            (n == &node_s
+                                && key.contains('/')
+                                && b["uuid"].as_str() == Some(lvol_arg.as_str()))
+                            .then(|| key.clone())
+                        }) {
+                            Some(key) => key,
+                            None => {
+                                return Err(format!(
+                                    "SPDK RPC error: Code=-19 Msg=No such device: {}",
+                                    lvol_arg
+                                )
+                                .into())
+                            }
+                        }
+                    };
                     let lvs = lvol.split('/').next().unwrap().to_string();
                     let alias = format!("{}/{}", lvs, snap);
                     if w.bdevs.contains_key(&(node_s.clone(), alias.clone())) {
@@ -3190,6 +3244,78 @@ mod tests {
         drop(w);
 
         assert_eq!(store.events(), vec!["HotRejoinSucceeded", "HotRejoinLocalized"]);
+    }
+
+    /// `staged_world` where the survivor has ITSELF hot-rejoined: its live
+    /// head is the promoted `_hr` clone (uuid-a-live) and the canonical
+    /// replica_0 alias does not exist on node-a.
+    fn staged_world_hr_survivor(rpc: &FakeRpc) {
+        let hr_head = format!("vol_{}_replica_0_hr", VOL);
+        rpc.seed_lvol("node-a", "lvs_node-a", &hr_head, "uuid-a-live");
+        rpc.seed_lvol_with_parent("node-a", "lvs_node-a", &epoch_name(VOL, 1), "uuid-ep1", None);
+        rpc.seed_lvol_with_parent("node-a", "lvs_node-a", &epoch_name(VOL, 2), "uuid-ep2", None);
+        {
+            let mut w = rpc.world.lock().unwrap();
+            let head = w
+                .bdevs
+                .get_mut(&("node-a".into(), format!("lvs_node-a/{}", hr_head)))
+                .unwrap();
+            head["driver_specific"]["lvol"]["base_snapshot"] = json!(epoch_name(VOL, 2));
+            let ep2 = w
+                .bdevs
+                .get_mut(&("node-a".into(), format!("lvs_node-a/{}", epoch_name(VOL, 2))))
+                .unwrap();
+            ep2["driver_specific"]["lvol"]["base_snapshot"] = json!(epoch_name(VOL, 1));
+        }
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1", VOL), "uuid-b");
+        rpc.seed_lvol("node-b", "lvs_node-b", &epoch_name(VOL, 1), "uuid-ep1b");
+        rpc.seed_raid(
+            "consumer",
+            &format!("raid_{}", VOL),
+            "online",
+            &[(&expected_remote_base_bdev(VOL, 0), true)],
+        );
+    }
+
+    #[tokio::test]
+    async fn ef_cut_targets_the_survivors_live_head_after_its_own_rejoin() {
+        // 3-replica drill (2026-07-03): the E_f cut must address the
+        // record's live uuid — the canonical alias does not exist on a
+        // survivor that itself hot-rejoined, and cutting by name livelocked
+        // the rejoin (cut fails → unwind → demote to stale → re-chase →
+        // retry → same failure, forever).
+        let rpc = FakeRpc::new();
+        staged_world_hr_survivor(&rpc);
+        let mut record = stale_b_record();
+        record.replicas[0].active_lvol_uuid = Some("uuid-a-live".to_string());
+        let store = FakeStore::new(record);
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::Rejoined { .. }),
+            "expected Rejoined, got {:?}",
+            out
+        );
+
+        // Every E_f cut on the survivor addressed the live uuid, never the
+        // (nonexistent) canonical alias.
+        let cuts = rpc.calls_of("bdev_lvol_snapshot");
+        let survivor_cuts: Vec<&Value> =
+            cuts.iter().filter(|(n, _)| n == "node-a").map(|(_, p)| p).collect();
+        assert!(!survivor_cuts.is_empty());
+        assert!(
+            survivor_cuts.iter().all(|p| p["lvol_name"] == json!("uuid-a-live")),
+            "survivor cuts: {:?}",
+            survivor_cuts
+        );
+
+        // End state: b admitted in_sync at the E_f epoch.
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert_eq!(b.last_epoch.as_deref(), Some(epoch_name(VOL, 3).as_str()));
     }
 
     #[tokio::test]
