@@ -417,9 +417,13 @@ Documented, bounded, not yet fixed — so an operator recognizes them:
   lease auto-expiry still bounds it at `FLINT_HOT_REJOIN_LEASE_MS`
   (measured 10.0 s ± 0.12 s with no controller alive). The writer
   resumes with no error in both cases.
-- **`admit_standbys_at_stage` final-delta source selection** assumes fresh
-  standby marks (safe today — the chase gates admission — but not yet
-  coverage-probed like the other source-selection sites).
+- **`admit_standbys_at_stage` final-delta source selection**: FIXED on
+  `main` 2026-07-03 — the reassembly admission now coverage-probes its
+  source like every other selection site and defers side-effect-free
+  when nothing covers. Node-side code: the fix ships with the next
+  node-DS image; on older node images the (never-observed) corner
+  surfaces as a failed stage-time admission, which the ordinary chase
+  heals.
 
 ## 9. Appendix: drill primitives
 

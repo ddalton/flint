@@ -1544,3 +1544,54 @@ through a real controller death.
 **Remaining from the 7b list after this:** the
 `admit_standbys_at_stage` coverage probe — everything else on the 7b
 validation tail is closed.
+
+## Phase-4 admission coverage probe (2026-07-03, 6f798c3) — the 7b list is CLOSED
+
+The last open item, and the last `pick_source` holdout anywhere in the
+codebase. `admit_one_standby` (NodeStage's reassembly admission)
+selected its final-delta source blind: the lag gate bounds the
+standby's mark in epoch COUNT, but an attached source that was itself
+rebuilt roots its chain at its OWN rebuild base — the P1 №2 wedge
+class, reachable here whenever a source rebuilds between the standby's
+convergence and a restage. Now the admission probes
+`select_covering_source` (mark → newest epoch), **before** the final
+cut, so a deferral has zero side effects: no stray epoch, no record
+writes — the stage proceeds degraded with `StandbyAdmissionDeferred`
+and the ordinary chase owns the heal (it demotes an uncoverable
+standby to the bulk path, which self-selects a full build). Suite 546;
+differentials: failover to a covering attached source past a re-rooted
+preferred one, and the side-effect-free deferral when nothing covers.
+
+**Deployment note:** this path runs in the NODE driver at stage time.
+Per the campaign's standing rule the node DS (`tier2-7b4.0`) is not
+rolled for it — the hardening is on `main`, unit-differential
+validated, and rides into the next node-DS image (the trigger
+condition is unreachable today precisely because the chase gates
+admission; this closes the corner for when that assumption erodes).
+
+### The 7b scoreboard, closed out
+
+Every item from the original 7b plan and every residual the campaigns
+surfaced is now landed and validated:
+
+- 7b-0 patch v3 + dead-controller reaping — live-validated 2026-07-01
+- 7b-1 mechanism library, 7b-2 trigger loop + shared claim — E2E
+  live-validated 2026-07-02 (windows 141–180 ms, n=14+, all ≥11× under
+  the 2 s bar)
+- 7b-3 adversarial set: B1/B2/C + the quiesced-span orphaned-lease
+  crash (fault-injection knob; 10.0 s bound measured, then cut to
+  3.5 s by the defensive unquiesce)
+- 7b-4 adaptive dual-path — inline drill PASS
+- One P0 + five P1s found by drills, all fixed and live-revalidated
+  same day (orphan sweep, `_hr` EEXIST, raid-ABSENT silence, and the
+  three name-vs-uuid chase/rejoin bugs)
+- Multi-failure scaling proven at 3 and 4 replicas (3 staggered kills,
+  raid serving 1/4, zero intervention)
+- The B1 esnap-resume GC race — fixed, 133 s → 10 s across a
+  controller death
+- Operator runbook + fs-allocated scrub methodology (3 legs
+  bit-identical over 1,127 MiB)
+- Writer ledger across the ENTIRE campaign: **113,704+ appends, zero
+  acked-write loss** through 5 controller deaths, 12+ leg kills, one
+  full raid collapse, three staggered-failure drills and every window
+  ever committed.
