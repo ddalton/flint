@@ -43,8 +43,9 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::catchup::{
-    copy_chain_to, detach_controller, get_bdev, get_raids, list_lvol_names, pick_source,
-    revert_head, revert_head_to_empty, CatchupConfig, CatchupRpc, CatchupStore, RpcError,
+    copy_chain_to, detach_controller, get_bdev, get_raids, in_sync_sources, list_lvol_names,
+    pick_source, revert_head, revert_head_to_empty, select_covering_source, CatchupConfig,
+    CatchupRpc, CatchupStore, CoveringSource, RpcError,
 };
 use crate::driver::SpdkCsiDriver;
 use crate::epoch_scheduler::{is_already_exists, is_missing};
@@ -1823,14 +1824,11 @@ async fn localize(
         == Some(ef.as_str());
 
     if !already_localized {
-        let Some(src) = pick_source(record, replicas, consumer_node) else {
-            return Err("no in-sync source for the backfill".into());
-        };
-
         // §5 base for the pad: the OLDEST recorded epoch (≤ E_f) still
         // present on the destination — conservative by construction (the
         // stale-time back-off was lost at the flip; oldest can only
         // over-copy, never under-copy). None → thin-aware full build.
+        // Computed before source selection: the coverage probe needs it.
         let ef_seq = epoch_seq(volume_id, &ef)
             .ok_or_else(|| format!("marker {} is not an epoch of {}", ef, volume_id))?;
         let present = list_lvol_names(rpc, dst_node, dst_lvs).await?;
@@ -1840,6 +1838,38 @@ async fn localize(
             .map(|e| e.name.clone())
             .filter(|n| epoch_seq(volume_id, n).map(|s| s < ef_seq).unwrap_or(false))
             .find(|n| present.contains(n));
+
+        // The backfill source must actually COVER the replay: E_f (and the
+        // base, when set) in its LIVE lineage. A survivor that localized
+        // its OWN rejoin after cutting this E_f may have re-rooted past it,
+        // and retention retires it eventually — blindly re-picking the
+        // preferred source then retries into the same wall every cycle
+        // while another chain may still hold the epoch (observed live,
+        // Drill B redux 2026-07-03: HotRejoinReconcileFailed ×3). Fail
+        // over to any covering source. When NONE covers definitively, the
+        // committed window is unrecoverable by replay — keep the claim and
+        // fail the cycle: the dead E_f export fails the leg soon after,
+        // and the leg-gone reconcile arm demotes it (never force-demote a
+        // leg that may still be serving raid writes).
+        let src = match select_covering_source(
+            rpc, record, replicas, consumer_node, &ef, base.as_deref(),
+        )
+        .await?
+        {
+            CoveringSource::Covering(src) => src,
+            CoveringSource::NoneInSync => {
+                return Err("no in-sync source for the backfill".into())
+            }
+            CoveringSource::NoneCovering => {
+                return Err(format!(
+                    "{} is in no in-sync source lineage (base {}) — the committed window \
+                     cannot localize by replay; awaiting the leg-gone demote",
+                    ef,
+                    base.as_deref().unwrap_or("<full>"),
+                )
+                .into())
+            }
+        };
 
         // Revert the pad onto the base (or empty) — the landing pad must be
         // write-virgin for the replay. Its lvol name is the stable replica
@@ -1937,14 +1967,19 @@ async fn localize(
 
     // Cleanup, all missing-tolerant: the pad's copy transport, the pad
     // itself (now a redundant clone of the local E_f), and the E_f export
-    // chain the esnap no longer needs.
-    if let Some(src) = pick_source(record, replicas, consumer_node) {
+    // chain the esnap no longer needs. The pad detaches from EVERY in-sync
+    // node — the backfill may have failed over between cycles, so the
+    // attach can live on a node the current preference order would not
+    // re-pick.
+    {
         let pad_nqn = format!(
             "nqn.2024-11.com.flint:volume:{}",
             pad_export_volume_id(volume_id, idx)
         );
         let pad_ctrl = format!("nvme_{}", pad_nqn.replace(':', "_").replace('.', "_"));
-        detach_controller(rpc, &src.node_name, &pad_ctrl).await;
+        for src in in_sync_sources(record, replicas, consumer_node) {
+            detach_controller(rpc, &src.node_name, &pad_ctrl).await;
+        }
         let _ = rpc
             .spdk_rpc(
                 dst_node,
@@ -3939,6 +3974,167 @@ mod tests {
         assert!(
             rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1_hr", VOL)),
             "localized head kept"
+        );
+    }
+
+    // -- Reconcile backfill coverage (3-replica worlds) -----------------------
+
+    fn replica_at(node: &str, uuid: &str, idx: usize) -> ReplicaInfo {
+        ReplicaInfo {
+            node_name: node.to_string(),
+            node_uid: format!("uid-{}", node),
+            disk_pci_address: "0000:00:04.0".to_string(),
+            lvol_uuid: uuid.to_string(),
+            lvol_name: format!("vol_{}_replica_{}", VOL, idx),
+            lvs_name: format!("lvs_{}", node),
+            nqn: None,
+            target_ip: None,
+            target_port: None,
+            health: "online".to_string(),
+        }
+    }
+
+    fn replicas3() -> Vec<ReplicaInfo> {
+        vec![
+            replica_at("node-a", "uuid-a", 0),
+            replica_at("node-b", "uuid-b", 1),
+            replica_at("node-c", "uuid-c", 2),
+        ]
+    }
+
+    /// A committed-but-unlocalized window for replica b (E_f = epoch 3),
+    /// leg live in the consumer raid, esnap head still on its external
+    /// parent. `src_a_chain`/`src_c_chain` are each source's lineage,
+    /// oldest FIRST; the head's parent is the last (newest) element.
+    fn marked_world3(rpc: &FakeRpc, src_a_chain: &[&str], src_c_chain: &[&str]) -> VolumeSyncRecord {
+        for (node, idx, chain) in
+            [("node-a", 0usize, src_a_chain), ("node-c", 2usize, src_c_chain)]
+        {
+            let lvs = format!("lvs_{}", node);
+            let mut parent: Option<String> = None;
+            for e in chain.iter() {
+                rpc.seed_lvol_with_parent(node, &lvs, e, &format!("uuid-{}-{}", node, e), parent.as_deref());
+                parent = Some(e.to_string());
+            }
+            rpc.seed_lvol_with_parent(
+                node, &lvs, &format!("vol_{}_replica_{}", VOL, idx),
+                &format!("uuid-{}-head", node), parent.as_deref(),
+            );
+        }
+        // Rejoiner b: un-localized esnap head (external parent, no local
+        // base_snapshot), the landing pad, and its copy of epoch-1.
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head");
+        {
+            let mut w = rpc.world.lock().unwrap();
+            let head = w
+                .bdevs
+                .get_mut(&("node-b".into(), format!("lvs_node-b/vol_{}_replica_1_hr", VOL)))
+                .unwrap();
+            head["driver_specific"]["lvol"]["esnap_clone"] = json!(true);
+        }
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1", VOL), "uuid-b");
+        rpc.seed_lvol("node-b", "lvs_node-b", &epoch_name(VOL, 1), "uuid-ep1b");
+        // Leg live in the consumer raid, carrying the head's uuid.
+        rpc.seed_raid(
+            "consumer",
+            &format!("raid_{}", VOL),
+            "online",
+            &[
+                (&expected_remote_base_bdev(VOL, 0), true),
+                (&expected_remote_base_bdev(VOL, 1), true),
+                (&expected_remote_base_bdev(VOL, 2), true),
+            ],
+        );
+        {
+            let mut w = rpc.world.lock().unwrap();
+            w.bdevs.insert(
+                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
+                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+            );
+        }
+
+        let mut record = VolumeSyncRecord::initial(&replicas3());
+        let all: Vec<String> =
+            vec!["uuid-a".into(), "uuid-b".into(), "uuid-c".into()];
+        record.apply_epoch_cut(&epoch_name(VOL, 1), &all, NOW);
+        record.apply_epoch_cut(&epoch_name(VOL, 2), &all, NOW);
+        record.mark_stale("uuid-b", "leg failed", NOW);
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
+        record.mark_hot_rejoined(
+            "uuid-b",
+            &epoch_name(VOL, 3),
+            &["uuid-a".into(), "uuid-c".into()],
+            "uuid-head",
+            NOW,
+        );
+        record
+    }
+
+    #[tokio::test]
+    async fn localize_backfill_fails_over_to_a_source_covering_ef() {
+        // Drill B redux residual (2026-07-03): the preferred source
+        // (node-a) re-rooted past this window's E_f after its OWN rejoin —
+        // its chain no longer contains epoch 3. node-c still holds it. The
+        // backfill must fail over instead of retrying into node-a forever.
+        let rpc = FakeRpc::new();
+        let e1 = epoch_name(VOL, 1);
+        let e2 = epoch_name(VOL, 2);
+        let e3 = epoch_name(VOL, 3);
+        let record =
+            marked_world3(&rpc, &[&e1, &e2], &[&e1, &e2, &e3]);
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas3(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        // Replay ran from node-c only; head re-rooted; b admitted in_sync.
+        let copies = rpc.calls_of("bdev_lvol_start_shallow_copy");
+        assert!(!copies.is_empty());
+        assert!(copies.iter().all(|(n, _)| n == "node-c"), "copies: {:?}", copies);
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.hot_rejoin.is_none(), "marker cleared by the localization");
+        let w = rpc.world.lock().unwrap();
+        let head = w
+            .bdevs
+            .get(&("node-b".into(), format!("lvs_node-b/vol_{}_replica_1_hr", VOL)))
+            .expect("head kept");
+        assert_eq!(
+            head["driver_specific"]["lvol"]["base_snapshot"].as_str(),
+            Some(epoch_name(VOL, 3).as_str()),
+            "head re-rooted onto the local E_f"
+        );
+    }
+
+    #[tokio::test]
+    async fn localize_definitive_ef_loss_keeps_the_claim_for_the_leg_gone_demote() {
+        // E_f is in NO in-sync lineage (retired everywhere): the window can
+        // never localize by replay. The reconcile must fail the cycle and
+        // KEEP the claim — the leg may still be serving; the leg-gone arm
+        // demotes once the dead E_f export fails it. Never force-demote.
+        let rpc = FakeRpc::new();
+        let e1 = epoch_name(VOL, 1);
+        let e2 = epoch_name(VOL, 2);
+        let record = marked_world3(&rpc, &[&e1, &e2], &[&e1, &e2]);
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas3(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(store.events().contains(&"HotRejoinReconcileFailed".to_string()));
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby, "not demoted");
+        assert_eq!(
+            b.hot_rejoin.as_deref(),
+            Some(epoch_name(VOL, 3).as_str()),
+            "claim kept for the leg-gone reconcile"
         );
     }
 

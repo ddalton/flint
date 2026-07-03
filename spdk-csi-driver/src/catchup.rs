@@ -826,7 +826,7 @@ pub fn pick_source<'a>(
 /// Every in-sync replica in source-preference order: non-consumer nodes
 /// first (record order within each group). `pick_source` is the head of
 /// this list; the coverage-aware selection walks all of it.
-fn in_sync_sources<'a>(
+pub(crate) fn in_sync_sources<'a>(
     record: &VolumeSyncRecord,
     replicas: &'a [ReplicaInfo],
     consumer_node: Option<&str>,
@@ -842,7 +842,7 @@ fn in_sync_sources<'a>(
 }
 
 /// Outcome of coverage-aware source selection.
-enum CoveringSource<'a> {
+pub(crate) enum CoveringSource<'a> {
     Covering(&'a ReplicaInfo),
     /// No in-sync replica exists at all.
     NoneInSync,
@@ -870,7 +870,7 @@ enum CoveringSource<'a> {
 /// only when every candidate was definitive: on any indeterminate error the
 /// cycle fails and retries instead, because a spurious full build on a
 /// transient would be far worse than a 60s delay.
-async fn select_covering_source<'a>(
+pub(crate) async fn select_covering_source<'a>(
     rpc: &dyn CatchupRpc,
     record: &VolumeSyncRecord,
     replicas: &'a [ReplicaInfo],
