@@ -94,17 +94,75 @@ polls; N browser tabs produce ~1× node-agent fan-out per TTL, not N×.
 The payoff phase: make the dashboard the tool the Tier-2 runbook
 points at.
 
+### 2a. Live replica sync-state indicator (lead deliverable)
+
+Motivation (finding, 2026-07-02): every rebuild control in the current
+UI is bound to the field `rebuild_progress` — the *old blind
+full-rebuild* model. The Tier-2 engine no longer does that rebuild. A
+hot-rejoin is a sub-2-second window (last drill: 1730 ms), and the
+dashboard polls at 30 s, so a real repair blinks from `stale` to
+`in_sync` *between two polls* and the UI shows nothing. The existing
+"rebuild" affordances (a hand-rolled `<div>` width-% bar + a Settings
+gear with `animate-spin`) are cosmetic: the gear spins regardless of
+progress and the bar only tweens between two poll samples. There is no
+`role="progressbar"`, no indeterminate state, and — most importantly —
+no representation of `sync_state` (in_sync / stale / standby), epoch
+lag, or hot-rejoin windows at all. The dashboard is watching for a kind
+of rebuild the engine stopped doing.
+
+Deliverable — a proper, live per-replica state control:
+
+- **Real signal, not `rebuild_progress`**: drive off the PV
+  `replica-sync-state` annotation (`sync_state`, `last_epoch`,
+  `current_epoch`, `hot_rejoin` marker) the controller already
+  maintains. Per replica show a semantic status chip
+  (in_sync / stale / standby / rejoining) and, for stale/standby,
+  epoch lag (`current − last`) as the progress measure — lag → 0 is the
+  catch-up, which IS observable, unlike the sub-2s window.
+- **Live, adaptively**: while any replica of a volume is non-`in_sync`,
+  refetch that volume fast (2–3 s) instead of the 30 s baseline; drop
+  back to 30 s once all replicas are `in_sync`. This is the react-query
+  seam from Phase 1 (`refetchInterval` as a function of the data). A
+  hot-rejoin window itself stays too fast to poll — surface it *after
+  the fact* from the `HotRejoinSucceeded` event (see 2c) rather than
+  pretending to animate it live.
+- **Proper component**: an accessible progress/status control
+  (`role="progressbar"` with aria-valuenow for lag; a labeled state
+  chip otherwise; an indeterminate/pulsing state for "rejoining" where
+  no numeric progress exists), replacing the decorative spinner. One
+  shared component reused by the Volumes table, RAID topology, and node
+  detail so the three ad-hoc rebuild renderings collapse to one.
+- **Consider SSE later**: if 2–3 s polling proves too coarse or too
+  chatty at scale, a backend `/api/events/stream` (Server-Sent Events
+  over the K8s event/annotation watch) pushes sync-state transitions;
+  the indicator subscribes while a volume is degraded. Poll first,
+  push only if measurement shows it's needed.
+
+Acceptance: kill a replica leg on a live volume and watch the volume's
+row go stale → standby (epoch lag counting down) → in_sync in the UI
+with no manual refresh, and the completed rejoin window appears in the
+event/timeline view — the same narrative the runbook describes, seen
+entirely from the dashboard.
+
+### 2b. Volume detail + topology
+
 - **Volume detail**: per-replica table — node, `sync_state`
   (in_sync/stale/standby), epoch lag vs `current_epoch`, hot-rejoin
   marker — read from the PV `replica-sync-state` annotation the
   controller already maintains. RAID state per consumer (online /
-  degraded n/m).
+  degraded n/m). Uses the 2a indicator component per replica.
+### 2c. Events + windows
+
 - **Event timeline**: `HotRejoin*`, `VolumeDataPath*`, catchup
   transitions, per volume and cluster-wide (K8s events already carry
-  all of it, including window step timings).
+  all of it, including window step timings). This is where a completed
+  sub-2s rejoin window becomes visible — the 2a indicator points here.
 - **Windows panel**: hot-rejoin window durations vs the 2 s target,
   inline-vs-esnap routing with estimator bytes — straight from
   `HotRejoinSucceeded` event payloads.
+
+### 2d. Operator workflows
+
 - **State-aware landing + onboarding** (Decision 2).
 - **Bulk disk initialization** (Decision 4). Current UI already has
   per-disk checkbox selection and per-node `disks/setup` calls; add:
@@ -125,10 +183,12 @@ points at.
     the backend doesn't report as uninitialized unless explicitly
     forced per-disk.
 
-Acceptance: an operator can initialize 100+ uninitialized disks across
-10+ nodes in one confirmed action and see per-disk outcomes; a
-leg-kill drill is fully narratable from the UI (stale → standby →
-window → in_sync with timings) without kubectl.
+Phase 2 acceptance (whole): an operator can initialize 100+
+uninitialized disks across 10+ nodes in one confirmed action and see
+per-disk outcomes; and a leg-kill drill is fully narratable from the UI
+— the live 2a indicator shows stale → standby (lag counting down) →
+in_sync with no manual refresh, and 2c shows the completed window with
+its step timings — without kubectl.
 
 ## Phase 3 — Structure and safety net (interleave with 1–2)
 
@@ -159,7 +219,8 @@ window → in_sync with timings) without kubectl.
 |---|---|---|
 | 0 Security | ~1–2 days | Independent; do first |
 | 1 Data layer | ~3–5 days | Enables everything else |
-| 2 Engine surface + bulk ops | ~1–2 weeks | The payoff; needs 1 |
+| 2a Live sync-state indicator | ~3–4 days | Lead deliverable; needs the Phase 1 react-query seam |
+| 2b–2d Volume detail / events / bulk ops | ~1–2 weeks | The payoff; needs 1 |
 | 3 Structure/tests | ongoing | Interleave; gate new code on tests |
 | 4 UX polish | ~1 week | Last |
 
