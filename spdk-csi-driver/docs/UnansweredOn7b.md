@@ -1301,3 +1301,20 @@ stands; `admit_standbys_at_stage`'s final-delta source and the
 hot-rejoin backfill source still assume fresh marks (safe today — the
 chase gates admission, so marks are always recent — but the same
 coverage probe could harden them).
+
+## Operator runbook landed (2026-07-03)
+
+The standalone runbook is `tier2-operator-runbook.md`: the 30-second
+model, the full config/annotation reference, the "normal recovery —
+do not intervene" timeline (with the multi-failure cascade semantics),
+the event table, and the manual procedures earned by the campaigns
+(record repair after out-of-band head loss, the GC-horizon marker
+wedge, guarded `_hr` delete, stale-Node trigger starvation, collapse
+recovery + consumer bounce), plus tuning notes (inline ceiling vs the
+2 s target, `K × T_snap`, the replicas=2 exposure caveat) and the
+drill primitives appendix.
+
+**Remaining from the 7b list after this:** the quiesced-span
+orphaned-lease live measurement (fault-injection knob), the
+fs-allocated-only two-leg scrub, esnap-resume preferring the local
+chain (B1 residual), and the `admit_standbys_at_stage` coverage probe.
