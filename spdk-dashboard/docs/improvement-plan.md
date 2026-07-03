@@ -48,6 +48,10 @@ blind to the storage engine's most operationally important state
 4. **Bulk disk operations are a first-class feature** (Phase 2) —
    group selection + batch orchestration, not one-checkbox-at-a-time.
 5. Auth is enforced **by the backend**, not the SPA.
+6. **Consistent, modern, pleasurable UI is a directive, not a nice-to-
+   have** — pursued as a cross-cutting design system whose primitives
+   land alongside Phase 1–3 work (see "Design system & UX quality"),
+   with a deliberate visual pass in Phase 4.
 
 ## Phase 0 — Security (small, urgent, independent)
 
@@ -204,14 +208,68 @@ its step timings — without kubectl.
   source of truth.
 - CI: typecheck + lint + test + build + generated-types freshness.
 
-## Phase 4 — UX polish (after the above)
+## Design system & UX quality (cross-cutting principle)
 
-- Unified status color/badge system from the Phase 3 `status.ts`.
-- Consistent loading/empty/error states (skeletons, not spinners-only;
-  every empty state says what would populate it).
+Goal (owner directive, 2026-07-02): the whole UI should be **consistent,
+modern, and a pleasure to use** — not a bolt-on final phase. This is a
+throughline: every component touched in Phases 1–3 adopts the shared
+primitives below, so consistency accretes instead of being retrofitted.
+
+Current inconsistencies (baseline to fix):
+- Three ad-hoc `case 'degraded' / 'healthy' / …` color switches
+  (Dashboard, VolumesTable, RaidTopology) — same states, different
+  colors/labels per view.
+- Hand-rolled bars and `animate-spin` gears/dots as the only loading and
+  progress affordances; spinner-only loads with no skeletons; empty
+  states that don't say what would fill them; error states that vary by
+  component (some silent, some red boxes).
+- Decorative animation not bound to data (the rebuild gear spins
+  regardless of progress) — motion should mean something.
+- One 922 KB JS bundle, no code splitting — first paint is heavier than
+  it needs to be.
+- Login page and main app use different visual languages.
+
+Deliverables (a small, real design system — not a rewrite):
+- **Design tokens** in Tailwind config: a semantic palette
+  (`healthy`/`degraded`/`failed`/`rebuilding`/`stale`/`standby`/
+  `in_sync`), spacing/radius/shadow scale, one type ramp. Every color
+  comes from a token; no raw `text-orange-600` scattered in JSX.
+- **A shared primitive kit** (`src/components/ui/`): `StatusChip`,
+  `ProgressBar` (the accessible 2a control), `Card`, `Table` shell with
+  built-in pagination/sort/empty/loading, `Skeleton`, `Toast`/inline
+  error, `ConfirmModal` (reused by bulk disk ops), `Button`/`IconButton`
+  with consistent sizes and focus rings. Built on the `status.ts` from
+  Phase 3 so semantics and colors share one source.
+- **Consistent state contracts**: every data view renders one of
+  loading (skeleton) / empty (with a "what would populate this" hint) /
+  error (inline, actionable) / data — via a small `<AsyncView>` wrapper
+  over the react-query state, so no view invents its own.
+- **Motion with meaning**: transitions only where they convey change
+  (state transitions, value updates); remove purely decorative spinners
+  once real state exists. Respect `prefers-reduced-motion`.
+- **Accessibility as table stakes**: keyboard nav, focus-visible rings,
+  ARIA on the status/progress controls, adequate contrast — a modern UI
+  is an accessible one.
+
+## Phase 4 — Visual system rollout + polish
+
+By here the primitives exist and each touched component already uses
+them; Phase 4 finishes the sweep and does the deliberate visual pass.
+
+- Migrate any not-yet-touched views onto the primitive kit and tokens;
+  delete the last ad-hoc color switch and hand-rolled bar/spinner.
+- Code-split by route/tab (react-router lazy) + `manualChunks` for
+  reactflow/recharts so first paint drops well under the current
+  single 922 KB bundle.
 - Topology views scoped per-node / per-volume with level-of-detail
   instead of cluster-wide graphs (Decision 3 scale target).
-- Then, and only then, visual redesign if still wanted.
+- Unify the login page with the app shell; consistent header, nav, and
+  density across tabs.
+- A deliberate visual pass on layout, hierarchy, and whitespace — the
+  "pleasure to use" polish — now cheap because structure and tokens are
+  already in place.
+- Optional: a quick screenshot/interaction review against a couple of
+  reference dashboards to sanity-check that it reads as modern.
 
 ## Sequencing and effort (rough)
 
@@ -221,8 +279,9 @@ its step timings — without kubectl.
 | 1 Data layer | ~3–5 days | Enables everything else |
 | 2a Live sync-state indicator | ~3–4 days | Lead deliverable; needs the Phase 1 react-query seam |
 | 2b–2d Volume detail / events / bulk ops | ~1–2 weeks | The payoff; needs 1 |
+| Design system | cross-cutting | Primitives land with Phase 1–3 work, not after |
 | 3 Structure/tests | ongoing | Interleave; gate new code on tests |
-| 4 UX polish | ~1 week | Last |
+| 4 Visual rollout + polish | ~1 week | Finish the sweep + deliberate visual pass |
 
 ## Related storage-side item (tracked in docs/UnansweredOn7b.md)
 
