@@ -408,13 +408,13 @@ Documented, bounded, not yet fixed — so an operator recognizes them:
   under revert-first admission, but epoch numbers are not proof of
   consumer progress.
 - **Controller crash inside the quiesced sub-span**: live-measured
-  2026-07-03 via fault injection — worst-case consumer write stall is
-  exactly `FLINT_HOT_REJOIN_LEASE_MS` (measured 10.0 s ± 0.12 s); the
-  data plane auto-releases with no controller alive, the restarted
-  reconciler scrubs the dead window in seconds, and the writer resumes
-  with no error. The stall could be shortened to reconciler latency by
-  a defensive unquiesce in the scrub/adopt arms (improvement noted, not
-  yet taken).
+  2026-07-03 via fault injection. The restarted reconciler's decode
+  releases the orphaned quiesce as its first RPC, so the consumer write
+  stall is bounded by container-restart + reconcile latency (measured
+  3.5 s); if the controller cannot come back at all, the data-plane
+  lease auto-expiry still bounds it at `FLINT_HOT_REJOIN_LEASE_MS`
+  (measured 10.0 s ± 0.12 s with no controller alive). The writer
+  resumes with no error in both cases.
 - **`admit_standbys_at_stage` final-delta source selection** assumes fresh
   standby marks (safe today — the chase gates admission — but not yet
   coverage-probed like the other source-selection sites).
@@ -435,9 +435,11 @@ standard tools):
   window (~150 ms) are too narrow even for `cgroup.kill`. Set
   `FLINT_HOT_REJOIN_FAULT=abort_after_quiesce` on the controller to abort
   the process the instant W1 commits, leaving the quiesce lease orphaned
-  (the auto-release drill; expect a writer stall of exactly
-  `FLINT_HOT_REJOIN_LEASE_MS`). **Disarm immediately after the first
-  fire** (`kubectl set env ... FLINT_HOT_REJOIN_FAULT-`) — the restarted
+  (the auto-release drill; expect a writer stall of restart + reconcile
+  latency, ~3.5 s — the decode's defensive unquiesce — with
+  `FLINT_HOT_REJOIN_LEASE_MS` as the no-controller backstop). **Disarm
+  immediately after the first fire**
+  (`kubectl set env ... FLINT_HOT_REJOIN_FAULT-`) — the restarted
   container still has the env and will fault every rejoin attempt.
   Never set in production.
 - **Acked-write-loss check:** run a writer appending `seq timestamp` lines

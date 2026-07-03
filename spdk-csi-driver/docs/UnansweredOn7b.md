@@ -1449,3 +1449,44 @@ reconciler latency.
 **Remaining from the 7b list after this:** esnap-resume preferring the
 local chain (B1 residual) and the `admit_standbys_at_stage` coverage
 probe.
+
+## Defensive unquiesce (2026-07-03, 64db0a1, `tier2-7b4.6`) — stall cut 10.0 s → 3.5 s
+
+The follow-up from the orphaned-lease drill, taken same day.
+`adopt_or_scrub` now releases any orphaned quiesce as its FIRST RPC —
+before identity lookup, before `live_head_leg`, before any artifact
+inspection — because every millisecond of decode work is guest write
+stall. Safety rests on two facts: a stale+marker decode proves no
+window is in flight for the volume (the per-volume claim serializes
+them), and both decode shapes want the unquiesce anyway (an
+uncommitted window mutated nothing behind the quiesce; a committed
+one's own next step was exactly this unquiesce). `-ENOENT` ("no
+quiesce lease held" — the overwhelmingly common case) and a missing
+raid are non-events, and no failure on this path can block the decode:
+the data-plane lease expiry remains the backstop, e.g. when the
+controller cannot come back at all. Suite 542 (two new tests: the
+unquiesce is asserted to be call #0 of the decode; a `-ENOENT`
+injection must not perturb the adopt arm).
+
+**Redux drill (same fault-injection protocol, image `tier2-7b4.6`
+built on a second transient spot c5d — the recipe is now routine):**
+kill aws-2 → standby → intent CAS 13:43:24 → quiesce → FAULT.
+
+| measurement | 7b4.5 (lease expiry) | 7b4.6 (defensive unquiesce) |
+|---|---|---|
+| lease lifetime | 10.0 s ± 0.12 (= `lease_ms`) | **3.5 s** (released by the restarted reconciler) |
+| writer silent seconds | 9 | **3** |
+| writer stall | 9.8–10.0 s | **~3.2–3.5 s** |
+| release → scrub event | — | 0.2 s (unquiesce demonstrably first) |
+
+The stall is now bounded by container-restart + first-reconcile
+latency instead of `lease_ms` (worst case remains
+`min(restart+reconcile, lease_ms)` — expiry still covers a controller
+that stays down). Convergence: clean window 165 ms, Healthy 3/3, zero
+seq gaps — the fixture ledger has now crossed **101,975 gapless
+appends** through every drill this campaign has thrown at it. Hygiene
+clean; builder node torn down after the drill (no stale Node object).
+
+**Remaining from the 7b list after this:** esnap-resume preferring the
+local chain (B1 residual) and the `admit_standbys_at_stage` coverage
+probe.
