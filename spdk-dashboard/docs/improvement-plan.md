@@ -1,7 +1,15 @@
 # Flint Dashboard Improvement Plan
 
-Status: accepted 2026-07-02. Phase 0 DONE (f97d9fe, 2026-07-02) — live
-validation on a cluster still owed (needs image build + roll).
+Status: accepted 2026-07-02. Phase 0 DONE (f97d9fe) and LIVE-VALIDATED
+on cluster `runj` 2026-07-02 (images `phase0-auth.0`): before/after
+captured — unauth `/api/dashboard` 200→401 (direct and via nginx),
+bad login 401, admin/viewer roles enforced (viewer 403 on destructive
+POST), `/healthz` open. Phase 1 DONE (9a6623c) and LIVE-VALIDATED
+2026-07-02 (driver image `phase1.0`): per-tab endpoints serving and
+auth-gated, projections consistent with the aggregate, cache
+single-flight proven from backend logs — 12 concurrent requests
+across 4 endpoints → exactly 1 node fan-out (125 ms build), repeat
+burst within TTL → 0. OpenAPI types remain deferred.
 Assessment basis: `spdk-dashboard/` at commit 042b805 (~13k LOC TS/TSX,
 React 19 + Vite + Tailwind 3, nginx → warp backend
 `spdk-csi-driver/src/spdk_dashboard_backend_minimal.rs`, ~2.5k LOC).
@@ -73,8 +81,10 @@ cannot invoke destructive endpoints; no secret material in the bundle.
 
 ## Phase 1 — Data layer
 
-Status (2026-07-02): frontend + backend cache DONE (uncommitted, pending
-the phase1 image roll); OpenAPI codegen deferred to its own task.
+Status (2026-07-02): frontend + backend cache DONE (9a6623c) and
+live-validated on `runj` (driver image `phase1.0`, built on the
+dedicated c5d.4xlarge builder node); OpenAPI codegen deferred to its
+own task.
 
 - [DONE] Adopt TanStack Query; `useDashboardData` reimplemented as a
   `useQuery` (30 s `refetchInterval`, keeps last good data, no blanking).
