@@ -100,6 +100,14 @@ pub struct HotRejoinConfig {
     /// trigger (reconsider the atomic-add variant if p99 cannot hold it).
     /// FLINT_HOT_REJOIN_WINDOW_TARGET_MS, default 2s.
     pub window_target: Duration,
+    /// 7b-4 adaptive dual-path: a standby whose un-chased delta is
+    /// estimated at or below this many BYTES is rejoined by the inline
+    /// fenced-final-delta window (the leg itself is equalized to E_f under
+    /// the quiesce and added — no esnap head, no localization, no exposure
+    /// window). Larger/unestimable deltas take the O(1) esnap window.
+    /// FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB, default 64; 0 disables the
+    /// inline path entirely.
+    pub inline_delta_max: u64,
 }
 
 impl Default for HotRejoinConfig {
@@ -111,6 +119,7 @@ impl Default for HotRejoinConfig {
             add_retries: 3,
             poll_interval: Duration::from_millis(500),
             window_target: Duration::from_secs(2),
+            inline_delta_max: 64 * 1024 * 1024,
         }
     }
 }
@@ -135,6 +144,11 @@ impl HotRejoinConfig {
             add_retries: d.add_retries,
             poll_interval: d.poll_interval,
             window_target: ms("FLINT_HOT_REJOIN_WINDOW_TARGET_MS", d.window_target),
+            inline_delta_max: std::env::var("FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|mib| mib * 1024 * 1024)
+                .unwrap_or(d.inline_delta_max),
         }
     }
 }
@@ -192,6 +206,13 @@ pub enum HotRejoinOutcome {
     Rejoined { window_ms: u128, localized: bool },
     /// Nothing to do / preconditions unmet (reason is operator-facing).
     NotEligible(&'static str),
+    /// The 7b-4 inline window was attempted and unwound (budget overrun or
+    /// a step failure). Node state and the marker are already cleaned; the
+    /// caller should deny the inline path for a while and let the next
+    /// attempt take the esnap window — this is NOT the 300 s failure
+    /// back-off (nothing consumer-visible broke beyond one bounded
+    /// quiesce).
+    InlineAborted { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +369,26 @@ pub async fn hot_rejoin_volume(
         }
     }
 
+    // 7b-4 path selection, read-only and before the intent: a converged
+    // standby whose replay is estimably small takes the inline
+    // fenced-final-delta window (no esnap head, no exposure); anything
+    // else — stale targets, big or unestimable deltas, the knob off —
+    // takes the O(1) esnap window.
+    let inline_estimate = if cfg.inline_delta_max > 0
+        && topo.rec.sync_state == SyncState::Standby
+    {
+        match estimate_unchased_delta(rpc, &topo).await {
+            Ok(Some(bytes)) if bytes <= cfg.inline_delta_max => Some(bytes),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(volume_id, error = %e, "[HOT_REJOIN] Delta estimate failed — esnap path");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // INTENT before any node mutation: from here every crash point is
     // marker-recoverable. A standby target is demoted to stale in the same
     // write (see mark_hot_rejoin_intent). The CAS closure no-ops if the
@@ -364,6 +405,114 @@ pub async fn hot_rejoin_volume(
         return Ok(HotRejoinOutcome::NotEligible(
             "target replica changed state before the window opened",
         ));
+    }
+
+    // 7b-4 inline path: any failure here unwinds node state inside
+    // window_inline, clears the marker, and reports InlineAborted — the
+    // orchestrator denies inline for a while and the next attempt takes
+    // the esnap window. No 300 s failure back-off: nothing consumer-visible
+    // broke beyond one bounded quiesce.
+    if let Some(est) = inline_estimate {
+        let attempt: Result<(Vec<(&'static str, u128)>, String), RpcError> = async {
+            let dst_bdev = prestage_inline(rpc, &topo).await?;
+            window_inline(rpc, &topo, &record, &ef, &dst_bdev, cfg).await
+        }
+        .await;
+        match attempt {
+            Ok((timings, live_uuid)) => {
+                let window_ms: u128 = timings.iter().map(|(_, ms)| ms).sum();
+                let cut_uuids: Vec<String> =
+                    topo.survivors.iter().map(|s| s.lvol_uuid.clone()).collect();
+                store
+                    .record_hot_rejoin_flip(
+                        volume_id,
+                        &topo.rec.lvol_uuid,
+                        &ef,
+                        &cut_uuids,
+                        &live_uuid,
+                    )
+                    .await?;
+                // No localization phase exists: the leg is independent the
+                // moment writes resume — promote in the same breath. A
+                // crash between the flip and here is decoded by the
+                // reconciler (leg-at-E_f, no esnap head → promote).
+                store.record_in_sync(volume_id, &topo.rec.lvol_uuid, &ef).await?;
+                let detail = timings
+                    .iter()
+                    .map(|(step, ms)| format!("{}={}ms", step, ms))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                store
+                    .emit(
+                        volume_id,
+                        "Normal",
+                        "HotRejoinSucceeded",
+                        &format!(
+                            "Replica on {} hot-rejoined raid {} at {} in {}ms ({}); inline \
+                             fenced final delta ({} bytes est.) — no esnap exposure, fully \
+                             redundant immediately",
+                            topo.identity.node_name, topo.raid_name, ef, window_ms, detail, est
+                        ),
+                    )
+                    .await;
+                info!(volume_id, node = %topo.identity.node_name, window_ms, "[HOT_REJOIN] Window committed (inline)");
+                if window_ms > cfg.window_target.as_millis() {
+                    store
+                        .emit(
+                            volume_id,
+                            "Warning",
+                            "HotRejoinWindowSlow",
+                            &format!(
+                                "Inline hot-rejoin window took {}ms against the {}ms target ({}) — \
+                                 lower FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB if this persists",
+                                window_ms,
+                                cfg.window_target.as_millis(),
+                                detail
+                            ),
+                        )
+                        .await;
+                }
+                // Post-window transport hygiene, best-effort: the copy
+                // source's controller and its export re-admission are dead
+                // weight now.
+                let expected = expected_remote_base_bdev(volume_id, topo.idx);
+                let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
+                detach_controller(rpc, &topo.src.node_name, &ctrl).await;
+                let _ = rpc
+                    .spdk_rpc(
+                        &topo.identity.node_name,
+                        &json!({ "method": "nvmf_subsystem_remove_host",
+                                 "params": { "nqn": replica_export_nqn(volume_id, topo.idx),
+                                              "host": flint_host_nqn(&topo.src.node_name) } }),
+                    )
+                    .await;
+                return Ok(HotRejoinOutcome::Rejoined { window_ms, localized: true });
+            }
+            Err(e) => {
+                store
+                    .record_hot_rejoin_cleared(
+                        volume_id,
+                        &topo.rec.lvol_uuid,
+                        &format!("inline window unwound: {}", e),
+                        false,
+                    )
+                    .await?;
+                store
+                    .emit(
+                        volume_id,
+                        "Warning",
+                        "HotRejoinUnwound",
+                        &format!(
+                            "Inline hot rejoin of replica on {} unwound ({}); the next attempt \
+                             takes the esnap window",
+                            topo.identity.node_name, e
+                        ),
+                    )
+                    .await;
+                warn!(volume_id, error = %e, "[HOT_REJOIN] Inline window unwound — esnap on retry");
+                return Ok(HotRejoinOutcome::InlineAborted { reason: e.to_string() });
+            }
+        }
     }
 
     prestage(rpc, &topo).await.inspect_err(|_| {
@@ -794,6 +943,330 @@ async fn window(
 
 /// Cut E_f on every survivor, strictly fresh: EEXIST aborts (see W2 note),
 /// any failure rolls back the snapshots already cut.
+// ---------------------------------------------------------------------------
+// 7b-4: the inline fenced-final-delta window (adaptive dual-path)
+// ---------------------------------------------------------------------------
+
+/// Pure half of the delta estimator: total allocated clusters the inline
+/// window's base-inclusive replay would copy — every epoch snapshot at or
+/// after the standby's mark plus the source head's un-snapshotted sliver.
+/// `None` = not estimable (missing cluster counts, or user snapshots on the
+/// source chain whose interleaving we can't order cheaply) — the caller
+/// takes the esnap path.
+fn sum_replay_clusters(
+    lvols: &[serde_json::Value],
+    volume_id: &str,
+    base_seq: u64,
+    src_head_name: &str,
+) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut head_seen = false;
+    for l in lvols {
+        let name = l.get("name").and_then(|n| n.as_str())?;
+        if crate::replica_sync::user_snapshot_ts(volume_id, name).is_some() {
+            return None; // conservative: user snapshots interleave deltas
+        }
+        let is_epoch = epoch_seq(volume_id, name);
+        let counted = match is_epoch {
+            Some(seq) => seq >= base_seq,
+            None if name == src_head_name => {
+                head_seen = true;
+                true
+            }
+            None => false,
+        };
+        if counted {
+            total = total.saturating_add(l.get("num_allocated_clusters").and_then(|c| c.as_u64())?);
+        }
+    }
+    if !head_seen {
+        return None;
+    }
+    Some(total)
+}
+
+/// Estimate the bytes the inline window would copy. Read-only; any gap in
+/// the data routes to the esnap path rather than guessing.
+async fn estimate_unchased_delta(
+    rpc: &dyn HotRejoinRpc,
+    topo: &Topology<'_>,
+) -> Result<Option<u64>, RpcError> {
+    let Some(base) = topo.rec.last_epoch.as_deref() else { return Ok(None) };
+    let Some(base_seq) = epoch_seq(topo.volume_id, base) else { return Ok(None) };
+    let lvols = rpc
+        .spdk_rpc(
+            &topo.src.node_name,
+            &json!({ "method": "bdev_lvol_get_lvols",
+                     "params": { "lvs_name": topo.src.lvs_name } }),
+        )
+        .await?;
+    let Some(lvols) = lvols.get("result").and_then(|r| r.as_array()).cloned() else {
+        return Ok(None);
+    };
+    let Some(clusters) =
+        sum_replay_clusters(&lvols, topo.volume_id, base_seq, &topo.src.lvol_name)
+    else {
+        return Ok(None);
+    };
+    let stores = rpc
+        .spdk_rpc(
+            &topo.src.node_name,
+            &json!({ "method": "bdev_lvol_get_lvstores",
+                     "params": { "lvs_name": topo.src.lvs_name } }),
+        )
+        .await?;
+    let Some(cluster_size) = stores
+        .get("result")
+        .and_then(|r| r.as_array())
+        .and_then(|a| a.first())
+        .and_then(|s| s.get("cluster_size"))
+        .and_then(|c| c.as_u64())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(clusters.saturating_mul(cluster_size)))
+}
+
+/// Pre-window transport for the inline path: the replica export converged
+/// and fenced to the CONSUMER with its controller pre-connected (the leg
+/// the add uses — the handshake stays outside the window), plus the copy
+/// SOURCE re-admitted on the same export and attached (the fenced final
+/// delta's push path). Returns the source-side copy bdev.
+async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<String, RpcError> {
+    let vol = topo.volume_id;
+    let dst_node = &topo.identity.node_name;
+    let src_node = &topo.src.node_name;
+    let live_uuid = topo.rec.live_lvol_uuid();
+    let leg_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
+    let nqn_replica = replica_export_nqn(vol, topo.idx);
+    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
+
+    let conn = rpc
+        .export_replica(dst_node, &leg_alias, &format!("{}_{}", vol, topo.idx), topo.consumer)
+        .await?;
+
+    // Consumer pre-connect, identity-verified (a reconnect-looping stale
+    // controller serves nothing usable — replace it).
+    let consumer_ok = get_bdev(rpc, topo.consumer, &expected)
+        .await?
+        .and_then(|b| b.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .as_deref()
+        == Some(live_uuid);
+    if !consumer_ok {
+        detach_controller(rpc, topo.consumer, &ctrl).await;
+        let attach = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": ctrl, "trtype": conn.transport.to_uppercase(),
+                "traddr": conn.target_ip, "trsvcid": conn.target_port.to_string(),
+                "subnqn": conn.nqn, "adrfam": "IPv4", "hostnqn": flint_host_nqn(topo.consumer)
+            }
+        });
+        rpc.spdk_rpc(topo.consumer, &attach)
+            .await
+            .map_err(|e| format!("consumer pre-connect of {}: {}", conn.nqn, e))?;
+    }
+
+    // Re-admit the copy source (the converge above fenced to the consumer
+    // only). Raw add_host: any later export converge removes it again.
+    let host = json!({
+        "method": "nvmf_subsystem_add_host",
+        "params": { "nqn": nqn_replica, "host": flint_host_nqn(src_node) }
+    });
+    match rpc.spdk_rpc(dst_node, &host).await {
+        Ok(_) => {}
+        Err(e) if is_already_exists(&e.to_string()) => {}
+        Err(e) => return Err(format!("copy-source re-admit on {}: {}", dst_node, e).into()),
+    }
+
+    // Source-side copy attachment (reuse the steady chase's if live).
+    let src_ok = get_bdev(rpc, src_node, &expected)
+        .await?
+        .and_then(|b| b.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .as_deref()
+        == Some(live_uuid);
+    if !src_ok {
+        detach_controller(rpc, src_node, &ctrl).await;
+        let attach = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": ctrl, "trtype": conn.transport.to_uppercase(),
+                "traddr": conn.target_ip, "trsvcid": conn.target_port.to_string(),
+                "subnqn": conn.nqn, "adrfam": "IPv4", "hostnqn": flint_host_nqn(src_node)
+            }
+        });
+        rpc.spdk_rpc(src_node, &attach)
+            .await
+            .map_err(|e| format!("copy-source attach of {}: {}", conn.nqn, e))?;
+    }
+    Ok(expected)
+}
+
+/// The 7b-4 inline window: quiesce (the fence) → strict E_f → fenced final
+/// delta onto the LEG ITSELF (base-inclusive replay to exactly E_f, aligned
+/// as the local E_f snapshot) → renew → `--skip-rebuild` add of the leg →
+/// unquiesce. No esnap head, no localization, no exposure: the leg is an
+/// independent raid member from the instant writes resume. The delta copy
+/// is bounded by lease/2 — an overrun unwinds (the quiesce is released,
+/// the unrecorded E_f reaped; the partially-copied leg needs nothing, the
+/// §5 chase is revert-first and idempotent over it).
+async fn window_inline(
+    rpc: &dyn HotRejoinRpc,
+    topo: &Topology<'_>,
+    record: &VolumeSyncRecord,
+    ef: &str,
+    dst_bdev_on_src: &str,
+    cfg: &HotRejoinConfig,
+) -> Result<(Vec<(&'static str, u128)>, String), RpcError> {
+    let vol = topo.volume_id;
+    let live_uuid = topo.rec.live_lvol_uuid().to_string();
+    let leg_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
+    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let base = topo
+        .rec
+        .last_epoch
+        .clone()
+        .ok_or("inline window needs a standby chase mark")?;
+
+    let mut timings: Vec<(&'static str, u128)> = Vec::new();
+    let mut t = Instant::now();
+    let mut lap = |name: &'static str, t: &mut Instant| {
+        timings.push((name, t.elapsed().as_millis()));
+        *t = Instant::now();
+    };
+
+    let mut cut_done = false;
+    let result: Result<(), RpcError> = async {
+        // W1: leased quiesce — the correctness fence for the fenced delta.
+        rpc.spdk_rpc(
+            topo.consumer,
+            &json!({ "method": "bdev_raid_quiesce",
+                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+        )
+        .await
+        .map_err(|e| format!("quiesce: {}", e))?;
+        lap("quiesce", &mut t);
+
+        // W2: strict E_f on every survivor (same all-or-abort as esnap).
+        cut_ef_strict(rpc, &topo.survivors, ef).await?;
+        cut_done = true;
+        lap("cut E_f", &mut t);
+
+        // W3: the fenced final delta — the phase-4 equalization run under
+        // the quiesce instead of the unstaged fence, bounded by lease/2.
+        let deadline = Instant::now() + Duration::from_millis(cfg.lease_ms / 2);
+        copy_chain_to(
+            rpc,
+            vol,
+            record,
+            topo.src,
+            topo.identity,
+            &leg_alias,
+            dst_bdev_on_src,
+            Some(&base),
+            ef,
+            cfg.poll_interval,
+            Some(deadline),
+        )
+        .await
+        .map_err(|e| format!("fenced final delta: {}", e))?;
+        lap("fenced final delta", &mut t);
+
+        // W4: renew immediately before the add — hard invariant.
+        rpc.spdk_rpc(
+            topo.consumer,
+            &json!({ "method": "bdev_raid_quiesce",
+                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+        )
+        .await
+        .map_err(|e| format!("lease renew (window breached — never add): {}", e))?;
+        lap("lease renew", &mut t);
+
+        // W5: identity-check the pre-staged leg (the namespace never
+        // changed — no AER wait), then the patched add.
+        let ok = get_bdev(rpc, topo.consumer, &expected)
+            .await?
+            .and_then(|b| b.get("uuid").and_then(|u| u.as_str()).map(String::from))
+            .as_deref()
+            == Some(live_uuid.as_str());
+        if !ok {
+            return Err(format!(
+                "pre-staged leg {} lost or replaced on {} — never add",
+                expected, topo.consumer
+            )
+            .into());
+        }
+        let add = json!({ "method": "bdev_raid_add_base_bdev",
+                          "params": { "raid_bdev": topo.raid_name, "base_bdev": expected,
+                                       "skip_rebuild": true } });
+        let mut attempt = 0;
+        loop {
+            match rpc.spdk_rpc(topo.consumer, &add).await {
+                Ok(_) => break,
+                Err(e) if is_busy(&e.to_string()) && attempt < cfg.add_retries => {
+                    attempt += 1;
+                    if !cfg.aer_poll.is_zero() {
+                        tokio::time::sleep(cfg.aer_poll).await;
+                    }
+                }
+                Err(e) => return Err(format!("skip_rebuild add: {}", e).into()),
+            }
+        }
+        lap("add --skip-rebuild", &mut t);
+
+        // W6: release (same tolerant semantics as the esnap window).
+        match rpc
+            .spdk_rpc(
+                topo.consumer,
+                &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_missing(&e.to_string()) || e.to_string().contains("no quiesce lease") => {}
+            Err(e) => {
+                warn!(volume_id = vol, error = %e, "[HOT_REJOIN] Unquiesce failed post-add — v3 expiry poller owns the release");
+            }
+        }
+        lap("unquiesce", &mut t);
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => Ok((timings, live_uuid)),
+        Err(e) => {
+            if cut_done {
+                // E_f never became a recorded epoch — reap it.
+                for s in &topo.survivors {
+                    let alias = format!("{}/{}", s.lvs_name, ef);
+                    let _ = rpc
+                        .spdk_rpc(
+                            &s.node_name,
+                            &json!({ "method": "bdev_lvol_delete", "params": { "name": alias } }),
+                        )
+                        .await;
+                }
+            }
+            match rpc
+                .spdk_rpc(
+                    topo.consumer,
+                    &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e2) if is_missing(&e2.to_string()) || e2.to_string().contains("no quiesce lease") => {}
+                Err(e2) => {
+                    warn!(volume_id = vol, error = %e2, "[HOT_REJOIN] Inline unwind unquiesce failed — lease expiry will release");
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
 async fn cut_ef_strict(
     rpc: &dyn CatchupRpc,
     survivors: &[&ReplicaInfo],
@@ -954,6 +1427,7 @@ async fn live_head_leg(
     idx: usize,
     identity: &ReplicaInfo,
     consumer: Option<&str>,
+    ef: &str,
 ) -> Result<Option<String>, RpcError> {
     let Some(consumer) = consumer else { return Ok(None) };
     let expected = expected_remote_base_bdev(volume_id, idx);
@@ -986,10 +1460,33 @@ async fn live_head_leg(
     let consumer_uuid = get_bdev(rpc, consumer, &expected)
         .await?
         .and_then(|b| b.get("uuid").and_then(|u| u.as_str()).map(String::from));
-    match (head_uuid, consumer_uuid) {
-        (Some(h), Some(c)) if h == c => Ok(Some(h)),
-        _ => Ok(None),
+    if let (Some(h), Some(c)) = (&head_uuid, &consumer_uuid) {
+        if h == c {
+            return Ok(Some(h.clone()));
+        }
     }
+    // Inline-admitted leg (7b-4): no esnap head — the raid member is the
+    // replica lvol itself. It is only THIS window's if its chain is
+    // aligned at exactly E_f (the align precedes the add, so an in-raid
+    // leg at E_f proves the fenced delta committed).
+    let leg_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
+    if let Some(leg) = get_bdev(rpc, &identity.node_name, &leg_alias).await? {
+        let uuid = leg.get("uuid").and_then(|u| u.as_str()).map(String::from);
+        let at_ef = leg
+            .get("driver_specific")
+            .and_then(|d| d.get("lvol"))
+            .and_then(|l| l.get("base_snapshot"))
+            .and_then(|s| s.as_str())
+            == Some(ef);
+        if at_ef {
+            if let (Some(u), Some(c)) = (&uuid, &consumer_uuid) {
+                if u == c {
+                    return Ok(Some(u.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// stale + marker: the window opened but the flip never landed. If the head
@@ -1016,7 +1513,7 @@ async fn adopt_or_scrub(
     };
 
     if let Some(head_uuid) =
-        live_head_leg(rpc, volume_id, idx, identity, consumer_node).await?
+        live_head_leg(rpc, volume_id, idx, identity, consumer_node, &ef).await?
     {
         let cut_uuids: Vec<String> = record
             .replicas
@@ -1149,7 +1646,7 @@ async fn resume_standby(
             .await;
     };
 
-    if live_head_leg(rpc, volume_id, idx, identity, consumer_node)
+    if live_head_leg(rpc, volume_id, idx, identity, consumer_node, &ef)
         .await?
         .is_some()
     {
@@ -1253,6 +1750,48 @@ async fn localize(
     let pad_alias = format!("{}/{}", dst_lvs, identity.lvol_name);
     let ef_local_alias = format!("{}/{}", dst_lvs, ef);
 
+    // Inline-admitted leg (7b-4): there is no esnap head — the raid member
+    // is the replica lvol itself, aligned at E_f by the in-window fenced
+    // delta. Promotion is all that remains, and the esnap tail below must
+    // NEVER run for it: the "pad" alias IS the serving leg (its disposal
+    // would repeat the orphan-sweep P0 by hand).
+    if get_bdev(rpc, dst_node, &head_alias).await?.is_none() {
+        let leg = get_bdev(rpc, dst_node, &pad_alias).await?.ok_or_else(|| {
+            format!(
+                "neither esnap head {} nor the leg {} is present on {}",
+                head_alias, pad_alias, dst_node
+            )
+        })?;
+        let at_ef = leg
+            .get("driver_specific")
+            .and_then(|d| d.get("lvol"))
+            .and_then(|l| l.get("base_snapshot"))
+            .and_then(|s| s.as_str())
+            == Some(ef.as_str());
+        let is_live = leg.get("uuid").and_then(|u| u.as_str()) == Some(rec.live_lvol_uuid());
+        if !(at_ef && is_live) {
+            return Err(format!(
+                "marked leg {} on {} is not the live lvol aligned at {} — cannot promote",
+                pad_alias, dst_node, ef
+            )
+            .into());
+        }
+        store.record_in_sync(volume_id, &rec.lvol_uuid, &ef).await?;
+        store
+            .emit(
+                volume_id,
+                "Normal",
+                "HotRejoinLocalized",
+                &format!(
+                    "Hot-rejoined replica on {} was admitted by the inline fenced delta at {} — \
+                     fully redundant with no esnap exposure",
+                    rec.node_name, ef
+                ),
+            )
+            .await;
+        info!(volume_id, node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Inline admission promoted");
+        return Ok(());
+    }
     let head = get_bdev(rpc, dst_node, &head_alias)
         .await?
         .ok_or_else(|| format!("esnap head {} missing on {}", head_alias, dst_node))?;
@@ -1627,19 +2166,28 @@ pub async fn run_hot_rejoin_orchestrator(
     );
     let backoff: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>> =
         Default::default();
+    // 7b-4: volumes whose inline window recently unwound — deny the inline
+    // path so the next attempt takes the esnap window instead of re-running
+    // the same doomed copy every tick.
+    let inline_deny: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>> =
+        Default::default();
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        if let Err(e) = hot_rejoin_tick(&driver, &cfg, &backoff).await {
+        if let Err(e) = hot_rejoin_tick(&driver, &cfg, &backoff, &inline_deny).await {
             warn!(error = %e, "[HOT_REJOIN] Orchestrator tick failed (non-fatal)");
         }
     }
 }
 
+/// How long an inline-window unwind keeps a volume on the esnap path.
+const INLINE_DENY_TTL: Duration = Duration::from_secs(900);
+
 async fn hot_rejoin_tick(
     driver: &std::sync::Arc<SpdkCsiDriver>,
     cfg: &HotRejoinTriggerConfig,
     backoff: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>,
+    inline_deny: &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>,
 ) -> Result<(), RpcError> {
     use k8s_openapi::api::core::v1::PersistentVolume;
     use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -1772,7 +2320,17 @@ async fn hot_rejoin_tick(
                     .expect("planner only says Rejoin for attached volumes");
                 let driver = driver.clone();
                 let backoff = backoff.clone();
-                let mech_cfg = HotRejoinConfig::from_env();
+                let inline_deny = inline_deny.clone();
+                let mut mech_cfg = HotRejoinConfig::from_env();
+                let inline_denied = inline_deny
+                    .lock()
+                    .expect("hot-rejoin inline-deny lock poisoned")
+                    .get(&volume_id)
+                    .map(|at| at.elapsed() < INLINE_DENY_TTL)
+                    .unwrap_or(false);
+                if inline_denied {
+                    mech_cfg.inline_delta_max = 0;
+                }
                 tokio::spawn(async move {
                     let _claim = claim;
                     let store = crate::catchup::KubeStore { client: driver.kube_client.clone() };
@@ -1791,6 +2349,17 @@ async fn hot_rejoin_tick(
                         }
                         Ok(HotRejoinOutcome::NotEligible(reason)) => {
                             tracing::debug!(volume_id, reason, "[HOT_REJOIN] Not eligible after claim");
+                        }
+                        Ok(HotRejoinOutcome::InlineAborted { reason }) => {
+                            // Node state is already unwound and the marker
+                            // cleared; keep the volume off the inline path
+                            // for a while — no failure back-off (the next
+                            // eligible tick retries with the esnap window).
+                            info!(volume_id, reason, "[HOT_REJOIN] Inline window aborted — esnap path denied-in for {}s", INLINE_DENY_TTL.as_secs());
+                            inline_deny
+                                .lock()
+                                .expect("hot-rejoin inline-deny lock poisoned")
+                                .insert(volume_id.clone(), Instant::now());
                         }
                         Err(e) => {
                             warn!(volume_id, error = %e, "[HOT_REJOIN] Rejoin failed (unwound) — backing off");
@@ -2044,9 +2613,13 @@ mod tests {
                         .iter()
                         .filter(|((n, name), _)| *n == node_s && name.starts_with(&prefix))
                         .map(|((_, name), b)| {
-                            json!({ "name": name[prefix.len()..],
+                            let mut e = json!({ "name": name[prefix.len()..],
                                     "uuid": b.get("uuid").cloned().unwrap_or(json!("")),
-                                    "alias": name })
+                                    "alias": name });
+                            if let Some(c) = b.get("num_allocated_clusters") {
+                                e["num_allocated_clusters"] = c.clone();
+                            }
+                            e
                         })
                         .collect();
                     json!({ "result": names })
@@ -2168,10 +2741,22 @@ mod tests {
                         .push(host);
                     json!({ "result": true })
                 }
+                "nvmf_subsystem_remove_host" => {
+                    let nqn = params["nqn"].as_str().unwrap().to_string();
+                    let host = params["host"].as_str().unwrap().to_string();
+                    if let Some(s) = w.subsystems.get_mut(&(node_s.clone(), nqn)) {
+                        s.hosts.retain(|h| h != &host);
+                    }
+                    json!({ "result": true })
+                }
                 "nvmf_subsystem_add_listener" => {
                     let nqn = params["nqn"].as_str().unwrap().to_string();
                     w.subsystems.entry((node_s.clone(), nqn)).or_default().listener = true;
                     json!({ "result": true })
+                }
+                "bdev_lvol_get_lvstores" => {
+                    let lvs = params["lvs_name"].as_str().unwrap_or("").to_string();
+                    json!({ "result": [{ "name": lvs, "cluster_size": 1_048_576u64 }] })
                 }
                 "nvmf_subsystem_add_ns" => {
                     let nqn = params["nqn"].as_str().unwrap().to_string();
@@ -2488,7 +3073,14 @@ mod tests {
             add_retries: 2,
             poll_interval: Duration::ZERO,
             window_target: Duration::from_secs(2),
+            // Existing tests exercise the esnap window; the inline tests
+            // opt in explicitly.
+            inline_delta_max: 0,
         }
+    }
+
+    fn cfg_inline() -> HotRejoinConfig {
+        HotRejoinConfig { inline_delta_max: 64 * 1024 * 1024, ..cfg() }
     }
 
     fn catchup_cfg() -> CatchupConfig {
@@ -2660,6 +3252,236 @@ mod tests {
         assert!(rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1_hr", VOL)));
         let rec = store.record.lock().unwrap();
         assert!(rec.replicas.iter().all(|r| r.hot_rejoin.is_none()));
+    }
+
+    // -- 7b-4 inline fenced-final-delta tests ---------------------------------
+
+    fn src_head_name() -> String {
+        format!("vol_{}_replica_0", VOL)
+    }
+
+    /// Give the source chain the cluster counts the estimator needs.
+    fn seed_allocated(rpc: &FakeRpc, counts: &[(&str, u64)]) {
+        let mut w = rpc.world.lock().unwrap();
+        for (name, c) in counts {
+            let alias = format!("lvs_node-a/{}", name);
+            w.bdevs
+                .get_mut(&("node-a".to_string(), alias))
+                .expect("seeded bdev")["num_allocated_clusters"] = json!(c);
+        }
+    }
+
+    #[test]
+    fn replay_cluster_estimator_is_base_inclusive_and_bails_on_gaps() {
+        let head = src_head_name();
+        let lvols = vec![
+            json!({ "name": epoch_name(VOL, 1), "num_allocated_clusters": 100 }),
+            json!({ "name": epoch_name(VOL, 2), "num_allocated_clusters": 7 }),
+            json!({ "name": head, "num_allocated_clusters": 3 }),
+        ];
+        // Base seq 2: epoch-2 (the base-inclusive replay re-copies it) plus
+        // the head's un-snapshotted sliver; epoch-1 is already local.
+        assert_eq!(sum_replay_clusters(&lvols, VOL, 2, &head), Some(10));
+        // A counted element without a cluster count → not estimable.
+        let missing = vec![
+            json!({ "name": epoch_name(VOL, 2) }),
+            json!({ "name": head, "num_allocated_clusters": 3 }),
+        ];
+        assert_eq!(sum_replay_clusters(&missing, VOL, 2, &head), None);
+        // No head in the listing → not estimable (the sliver is unknown).
+        let headless = vec![json!({ "name": epoch_name(VOL, 2), "num_allocated_clusters": 7 })];
+        assert_eq!(sum_replay_clusters(&headless, VOL, 2, &head), None);
+    }
+
+    #[tokio::test]
+    async fn inline_window_admits_the_leg_without_esnap_machinery() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // Small, fully-estimable replay: epoch-2 (7 clusters) + head sliver
+        // (3) at 1 MiB clusters = 10 MiB ≤ 64 MiB → inline path.
+        seed_allocated(
+            &rpc,
+            &[(&epoch_name(VOL, 1), 100), (&epoch_name(VOL, 2), 7), (&src_head_name(), 3)],
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg_inline())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::Rejoined { localized, .. } => assert!(localized),
+            other => panic!("expected Rejoined, got {:?}", other),
+        }
+
+        // None of the esnap machinery ran: no head clone, no ns swap, no
+        // E_f export namespace, no pad.
+        let methods = rpc.methods_in_order();
+        assert!(!methods.contains(&"bdev_lvol_clone_bdev".to_string()));
+        assert!(!methods.contains(&"nvmf_subsystem_remove_ns".to_string()));
+        assert!(!methods.contains(&"nvmf_subsystem_add_ns".to_string()));
+        assert!(!rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1_hr", VOL)));
+
+        // The quiesced fenced delta, in dependency order.
+        let idx = |m: &str| methods.iter().position(|x| x == m).unwrap_or(usize::MAX);
+        assert!(idx("bdev_raid_quiesce") < idx("bdev_lvol_snapshot"), "quiesce before E_f cut");
+        assert!(
+            idx("bdev_lvol_snapshot") < idx("bdev_lvol_start_shallow_copy"),
+            "cut before the fenced delta"
+        );
+        assert!(
+            idx("bdev_lvol_start_shallow_copy") < idx("bdev_raid_add_base_bdev"),
+            "delta before the add"
+        );
+        assert!(idx("bdev_raid_add_base_bdev") < idx("bdev_raid_unquiesce"), "add before release");
+
+        // The member added is the pre-staged LEG bdev with --skip-rebuild.
+        let adds = rpc.calls_of("bdev_raid_add_base_bdev");
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].1["base_bdev"], json!(expected_remote_base_bdev(VOL, 1)));
+        assert_eq!(adds[0].1["skip_rebuild"], json!(true));
+
+        // The leg's local chain is aligned at E_f (epoch-3).
+        let w = rpc.world.lock().unwrap();
+        let leg = w
+            .bdevs
+            .get(&("node-b".to_string(), format!("lvs_node-b/vol_{}_replica_1", VOL)))
+            .expect("leg lvol");
+        assert_eq!(
+            leg["driver_specific"]["lvol"]["base_snapshot"].as_str(),
+            Some(epoch_name(VOL, 3).as_str())
+        );
+        drop(w);
+
+        // Record: in_sync at E_f, marker cleared — no localization phase.
+        let rec = store.record.lock().unwrap();
+        let b = rec.replicas.iter().find(|r| r.lvol_uuid == "uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.hot_rejoin.is_none());
+        assert_eq!(b.last_epoch.as_deref(), Some(epoch_name(VOL, 3).as_str()));
+        drop(rec);
+        assert_eq!(store.events(), vec!["HotRejoinSucceeded"]);
+    }
+
+    #[tokio::test]
+    async fn inline_estimator_routes_large_deltas_to_the_esnap_window() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // 100k clusters at 1 MiB ≈ 100 GiB — way past the inline ceiling.
+        seed_allocated(
+            &rpc,
+            &[(&epoch_name(VOL, 1), 1), (&epoch_name(VOL, 2), 100_000), (&src_head_name(), 1)],
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg_inline())
+            .await
+            .unwrap();
+        assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }), "got {:?}", out);
+        // The esnap machinery ran.
+        assert!(rpc.methods_in_order().contains(&"bdev_lvol_clone_bdev".to_string()));
+    }
+
+    #[tokio::test]
+    async fn inline_abort_unwinds_clears_the_marker_and_reports() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        seed_allocated(
+            &rpc,
+            &[(&epoch_name(VOL, 1), 100), (&epoch_name(VOL, 2), 7), (&src_head_name(), 3)],
+        );
+        // The fenced delta dies mid-copy.
+        rpc.fail("node-a", "bdev_lvol_start_shallow_copy", "copy blew up");
+        let store = FakeStore::new(standby_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg_inline())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::InlineAborted { reason } => {
+                assert!(reason.contains("fenced final delta"), "{}", reason)
+            }
+            other => panic!("expected InlineAborted, got {:?}", other),
+        }
+        // Unwound: the unrecorded E_f reaped from the survivor, the quiesce
+        // released, the marker cleared (leg stays stale for the chase), and
+        // no add ever happened.
+        assert!(!rpc.has_bdev("node-a", &format!("lvs_node-a/{}", epoch_name(VOL, 3))));
+        assert!(rpc.methods_in_order().contains(&"bdev_raid_unquiesce".to_string()));
+        assert!(rpc.calls_of("bdev_raid_add_base_bdev").is_empty());
+        let rec = store.record.lock().unwrap();
+        let b = rec.replicas.iter().find(|r| r.lvol_uuid == "uuid-b").unwrap();
+        assert!(b.hot_rejoin.is_none());
+        assert_eq!(b.sync_state, SyncState::Stale);
+        drop(rec);
+        assert_eq!(store.events(), vec!["HotRejoinUnwound"]);
+    }
+
+    #[tokio::test]
+    async fn inline_crash_between_flip_and_promote_is_promoted_by_the_reconciler() {
+        // Post-flip pre-promote crash state: marker set, no esnap head, the
+        // leg aligned at E_f and serving in the raid. The resume arm must
+        // promote WITHOUT running the esnap disposal tail (which would
+        // delete the serving leg — the "pad" alias IS the leg here).
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        {
+            // The leg chain aligned at E_f + in the raid + on the consumer.
+            let mut w = rpc.world.lock().unwrap();
+            let leg = w
+                .bdevs
+                .get_mut(&("node-b".to_string(), format!("lvs_node-b/vol_{}_replica_1", VOL)))
+                .unwrap();
+            leg["driver_specific"]["lvol"]["base_snapshot"] = json!(epoch_name(VOL, 3));
+            let expected = expected_remote_base_bdev(VOL, 1);
+            w.bdevs.insert(
+                ("consumer".to_string(), expected.clone()),
+                json!({ "name": expected, "uuid": "uuid-b" }),
+            );
+        }
+        rpc.seed_raid(
+            "consumer",
+            &format!("raid_{}", VOL),
+            "online",
+            &[
+                (&expected_remote_base_bdev(VOL, 0), true),
+                (&expected_remote_base_bdev(VOL, 1), true),
+            ],
+        );
+        let mut record = standby_b_record();
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), NOW);
+        record.mark_hot_rejoined(
+            "uuid-b",
+            &epoch_name(VOL, 3),
+            &["uuid-a".to_string()],
+            "uuid-b",
+            NOW,
+        );
+        let rec = record.replicas.iter().find(|r| r.lvol_uuid == "uuid-b").cloned().unwrap();
+        assert!(rec.hot_rejoin.is_some(), "fixture must model the crash window");
+        let store = FakeStore::new(record.clone());
+
+        resume_standby(
+            &rpc, &store, VOL, &record, &rec, &replicas2(), Some("consumer"), &catchup_cfg(),
+        )
+        .await
+        .unwrap();
+
+        // Promoted, marker cleared — and the serving leg is UNTOUCHED.
+        let recs = store.record.lock().unwrap();
+        let b = recs.replicas.iter().find(|r| r.lvol_uuid == "uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.hot_rejoin.is_none());
+        drop(recs);
+        assert!(rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1", VOL)));
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert!(
+            !deletes
+                .iter()
+                .any(|(_, p)| p["name"].as_str() == Some(&format!("lvs_node-b/vol_{}_replica_1", VOL))),
+            "the disposal tail must never touch an inline leg: {:?}",
+            deletes
+        );
+        assert_eq!(store.events(), vec!["HotRejoinLocalized"]);
     }
 
     #[tokio::test]

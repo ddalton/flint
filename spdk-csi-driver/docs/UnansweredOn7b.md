@@ -972,3 +972,53 @@ instead of timing luck), the two-leg fs-allocated-only scrub, the
 operator runbook as a standalone doc, and the local-E_f design decision
 above. Cluster `runj` stands healthy: fixture running, `in_sync×2`,
 all orchestrators on, epoch stream at ~533.
+
+## 7b-4 implemented (2026-07-02 evening)
+
+The adaptive dual-path from the decision above, in `hot_rejoin.rs`.
+Suite 514 green; NOT yet run live.
+
+- **Estimator** (`estimate_unchased_delta` / pure `sum_replay_clusters`):
+  one `bdev_lvol_get_lvols` + one `bdev_lvol_get_lvstores` on the source
+  at trigger time. Counts the base-INCLUSIVE replay (every epoch snapshot
+  at or after the standby's mark — the §5 copy re-copies the base — plus
+  the source head's un-snapshotted sliver, × cluster_size). Bails to the
+  esnap path on any gap: missing cluster counts, no head in the listing,
+  or user snapshots on the chain (their interleaving is unordered without
+  a lineage walk). Stale targets and `inline_delta_max = 0` also route to
+  esnap. Knob: `FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB`, default 64.
+- **`prestage_inline`**: replica export converged and fenced to the
+  consumer + identity-verified consumer pre-connect (the add's handshake
+  stays outside the window), then the copy source re-admitted on the same
+  export via raw `add_host` (the converge fence is exclusive — the
+  "dual-host window fence") and its copy controller attached, reusing the
+  steady chase's when live.
+- **`window_inline`**: quiesce → strict E_f → **fenced final delta onto
+  the leg itself** (`copy_chain_to` bounded by a lease/2 deadline —
+  `shallow_copy` already enforces deadlines; the final align snapshots
+  the local E_f, leaving `base_snapshot = E_f` as the on-disk proof of
+  equalization) → renew → identity-check the pre-staged leg (no AER —
+  the namespace never changed) → `--skip-rebuild` add → unquiesce.
+  Unwind mirrors the esnap ladder's tail: reap the unrecorded E_f,
+  release the quiesce; the partially-copied leg needs nothing (the §5
+  chase is revert-first and idempotent over it).
+- **Commit choreography**: intent CAS (unchanged, path-agnostic) → flip →
+  `record_in_sync` in the same breath — there is no localization phase,
+  the leg is independent the instant writes resume. `HotRejoinSucceeded`
+  carries "inline fenced final delta … no esnap exposure".
+- **Crash decode reuses the existing table**: `live_head_leg` now also
+  recognizes the inline shape (no `_hr` head; the replica lvol in the
+  raid with `base_snapshot = E_f`), so stale+marker decodes to
+  adopt-or-scrub exactly as before; the resume arm's `localize` entry
+  short-circuits an inline leg to promotion — load-bearing, because the
+  esnap disposal tail deletes the "pad" alias, WHICH IS the serving leg
+  in the inline shape (test pins that it is never touched).
+- **Abort semantics**: any inline window failure unwinds, clears the
+  marker, and returns `InlineAborted` — the orchestrator denies the
+  inline path for that volume for 15 min (`INLINE_DENY_TTL`) and the
+  next eligible tick takes the esnap window. No 300 s failure back-off:
+  nothing consumer-visible broke beyond one bounded quiesce.
+
+Owed: the live drill (leg-kill on the standing fixture should route
+inline naturally — the writer's per-epoch deltas are KBs), a window
+timing sample, and the runbook note. The build path (dind pod) is ready.
