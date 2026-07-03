@@ -1080,3 +1080,149 @@ single ~2 s pause at seq 20330 — the quiesced window itself.
 orphaned-lease live measurement (fault-injection knob), fs-allocated-only
 two-leg scrub, the standalone operator runbook, and esnap-resume
 preferring the local chain (B1 residual, esnap path only).
+
+## 3-replica drill session (2026-07-03, cluster runj) — three P1s found, fixed & live-validated
+
+First drill at replicas=3 (SC `flint-3r` numReplicas:3, fixture
+`r3-e2e`/`r3-writer`, replicas on aws-1/2/3, consumer aws-3; narrated
+through the dashboard API at 2 s cadence like the phase-2 drills).
+Requested precisely to probe multi-failure recovery and source choice —
+and it found the class of bug replicas=2 cannot express.
+
+**Drill A (single leg, kill aws-1): PASS, fastest episode on record.**
+Consumer raid `2/3+failed` at +2 s, stale +7 s, Healthy 3/3 at
++1 m 57 s; window 1781 ms inline (22 MiB estimator, steps sum exact).
+Young-volume note: with no shared epoch history within retention the
+chase correctly routed `ReplicaFullBuildStarted` (thin-aware full
+build), then standby → inline window.
+
+**Drill B (two legs staggered, aws-1 then aws-2 +31 s): P1.** The raid
+served `online 1/3` throughout — **zero acked-write loss** (22,478
+ledger appends, gapless across both drills). aws-2 (killed second)
+recovered first at +5 m 39 s. **aws-1 then wedged permanently**:
+`ReplicaCatchupFailed` every 60 s — "source head
+`lvs_runj-aws-2_…/vol_<vol>_replica_1` **not found** on runj-aws-2" —
+standby lag climbing one per epoch cut, unbounded (observed to lag=67;
+epoch snapshots accumulating on every leg since retention holds
+history for a lagging standby: the wedge slowly eats disk cluster-wide).
+
+**(P1) Root cause — chase source resolution is name-based; a
+hot-rejoined source's head isn't.** Two deliberate behaviors compose
+into the wedge:
+1. `pick_source` prefers a **non-consumer** in_sync source, so once
+   aws-2 rejoined, every cycle re-picked it over the (healthy,
+   plain-named, consumer-local) aws-3.
+2. `lineage_chain` / the full-build sizing resolved the source head by
+   the deterministic alias — but an esnap-path rejoin promotes a
+   `_hr`-named head under a fresh uuid that keeps serving afterwards
+   (Finding-1 territory: that persistence is by design and
+   sweep-protected). The record knows the truth
+   (`active_lvol_uuid = e0fd6681`, aws-2's `_hr` head); the chase
+   never consulted it.
+
+Structural note: at replicas=2 the only possible source is a replica
+that never failed during the episode, so every 2-replica drill passed
+over this hole; at ≥3 replicas with ≥2 failures the non-consumer
+preference makes hitting it deterministic, and the same wedge scales
+to any N (each additional rejoined replica is another poisoned source
+candidate).
+
+**FIXED (a67527e), suite 532**: source head resolution now goes record
+live uuid first (an lvol bdev's name IS its uuid; the exact rule the
+dashboard's raid-member matching already uses), canonical alias as the
+fallback (pre-Tier-2 records, never-rejoined sources); both resolution
+sites (`lineage_chain`, full-build sizing). Deliberately no `_hr`
+name-guessing — a stranded `_hr` the record doesn't reference may hold
+stale data and must never become a source. Unit tests include a
+faithful reproduction (canonical alias absent, head addressable only
+by live uuid). The wedged r3 volume was left Degraded as live
+validation material (controller-only rolls throughout — all three
+fixes are controller-side; the node DS was never touched).
+
+**(P1 №2) Rolling `tier2-7b4.1` did NOT heal the volume — resolution
+succeeded and failed one level deeper.** The error changed from
+"source head not found" to "`epoch-…-7` not found in the source
+lineage on runj-aws-2 (walked … to the chain root)": aws-2, itself
+rebuilt after its failure, has a chain rooted at ITS OWN rebuild base
+(epoch-8 — it died one 30 s epoch cut after aws-1), so no walk of its
+lineage can ever reach aws-1's epoch-7 mark. Only never-failed aws-3
+still held epoch-7 (retention pins a base while the record needs it —
+on the chains that have it). `pick_source`'s non-consumer preference
+re-picked aws-2 every cycle regardless: wedge #2, same volume, lag
+kept climbing (observed to 124). The "source failover" follow-up
+declared defense-in-depth below turned out to be REQUIRED for
+correctness whenever ≥2 staggered failures span an epoch cut.
+
+**FIXED (0314af3), suite 537**: source selection is now
+coverage-aware — `select_covering_source` probes each in-sync
+replica's live lineage in `pick_source` order (non-consumer first) and
+takes the first whose chain contains the session's target AND base,
+failing over past definitively non-covering candidates and
+transiently unreachable nodes alike. When every candidate returns the
+definitive walked-to-root verdict: a chasing standby is demoted to
+stale (`record_stale`, new store transition — retrying could never
+succeed; the bulk path owns it), and a stale delta falls back to the
+thin-aware full build. Demotion requires ALL verdicts definitive — a
+transport error aborts the cycle instead, so a transient can never
+cost a full rebuild. Five new tests.
+
+**(P1 №3) Rolling `tier2-7b4.2` un-wedged the chase — and exposed a
+livelock in the rejoin.** The failover worked on its first cycle:
+aws-1 swept 119 epochs of backlog from aws-3 in one chase (lag 124 → 5
+at 10:09:50), settled into the standby 1↔2 oscillation… and then the
+hot-rejoin window failed at the E_f cut: `bdev_lvol_snapshot` →
+"No such device" on runj-aws-2. `cut_ef_strict` snapshotted every
+survivor by the canonical `{lvs}/{lvol_name}` alias — the THIRD
+instance of the name-vs-uuid class, and the only one the regular 30 s
+cuts don't share (the epoch scheduler's `snapshot_source` already uses
+the record's live uuid; there is literally a test named
+`execute_cut_uses_live_uuid_after_revert`). Failure shape is worse
+than a wedge: cut fails → window unwinds → rejoiner demoted to stale →
+trivially re-chases → retries → same failure. A permanent
+standby↔stale livelock, churning a full window attempt per cycle.
+
+**FIXED (cdab443), suite 538**: `Topology` survivors now carry a
+`snapshot_source` resolved from the record's `live_lvol_uuid()` at
+build time (the epoch scheduler's exact pattern); both window paths
+(esnap and inline fenced-delta) share it. The test fake previously
+accepted snapshots of nonexistent heads and only resolved bdevs by
+exact key — which is precisely why no test ever reproduced the live
+failure; it now mirrors SPDK's dual addressability (alias or
+name=uuid, unknown uuid = hard ENODEV) and a regression test rejoins
+through a survivor whose only head is the `_hr` clone.
+
+**Live validation (`tier2-7b4.3`, 10:37): complete self-heal, zero
+intervention.** Next cycle after the roll: chase current →
+`standby(HR)` at 10:37:16 → **Healthy 3/3 at 10:37:20**.
+`HotRejoinSucceeded` at epoch-156, **window 168 ms** (quiesce 23,
+E_f cut 24, export+AER E_f 23, esnap clone 11, export+AER head 49,
+lease renew 11, add --skip-rebuild 15, unquiesce 12); localized after
+4 s of esnap exposure. Writer ledger: **46,425 appends, zero gaps** —
+through two leg kills, ~70 min of wedge, the livelock, and three
+controller rolls. Hygiene: epoch snapshots drained from the ~120-deep
+retention backlog back to steady state, 6 per node on all three legs;
+a `HotRejoinScrubbed` along the way is the reconciler disposing of the
+livelock era's uncommitted-window artifacts as designed. Bonus
+confirmation: the final pre-rejoin catch-up sourced from aws-2
+("copying epoch-152 → latest from runj-aws-2") — with a recent base
+the coverage-aware selector still prefers the non-consumer source, and
+fails over only when coverage demands it. Both selector arms proven
+live.
+
+**Recovery-choice semantics observed (the drill's original question):**
+per-replica and event-driven; hot-rejoin admission serialized per
+volume by the shared claim — the first standby to qualify wins (hence
+second-killed-first-recovered); source selection prefers non-consumer
+in_sync replicas, now subject to lineage coverage, with consumer
+fallback. Multi-failure recovery at any N is a deliberate cascade:
+all failed replicas chase concurrently (cheap epoch deltas), but bulk
+catch-up runs one replica per volume-cycle and admission one per
+volume — each rejoiner then becomes a preferred source for the rest,
+fanning load off the survivor. The three fixes are exactly what make
+that cascade correct at N≥3.
+
+**Follow-ups NOT taken:** the pre-existing B1 esnap-resume residual
+stands; `admit_standbys_at_stage`'s final-delta source and the
+hot-rejoin backfill source still assume fresh marks (safe today — the
+chase gates admission, so marks are always recent — but the same
+coverage probe could harden them).
