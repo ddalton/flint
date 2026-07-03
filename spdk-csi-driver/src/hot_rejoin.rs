@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::catchup::{
     copy_chain_to, detach_controller, get_bdev, get_raids, in_sync_sources, list_lvol_names,
@@ -1535,6 +1535,46 @@ async fn live_head_leg(
 /// stale + marker: the window opened but the flip never landed. If the head
 /// leg is live in the raid the add committed — adopt it (re-flip). If not,
 /// the window died: scrub the strandings and release the claim.
+/// A window that died between quiesce and unquiesce leaves the raid frozen
+/// under an orphaned lease: guest writes stall until the lease auto-expires
+/// (the full `lease_ms` — measured live at exactly 10.0 s, 2026-07-03). A
+/// stale+marker decode proves no window is in flight for this volume (the
+/// per-volume claim serializes them), so the reconciler releases the
+/// quiesce defensively and the stall shrinks to reconciler latency. Safe in
+/// both decode shapes: an uncommitted window mutated nothing behind the
+/// quiesce, and a committed one's own next step was exactly this unquiesce.
+/// `-ENOENT` ("no quiesce lease held" — the common case: the crash landed
+/// outside the quiesced span, or the lease already expired) and a missing
+/// raid are non-events, and no failure here may block the decode — the
+/// data-plane lease expiry remains the backstop.
+async fn release_orphaned_quiesce(
+    rpc: &dyn CatchupRpc,
+    volume_id: &str,
+    consumer_node: Option<&str>,
+) {
+    let Some(consumer) = consumer_node else { return };
+    let raid_name = format!("raid_{}", volume_id);
+    match rpc
+        .spdk_rpc(
+            consumer,
+            &json!({ "method": "bdev_raid_unquiesce", "params": { "name": raid_name } }),
+        )
+        .await
+    {
+        Ok(_) => {
+            info!(volume_id, consumer, "[HOT_REJOIN] Released an orphaned quiesce lease left by a crashed window");
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no quiesce lease held") || msg.contains("not found") {
+                debug!(volume_id, error = %msg, "[HOT_REJOIN] No orphaned quiesce to release");
+            } else {
+                warn!(volume_id, error = %msg, "[HOT_REJOIN] Defensive unquiesce failed — the lease expiry remains the backstop");
+            }
+        }
+    }
+}
+
 async fn adopt_or_scrub(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
@@ -1544,6 +1584,11 @@ async fn adopt_or_scrub(
     replicas: &[ReplicaInfo],
     consumer_node: Option<&str>,
 ) -> Result<(), RpcError> {
+    // First move, before any inspection: if the window died inside its
+    // quiesced span, every second of decode work is a second of guest
+    // write stall.
+    release_orphaned_quiesce(rpc, volume_id, consumer_node).await;
+
     let ef = rec.hot_rejoin.clone().expect("caller filters on marker");
     let Some((idx, identity)) = replicas
         .iter()
@@ -3856,6 +3901,73 @@ mod tests {
         assert_eq!(b.sync_state, SyncState::Stale);
         assert!(b.hot_rejoin.is_none());
         assert_eq!(store.events(), vec!["HotRejoinScrubbed"]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_releases_the_orphaned_quiesce_before_any_decode_work() {
+        // A window that died inside its quiesced span: the scrub arm must
+        // unquiesce the consumer raid FIRST — every ms of decode work is
+        // guest write stall — and still scrub normally afterwards.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head");
+        let mut record = stale_b_record();
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas2(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        let calls = rpc.calls.lock().unwrap();
+        let unq = calls
+            .iter()
+            .position(|(node, m, _)| node == "consumer" && m == "bdev_raid_unquiesce")
+            .expect("the reconcile must attempt the defensive unquiesce");
+        assert_eq!(unq, 0, "defensive unquiesce must be the first RPC of the decode");
+        drop(calls);
+        assert_eq!(store.events(), vec!["HotRejoinScrubbed"]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tolerates_no_lease_on_the_defensive_unquiesce() {
+        // The common case: the crash landed outside the quiesced span (or
+        // the lease already expired) — the unquiesce returns -ENOENT and
+        // the adopt arm must proceed untroubled.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        rpc.fail(
+            "consumer",
+            "bdev_raid_unquiesce",
+            "SPDK RPC error: Code=-2 Msg=no quiesce lease held on raid bdev",
+        );
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head");
+        {
+            let mut w = rpc.world.lock().unwrap();
+            let raids = w.raids.get_mut("consumer").unwrap();
+            raids[0]["base_bdevs_list"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "name": expected_remote_base_bdev(VOL, 1), "is_configured": true }));
+            w.bdevs.insert(
+                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
+                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+            );
+        }
+        let mut record = stale_b_record();
+        record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas2(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby, "adopt must proceed past the -ENOENT");
+        assert_eq!(store.events(), vec!["HotRejoinAdopted"]);
     }
 
     #[tokio::test]
