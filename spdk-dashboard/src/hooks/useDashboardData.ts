@@ -266,6 +266,7 @@ export interface Disk {
   free_space_display: string;
   healthy: boolean;
   blobstore_initialized: boolean; // Matches backend field name
+  is_system_disk: boolean; // Root/boot disk — never an init candidate
   lvol_count: number;
   model: string;
   read_iops: number;
@@ -463,6 +464,7 @@ const transformBackendData = (backendData: any): DashboardData => {
         free_space_display: disk.free_space_display || `${freeGB}GB`,
         // Already correct from backend
         blobstore_initialized: disk.blobstore_initialized,
+        is_system_disk: disk.is_system_disk ?? false,
         // Use backend fields (no mapping needed)
         id: disk.id,
         node: disk.node,

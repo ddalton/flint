@@ -1,18 +1,25 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
-import { 
-  HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw, 
-  Play, Database, Shield, Info, ChevronLeft, ChevronRight,
-  Search, Filter, Monitor, Grid, List, Trash2  
+import {
+  HardDrive, Settings, AlertTriangle, CheckCircle, RefreshCw,
+  Play, Database, Shield, Info, ChevronLeft, ChevronRight, ChevronDown,
+  Search, Filter, Monitor, Grid, List, Trash2
 } from 'lucide-react';
-import { 
-  useDiskSetup, 
+import {
+  useDiskSetup,
   useDashboardData,
   type UnimplementedDisk,
   type DiskSetupRequest,
-  type DiskSetupResult
+  type DiskSetupResult,
+  type NodeDiskData
 } from '../../hooks/useDashboardData';
 import { useOperations } from '../../contexts/OperationsContext';
+import {
+  runInitBatch, isBulkSelectable, isBatchEligible, groupDisks, rangeBetween,
+  type BatchDisk, type BatchItem, type GroupBy, type SetupOneResult, type DiskGroup
+} from './batchSetup';
+import { BulkConfirmModal, BatchProgressPanel, type ExcludedDisk } from './BulkInitPanels';
 
 type ViewMode = 'grid' | 'compact' | 'table';
 type StatusFilter = 'all' | 'free' | 'driver-bound' | 'lvs-ready' | 'setup-ready' | 'initialize-ready' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready' | 'driver-ready';
@@ -21,9 +28,14 @@ type SizeFilter = 'all' | 'small' | 'medium' | 'large' | 'xlarge';
 interface CompactDiskCardProps {
   disk: UnimplementedDisk;
   isSelected: boolean;
-  onSelect: (selected: boolean) => void;
+  onSelect: (selected: boolean, shiftKey: boolean) => void;
   nodeName: string;
 }
+
+// A checkbox change carries the modifier state of the click that caused it;
+// shift extends the selection over the visible range (see rangeBetween).
+const shiftKeyOf = (e: React.ChangeEvent<HTMLInputElement>): boolean =>
+  e.nativeEvent instanceof MouseEvent && e.nativeEvent.shiftKey;
 
 const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSelect }) => {
   const sizeGB = Math.round(disk.size_bytes / (1024 * 1024 * 1024));
@@ -54,7 +66,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
         <input
           type="checkbox"
           checked={isSelected}
-          onChange={(e) => onSelect(e.target.checked)}
+          onChange={(e) => onSelect(e.target.checked, shiftKeyOf(e))}
           className="absolute top-2 left-2 rounded"
         />
       )}
@@ -131,7 +143,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
           <input
             type="checkbox"
             checked={isSelected}
-            onChange={(e) => onSelect(e.target.checked)}
+            onChange={(e) => onSelect(e.target.checked, shiftKeyOf(e))}
             className="rounded"
           />
         )}
@@ -169,14 +181,83 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
   );
 };
 
-export const DiskSetupTab: React.FC = () => {
-  const { nodeData, refreshNodeDisks, setupDisksOnNode, initializeBlobstoreOnNode, deleteDiskOnNode, setNodeData } = useDiskSetup();
+type DiskWithNode = UnimplementedDisk & { nodeName: string };
+
+interface DiskCollectionProps {
+  disks: DiskWithNode[];
+  selectedDisks: Set<string>;
+  onSelect: (diskKey: string, selected: boolean, shiftKey: boolean) => void;
+  headerCheckbox?: React.ReactNode;
+}
+
+const DiskGrid: React.FC<DiskCollectionProps> = ({ disks, selectedDisks, onSelect }) => (
+  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6 gap-4">
+    {disks.map((disk) => {
+      const diskKey = `${disk.nodeName}:${disk.pci_address}`;
+      return (
+        <CompactDiskCard
+          key={diskKey}
+          disk={disk}
+          isSelected={selectedDisks.has(diskKey)}
+          onSelect={(selected, shiftKey) => onSelect(diskKey, selected, shiftKey)}
+          nodeName={disk.nodeName}
+        />
+      );
+    })}
+  </div>
+);
+
+const DiskTable: React.FC<DiskCollectionProps> = ({ disks, selectedDisks, onSelect, headerCheckbox }) => (
+  <div className="overflow-x-auto">
+    <table className="min-w-full divide-y divide-gray-200">
+      <thead className="bg-gray-50">
+        <tr>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+            {headerCheckbox}
+          </th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Device</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Driver</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NUMA</th>
+          <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Mounted</th>
+        </tr>
+      </thead>
+      <tbody className="bg-white divide-y divide-gray-200">
+        {disks.map((disk) => {
+          const diskKey = `${disk.nodeName}:${disk.pci_address}`;
+          return (
+            <CompactDiskRow
+              key={diskKey}
+              disk={disk}
+              isSelected={selectedDisks.has(diskKey)}
+              onSelect={(selected, shiftKey) => onSelect(diskKey, selected, shiftKey)}
+              nodeName={disk.nodeName}
+            />
+          );
+        })}
+      </tbody>
+    </table>
+  </div>
+);
+
+interface DiskSetupTabProps {
+  // Set when the state-aware landing routed here on a fresh cluster —
+  // renders the onboarding callout above the tab.
+  onboarding?: boolean;
+}
+
+export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }) => {
+  const { nodeData, refreshNodeDisks, deleteDiskOnNode, setNodeData } = useDiskSetup();
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
   // UI State
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [groupBy, setGroupBy] = useState<GroupBy>('node');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [searchTerm, setSearchTerm] = useState('');
@@ -185,7 +266,9 @@ export const DiskSetupTab: React.FC = () => {
   const [sizeFilter, setSizeFilter] = useState<SizeFilter>('all');
   const [showFilters, setShowFilters] = useState(false);
   const [globalRefreshing, setGlobalRefreshing] = useState(false);
-  
+  // Anchor for shift-click range selection (last individually toggled disk)
+  const lastAnchorRef = useRef<string | null>(null);
+
   // Setup State
   const [setupOptions, setSetupOptions] = useState({
     force_unmount: false,
@@ -193,11 +276,18 @@ export const DiskSetupTab: React.FC = () => {
     huge_pages_mb: 2048,
     driver_override: 'kernel'
   });
-  const [setupInProgress, setSetupInProgress] = useState<Set<string>>(new Set());
-  const [initializeLVSInProgress, setInitializeLVSInProgress] = useState<Set<string>>(new Set());
   const [unbindDriverInProgress, setUnbindDriverInProgress] = useState<Set<string>>(new Set());
-  const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult>>({});
+  // Some node-agent error responses carry a top-level `error` next to the
+  // DiskSetupResult fields; keep it typed instead of casting at render time.
+  const [setupResults, setSetupResults] = useState<Record<string, DiskSetupResult & { error?: string }>>({});
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+
+  // Bulk init batch state (plan 2d): one confirmed action, per-disk outcomes
+  const [batchItems, setBatchItems] = useState<BatchItem[] | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [showBulkConfirm, setShowBulkConfirm] = useState(false);
+  const batchCancelRef = useRef(false);
+  const queryClient = useQueryClient();
 
   // Delete State
   const [deleteInProgress, setDeleteInProgress] = useState<Set<string>>(new Set());
@@ -223,7 +313,7 @@ export const DiskSetupTab: React.FC = () => {
 
 
   useEffect(() => {
-    const initialData: Record<string, any> = {};
+    const initialData: Record<string, NodeDiskData> = {};
     knownNodes.forEach(node => {
       initialData[node] = { node, disks: [], loading: true };
     });
@@ -233,20 +323,18 @@ export const DiskSetupTab: React.FC = () => {
 
   // Check if any operations are in progress to avoid discovery interference
   const hasActiveOperations = useMemo(() => {
-    return setupInProgress.size > 0 || 
-           initializeLVSInProgress.size > 0 || 
+    return batchRunning ||
            unbindDriverInProgress.size > 0 ||
            deleteInProgress.size > 0;
-  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress]);
+  }, [batchRunning, unbindDriverInProgress, deleteInProgress]);
 
   // Sync local operation state with global context
   useEffect(() => {
-    const totalOperations = setupInProgress.size + 
-                            initializeLVSInProgress.size + 
-                            unbindDriverInProgress.size + 
+    const totalOperations = (batchRunning ? 1 : 0) +
+                            unbindDriverInProgress.size +
                             deleteInProgress.size;
     setActiveOperationsCount(totalOperations);
-  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress, setActiveOperationsCount]);
+  }, [batchRunning, unbindDriverInProgress, deleteInProgress, setActiveOperationsCount]);
 
   // Sync selected disks count with global context to prevent auto-refresh during selection
   useEffect(() => {
@@ -273,23 +361,22 @@ export const DiskSetupTab: React.FC = () => {
 
   // Track selection state with ref to avoid stale closures
   const selectedDisksRef = useRef(selectedDisks);
-  const operationsRef = useRef({ setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress });
-  
+  const operationsRef = useRef({ batchRunning, unbindDriverInProgress, deleteInProgress });
+
   // Update refs when state changes
   useEffect(() => {
     selectedDisksRef.current = selectedDisks;
   }, [selectedDisks]);
-  
+
   useEffect(() => {
-    operationsRef.current = { setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress };
-  }, [setupInProgress, initializeLVSInProgress, unbindDriverInProgress, deleteInProgress]);
+    operationsRef.current = { batchRunning, unbindDriverInProgress, deleteInProgress };
+  }, [batchRunning, unbindDriverInProgress, deleteInProgress]);
 
   // Auto-refresh disk data every 15 seconds, but pause during operations or selections
   useEffect(() => {
     const interval = setInterval(() => {
       // Use refs to get current state without causing re-renders
-      const currentHasOperations = operationsRef.current.setupInProgress.size > 0 || 
-                                  operationsRef.current.initializeLVSInProgress.size > 0 || 
+      const currentHasOperations = operationsRef.current.batchRunning ||
                                   operationsRef.current.unbindDriverInProgress.size > 0 ||
                                   operationsRef.current.deleteInProgress.size > 0;
       
@@ -391,53 +478,45 @@ export const DiskSetupTab: React.FC = () => {
     return disk && disk.blobstore_initialized && !disk.is_system_disk;
   }, [selectedDisks, allDisks]);
 
-  // Check if setup is allowed (Free disks or Needs Unmount disks with force_unmount)
-  // This will do FULL setup: driver binding + LVS initialization
-  const canSetupSelected = useMemo(() => {
-    if (selectedDisks.size === 0) return false;
-    
-    const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
+  // Partition the selection for the bulk-init flow: eligible disks form the
+  // batch; the rest are surfaced in the confirm modal with the reason they
+  // are excluded. Initialized and system disks never enter a batch.
+  const { eligibleBatchDisks, excludedBatchDisks } = useMemo(() => {
+    const eligible: BatchDisk[] = [];
+    const excluded: ExcludedDisk[] = [];
+    for (const diskKey of selectedDisks) {
       const colonIndex = diskKey.indexOf(':');
       const nodeName = diskKey.substring(0, colonIndex);
       const pciAddr = diskKey.substring(colonIndex + 1);
-      return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
-    }).filter(Boolean);
-    
-    // All selected disks must be Free or (Needs Unmount with force_unmount enabled)
-    // This will do complete setup from start to LVS Ready
-    const result = selectedDiskDetails.every(disk => 
-      disk && 
-      !disk.is_system_disk && 
-      !disk.blobstore_initialized &&  // Not already LVS Ready
-      (
-        (!disk.driver_ready && disk.mounted_partitions.length === 0) ||  // Free disks
-        (!disk.driver_ready && disk.mounted_partitions.length > 0 && setupOptions.force_unmount)  // Needs Unmount with force
-      )
-    );
-    return result;
+      const disk = allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
+      if (!disk) continue;
+      const batchDisk: BatchDisk = {
+        key: diskKey,
+        node: nodeName,
+        pci: pciAddr,
+        device: disk.device_name,
+        model: disk.model,
+        serial: disk.serial,
+        sizeBytes: disk.size_bytes,
+      };
+      if (isBatchEligible(disk, setupOptions.force_unmount)) {
+        eligible.push(batchDisk);
+      } else {
+        const reason = disk.is_system_disk
+          ? 'system disk'
+          : disk.blobstore_initialized
+            ? 'already initialized (LVS present)'
+            : 'has mounted partitions — enable Force Unmount to include';
+        excluded.push({ disk: batchDisk, reason });
+      }
+    }
+    return { eligibleBatchDisks: eligible, excludedBatchDisks: excluded };
   }, [selectedDisks, allDisks, setupOptions.force_unmount]);
 
-  // Check if LVS initialization is allowed (Driver Ready disks - RECOVERY ONLY)
-  // This is for when setup partially failed and disk is stuck in Driver Ready state
-  const canInitializeLVS = useMemo(() => {
-    if (selectedDisks.size === 0) return false;
-    
-    const selectedDiskDetails = Array.from(selectedDisks).map(diskKey => {
-      const colonIndex = diskKey.indexOf(':');
-      const nodeName = diskKey.substring(0, colonIndex);
-      const pciAddr = diskKey.substring(colonIndex + 1);
-      return allDisks.find(d => d.nodeName === nodeName && d.pci_address === pciAddr);
-    }).filter(Boolean);
-    
-    // All selected disks must be Driver Ready (recovery scenario)
-    const result = selectedDiskDetails.every(disk => 
-      disk && 
-      !disk.is_system_disk && 
-      disk.driver_ready &&
-      !disk.blobstore_initialized
-    );
-    return result;
-  }, [selectedDisks, allDisks]);
+  const groupedDisks = useMemo(
+    () => groupDisks(filteredDisks, groupBy),
+    [filteredDisks, groupBy]
+  );
 
   // Check if driver unbinding is allowed (Driver Bound disks only)
   const canUnbindDriver = useMemo(() => {
@@ -481,9 +560,19 @@ export const DiskSetupTab: React.FC = () => {
     return null;
   };
 
-  // Pagination
+  // Pagination (flat view only — grouped views render all filtered disks)
   const totalPages = Math.ceil(filteredDisks.length / pageSize);
   const paginatedDisks = filteredDisks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  // Selectable disk keys in current render order, for shift-click ranges
+  const visibleOrder = useMemo(() => {
+    const source = groupBy === 'none'
+      ? paginatedDisks
+      : groupedDisks.flatMap(group => group.disks);
+    return source
+      .filter(disk => !disk.is_system_disk)
+      .map(disk => `${disk.nodeName}:${disk.pci_address}`);
+  }, [groupBy, paginatedDisks, groupedDisks]);
 
   // Statistics
   const stats = useMemo(() => {
@@ -504,15 +593,50 @@ export const DiskSetupTab: React.FC = () => {
     };
   }, [allDisks, filteredDisks, selectedDisks]);
 
-  const handleDiskSelection = (diskKey: string, selected: boolean) => {
+  const handleDiskSelection = (diskKey: string, selected: boolean, shiftKey: boolean) => {
+    const keys = shiftKey ? rangeBetween(visibleOrder, lastAnchorRef.current, diskKey) : [diskKey];
+    lastAnchorRef.current = diskKey;
     setSelectedDisks(prev => {
       const newSelection = new Set(prev);
-      if (selected) {
-        newSelection.add(diskKey);
-      } else {
-        newSelection.delete(diskKey);
-      }
+      keys.forEach(key => {
+        if (selected) {
+          newSelection.add(key);
+        } else {
+          newSelection.delete(key);
+        }
+      });
       return newSelection;
+    });
+  };
+
+  const addDisksToSelection = (disks: DiskWithNode[]) => {
+    setSelectedDisks(prev => new Set([
+      ...prev,
+      ...disks.map(disk => `${disk.nodeName}:${disk.pci_address}`)
+    ]));
+  };
+
+  const selectAllUninitializedCluster = () => addDisksToSelection(allDisks.filter(isBulkSelectable));
+  const selectFilteredUninitialized = () => addDisksToSelection(filteredDisks.filter(isBulkSelectable));
+  const selectGroupUninitialized = (group: DiskGroup<DiskWithNode>) =>
+    addDisksToSelection(group.disks.filter(isBulkSelectable));
+  const deselectGroup = (group: DiskGroup<DiskWithNode>) => {
+    setSelectedDisks(prev => {
+      const newSelection = new Set(prev);
+      group.disks.forEach(disk => newSelection.delete(`${disk.nodeName}:${disk.pci_address}`));
+      return newSelection;
+    });
+  };
+
+  const toggleGroupCollapsed = (groupKey: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
     });
   };
 
@@ -535,124 +659,64 @@ export const DiskSetupTab: React.FC = () => {
     }
   };
 
-  const setupSelectedDisks = async () => {
-    const disksByNode = Object.groupBy(
-      Array.from(selectedDisks).map(diskKey => {
-        const firstColonIndex = diskKey.indexOf(':');
-        const nodeName = diskKey.substring(0, firstColonIndex);
-        const pciAddr = diskKey.substring(firstColonIndex + 1);
-        return { nodeName, pciAddr };
-      }),
-      ({ nodeName }) => nodeName
-    );
-
-    // Fan out across nodes — each request goes to a different machine's
-    // agent, and the wrapper tracks progress/results per node. Disks on
-    // the same node stay batched in one request (the agent sets them up
-    // sequentially; it mutates shared host state like driver binding).
-    await Promise.all(
-      Object.entries(disksByNode).map(async ([nodeName, disks]) => {
-        if (disks && disks.length > 0) {
-          await setupDisksOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
-        }
-      })
-    );
-  };
-
-  const setupDisksOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
-    setSetupInProgress(prev => new Set([...prev, node]));
-
-    const request: DiskSetupRequest = {
-      pci_addresses: diskPciAddresses,
-      force_unmount: setupOptions.force_unmount,
-      backup_data: setupOptions.backup_data,
-      huge_pages_mb: setupOptions.huge_pages_mb,
-      driver_override: setupOptions.driver_override
+  // One setup call per disk (the agent loops per-PCI server-side anyway),
+  // options frozen at confirm time so mid-batch toggles can't change a
+  // running batch's behavior.
+  const makeSetupOne = (options: typeof setupOptions) =>
+    async (disk: BatchDisk): Promise<SetupOneResult> => {
+      try {
+        const request: DiskSetupRequest = {
+          pci_addresses: [disk.pci],
+          force_unmount: options.force_unmount,
+          backup_data: options.backup_data,
+          huge_pages_mb: options.huge_pages_mb,
+          driver_override: options.driver_override
+        };
+        const response = await apiFetch(`/api/nodes/${disk.node}/disks/setup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(request)
+        });
+        const result = await response.json().catch(() => null);
+        if (response.ok && result?.success) return { ok: true };
+        const error = result?.warnings?.length
+          ? result.warnings.join('; ')
+          : result?.error || `HTTP ${response.status}`;
+        return { ok: false, error };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'Connection error' };
+      }
     };
 
+  const startBatch = async (disks: BatchDisk[]) => {
+    batchCancelRef.current = false;
+    setBatchRunning(true);
+    setBatchItems(disks.map(disk => ({ disk, status: 'pending' as const })));
     try {
-      const result = await setupDisksOnNode(node, request);
-      
-      setSetupResults(prev => ({ ...prev, [node]: result }));
-
-      if (result.success) {
-        setSelectedDisks(prev => {
-          const newSelection = new Set(prev);
-          diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
-          return newSelection;
-        });
-      }
-    } catch (error) {
-      const errorResult: DiskSetupResult = {
-        success: false,
-        setup_disks: [],
-        failed_disks: diskPciAddresses.map(addr => [addr, error instanceof Error ? error.message : 'Unknown error']),
-        warnings: [],
-        completed_at: new Date().toISOString()
-      };
-      setSetupResults(prev => ({ ...prev, [node]: errorResult }));
-    } finally {
-      setSetupInProgress(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(node);
-        return newSet;
+      const finished = await runInitBatch(disks, {
+        setupOne: makeSetupOne({ ...setupOptions }),
+        onUpdate: items => setBatchItems(items),
+        isCancelled: () => batchCancelRef.current,
+        // Refresh a node's disk list once when its queue drains, not per disk
+        onNodeDrained: node => { refreshNodeDisks(node); }
       });
+      setSelectedDisks(prev => {
+        const newSelection = new Set(prev);
+        finished.forEach(item => {
+          if (item.status === 'ok') newSelection.delete(item.disk.key);
+        });
+        return newSelection;
+      });
+    } finally {
+      setBatchRunning(false);
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     }
   };
 
-  const initializeLVSSelectedDisks = async () => {
-    const disksByNode = Object.groupBy(
-      Array.from(selectedDisks).map(diskKey => {
-        const firstColonIndex = diskKey.indexOf(':');
-        const nodeName = diskKey.substring(0, firstColonIndex);
-        const pciAddr = diskKey.substring(firstColonIndex + 1);
-        return { nodeName, pciAddr };
-      }),
-      ({ nodeName }) => nodeName
-    );
-
-    // Fan out across nodes, same as setupSelectedDisks; per-node disks
-    // stay batched in one sequential request.
-    await Promise.all(
-      Object.entries(disksByNode).map(async ([nodeName, disks]) => {
-        if (disks && disks.length > 0) {
-          await initializeLVSOnNodeWrapper(nodeName, disks.map(d => d.pciAddr));
-        }
-      })
-    );
-  };
-
-  const initializeLVSOnNodeWrapper = async (node: string, diskPciAddresses: string[]) => {
-    setInitializeLVSInProgress(prev => new Set([...prev, node]));
-
-    try {
-      const result = await initializeBlobstoreOnNode(node, diskPciAddresses);
-      
-      setSetupResults(prev => ({ ...prev, [node]: result }));
-
-      if (result.success) {
-        setSelectedDisks(prev => {
-          const newSelection = new Set(prev);
-          diskPciAddresses.forEach(addr => newSelection.delete(`${node}:${addr}`));
-          return newSelection;
-        });
-      }
-    } catch (error) {
-      const errorResult: DiskSetupResult = {
-        success: false,
-        setup_disks: [],
-        failed_disks: diskPciAddresses.map(addr => [addr, error instanceof Error ? error.message : 'Unknown error']),
-        warnings: [],
-        completed_at: new Date().toISOString()
-      };
-      setSetupResults(prev => ({ ...prev, [node]: errorResult }));
-    } finally {
-      setInitializeLVSInProgress(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(node);
-        return newSet;
-      });
-    }
+  const retryFailedBatch = () => {
+    if (!batchItems) return;
+    const failed = batchItems.filter(item => item.status === 'failed').map(item => item.disk);
+    if (failed.length > 0) startBatch(failed);
   };
 
   const unbindDriverSelectedDisks = async () => {
@@ -783,6 +847,24 @@ export const DiskSetupTab: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Fresh-cluster onboarding (state-aware landing routed here) */}
+      {onboarding && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <Info className="w-6 h-6 text-blue-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-medium text-blue-900">Welcome — no storage is initialized yet</p>
+              <p className="text-sm text-blue-800 mt-1">
+                Flint found no logical volume stores on this cluster, so you landed here.
+                Select the disks flint should manage and initialize them to start
+                provisioning volumes. System disks are excluded automatically, and any
+                disk or node you leave unselected is simply skipped.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-between mb-6">
@@ -1066,47 +1148,73 @@ export const DiskSetupTab: React.FC = () => {
               </div>
             </div>
 
-            {/* Page Size */}
+            {/* Group By */}
             <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-700">Show:</span>
+              <span className="text-sm font-medium text-gray-700">Group by:</span>
               <select
-                value={pageSize}
+                value={groupBy}
                 onChange={(e) => {
-                  setPageSize(Number(e.target.value));
+                  setGroupBy(e.target.value as GroupBy);
+                  setCollapsedGroups(new Set());
                   setCurrentPage(1);
                 }}
                 className="border border-gray-300 rounded px-2 py-1 text-sm"
               >
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={200}>200</option>
+                <option value="node">Node</option>
+                <option value="class">Disk class</option>
+                <option value="none">None (paged)</option>
               </select>
-              <span className="text-sm text-gray-700">per page</span>
             </div>
+
+            {/* Page Size (flat view only) */}
+            {groupBy === 'none' && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-700">Show:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="border border-gray-300 rounded px-2 py-1 text-sm"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={200}>200</option>
+                </select>
+                <span className="text-sm text-gray-700">per page</span>
+              </div>
+            )}
           </div>
 
-          {/* Pagination */}
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-700">
-              {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length}
-            </span>
-            <button
-              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-              disabled={currentPage === 1}
-              className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
-            <button
-              onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-              disabled={currentPage === totalPages}
-              className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
+          {/* Pagination (flat) / group summary (grouped) */}
+          {groupBy === 'none' ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-700">
+                {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length}
+              </span>
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-500">
+              {filteredDisks.length} disk{filteredDisks.length !== 1 ? 's' : ''} in {groupedDisks.length} group{groupedDisks.length !== 1 ? 's' : ''}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1154,44 +1262,30 @@ export const DiskSetupTab: React.FC = () => {
               >
                 {showAdvancedOptions ? 'Hide' : 'Show'} Options
               </button>
-              {canSetupSelected && (
+              {eligibleBatchDisks.length > 0 && (
                 <button
-                  onClick={setupSelectedDisks}
-                  disabled={Array.from(setupInProgress).length > 0}
+                  onClick={() => setShowBulkConfirm(true)}
+                  disabled={batchRunning}
                   className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                  title="Initialize the eligible selected disks (confirmation follows)"
                 >
-                  {Array.from(setupInProgress).length > 0 ? (
-                    <>
-                      <Settings className="w-4 h-4 animate-spin" />
-                      Setting up...
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4" />
-                      Setup SPDK
-                    </>
-                  )}
-                </button>
-              )}
-              {canInitializeLVS && (
-                <button
-                  onClick={initializeLVSSelectedDisks}
-                  disabled={Array.from(initializeLVSInProgress).length > 0}
-                  className="px-4 py-2 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2"
-                  title="Recovery: Initialize LVS on disks that already have SPDK driver"
-                >
-                  {Array.from(initializeLVSInProgress).length > 0 ? (
+                  {batchRunning ? (
                     <>
                       <Settings className="w-4 h-4 animate-spin" />
                       Initializing...
                     </>
                   ) : (
                     <>
-                      <Database className="w-4 h-4" />
-                      Initialize LVS
+                      <Play className="w-4 h-4" />
+                      Initialize {eligibleBatchDisks.length} disk{eligibleBatchDisks.length !== 1 ? 's' : ''}
                     </>
                   )}
                 </button>
+              )}
+              {eligibleBatchDisks.length === 0 && excludedBatchDisks.length > 0 && (
+                <span className="text-sm text-gray-500">
+                  No selected disk is eligible for initialization
+                </span>
               )}
               {canUnbindDriver && (
                 <button
@@ -1274,28 +1368,65 @@ export const DiskSetupTab: React.FC = () => {
 
 
 
+      {/* Batch progress (live per-disk outcomes) */}
+      {batchItems && (
+        <BatchProgressPanel
+          items={batchItems}
+          running={batchRunning}
+          onCancel={() => { batchCancelRef.current = true; }}
+          onRetryFailed={retryFailedBatch}
+          onDismiss={() => setBatchItems(null)}
+        />
+      )}
+
       {/* Bulk Actions */}
       <div className="bg-white rounded-lg shadow p-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-gray-700">Bulk Actions:</span>
             <button
-              onClick={() => handleSelectAll(true)}
+              onClick={selectAllUninitializedCluster}
               className="text-sm text-blue-600 hover:text-blue-800"
+              title="Select every uninitialized, unmounted, non-system disk on every node"
             >
-              Select All (This Page)
+              Select all uninitialized (cluster)
             </button>
+            {activeFilterCount > 0 && (
+              <>
+                <span className="text-gray-300">|</span>
+                <button
+                  onClick={selectFilteredUninitialized}
+                  className="text-sm text-blue-600 hover:text-blue-800"
+                  title="Select the uninitialized disks matching the active filters"
+                >
+                  Select filtered uninitialized
+                </button>
+              </>
+            )}
+            {groupBy === 'none' && (
+              <>
+                <span className="text-gray-300">|</span>
+                <button
+                  onClick={() => handleSelectAll(true)}
+                  className="text-sm text-blue-600 hover:text-blue-800"
+                >
+                  Select All (This Page)
+                </button>
+              </>
+            )}
             <span className="text-gray-300">|</span>
             <button
-              onClick={() => handleSelectAll(false)}
+              onClick={() => setSelectedDisks(new Set())}
               className="text-sm text-blue-600 hover:text-blue-800"
             >
               Deselect All
             </button>
           </div>
-          
+
           <div className="text-sm text-gray-500">
-            Page {currentPage} of {totalPages} • {paginatedDisks.length} items
+            {groupBy === 'none'
+              ? `Page ${currentPage} of ${totalPages} • ${paginatedDisks.length} items`
+              : 'Tip: shift-click a checkbox to select a range'}
           </div>
         </div>
       </div>
@@ -1330,9 +1461,9 @@ export const DiskSetupTab: React.FC = () => {
                     ⚠ {result.warnings.join(', ')}
                   </div>
                 )}
-                {(result as any).error && (
+                {result.error && (
                   <div className="text-sm text-red-700">
-                    ❌ Error: {(result as any).error}
+                    ❌ Error: {result.error}
                   </div>
                 )}
               </div>
@@ -1343,78 +1474,115 @@ export const DiskSetupTab: React.FC = () => {
 
       {/* Disk Display */}
       <div className="bg-white rounded-lg shadow">
-        {paginatedDisks.length === 0 ? (
+        {filteredDisks.length === 0 ? (
           <div className="text-center py-12">
             <HardDrive className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <p className="text-lg font-medium text-gray-900">No disks found</p>
             <p className="text-gray-500">
-              {activeFilterCount > 0 
+              {activeFilterCount > 0
                 ? 'Try adjusting your filters to see more results.'
                 : 'No uninitialized disks are available for setup.'
               }
             </p>
           </div>
-        ) : viewMode === 'grid' ? (
-          <div className="p-6">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6 gap-4">
-              {paginatedDisks.map((disk) => {
-                const diskKey = `${disk.nodeName}:${disk.pci_address}`;
-                return (
-                  <CompactDiskCard
-                    key={diskKey}
-                    disk={disk}
-                    isSelected={selectedDisks.has(diskKey)}
-                    onSelect={(selected) => handleDiskSelection(diskKey, selected)}
-                    nodeName={disk.nodeName}
-                  />
-                );
-              })}
+        ) : groupBy === 'none' ? (
+          viewMode === 'grid' ? (
+            <div className="p-6">
+              <DiskGrid
+                disks={paginatedDisks}
+                selectedDisks={selectedDisks}
+                onSelect={handleDiskSelection}
+              />
             </div>
-          </div>
+          ) : (
+            <DiskTable
+              disks={paginatedDisks}
+              selectedDisks={selectedDisks}
+              onSelect={handleDiskSelection}
+              headerCheckbox={
+                <input
+                  type="checkbox"
+                  checked={paginatedDisks.filter(d => !d.is_system_disk).length > 0 &&
+                           paginatedDisks.filter(d => !d.is_system_disk).every(d => selectedDisks.has(`${d.nodeName}:${d.pci_address}`))}
+                  onChange={(e) => handleSelectAll(e.target.checked)}
+                  className="rounded"
+                />
+              }
+            />
+          )
         ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    <input
-                      type="checkbox"
-                      checked={paginatedDisks.filter(d => !d.is_system_disk).length > 0 && 
-                               paginatedDisks.filter(d => !d.is_system_disk).every(d => selectedDisks.has(`${d.nodeName}:${d.pci_address}`))}
-                      onChange={(e) => handleSelectAll(e.target.checked)}
-                      className="rounded"
-                    />
-                  </th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Device</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Driver</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NUMA</th>
-                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Mounted</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {paginatedDisks.map((disk) => {
-                  const diskKey = `${disk.nodeName}:${disk.pci_address}`;
-                  return (
-                    <CompactDiskRow
-                      key={diskKey}
-                      disk={disk}
-                      isSelected={selectedDisks.has(diskKey)}
-                      onSelect={(selected) => handleDiskSelection(diskKey, selected)}
-                      nodeName={disk.nodeName}
-                    />
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="divide-y divide-gray-200">
+            {groupedDisks.map(group => {
+              const uninitCount = group.disks.filter(isBulkSelectable).length;
+              const selectedInGroup = group.disks.filter(
+                disk => selectedDisks.has(`${disk.nodeName}:${disk.pci_address}`)
+              ).length;
+              const collapsed = collapsedGroups.has(group.key);
+              return (
+                <div key={group.key}>
+                  <div className="px-6 py-3 bg-gray-50 flex items-center justify-between">
+                    <button
+                      onClick={() => toggleGroupCollapsed(group.key)}
+                      className="flex items-center gap-2 text-left"
+                    >
+                      {collapsed
+                        ? <ChevronRight className="w-4 h-4 text-gray-500" />
+                        : <ChevronDown className="w-4 h-4 text-gray-500" />}
+                      <span className="font-medium text-gray-900">{group.label}</span>
+                      <span className="text-sm text-gray-500">
+                        {uninitCount} uninitialized / {group.disks.length} total
+                      </span>
+                      {selectedInGroup > 0 && (
+                        <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">
+                          {selectedInGroup} selected
+                        </span>
+                      )}
+                    </button>
+                    <div className="flex items-center gap-3">
+                      {uninitCount > 0 && (
+                        <button
+                          onClick={() => selectGroupUninitialized(group)}
+                          className="text-sm text-blue-600 hover:text-blue-800"
+                        >
+                          Select uninitialized ({uninitCount})
+                        </button>
+                      )}
+                      {selectedInGroup > 0 && (
+                        <button
+                          onClick={() => deselectGroup(group)}
+                          className="text-sm text-gray-600 hover:text-gray-800"
+                        >
+                          Deselect
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {!collapsed && (
+                    viewMode === 'grid' ? (
+                      <div className="p-6">
+                        <DiskGrid
+                          disks={group.disks}
+                          selectedDisks={selectedDisks}
+                          onSelect={handleDiskSelection}
+                        />
+                      </div>
+                    ) : (
+                      <DiskTable
+                        disks={group.disks}
+                        selectedDisks={selectedDisks}
+                        onSelect={handleDiskSelection}
+                      />
+                    )
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
       {/* Bottom Pagination */}
-      {totalPages > 1 && (
+      {groupBy === 'none' && totalPages > 1 && (
         <div className="bg-white rounded-lg shadow p-4">
           <div className="flex items-center justify-between">
             <div className="text-sm text-gray-700">
@@ -1496,6 +1664,19 @@ export const DiskSetupTab: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Bulk Initialization Confirmation */}
+      {showBulkConfirm && (
+        <BulkConfirmModal
+          disks={eligibleBatchDisks}
+          excluded={excludedBatchDisks}
+          onCancel={() => setShowBulkConfirm(false)}
+          onConfirm={() => {
+            setShowBulkConfirm(false);
+            startBatch(eligibleBatchDisks);
+          }}
+        />
+      )}
 
       {/* Delete Confirmation Dialog */}
       {showDeleteConfirmation && diskToDelete && (

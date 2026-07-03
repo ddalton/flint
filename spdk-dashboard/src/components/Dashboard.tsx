@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Filter } from 'lucide-react';
+import { isFreshCluster, uninitializedDiskCount } from './setup/batchSetup';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
@@ -58,6 +59,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
   const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
   const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
+
+  // State-aware landing (plan Decision 2): decided once, from the first
+  // real data. A fresh cluster (zero initialized lvstores) lands on Disk
+  // Setup with onboarding; a provisioned cluster stays on Overview so an
+  // operator arriving mid-incident is never dropped into a wizard.
+  const [onboardingLanding, setOnboardingLanding] = useState(false);
+  const landingDecided = useRef(false);
+  useEffect(() => {
+    if (landingDecided.current || loading || connectionError) return;
+    landingDecided.current = true;
+    if (data.nodes.length > 0 && isFreshCluster(data.disks)) {
+      setActiveTab('disk-setup');
+      setOnboardingLanding(true);
+    }
+  }, [loading, connectionError, data.nodes, data.disks]);
+
+  // Persistent nav nudge while any node still has uninitialized disks
+  const uninitializedDisks = uninitializedDiskCount(data.disks);
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -248,7 +267,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         );
 
       case 'disk-setup':
-        return <DiskSetupTab />;
+        return <DiskSetupTab onboarding={onboardingLanding} />;
 
       case 'remote-storage':
         return <RemoteStorageTab />;
@@ -361,9 +380,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
         <div className="bg-white rounded-lg shadow-lg overflow-hidden">
           {/* Tab Navigation with Background */}
           <div className="bg-gray-50 border-b border-gray-200">
-            <TabNavigation 
-              activeTab={activeTab} 
-              onTabChange={handleTabChange} 
+            <TabNavigation
+              activeTab={activeTab}
+              onTabChange={handleTabChange}
+              badges={{ 'disk-setup': uninitializedDisks }}
             />
           </div>
           

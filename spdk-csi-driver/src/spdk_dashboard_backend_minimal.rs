@@ -99,6 +99,10 @@ struct DashboardDisk {
     free_space_display: String,
     healthy: bool,
     blobstore_initialized: bool,
+    // Root/boot disks are never init candidates; the frontend needs this to
+    // keep the uninitialized-disk badge from counting disks that can never
+    // be initialized.
+    is_system_disk: bool,
     lvol_count: u32,
     model: String,
     read_iops: u64,
@@ -638,6 +642,7 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         free_space_display: format!("{:.2}GB", disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)),
         healthy: disk_info.healthy,
         blobstore_initialized: disk_info.blobstore_initialized,
+        is_system_disk: disk_info.is_system_disk,
         lvol_count: disk_info.lvol_count,
         model: disk_info.model.clone(),
         read_iops: stats.read_iops,
@@ -3057,6 +3062,7 @@ mod tests {
             free_space_display: "500GB".to_string(),
             healthy: true,
             blobstore_initialized: initialized,
+            is_system_disk: false,
             lvol_count: 2,
             model: "Test NVMe SSD".to_string(),
             read_iops: 10000,
