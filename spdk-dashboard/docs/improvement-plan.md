@@ -192,6 +192,40 @@ entirely from the dashboard.
 
 ### 2b. Volume detail + topology
 
+Status (2026-07-02): DONE (29f4a89) and LIVE-VALIDATED on `runj`
+(images `phase2b.0`, surgical `kubectl set image` roll) with a third
+leg-kill drill narrated entirely from the new surfaces. Backend:
+volumes carry `consumer_raids` — one `bdev_raid_get_bdevs` per node
+agent, projected per consumer (state, operational n/m, members);
+presence of `raid_<pv>` on a node IS the consumer set. Configured
+members are labeled with the replica node they back (same matching
+rules as `replicas_missing_from_raid`: identity/live uuid, local
+lvol-uuid name, deterministic remote bdev name); SPDK nulls name+uuid
+on a failed leg, so a null member renders as the failed slot. Frontend:
+the detail modal is LIVE (selection by id, volume re-derived from the
+polled query each render; SPDK details stay a one-shot fetch keyed by
+id); Replicas tab is the per-replica sync table on the 2a indicator;
+RAID tab shows per-consumer assembly; a new Events tab embeds the 2c
+panels via `/api/events?volume=` (the item deferred out of 2c).
+Drill evidence (kill 23:37:55 local, spdk-tgt leg on runj-aws-2,
+consumer on runj-aws-3, 2 s API poll): **+5 s the consumer raid showed
+`online 1/2 + failed slot` — before the replica sync flipped at +22 s.
+The consumer-raid projection reads SPDK ground truth on the consumer
+and is the dashboard's fastest degradation signal.** Then the familiar
+narrative: stale → stale lag=1 → standby with lag oscillating 1↔2
+against the 30 s cuts → `stale+hot_rejoin` marker sampled live at
++3 m 07 s → Healthy 2/2 with the raid back to `online 2/2` in the same
+poll (+3 m 12 s). The raid stayed **online** (serving at 1/2) through
+the entire episode — the no-blind-rebuild story made visible. Window
+1764 ms inline (30 MiB estimator, steps summing exactly) appeared in
+the volume-filtered feed within one 10 s poll; member labels intact
+after the rejoin (remote-name match is uuid-change-proof); zero
+acked-write loss (writer counter monotonic through the drill).
+Also fixed en route: the frontend `PvcInfo` type was hand-drifted
+fiction (four fields the API never sent) — corrected to the backend
+struct; the dead `raid_bdevs`/`nvmeof_subsystems` empty-states in the
+old modal (fields no backend path emits) were removed.
+
 - **Volume detail**: per-replica table — node, `sync_state`
   (in_sync/stale/standby), epoch lag vs `current_epoch`, hot-rejoin
   marker — read from the PV `replica-sync-state` annotation the
@@ -227,8 +261,9 @@ drill's 2 s sync poll sampled the `hot_rejoin` marker live
 - **Windows panel**: hot-rejoin window durations vs the 2 s target,
   inline-vs-esnap routing with estimator bytes — straight from
   `HotRejoinSucceeded` event payloads.
-- Deferred within 2c: per-volume timeline embedding in the volume
-  detail view (rides 2b, `/api/events?volume=` already supports it).
+- ~~Deferred within 2c~~ LANDED with 2b: per-volume timeline embedding
+  in the volume detail view (`/api/events?volume=`, panels shared via
+  `EventPanels.tsx`).
 
 ### 2d. Operator workflows
 
