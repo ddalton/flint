@@ -656,9 +656,56 @@ pub fn select_base_epoch(
 /// after the newest recorded epoch) belong to a later session and are
 /// skipped. A retired epoch's merge into its descendant is reflected by
 /// construction.
+/// The uuid addressing the LIVE head of a chase source, from the record.
+/// The deterministic `{lvs}/{lvol_name}` alias is NOT authoritative for a
+/// source that has itself been hot-rejoined: the esnap window promotes a
+/// `_hr`-named head with a fresh uuid (recorded as `active_lvol_uuid`)
+/// that keeps serving after localization. Resolving such a source by name
+/// fails on every chase cycle, and `pick_source`'s non-consumer preference
+/// re-picks it deterministically — the 3-replica drill wedge (2026-07-03):
+/// a standby chasing forever with unbounded lag. Unreachable at
+/// replicas=2 (the only possible source never failed), guaranteed
+/// reachable at ≥3 replicas with ≥2 failures.
+fn source_live_uuid<'a>(record: &'a VolumeSyncRecord, src: &ReplicaInfo) -> Option<&'a str> {
+    record
+        .replicas
+        .iter()
+        .find(|rec| rec.lvol_uuid == src.lvol_uuid)
+        .map(|rec| rec.live_lvol_uuid())
+}
+
+/// Resolve the source's live head bdev: the record's live uuid first (an
+/// lvol bdev's name IS its uuid), then the canonical alias (correct
+/// whenever the source never went through a rejoin, and for records from
+/// pre-Tier-2 builds that carry no `active_lvol_uuid`). No `_hr`
+/// name-guessing: a stranded `_hr` lvol the record does not reference may
+/// hold stale data and must never be adopted as a source.
+pub(crate) async fn source_head_bdev(
+    rpc: &dyn CatchupRpc,
+    src: &ReplicaInfo,
+    live_uuid: Option<&str>,
+) -> Result<Value, RpcError> {
+    if let Some(uuid) = live_uuid {
+        if let Some(bdev) = get_bdev(rpc, &src.node_name, uuid).await? {
+            return Ok(bdev);
+        }
+    }
+    let head_alias = format!("{}/{}", src.lvs_name, src.lvol_name);
+    get_bdev(rpc, &src.node_name, &head_alias).await?.ok_or_else(|| {
+        format!(
+            "source head {} (live uuid {}) not found on {}",
+            head_alias,
+            live_uuid.unwrap_or("<unrecorded>"),
+            src.node_name
+        )
+        .into()
+    })
+}
+
 pub(crate) async fn lineage_chain(
     rpc: &dyn CatchupRpc,
     src: &ReplicaInfo,
+    src_live_uuid: Option<&str>,
     target: &str,
     base: Option<&str>,
 ) -> Result<Vec<String>, RpcError> {
@@ -666,11 +713,7 @@ pub(crate) async fn lineage_chain(
     // is purely defensive against a corrupted fake of reality.
     const MAX_DEPTH: usize = 4096;
     let head_alias = format!("{}/{}", src.lvs_name, src.lvol_name);
-    let mut cursor = get_bdev(rpc, &src.node_name, &head_alias)
-        .await?
-        .ok_or_else(|| {
-            format!("source head {} not found on {}", head_alias, src.node_name)
-        })?;
+    let mut cursor = source_head_bdev(rpc, src, src_live_uuid).await?;
 
     let mut chain: Vec<String> = Vec::new();
     let mut collecting = false;
@@ -1203,7 +1246,7 @@ pub(crate) async fn copy_chain_to(
     deadline: Option<Instant>,
 ) -> Result<String, RpcError> {
     let target = target.to_string();
-    let chain = lineage_chain(rpc, src, &target, base).await?;
+    let chain = lineage_chain(rpc, src, source_live_uuid(record, src), &target, base).await?;
     for element in &chain {
         let src_lvol = format!("{}/{}", src.lvs_name, element);
         debug!(volume_id, element = %element, src = %src.node_name, dst = %dst.node_name, "[CATCHUP] Copying lineage delta");
@@ -1330,18 +1373,14 @@ async fn catchup_stale(
             }
             None => {
                 // Size the empty head to the source head exactly.
-                let src_head_alias = format!("{}/{}", src.lvs_name, src.lvol_name);
-                let src_head = get_bdev(rpc, &src.node_name, &src_head_alias)
-                    .await?
-                    .ok_or_else(|| {
-                        format!("source head {} not found on {}", src_head_alias, src.node_name)
-                    })?;
+                let src_head =
+                    source_head_bdev(rpc, src, source_live_uuid(record, src)).await?;
                 let bytes = src_head.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0)
                     * src_head.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
                 if bytes == 0 {
                     return Err(format!(
-                        "cannot size the rebuilt head: source head {} reports no size",
-                        src_head_alias
+                        "cannot size the rebuilt head: source head {}/{} on {} reports no size",
+                        src.lvs_name, src.lvol_name, src.node_name
                     )
                     .into());
                 }
@@ -2502,7 +2541,7 @@ mod tests {
 
         // Base-inclusive from 4 through the target 5; the newer user
         // snapshot belongs to a later session and is skipped.
-        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
+        let chain = lineage_chain(&rpc, &src, None, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap();
         assert_eq!(
@@ -2511,7 +2550,7 @@ mod tests {
         );
 
         // Degenerate target == base.
-        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 4), Some(&epoch("vol1", 4)))
+        let chain = lineage_chain(&rpc, &src, None, &epoch("vol1", 4), Some(&epoch("vol1", 4)))
             .await
             .unwrap();
         assert_eq!(chain, vec![epoch("vol1", 4)]);
@@ -2519,7 +2558,7 @@ mod tests {
         // Full build (no base): everything from the chain root through the
         // target — the root element's blob holds all clusters written
         // before its cut, so this replays the volume from nothing.
-        let chain = lineage_chain(&rpc, &src, &epoch("vol1", 5), None).await.unwrap();
+        let chain = lineage_chain(&rpc, &src, None, &epoch("vol1", 5), None).await.unwrap();
         assert_eq!(
             chain,
             vec![
@@ -2537,21 +2576,92 @@ mod tests {
         let src = replica("node-a", "uuid-a");
 
         // No head at all.
-        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
+        let err = lineage_chain(&rpc, &src, None, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("source head"), "got: {}", err);
 
         // Base not present in the lineage (walked to the chain root).
         install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
-        let err = lineage_chain(&rpc, &src, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
+        let err = lineage_chain(&rpc, &src, None, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not found in the source lineage"), "got: {}", err);
 
         // Full build whose target is not in the lineage at all.
-        let err = lineage_chain(&rpc, &src, &epoch("vol1", 9), None).await.unwrap_err();
+        let err = lineage_chain(&rpc, &src, None, &epoch("vol1", 9), None).await.unwrap_err();
         assert!(err.to_string().contains("not found in the source lineage"), "got: {}", err);
+    }
+
+    /// The 3-replica drill wedge (2026-07-03): the chase source has itself
+    /// been hot-rejoined, so its live head is a `_hr`-named clone under a
+    /// NEW uuid and the canonical `{lvs}/{lvol_name}` alias resolves to
+    /// nothing. Resolution must go through the record's live uuid.
+    #[tokio::test]
+    async fn lineage_chain_resolves_hot_rejoined_source_by_live_uuid() {
+        let rpc = FakeRpc::new("u");
+        let src = replica("node-a", "uuid-a");
+        // Install the chain under the live head's own name — the canonical
+        // alias lvs0/lvol-uuid-a is deliberately ABSENT, as on a source
+        // whose promoted `_hr` head replaced it.
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a_hr",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        // An lvol bdev is addressable by its uuid; mirror the `_hr` head
+        // under the live uuid the record carries.
+        {
+            let mut bdevs = rpc.bdevs.lock().unwrap();
+            let head = bdevs
+                .get(&("node-a".to_string(), "lvs0/lvol-uuid-a_hr".to_string()))
+                .cloned()
+                .unwrap();
+            bdevs.insert(("node-a".to_string(), "uuid-a-live".to_string()), head);
+        }
+
+        // Name-based resolution alone still fails loudly...
+        let err = lineage_chain(&rpc, &src, None, &epoch("vol1", 5), Some(&epoch("vol1", 4)))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("source head"), "got: {}", err);
+
+        // ...and the record's live uuid resolves the same chain correctly.
+        let chain = lineage_chain(
+            &rpc, &src, Some("uuid-a-live"), &epoch("vol1", 5), Some(&epoch("vol1", 4)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(chain, vec![epoch("vol1", 4), epoch("vol1", 5)]);
+    }
+
+    /// A recorded live uuid that no longer resolves (e.g. the record is a
+    /// step behind a concurrent revert) must fall back to the canonical
+    /// alias rather than fail — the alias is correct whenever no rejoin
+    /// replaced the head.
+    #[tokio::test]
+    async fn source_head_resolution_falls_back_to_canonical_alias() {
+        let rpc = FakeRpc::new("u");
+        let src = replica("node-a", "uuid-a");
+        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 4)]);
+
+        let chain = lineage_chain(
+            &rpc, &src, Some("uuid-gone"), &epoch("vol1", 4), Some(&epoch("vol1", 4)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(chain, vec![epoch("vol1", 4)]);
+    }
+
+    /// source_live_uuid reads the record: identity uuid when no override,
+    /// active_lvol_uuid once a revert/rejoin recorded a new live head.
+    #[test]
+    fn source_live_uuid_prefers_active_override() {
+        let mut record = stale_b_record();
+        let replicas = replicas3();
+        let src = &replicas[0]; // node-a, uuid-a
+        assert_eq!(source_live_uuid(&record, src), Some("uuid-a"));
+        record.replicas[0].active_lvol_uuid = Some("uuid-a-live".to_string());
+        assert_eq!(source_live_uuid(&record, src), Some("uuid-a-live"));
     }
 
     #[test]
