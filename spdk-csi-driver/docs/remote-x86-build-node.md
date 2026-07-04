@@ -51,6 +51,35 @@ node_run() {  # usage: node_run <node-name> <<'EOF' ... EOF
 
 (The script is base64-encoded to avoid JSON/shell quoting issues.)
 
+## Step 0 — bulk-init E2E drill (standard for fresh spot builders)
+
+A freshly joined builder node is the ONE moment the cluster has a disk that
+is uninitialized, unmounted, and non-system — i.e. actually eligible for the
+dashboard's bulk-init flow — and that we are about to reformat anyway. Run
+the end-to-end drill against it BEFORE the docker-data setup below:
+
+```sh
+cd ~/github/flint/spdk-dashboard
+npm install --no-save playwright-core
+kubectl -n flint-system port-forward deploy/spdk-dashboard 13000:3000 &
+DASHBOARD_ADMIN_PW=$(kubectl -n flint-system get secret spdk-dashboard-auth     -o jsonpath='{.data.admin-password}' | base64 -d) TARGET_NODE=<new-node-name> TARGET_PCI=0000:00:1f.0   node scripts/bulk-init-drill.mjs
+```
+
+The drill exercises selection → BulkConfirmModal manifest → confirm →
+runInitBatch per-disk status → LVS Ready, against a real agent. It leaves an
+SPDK LVS on the scratch disk; hand the disk back before the docker setup:
+
+```sh
+node_run <new-node-name> <<'EOF'
+wipefs -a /dev/nvme1n1
+EOF
+```
+
+(The docker-data guard below refuses any disk with a signature, so a skipped
+wipefs fails safe.) First validated live 2026-07-04 groundwork; the flow's
+rails (eligibility, manifest, typed-phrase gate) are unit-tested in
+`spdk-dashboard/src/components/setup/BulkInitPanels.test.tsx`.
+
 ## One-time node setup
 
 ### 1. Docker data-root on the instance-store NVMe
