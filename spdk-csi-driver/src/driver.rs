@@ -63,6 +63,11 @@ pub struct SpdkCsiDriver {
     // Whether the local SPDK supports `bdev_raid_delete clear_sb` (v26.05+).
     // Probed once via spdk_get_version and cached for the process lifetime.
     clear_sb_support: Arc<tokio::sync::OnceCell<bool>>,
+
+    // The ONE role resolver (identity-unification Phase 1): every RPC that
+    // must classify a bare handle (RWO block consumer vs RWX/ROX NFS
+    // client) goes through this instead of site-local heuristics.
+    pub role_resolver: crate::identity::RoleResolver,
 }
 
 impl SpdkCsiDriver {
@@ -76,6 +81,7 @@ impl SpdkCsiDriver {
         nvmeof_target_port: u16,
     ) -> Self {
         Self {
+            role_resolver: crate::identity::RoleResolver::new(kube_client.clone()),
             kube_client,
             target_namespace,
             node_id,
@@ -1559,12 +1565,12 @@ impl SpdkCsiDriver {
             }
         });
 
-        // Resolve through record_pv_name: the synthetic NFS backing volume's
+        // Resolve to the storage id: the synthetic NFS backing volume's
         // handle (nfs-server-pvc-X) names no PV — annotating by handle
         // silently failed, so every RWX restage saw "never formatted" and
         // wipefs'd the live filesystem (data loss, found 2026-06-12). The
         // marker lives on the user PV, like every other volume-scoped record.
-        let pv_name = crate::replica_sync::record_pv_name(volume_id);
+        let pv_name = crate::identity::storage_id_of_handle(volume_id);
         pvs.patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
 
         Ok(())
@@ -1577,7 +1583,7 @@ impl SpdkCsiDriver {
 
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
 
-        match pvs.get(crate::replica_sync::record_pv_name(volume_id)).await {
+        match pvs.get(crate::identity::storage_id_of_handle(volume_id)).await {
             Ok(pv) => {
                 let initialized = pv.metadata.annotations
                     .and_then(|annot| annot.get("flint.csi.storage.io/filesystem-initialized").cloned())
@@ -1625,7 +1631,7 @@ impl SpdkCsiDriver {
         let current_node = &self.node_id;
         // RWX volumes stage under the synthetic "nfs-server-<vol>" handle;
         // the sync record (and epoch namespace) lives on the user PV.
-        let record_volume_id = crate::replica_sync::record_pv_name(volume_id).to_string();
+        let record_volume_id = crate::identity::storage_id_of_handle(volume_id).to_string();
 
         println!("🔧 [DRIVER] Creating RAID 1 on node: {}", current_node);
         println!("🔧 [DRIVER] Processing {} replicas...", replicas.len());

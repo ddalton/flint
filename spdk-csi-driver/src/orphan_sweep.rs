@@ -222,7 +222,7 @@ pub struct SweepPlan {
 }
 
 fn pv_exists(existing: &HashSet<String>, id: &str) -> bool {
-    existing.contains(id) || existing.contains(crate::replica_sync::record_pv_name(id))
+    existing.contains(id) || existing.contains(crate::identity::storage_id_of_handle(id))
 }
 
 /// Pure planning step. `strikes` persists across cycles (keyed

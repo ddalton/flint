@@ -1266,6 +1266,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }
         }
 
+        // Behavior-matrix contract (identity Phase 1): the synthetic backing
+        // PV is driver-managed — its handle must never arrive via the
+        // provisioner. Refuse rather than tear down under an aliased name.
+        if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_some() {
+            return Err(tonic::Status::invalid_argument(format!(
+                "refusing DeleteVolume for NFS backing handle {} — backing volumes are driver-managed (deleted with their user volume)",
+                volume_id
+            )));
+        }
+
         // Delete NFS server pod if this is an NFS-enabled volume
         // This is safe to call even if pod doesn't exist
         let _ = spdk_csi_driver::rwx_nfs::delete_nfs_server_pod(
@@ -1312,6 +1322,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 }
 
                 println!("✅ [CONTROLLER] Multi-replica volume deleted: {}", volume_id);
+                self.driver.role_resolver.invalidate(&volume_id);
                 return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
             }
             Ok(None) => {
@@ -1321,6 +1332,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             Err(e) => {
                 println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
                 // Not an error - idempotent delete
+                self.driver.role_resolver.invalidate(&volume_id);
                 return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
             }
         }
@@ -1331,6 +1343,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             Err(e) => {
                 println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
                 // Not an error - idempotent delete
+                self.driver.role_resolver.invalidate(&volume_id);
                 return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
             }
         };
@@ -1360,6 +1373,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
             let _ = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await;
 
+            self.driver.role_resolver.invalidate(&volume_id);
             return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
         }
 
@@ -1425,7 +1439,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
 
         println!("✅ [CONTROLLER] Volume {} deleted successfully", volume_id);
-        
+
+        // Role-cache hygiene: volume ids are never reused, so this is
+        // memory bookkeeping, not correctness (identity Phase 1).
+        self.driver.role_resolver.invalidate(&volume_id);
+
         Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}))
     }
 
@@ -1438,17 +1456,24 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let node_id = req.node_id.clone();
         
         // Handle synthetic volumeHandle for NFS PVs
-        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts
-        let (actual_volume_id, _is_nfs_pv) = if volume_id.starts_with("nfs-server-") {
-            let original_id = req.volume_context.get("originalVolumeId")
-                .ok_or_else(|| tonic::Status::invalid_argument(
-                    "NFS PV missing originalVolumeId in volumeAttributes"
-                ))?
-                .clone();
-            println!("📤 [CONTROLLER] NFS PV detected: {} → original volume: {}", volume_id, original_id);
-            (original_id, true)
-        } else {
-            (volume_id.clone(), false)
+        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts.
+        // The storage id is derived from the HANDLE (identity Phase 1, audit
+        // L5) — the `originalVolumeId` attr carries the same fact and is kept
+        // as a transitional divergence assertion + debugging aid.
+        let actual_volume_id = match spdk_csi_driver::identity::parse_backing_handle(&volume_id) {
+            Some(storage_id) => {
+                if let Some(ctx_id) = req.volume_context.get("originalVolumeId") {
+                    if ctx_id != storage_id {
+                        eprintln!(
+                            "🚨 [IDENTITY-DIVERGENCE] ControllerPublish {}: originalVolumeId={} != handle-derived {}",
+                            volume_id, ctx_id, storage_id
+                        );
+                    }
+                }
+                println!("📤 [CONTROLLER] NFS PV detected: {} → original volume: {}", volume_id, storage_id);
+                storage_id.to_string()
+            }
+            None => volume_id.clone(),
         };
         
         println!("📤 [CONTROLLER] Publishing volume {} to node {}", actual_volume_id, node_id);
@@ -1688,20 +1713,19 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             // then unkillable until ctrl_loss_tmo (~10 min; observed live
             // on the v1.5.0 gate teardown). Shared volumes keep their
             // target: DeleteVolume owns its teardown, ordered after the
-            // server pod exits.
-            let shared = match self.driver.pv_access_modes(&volume_id).await {
-                Ok(modes) => modes
-                    .iter()
-                    .any(|m| m == "ReadWriteMany" || m == "ReadOnlyMany"),
+            // server pod exits. Backing handles (`nfs-server-…`) ARE the
+            // block path and self-identify by prefix, no API read needed.
+            let vref = match self.driver.role_resolver.volume_ref(&volume_id).await {
+                Ok(v) => v,
                 Err(e) => {
                     println!(
                         "⚠️ [CONTROLLER] Could not read PV access modes ({}); assuming RWO fencing semantics",
-                        e
+                        e.reason
                     );
-                    false
+                    e.default_block()
                 }
             };
-            if shared {
+            if !vref.has_block_path() {
                 println!(
                     "📡 [CONTROLLER] Shared (RWX/ROX) volume — departing node {} is an NFS client; leaving the backing NVMe-oF target alone",
                     node_id
@@ -1709,7 +1733,9 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             } else if volume_info.node_name != node_id {
                 println!("🧹 [CONTROLLER] Volume is remote - cleaning up NVMe-oF connections");
 
-                let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+                // Target NQN keys on the RAW handle (a backing attachment's
+                // target is `…:volume:nfs-server-<id>`), not the storage id.
+                let nqn = spdk_csi_driver::identity::volume_nqn(&volume_id);
 
                 // Disconnect from NVMe-oF target on the node where pod was running
                 // Note: We need to create a temporary driver instance for the target node
@@ -2001,17 +2027,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_context = req.volume_context.clone();
         
         // Handle synthetic volumeHandle for NFS PVs
-        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts
-        let actual_volume_id = if volume_id.starts_with("nfs-server-") {
-            let original_id = volume_context.get("originalVolumeId")
-                .ok_or_else(|| tonic::Status::invalid_argument(
-                    "NFS PV missing originalVolumeId in volumeAttributes"
-                ))?
-                .clone();
-            eprintln!("📦 [NODE_STAGE] NFS PV detected: {} → original volume: {}", volume_id, original_id);
-            original_id
-        } else {
-            volume_id.clone()
+        // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts.
+        // Storage id derived from the HANDLE (identity Phase 1, audit L5);
+        // the `originalVolumeId` attr stays as a divergence assertion.
+        let actual_volume_id = match spdk_csi_driver::identity::parse_backing_handle(&volume_id) {
+            Some(storage_id) => {
+                if let Some(ctx_id) = volume_context.get("originalVolumeId") {
+                    if ctx_id != storage_id {
+                        eprintln!(
+                            "🚨 [IDENTITY-DIVERGENCE] NodeStage {}: originalVolumeId={} != handle-derived {}",
+                            volume_id, ctx_id, storage_id
+                        );
+                    }
+                }
+                eprintln!("📦 [NODE_STAGE] NFS PV detected: {} → original volume: {}", volume_id, storage_id);
+                storage_id.to_string()
+            }
+            None => volume_id.clone(),
         };
         
         eprintln!("📦 [NODE_STAGE] Volume ID: {}", actual_volume_id);
@@ -2570,13 +2602,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         
-        // Handle synthetic volumeHandle for NFS PVs (same logic as NodeStageVolume)
-        let actual_volume_id = if volume_id.starts_with("nfs-server-") {
-            // Extract from volume ID pattern since we don't have volume_context here
-            volume_id.strip_prefix("nfs-server-").unwrap().to_string()
-        } else {
-            volume_id.clone()
-        };
+        // Handle synthetic volumeHandle for NFS PVs (same rule as
+        // NodeStageVolume; context-free RPC, so the handle is the source).
+        let actual_volume_id =
+            spdk_csi_driver::identity::storage_id_of_handle(&volume_id).to_string();
 
         println!("📤 [NODE] Unstaging volume {} from {}", actual_volume_id, staging_target_path);
 
@@ -2598,14 +2627,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // nfs), and gates passed only while the teardown race was won.
         // findmnt survives solely as the fallback when the PV is
         // unreadable. The synthetic backing volume (`nfs-server-…` handle)
-        // is exempt: it IS the block consumer.
-        let is_shared_nfs_consumer = if volume_id.starts_with("nfs-server-") {
+        // is exempt: it IS the block consumer. Resolution goes through the
+        // ONE cached role resolver (identity Phase 1; modes are immutable
+        // and ids never reused, so the cache cannot go stale).
+        let is_shared_nfs_consumer = if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_some() {
             false
         } else {
-            match self.driver.pv_access_modes(&actual_volume_id).await {
-                Ok(modes) => modes
-                    .iter()
-                    .any(|m| m == "ReadWriteMany" || m == "ReadOnlyMany"),
+            match self.driver.role_resolver.resolve(&actual_volume_id).await {
+                Ok(role) => matches!(role, spdk_csi_driver::identity::Role::NfsShared { .. }),
                 Err(e) => {
                     println!(
                         "⚠️ [NODE] Cannot read PV {} access modes ({}) — falling back to mount-state sniffing",

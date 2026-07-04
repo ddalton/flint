@@ -270,9 +270,132 @@ pub fn lvs_name_for_disk(disk_ref: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Role resolution (Phase 1) — the ONE place a bare handle's role comes from.
+// ---------------------------------------------------------------------------
+
+/// Per-volume role cache. Volume ids are UUIDs (never reused) and PV
+/// access modes are immutable, so entries are valid for the volume's
+/// lifetime — `remove` at DeleteVolume is memory hygiene, not
+/// correctness. Only successful resolutions are cached ("never trust a
+/// cached zero": an unreadable PV is re-tried on every RPC).
+#[derive(Clone, Default)]
+pub struct RoleCache(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Role>>>);
+
+impl RoleCache {
+    pub fn get(&self, storage_id: &str) -> Option<Role> {
+        self.0.lock().unwrap().get(storage_id).copied()
+    }
+    pub fn put(&self, storage_id: &str, role: Role) {
+        self.0.lock().unwrap().insert(storage_id.to_string(), role);
+    }
+    pub fn remove(&self, storage_id: &str) {
+        self.0.lock().unwrap().remove(storage_id);
+    }
+}
+
+/// PV unreadable — the caller applies its documented per-RPC default:
+/// [`RoleResolveError::default_block`] (RWO fencing semantics, the
+/// c879bc3 choice) everywhere except NodeUnstage, which falls back to
+/// findmnt mount-state sniffing first (the d7490de choice).
+pub struct RoleResolveError {
+    pub handle: String,
+    pub reason: String,
+}
+
+impl RoleResolveError {
+    pub fn default_block(&self) -> VolumeRef {
+        VolumeRef::Block { storage_id: self.handle.clone() }
+    }
+}
+
+/// The cached role resolver — replaces every site-local
+/// `pv_access_modes`/findmnt/`is_shared_nfs_consumer` heuristic.
+#[derive(Clone)]
+pub struct RoleResolver {
+    kube_client: kube::Client,
+    cache: RoleCache,
+}
+
+impl RoleResolver {
+    pub fn new(kube_client: kube::Client) -> Self {
+        Self { kube_client, cache: RoleCache::default() }
+    }
+
+    /// Pure mapping from PV access modes to a role. MUST reproduce the
+    /// shipped c879bc3/d7490de predicate exactly: shared ⇔ the modes
+    /// contain ReadWriteMany or ReadOnlyMany (flint's only shared
+    /// implementation is the NFS path).
+    pub fn role_from_modes<S: AsRef<str>>(modes: &[S]) -> Role {
+        let mut rwm = false;
+        let mut rom = false;
+        for m in modes {
+            match m.as_ref() {
+                "ReadWriteMany" => rwm = true,
+                "ReadOnlyMany" => rom = true,
+                _ => {}
+            }
+        }
+        if rwm {
+            Role::NfsShared { read_only: false }
+        } else if rom {
+            Role::NfsShared { read_only: true }
+        } else {
+            Role::Block
+        }
+    }
+
+    /// Resolve a STORAGE ID (== user PV name). Cache → PV access modes.
+    /// `Err(reason)` when the PV is unreadable — caller applies its
+    /// per-RPC default; the miss is NOT cached.
+    pub async fn resolve(&self, storage_id: &str) -> Result<Role, String> {
+        if let Some(role) = self.cache.get(storage_id) {
+            return Ok(role);
+        }
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        let pvs: kube::Api<PersistentVolume> = kube::Api::all(self.kube_client.clone());
+        let pv = pvs.get(storage_id).await.map_err(|e| e.to_string())?;
+        let modes = pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.access_modes.clone())
+            .unwrap_or_default();
+        let role = Self::role_from_modes(&modes);
+        self.cache.put(storage_id, role);
+        Ok(role)
+    }
+
+    /// Resolve a full volumeHandle to a [`VolumeRef`]. Backing handles
+    /// self-identify by prefix and never touch the API.
+    pub async fn volume_ref(&self, handle: &str) -> Result<VolumeRef, RoleResolveError> {
+        if let Some(storage_id) = parse_backing_handle(handle) {
+            return Ok(VolumeRef::NfsBacking { storage_id: storage_id.to_string() });
+        }
+        match self.resolve(handle).await {
+            Ok(Role::Block) => Ok(VolumeRef::Block { storage_id: handle.to_string() }),
+            Ok(Role::NfsShared { read_only }) => {
+                Ok(VolumeRef::NfsShared { storage_id: handle.to_string(), read_only })
+            }
+            Err(reason) => Err(RoleResolveError { handle: handle.to_string(), reason }),
+        }
+    }
+
+    /// Deletion-time hygiene (see [`RoleCache`]).
+    pub fn invalidate(&self, storage_id: &str) {
+        self.cache.remove(storage_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parsers — ownership classification (delegated to current owners; bodies
 // move here in Phase 1 and the owners re-point).
 // ---------------------------------------------------------------------------
+
+/// Inverse of [`raid_name`]: the staging handle a raid bdev belongs to
+/// (`raid_<handle>`), `None` for foreign bdevs. Mirrors the health
+/// monitor's historical `strip_prefix` exactly (no emptiness check).
+pub fn parse_raid_name(bdev_name: &str) -> Option<&str> {
+    bdev_name.strip_prefix("raid_")
+}
 
 /// Classify a local lvol name to its owner (`None` = not flint-shaped,
 /// never touched). Covers `vol_*` (+replica/hr suffixes), `epoch-*`,
@@ -489,6 +612,66 @@ mod tests {
         assert_eq!(epoch_seq(VOL, "epoch-pvc-x-"), None);
         assert_eq!(user_snapshot_ts(VOL, &user_snapshot_name(VOL, 99)), Some(99));
         assert_eq!(user_snapshot_ts("pvc-other", &user_snapshot_name(VOL, 99)), None);
+    }
+
+    // -- role resolution ------------------------------------------------
+
+    /// The pure mapping must reproduce the shipped c879bc3/d7490de
+    /// predicate cell-for-cell: shared ⇔ RWM || ROM present.
+    #[test]
+    fn role_from_modes_reproduces_the_shipped_predicate() {
+        use RoleResolver as R;
+        let cases: &[(&[&str], Role)] = &[
+            (&["ReadWriteOnce"], Role::Block),
+            (&[], Role::Block),
+            (&["ReadWriteMany"], Role::NfsShared { read_only: false }),
+            (&["ReadOnlyMany"], Role::NfsShared { read_only: true }),
+            // RWM wins over ROM (read-write capability dominates).
+            (&["ReadOnlyMany", "ReadWriteMany"], Role::NfsShared { read_only: false }),
+            (&["ReadWriteOnce", "ReadWriteMany"], Role::NfsShared { read_only: false }),
+            (&["ReadWriteOnce", "ReadOnlyMany"], Role::NfsShared { read_only: true }),
+            (&["ReadWriteOncePod"], Role::Block),
+        ];
+        for (modes, want) in cases {
+            assert_eq!(&R::role_from_modes(modes), want, "modes {:?}", modes);
+            // Agreement with the literal predicate the sites shipped with.
+            let legacy_shared = modes.iter().any(|m| *m == "ReadWriteMany" || *m == "ReadOnlyMany");
+            assert_eq!(
+                matches!(R::role_from_modes(modes), Role::NfsShared { .. }),
+                legacy_shared,
+                "divergence from the c879bc3 predicate for {:?}",
+                modes
+            );
+        }
+    }
+
+    #[test]
+    fn role_cache_semantics() {
+        let cache = RoleCache::default();
+        assert_eq!(cache.get(VOL), None);
+        cache.put(VOL, Role::NfsShared { read_only: false });
+        assert_eq!(cache.get(VOL), Some(Role::NfsShared { read_only: false }));
+        cache.remove(VOL);
+        assert_eq!(cache.get(VOL), None, "invalidation is deletion-only and total");
+    }
+
+    #[test]
+    fn resolve_error_default_is_block_fencing() {
+        let err = RoleResolveError { handle: VOL.into(), reason: "pv unreadable".into() };
+        let vref = err.default_block();
+        assert_eq!(vref, VolumeRef::Block { storage_id: VOL.into() });
+        assert!(vref.has_block_path(), "unreadable PV ⇒ RWO fencing semantics (c879bc3)");
+    }
+
+    #[test]
+    fn raid_name_round_trip() {
+        assert_eq!(parse_raid_name(&raid_name(VOL)), Some(VOL));
+        assert_eq!(
+            parse_raid_name(&raid_name(&backing_handle(VOL))),
+            Some(backing_handle(VOL).as_str()),
+            "RWX raids parse back to the BACKING handle, resolution is the caller's job"
+        );
+        assert_eq!(parse_raid_name("Nvme0n1"), None);
     }
 
     #[test]

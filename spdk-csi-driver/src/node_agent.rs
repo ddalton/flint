@@ -1981,10 +1981,10 @@ impl NodeAgent {
 
         for raid in raids {
             let Some(raid_name) = raid.get("name").and_then(|n| n.as_str()) else { continue };
-            let Some(volume_id) = raid_name.strip_prefix("raid_") else { continue };
+            let Some(volume_id) = crate::identity::parse_raid_name(raid_name) else { continue };
             // RWX volumes stage under the synthetic "nfs-server-<vol>"
             // handle; PV reads/patches must target the user PV.
-            let pv_name = crate::replica_sync::record_pv_name(volume_id);
+            let pv_name = crate::identity::storage_id_of_handle(volume_id);
 
             let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
             let total = raid.get("num_base_bdevs").and_then(|n| n.as_u64()).unwrap_or(0);
@@ -2636,7 +2636,7 @@ impl NodeAgent {
                 .map(|v| v == &self.node_name)
                 .unwrap_or(false);
             let attached = attached_here.contains(&pv_name);
-            let raid_present = raids.contains(&format!("raid_{}", csi.volume_handle));
+            let raid_present = raids.contains(&crate::identity::raid_name(&csi.volume_handle));
 
             // Collapse visibility (7b-3 P1): a raid previously observed
             // present that vanishes under a live attachment is announced

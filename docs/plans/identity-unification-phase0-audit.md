@@ -88,6 +88,32 @@ becomes.
 Count: ~25 decision sites, matching the plan's estimate. The other ~700
 `volume_id` references are pass-through and don't decide anything.
 
+### Phase-1 status (2026-07-04): CONVERTED
+
+All queue rows above are done. The resolver (`identity::RoleResolver`,
+embedded in `SpdkCsiDriver`) now backs ControllerUnpublish and
+NodeUnstage; backing-handle parses in ControllerPublish/NodeStage/
+NodeUnstage/ControllerUnpublish go through `parse_backing_handle`/
+`storage_id_of_handle`; driver/node_agent/orphan_sweep helper callers
+re-pointed. Deliberate deltas from shipped behavior (all
+impossible-on-real-inputs or contract-mandated):
+
+- **L5 unified**: `originalVolumeId` is no longer load-bearing — the
+  handle is parsed directly. The attr survives as a transitional
+  `IDENTITY-DIVERGENCE` assertion (grep target for Phase 3) and a
+  debugging aid. Degenerate delta: a backing PV *missing* the attr used
+  to fail InvalidArgument, now works.
+- **DeleteVolume refuses backing handles** (matrix cell was "never
+  arrives"; now enforced instead of aliased teardown).
+- **DeleteVolume invalidates the role cache** on every success return.
+- Signals #3/#5/#6 (publish-side context signals) deliberately NOT
+  moved to the resolver in Phase 1 — they are CO-authoritative at
+  publish time and behavior-identical conversion is not guaranteed
+  (e.g. an RWO PVC under an nfs-enabled SC). Phase 2's CreateVolume
+  role hint is the honest unification point for those.
+- `replica_sync.rs:857/929` unchanged — that module owns the canonical
+  body `storage_id_of_handle` delegates to (bodies migrate in Phase 4).
+
 ## 4. Naming inventory
 
 Mints outside the canonical owners, to be re-pointed in Phase 1 and linted

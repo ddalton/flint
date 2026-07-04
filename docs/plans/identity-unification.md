@@ -1,9 +1,15 @@
 # Identity unification — one typed volume identity at every boundary
 
-**Status:** Phase 0 COMPLETE (2026-07-04) — `src/identity.rs` (canonical
-vocabulary, delegating parsers, live-shape tests) +
+**Status:** Phases 0–1 COMPLETE (2026-07-04). Phase 0: `src/identity.rs`
+(canonical vocabulary, delegating parsers, live-shape tests) +
 `identity-unification-phase0-audit.md` (eleven role signals, full RPC×role
-matrix, ~25-site inventory, latent findings L1–L6). Phases 1–4 not started.
+matrix, ~25-site inventory, latent findings L1–L6). Phase 1: all queue
+sites converted onto identity.rs + the cached `RoleResolver`
+(ControllerUnpublish/NodeUnstage classify through it; backing parses
+unified on the handle with `IDENTITY-DIVERGENCE` transitional assertions;
+DeleteVolume enforces the backing-refusal matrix cell + cache hygiene).
+Publish-side context signals stay until Phase 2's role hint (see audit
+§3 Phase-1 status). Phases 2–4 not started; Phase 3 needs a fresh cluster.
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage
