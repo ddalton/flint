@@ -183,7 +183,7 @@ fn fault_point(point: &str) {
 /// The E_f export subsystem on the source survivor. NOT under `:volume:`
 /// (see module note on the dead-controller reaper).
 pub fn ef_export_nqn(volume_id: &str) -> String {
-    format!("nqn.2024-11.com.flint:hotrejoin:{}", volume_id)
+    crate::identity::hotrejoin_export_nqn(volume_id)
 }
 
 /// The controller name the rejoin target attaches the E_f export under
@@ -201,20 +201,20 @@ pub fn ef_bdev_on_dst(volume_id: &str) -> String {
 /// replica lvol name — the old head stays behind as the backfill landing
 /// pad until localization disposes of it.
 pub fn head_lvol_name(volume_id: &str, replica_index: usize) -> String {
-    format!("vol_{}_replica_{}_hr", volume_id, replica_index)
+    crate::identity::hr_head_lvol_name(volume_id, replica_index)
 }
 
 /// Export id for the landing pad during the backfill (the pad is attached
 /// on the SOURCE node as the shallow-copy destination). Distinct from the
 /// replica export `{volume}_{index}`, which the live head leg owns.
 pub fn pad_export_volume_id(volume_id: &str, replica_index: usize) -> String {
-    format!("{}_hrpad{}", volume_id, replica_index)
+    crate::identity::hrpad_export_id(volume_id, replica_index)
 }
 
 /// The replica export NQN (`export_replica` convention) — the subsystem
 /// whose namespace the window swaps from the pad to the esnap head.
 pub fn replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index)
+    crate::identity::replica_export_nqn(volume_id, replica_index)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +321,7 @@ fn resolve<'a>(
     let src = pick_source(record, replicas, Some(consumer)).ok_or("no in-sync source")?;
     Ok(Topology {
         volume_id,
-        raid_name: format!("raid_{}", volume_id),
+        raid_name: crate::identity::raid_name(volume_id),
         consumer,
         rec,
         idx,
@@ -1479,7 +1479,7 @@ async fn live_head_leg(
 ) -> Result<Option<String>, RpcError> {
     let Some(consumer) = consumer else { return Ok(None) };
     let expected = expected_remote_base_bdev(volume_id, idx);
-    let raid_name = format!("raid_{}", volume_id);
+    let raid_name = crate::identity::raid_name(volume_id);
     let leg_configured = get_raids(rpc, consumer).await?.iter().any(|r| {
         r.get("name").and_then(|n| n.as_str()) == Some(raid_name.as_str())
             && r.get("base_bdevs_list")
@@ -1558,7 +1558,7 @@ async fn release_orphaned_quiesce(
     consumer_node: Option<&str>,
 ) {
     let Some(consumer) = consumer_node else { return };
-    let raid_name = format!("raid_{}", volume_id);
+    let raid_name = crate::identity::raid_name(volume_id);
     match rpc
         .spdk_rpc(
             consumer,
@@ -3032,7 +3032,7 @@ mod tests {
             export_volume_id: &str,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
-            let nqn = format!("nqn.2024-11.com.flint:volume:{}", export_volume_id);
+            let nqn = crate::identity::volume_nqn(&export_volume_id);
             self.calls.lock().unwrap().push((
                 node.to_string(),
                 "export_replica".to_string(),

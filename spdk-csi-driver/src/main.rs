@@ -598,7 +598,7 @@ impl MinimalControllerService {
         };
 
         // Step 2: Clone the snapshot to create a new writable volume
-        let clone_name = format!("vol_{}", volume_id);
+        let clone_name = spdk_csi_driver::identity::lvol_name(volume_id);
 
         let payload = serde_json::json!({
             "snapshot_uuid": snapshot_ref,
@@ -762,7 +762,7 @@ impl MinimalControllerService {
         // Step 2: Create a temporary snapshot of the source volume
         // NOTE: SPDK bdev_lvol_clone requires a snapshot, can't clone regular lvol directly
         // We create a temp snapshot, clone it, then delete the temp snapshot
-        let snapshot_name = format!("temp_pvc_clone_{}", volume_id);
+        let snapshot_name = spdk_csi_driver::identity::temp_clone_snapshot_name(volume_id);
         
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("📸 [PVC_CLONE] Creating temporary snapshot for cloning");
@@ -788,7 +788,7 @@ impl MinimalControllerService {
         println!("✅ [CONTROLLER] Temporary snapshot created: {}", snapshot_uuid);
 
         // Step 3: Clone the snapshot to create the new volume
-        let clone_name = format!("vol_{}", volume_id);
+        let clone_name = spdk_csi_driver::identity::lvol_name(volume_id);
         
         let clone_payload = serde_json::json!({
             "snapshot_uuid": snapshot_uuid,
@@ -1356,7 +1356,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     }
 
                     // Cleanup NVMe-oF target if it exists
-                    let nqn = format!("nqn.2024-11.com.flint:volume:{}:replica:{}", volume_id, i);
+                    let nqn = spdk_csi_driver::identity::replica_alias_nqn(&volume_id, i);
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &nqn).await;
                 }
 
@@ -1409,7 +1409,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             println!("✅ [CONTROLLER] Treating as successful deletion (storage already cleaned up)");
 
             // Still clean up any NVMe-oF targets that might exist on other nodes
-            let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+            let nqn = spdk_csi_driver::identity::volume_nqn(&volume_id);
             let _ = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await;
 
             self.driver.role_resolver.invalidate(&volume_id);
@@ -1471,7 +1471,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         }
 
         // Clean up any NVMe-oF targets that might still exist
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let nqn = spdk_csi_driver::identity::volume_nqn(&volume_id);
         if let Err(e) = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await {
             println!("⚠️ [CONTROLLER] Failed to remove NVMe-oF target (may not exist): {}", e);
             // Continue anyway - best effort cleanup
@@ -1501,14 +1501,6 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // as a transitional divergence assertion + debugging aid.
         let actual_volume_id = match spdk_csi_driver::identity::parse_backing_handle(&volume_id) {
             Some(storage_id) => {
-                if let Some(ctx_id) = req.volume_context.get("originalVolumeId") {
-                    if ctx_id != storage_id {
-                        eprintln!(
-                            "🚨 [IDENTITY-DIVERGENCE] ControllerPublish {}: originalVolumeId={} != handle-derived {}",
-                            volume_id, ctx_id, storage_id
-                        );
-                    }
-                }
                 println!("📤 [CONTROLLER] NFS PV detected: {} → original volume: {}", volume_id, storage_id);
                 storage_id.to_string()
             }
@@ -1538,23 +1530,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .map(|v| v == "emptydir")
             .unwrap_or(false);
 
-        // Identity Phase 2: seed the role cache from the CreateVolume-stamped
-        // hint (the later context-free RPCs then classify without a PV read)
-        // and transitionally assert it against the legacy publish signals.
-        // Scoped to bare handles (a backing PV inherits the USER volume's
-        // hint) and non-emptydir volumes (emptydir serves Block roles over
-        // NFS by design — see CreateVolume).
+        // Seed the role cache from the CreateVolume-stamped hint — the later
+        // context-free RPCs then classify without a PV read. (The Phase-3
+        // transitional divergence assertion earned removal: zero hits across
+        // the full runk campaign, 2026-07-04.)
         if let Some(hint) = spdk_csi_driver::identity::role_hint_from_context(&req.volume_context) {
             self.driver.role_resolver.seed(&actual_volume_id, hint);
-            if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_none() && !is_emptydir_nfs {
-                let hint_shared = matches!(hint, spdk_csi_driver::identity::Role::NfsShared { .. });
-                if hint_shared != (is_rwx || is_rox) {
-                    eprintln!(
-                        "🚨 [IDENTITY-DIVERGENCE] ControllerPublish {}: role hint {:?} vs legacy signals rwx={} rox={}",
-                        volume_id, hint, is_rwx, is_rox
-                    );
-                }
-            }
         }
 
         // NFS path: RWX, ROX, or emptyDir-backed volumes
@@ -2106,14 +2087,6 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // the `originalVolumeId` attr stays as a divergence assertion.
         let actual_volume_id = match spdk_csi_driver::identity::parse_backing_handle(&volume_id) {
             Some(storage_id) => {
-                if let Some(ctx_id) = volume_context.get("originalVolumeId") {
-                    if ctx_id != storage_id {
-                        eprintln!(
-                            "🚨 [IDENTITY-DIVERGENCE] NodeStage {}: originalVolumeId={} != handle-derived {}",
-                            volume_id, ctx_id, storage_id
-                        );
-                    }
-                }
                 eprintln!("📦 [NODE_STAGE] NFS PV detected: {} → original volume: {}", volume_id, storage_id);
                 storage_id.to_string()
             }
@@ -2862,7 +2835,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         }
 
         // Disconnect from NVMe-oF if this was a remote volume
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let nqn = spdk_csi_driver::identity::volume_nqn(&volume_id);
         if let Err(e) = self.driver.disconnect_from_nvmeof_target(&nqn).await {
             println!("⚠️ [NODE] Failed to disconnect from NVMe-oF (may not be connected): {}", e);
             // Continue anyway - best effort cleanup
@@ -3630,7 +3603,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             let _ = std::fs::remove_file(&ephemeral_marker);
             let eph_start = std::time::Instant::now();
             println!("🧹 [NODE] Ephemeral volume detected — cleaning up block device and lvol");
-            let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+            let nqn = spdk_csi_driver::identity::volume_nqn(&volume_id);
             let backend_mode = std::env::var("BLOCK_DEVICE_BACKEND").unwrap_or("ublk".to_string());
             println!("🧹 [NODE] Ephemeral cleanup: backend={}, nqn={}", backend_mode, nqn);
 

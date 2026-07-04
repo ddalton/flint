@@ -101,7 +101,7 @@ fn multi_replica_snapshot_name(volume_id: &str, csi_name: &str) -> String {
     let prefix_len = "snap_".len() + volume_id.len() + "_".len();
     let budget = SPDK_LVOL_NAME_USABLE.saturating_sub(prefix_len).min(19) as u32;
     let suffix = stable_snapshot_suffix(csi_name) % 10u64.pow(budget.max(1));
-    format!("snap_{}_{}", volume_id, suffix)
+    crate::identity::user_snapshot_name(volume_id, suffix)
 }
 
 /// Snapshot-specific CSI controller
@@ -162,7 +162,7 @@ impl SnapshotController {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let snapshot_name = format!("snap_{}_{}", req.source_volume_id, timestamp);
+        let snapshot_name = crate::identity::user_snapshot_name(&req.source_volume_id, timestamp);
 
         tracing::info!("📸 [SNAPSHOT_CSI] Generated snapshot name: {}", snapshot_name);
 

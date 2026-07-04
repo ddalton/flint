@@ -216,7 +216,7 @@ pub async fn create_nfs_server_pod(
     let pv_name = format!("flint-nfs-pv-{}", volume_id);
     
     // Synthetic volumeHandle to avoid conflict with user PV
-    let nfs_volume_handle = format!("nfs-server-{}", volume_id);
+    let nfs_volume_handle = crate::identity::backing_handle(volume_id);
     
     let mode = if read_only { "ROX (ReadOnlyMany)" } else { "RWX (ReadWriteMany)" };
     let backend_desc = if backend == NfsBackend::EmptyDir { "emptyDir" } else { "RWO PVC" };

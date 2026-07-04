@@ -18,9 +18,14 @@ teardown regressions + upgrade ride-through + drills A/A′/B/C/D all
 PASS; divergence assertions SILENT throughout (0 lines, all pods);
 three pre-existing dead-NFS-mount P1/P2s found by drill A and fixed
 (e67563b, a78c79c, 7e75419 — see the audit doc's Phase-3 section).
-Remaining: Phase 4 (lint + parser-body moves + assertion removal, no
-cluster needed); open finding: no NFS-server-pod liveness reconciler
-(bare pod death waits for the next publish/cutover).
+Phase 4 COMPLETE (2026-07-04):
+identity.rs owns every naming body (old owners delegate); all
+production mints converted; CI lint
+`identity::tests::no_naming_mints_outside_identity` enforces it (one
+allowlisted L4 exception); transitional divergence assertions removed
+(earned); contract published at docs/identity-contract.md. ALL PHASES
+DONE. Open follow-ups: NFS-server-pod liveness reconciler; latent
+findings L1/L3-L6 (L2 fixed via a78c79c).
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage

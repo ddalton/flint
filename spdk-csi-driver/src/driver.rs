@@ -313,7 +313,7 @@ impl SpdkCsiDriver {
                         node_uid: node_uid.clone(),
                         disk_pci_address: node_info.disk.pci_address.clone(),
                         lvol_uuid: lvol_uuid.clone(),
-                        lvol_name: format!("vol_{}", replica_volume_id),
+                        lvol_name: crate::identity::lvol_name(&replica_volume_id),
                         lvs_name: lvs_name.clone(),
                         nqn: None, // Will be set during NodePublishVolume if needed
                         target_ip: None,
@@ -451,7 +451,7 @@ impl SpdkCsiDriver {
                 node_uid,
                 disk_pci_address: selected_disk.pci_address.clone(),
                 lvol_uuid: lvol_uuid.clone(),
-                lvol_name: format!("vol_{}", volume_id),
+                lvol_name: crate::identity::lvol_name(volume_id),
                 lvs_name: lvs_name.clone(),
                 nqn: None,
                 target_ip: None,
@@ -1090,7 +1090,7 @@ impl SpdkCsiDriver {
     async fn create_nvmeof_block_device(&self, bdev_name: &str, volume_id: &str) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [NVMEOF_BLOCK] Creating NVMe-oF block device for bdev: {}", bdev_name);
 
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let nqn = crate::identity::volume_nqn(volume_id);
         let target_ip = std::env::var("NVMEOF_LOCAL_TARGET_IP").unwrap_or("127.0.0.1".to_string());
         let target_port = std::env::var("NVMEOF_TARGET_PORT")
             .ok()
@@ -1725,7 +1725,7 @@ impl SpdkCsiDriver {
         // the final delta and join the create as in-sync members. Deferral
         // is contained per-standby (the replica stays a chasing standby).
         let mut admitted_standbys: Vec<catchup::AdmittedStandby> = Vec::new();
-        let raid_name = format!("raid_{}", volume_id);
+        let raid_name = crate::identity::raid_name(volume_id);
         if !deferred_standbys.is_empty() {
             let stage_cfg = catchup::StageConfig::from_env();
             admitted_standbys = catchup::admit_standbys_at_stage(
@@ -2294,7 +2294,7 @@ impl SpdkCsiDriver {
     pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str, consumer_node: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
 
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let nqn = crate::identity::volume_nqn(volume_id);
 
         let node_ip = self.get_node_ip(node_name).await
             .map_err(|e| format!("Failed to get node IP: {}", e))?;
@@ -2483,7 +2483,7 @@ impl SpdkCsiDriver {
     /// Phase 0 fix: leg failure used to be invisible — the control plane kept
     /// reporting both replicas online while the array ran un-redundant.
     pub async fn check_local_raid_health(&self, volume_id: &str) -> Option<(bool, String)> {
-        let raid_name = format!("raid_{}", volume_id);
+        let raid_name = crate::identity::raid_name(volume_id);
         let raid = self.get_raid_bdev(&raid_name).await.ok()??;
 
         let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -2525,7 +2525,7 @@ impl SpdkCsiDriver {
     /// Subsystem and controller cleanup are best-effort.
     pub async fn teardown_volume_spdk_state(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // 1. Loopback subsystem (idempotent; absent for never-staged volumes)
-        let loopback_nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let loopback_nqn = crate::identity::volume_nqn(volume_id);
         let delete_subsystem = json!({
             "method": "nvmf_delete_subsystem",
             "params": { "nqn": loopback_nqn }
@@ -2536,7 +2536,7 @@ impl SpdkCsiDriver {
         }
 
         // 2. Raid bdev — frees the exclusive_write claims
-        let raid_name = format!("raid_{}", volume_id);
+        let raid_name = crate::identity::raid_name(volume_id);
         if self.get_raid_bdev(&raid_name).await?.is_some() {
             let clear_sb = self.spdk_supports_clear_sb().await;
             self.delete_raid_bdev(&raid_name, clear_sb)
@@ -2548,7 +2548,7 @@ impl SpdkCsiDriver {
         // 3. Per-replica initiator controllers (nvme_..._volume_{vol}_{i})
         let per_replica_prefix = format!(
             "nvme_{}_",
-            format!("nqn.2024-11.com.flint:volume:{}", volume_id)
+            crate::identity::volume_nqn(volume_id)
                 .replace(":", "_")
                 .replace(".", "_")
         );

@@ -205,7 +205,7 @@ async fn reconcile(spdk_volume: Arc<SpdkVolume>, ctx: Arc<Context>) -> Result<Ac
         // Single-replica volume health check
         if let Some(replica) = spdk_volume.spec.replicas.first() {
             if let Some(lvol_uuid) = &replica.lvol_uuid {
-                let lvs_name = format!("lvs_{}", replica.disk_ref);
+                let lvs_name = crate::identity::lvs_name_for_disk(&replica.disk_ref);
                 let bdev_name = format!("{}/{}", lvs_name, lvol_uuid);
 
                 match get_lvol_status(&ctx, &bdev_name).await {
@@ -408,8 +408,8 @@ async fn create_replacement_lvol(
     volume_id: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let http_client = HttpClient::new();
-    let lvs_name = format!("lvs_{}", replacement_disk.metadata.name.as_ref().unwrap());
-    let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp());
+    let lvs_name = crate::identity::lvs_name_for_disk(replacement_disk.metadata.name.as_ref().unwrap());
+    let lvol_name = format!("vol_{}_{}", volume_id, Utc::now().timestamp()); // identity-lint: allow — L4 replacement shape (sweep-illegible; see identity-unification-phase0-audit.md)
 
     let target_node_name = &replacement_disk.spec.node_id;
     let rpc_url = get_rpc_url_for_node(&ctx.client, target_node_name).await?;
@@ -568,7 +568,7 @@ async fn update_nvmeof_targets_status(
             let bdev_name = if spdk_volume.spec.num_replicas > 1 {
                 spdk_volume.spec.volume_id.clone() // RAID bdev name
             } else {
-                format!("lvs_{}/{}", replica.disk_ref, replica.lvol_uuid.as_ref().unwrap_or(&"unknown".to_string()))
+                format!("{}/{}", crate::identity::lvs_name_for_disk(&replica.disk_ref), replica.lvol_uuid.as_ref().unwrap_or(&"unknown".to_string()))
             };
             
             nvmeof_targets.push(NvmeofTarget {

@@ -24,13 +24,18 @@
 //!    server's own block attachment. Minted once (rwx_nfs.rs), currently
 //!    re-parsed ad-hoc in ≥6 files.
 
-use crate::orphan_sweep;
-use crate::replica_sync;
-use crate::hot_rejoin;
-use crate::nvmeof_export;
 use crate::snapshot::snapshot_models::SnapshotInfo;
 
-pub use crate::orphan_sweep::Owner;
+/// Who an SPDK object belongs to, per flint naming conventions.
+/// (Owned here since Phase 4; `orphan_sweep` re-exports it.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Owner {
+    /// Owned by a PV-backed volume; the String is the volume id as
+    /// embedded in the name (NOT yet resolved via `storage_id_of_handle`).
+    Pv(String),
+    /// Inline ephemeral volume — no PV exists by design.
+    Ephemeral,
+}
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -60,7 +65,7 @@ pub fn parse_backing_handle(handle: &str) -> Option<&str> {
 /// storage id is also the user PV's name — PV name == volumeHandle for
 /// user PVs, which is why records/annotations resolve through this).
 pub fn storage_id_of_handle(handle: &str) -> &str {
-    replica_sync::record_pv_name(handle)
+    handle.strip_prefix(NFS_BACKING_PREFIX).unwrap_or(handle)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,12 +177,12 @@ pub fn replica_lvol_name(volume_id: &str, replica_index: usize) -> String {
 
 /// Hot-rejoin esnap-clone head lvol: `vol_<vol>_replica_<i>_hr`.
 pub fn hr_head_lvol_name(volume_id: &str, replica_index: usize) -> String {
-    hot_rejoin::head_lvol_name(volume_id, replica_index)
+    format!("vol_{}_replica_{}_hr", volume_id, replica_index)
 }
 
 /// Hot-rejoin localization pad export id: `<vol>_hrpad<i>`.
 pub fn hrpad_export_id(volume_id: &str, replica_index: usize) -> String {
-    hot_rejoin::pad_export_volume_id(volume_id, replica_index)
+    format!("{}_hrpad{}", volume_id, replica_index)
 }
 
 /// Raid bdev name: `raid_<staging_handle>`. NOTE: keyed on the STAGING
@@ -191,13 +196,13 @@ pub fn raid_name(staging_handle: &str) -> String {
 
 /// Common-epoch snapshot: `epoch-<vol>-<seq>` (replica_sync §5).
 pub fn epoch_snapshot_name(volume_id: &str, seq: u64) -> String {
-    replica_sync::epoch_name(volume_id, seq)
+    format!("epoch-{}-{}", volume_id, seq)
 }
 
 /// Strict "is it ours" epoch parser — `Some(seq)` only for THIS volume's
 /// epochs (alignment/tombstone reaping must never touch foreign names).
 pub fn epoch_seq(volume_id: &str, name: &str) -> Option<u64> {
-    replica_sync::epoch_seq(volume_id, name)
+    crate::replica_sync::epoch_seq(volume_id, name)
 }
 
 /// User (CSI) snapshot: `snap_<vol>_<suffix>` (snapshot_csi; suffix is the
@@ -208,7 +213,7 @@ pub fn user_snapshot_name(volume_id: &str, suffix: u64) -> String {
 
 /// Strict "is it ours" user-snapshot parser (twin of [`epoch_seq`]).
 pub fn user_snapshot_ts(volume_id: &str, name: &str) -> Option<u64> {
-    replica_sync::user_snapshot_ts(volume_id, name)
+    crate::replica_sync::user_snapshot_ts(volume_id, name)
 }
 
 /// Transient clone-source snapshot: `temp_pvc_clone_<new_volume_id>`
@@ -227,7 +232,7 @@ pub fn volume_nqn(export_id: &str) -> String {
 /// Replica export NQN: `…:volume:<vol>_<i>` (the `export_replica`
 /// convention; also what hot rejoin swaps namespaces under).
 pub fn replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    hot_rejoin::replica_export_nqn(volume_id, replica_index)
+    format!("{}{}_{}", VOLUME_NQN_PREFIX, volume_id, replica_index)
 }
 
 /// Alias replica NQN: `…:volume:<vol>:replica:<i>` (multi-replica publish
@@ -239,13 +244,13 @@ pub fn replica_alias_nqn(volume_id: &str, replica_index: usize) -> String {
 /// Hot-rejoin E_f export NQN: `…:hotrejoin:<vol>` — deliberately NOT under
 /// `:volume:` (kept out of the dead-controller reaper's namespace).
 pub fn hotrejoin_export_nqn(volume_id: &str) -> String {
-    hot_rejoin::ef_export_nqn(volume_id)
+    format!("nqn.2024-11.com.flint:hotrejoin:{}", volume_id)
 }
 
 /// Per-node initiator host NQN: `…:node:<node>` (what makes host fencing
 /// possible; fencing only ever removes hosts under this prefix).
 pub fn node_host_nqn(node_name: &str) -> String {
-    nvmeof_export::flint_host_nqn(node_name)
+    format!("nqn.2024-11.com.flint:node:{}", node_name)
 }
 
 /// SPDK initiator controller name for an attached subsystem:
@@ -486,14 +491,110 @@ pub fn parse_raid_name(bdev_name: &str) -> Option<&str> {
 /// `snap_*`, `temp_pvc_clone_*`, `eph_*`. Returns the id AS EMBEDDED —
 /// resolve through [`storage_id_of_handle`] before PV lookups.
 pub fn classify_lvol(name: &str) -> Option<Owner> {
-    orphan_sweep::classify_lvol(name)
+    if let Some(rest) = name.strip_prefix("vol_") {
+        if rest.is_empty() {
+            return None;
+        }
+        return Some(Owner::Pv(strip_replica_suffix(rest).to_string()));
+    }
+    if let Some(rest) = name.strip_prefix("epoch-") {
+        // epoch-<vol>-<seq>: vol itself contains '-', so split at the
+        // LAST '-' and require a strictly numeric, non-empty tail.
+        let (vol, seq) = rest.rsplit_once('-')?;
+        if vol.is_empty() || seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        return Some(Owner::Pv(vol.to_string()));
+    }
+    if let Some(rest) = name.strip_prefix("snap_") {
+        // snap_<vol>_<suffix>, suffix strictly u64-parseable (the §11
+        // clamp guarantees it; anything else is not ours).
+        let (vol, suffix) = rest.rsplit_once('_')?;
+        if vol.is_empty() || suffix.parse::<u64>().is_err() {
+            return None;
+        }
+        return Some(Owner::Pv(vol.to_string()));
+    }
+    if let Some(rest) = name.strip_prefix("temp_pvc_clone_") {
+        if rest.is_empty() {
+            return None;
+        }
+        return Some(Owner::Pv(rest.to_string()));
+    }
+    if name.strip_prefix("eph_").is_some_and(|r| !r.is_empty()) {
+        return Some(Owner::Ephemeral);
+    }
+    None
 }
 
 /// Classify a subsystem NQN to its owning volume id (unresolved). Covers
-/// `:volume:<id>`, `:volume:<id>_<i>`, `:volume:<id>:replica:<i>`, and the
-/// replica/hrpad embedded-owner ids.
+/// all three export shapes: `:volume:<id>` (consumer/loopback),
+/// `:volume:<id>_<i>` and `:volume:<id>:replica:<i>` (replica exports),
+/// plus the replica/hrpad embedded-owner ids.
 pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
-    orphan_sweep::classify_subsystem_nqn(nqn)
+    let rest = nqn.strip_prefix(VOLUME_NQN_PREFIX)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let base = match rest.split_once(":replica:") {
+        // `:volume:<id>:replica:<i>` — <id> may itself be a replica
+        // volume id, so strip that suffix too.
+        Some((id, _)) => strip_replica_suffix(id),
+        None => {
+            // `<vol>_replica_<i>` replica volume ids and `<vol>_hrpad<i>`
+            // localization pad ids embed their owner — try those whole
+            // suffixes before the bare `_<digits>` replica index
+            // (`:volume:<id>_<i>`); plain PV-backed ids (`pvc-<uuid>`,
+            // `nfs-server-…`, `csi-…`) contain none of them.
+            let stripped = strip_replica_suffix(rest);
+            let stripped = if stripped != rest { stripped } else { strip_hrpad_suffix(rest) };
+            if stripped != rest {
+                stripped
+            } else {
+                match rest.rsplit_once('_') {
+                    Some((id, idx))
+                        if !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
+                        strip_replica_suffix(id)
+                    }
+                    _ => rest,
+                }
+            }
+        }
+    };
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+/// `<vol>_replica_<i>` → `<vol>` (replica volume ids embed their owner).
+/// Also the hot-rejoin head shape `<vol>_replica_<i>_hr` (Tier-2 7b-1's
+/// esnap-clone head lvol): the live run 2026-07-02 caught the sweep
+/// deleting a serving raid leg because the `_hr` tail failed the digits
+/// check and the WHOLE name was then treated as an (absent) PV name —
+/// the exact wrong-delete this parser exists to prevent.
+fn strip_replica_suffix(id: &str) -> &str {
+    if let Some((base, idx)) = id.rsplit_once("_replica_") {
+        let idx = idx.strip_suffix("_hr").unwrap_or(idx);
+        if !base.is_empty() && !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) {
+            return base;
+        }
+    }
+    id
+}
+
+/// `<vol>_hrpad<i>` → `<vol>` (Tier-2 7b-1's localization pad export id,
+/// [`hrpad_export_id`] — the pad's subsystem is live for the whole
+/// backfill and must never read as an absent-PV orphan).
+fn strip_hrpad_suffix(id: &str) -> &str {
+    if let Some((base, idx)) = id.rsplit_once("_hrpad") {
+        if !base.is_empty() && !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) {
+            return base;
+        }
+    }
+    id
 }
 
 /// Owner volume id of a snapshot lvol name (`snap_…`/`epoch-…`), `None`
@@ -826,6 +927,69 @@ mod tests {
             "RWX raids parse back to the BACKING handle, resolution is the caller's job"
         );
         assert_eq!(parse_raid_name("Nvme0n1"), None);
+    }
+
+    /// Phase-4 lint: every identity-shaped name is minted by THIS module.
+    /// A naming `format!` anywhere else in production code is a new
+    /// aliasing surface — the exact anti-pattern the unification retired.
+    /// Test modules are exempt (fixtures legitimately spell out shapes);
+    /// deliberate exceptions carry an `identity-lint: allow` comment on
+    /// the same line and are documented in the Phase-0 audit.
+    #[test]
+    fn no_naming_mints_outside_identity() {
+        let patterns = [
+            "format!(\"vol_",
+            "format!(\"raid_",
+            "format!(\"epoch-",
+            "format!(\"snap_",
+            "format!(\"lvs_",
+            "format!(\"nfs-server-",
+            "format!(\"nqn.2024-11",
+            "format!(\"temp_pvc_clone_",
+        ];
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        walk(&src_dir, &mut files);
+        assert!(files.len() > 20, "source walk looks broken: {} files", files.len());
+
+        let mut violations = Vec::new();
+        for f in files {
+            if f.file_name().is_some_and(|n| n == "identity.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&f).unwrap();
+            // Convention (verified per file at conversion time): unit-test
+            // modules sit at the END of a file behind `#[cfg(test)]`.
+            let prod = match text.find("#[cfg(test)]") {
+                Some(i) => &text[..i],
+                None => &text[..],
+            };
+            for (lineno, line) in prod.lines().enumerate() {
+                if line.contains("identity-lint: allow") {
+                    continue;
+                }
+                for pat in &patterns {
+                    if line.contains(pat) {
+                        violations.push(format!("{}:{}: {}", f.display(), lineno + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "naming mints outside identity.rs (mint via identity:: instead):\n{}",
+            violations.join("\n")
+        );
     }
 
     #[test]

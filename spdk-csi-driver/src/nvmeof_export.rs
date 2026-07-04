@@ -30,7 +30,7 @@ pub trait SpdkRpcTransport: Sync {
 /// Predictable per-node identity is what makes host fencing possible — the
 /// default initiator NQNs are random per boot/controller.
 pub fn flint_host_nqn(node_name: &str) -> String {
-    format!("nqn.2024-11.com.flint:node:{}", node_name)
+    crate::identity::node_host_nqn(node_name)
 }
 
 /// Prefix identifying host NQNs managed by Flint. Fencing only ever removes

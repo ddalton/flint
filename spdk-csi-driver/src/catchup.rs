@@ -2154,7 +2154,7 @@ pub async fn run_catchup_for_volume(
         // an empty record must never condemn a healable replica.
         return Ok(());
     }
-    let raid_name = format!("raid_{}", volume_id);
+    let raid_name = crate::identity::raid_name(volume_id);
 
     // Tier-2 7b: replicas claimed by a hot rejoin (marker set) belong to its
     // reconciler — resume localization, adopt a committed-but-unflipped
@@ -2544,7 +2544,7 @@ mod tests {
                 consumer_node.to_string(),
             ));
             Ok(NvmeofConnectionInfo {
-                nqn: format!("nqn.2024-11.com.flint:volume:{}", export_volume_id),
+                nqn: crate::identity::volume_nqn(&export_volume_id),
                 target_ip: "10.0.0.99".to_string(),
                 target_port: 4420,
                 transport: "tcp".to_string(),

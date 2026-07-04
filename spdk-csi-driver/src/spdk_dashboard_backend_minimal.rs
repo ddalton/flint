@@ -1225,7 +1225,7 @@ async fn fetch_volumes_from_pvs(
                         // against the sync record when the volume has one.
                         let consumer_raids = {
                             let mut raids = consumer_raids_by_name
-                                .get(&format!("raid_{}", pv_name))
+                                .get(&crate::identity::raid_name(pv_name))
                                 .cloned()
                                 .unwrap_or_default();
                             if let Some(rec) = &sync_record {
@@ -2286,7 +2286,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
                     "name": snap["snapshot_name"].as_str().unwrap_or(""),
                     "aliases": [snap["snapshot_name"].as_str().unwrap_or("")],
                     "driver": "lvol",
-                    "snapshot_source_bdev": format!("vol_{}", snap["source_volume_id"].as_str().unwrap_or("")),
+                    "snapshot_source_bdev": crate::identity::lvol_name(snap["source_volume_id"].as_str().unwrap_or("")),
                     "storage_info": {
                         "consumed_bytes": consumed,
                         "cluster_size": cluster_size,
@@ -2298,7 +2298,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         
         // Build snapshot chain
         let snapshot_chain = json!({
-            "active_lvol": format!("vol_{}", volume_id),
+            "active_lvol": crate::identity::lvol_name(&volume_id),
             "chain_depth": volume_snapshots.len(),
             "snapshots": formatted_snapshots,
             "error": null
@@ -3243,7 +3243,7 @@ mod tests {
 
         let mut raids = vec![ConsumerRaid {
             node: "n1".to_string(),
-            raid_name: format!("raid_{}", vol),
+            raid_name: crate::identity::raid_name(vol),
             state: "online".to_string(),
             num_base_bdevs: 2,
             num_base_bdevs_operational: 2,

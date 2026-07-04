@@ -1460,7 +1460,7 @@ impl NodeAgent {
                         let lvol_name = lvol["name"].as_str().unwrap_or("");
                         
                         // Check if this lvol matches our volume
-                        if lvol_name == format!("vol_{}", volume_id) {
+                        if lvol_name == crate::identity::lvol_name(volume_id) {
                             let size_bytes = lvol["num_blocks"].as_u64().unwrap_or(0) * 
                                            lvol["block_size"].as_u64().unwrap_or(512);
                             let lvol_uuid = lvol["uuid"].as_str().unwrap_or("").to_string();
@@ -1616,7 +1616,7 @@ impl NodeAgent {
         }
 
         // Step 3: Disconnect from NVMe-oF if this was a remote volume
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
+        let nqn = crate::identity::volume_nqn(volume_id);
         
         // Try to disconnect (best effort - may not be connected)
         let result = node_agent.disk_service.call_spdk_rpc(&json!({
@@ -2438,7 +2438,7 @@ impl NodeAgent {
                 .disk_service
                 .call_spdk_rpc(&json!({
                     "method": "bdev_raid_delete",
-                    "params": { "name": format!("raid_{}", volume_handle) }
+                    "params": { "name": crate::identity::raid_name(volume_handle) }
                 }))
                 .await;
             return Err("attachment left this node mid-repair — raid torn back down".into());
@@ -2449,7 +2449,7 @@ impl NodeAgent {
         // module — the partial-rebuild hazard from the layer-2 experiment
         // (listener over a namespace-less subsystem makes the kernel
         // conclude the namespace was deleted) cannot recur.
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_handle);
+        let nqn = crate::identity::volume_nqn(volume_handle);
         let target_ip =
             std::env::var("NVMEOF_LOCAL_TARGET_IP").unwrap_or("127.0.0.1".to_string());
         let target_port = std::env::var("NVMEOF_TARGET_PORT")
@@ -2853,7 +2853,7 @@ impl NodeAgent {
         &self,
         volume_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let raid_name = format!("raid_{}", volume_id);
+        let raid_name = crate::identity::raid_name(volume_id);
         let list = json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } });
         let response = self.disk_service.call_spdk_rpc(&list).await?;
         let exists = response
@@ -2909,7 +2909,7 @@ impl NodeAgent {
         attached_node: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Generate NQN using same format as driver
-        let nqn = format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index);
+        let nqn = crate::identity::replica_export_nqn(volume_id, replica_index);
 
         debug!(nqn, "[RECONCILE] Setting up NVMe-oF target");
 

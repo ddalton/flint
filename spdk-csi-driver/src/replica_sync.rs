@@ -649,7 +649,7 @@ impl VolumeSyncRecord {
 /// limit is 63 chars: "epoch-" + a 40-char PV name + "-" + seq leaves 16
 /// digits of headroom, far beyond any realistic sequence number.
 pub fn epoch_name(volume_id: &str, seq: u64) -> String {
-    format!("epoch-{}-{}", volume_id, seq)
+    crate::identity::epoch_snapshot_name(volume_id, seq)
 }
 
 /// Parse the sequence number out of one of this volume's epoch names.
@@ -698,7 +698,7 @@ pub fn parse_user_snapshot_id(snapshot_id: &str) -> Option<(&str, u64)> {
 /// the "n1" namespace suffix. Local replicas need no equivalent — an lvol
 /// bdev's name is its uuid.
 pub fn expected_remote_base_bdev(volume_id: &str, replica_index: usize) -> String {
-    let nqn = format!("nqn.2024-11.com.flint:volume:{}_{}", volume_id, replica_index);
+    let nqn = crate::identity::replica_export_nqn(volume_id, replica_index);
     format!("nvme_{}n1", nqn.replace(':', "_").replace('.', "_"))
 }
 
@@ -774,7 +774,7 @@ pub fn replicas_missing_from_raid(
 /// health monitor's raid-name strip) must resolve through this before
 /// touching the record.
 pub fn record_pv_name(volume_id: &str) -> &str {
-    volume_id.strip_prefix("nfs-server-").unwrap_or(volume_id)
+    crate::identity::storage_id_of_handle(volume_id)
 }
 
 /// `Some(parent_pv_name)` when this PV is the synthetic backing PV behind an

@@ -175,7 +175,7 @@ impl MinimalDiskService {
         }
 
         // Create new LVS
-        let lvs_name = format!("lvs_{}_{}", self.node_name, pci_address.replace(":", "-").replace(".", "-"));
+        let lvs_name = crate::identity::lvs_name(&self.node_name, pci_address);
         let bdev_name = &disk_found.bdev_name;
 
         let create_lvs_params = json!({
@@ -289,7 +289,7 @@ impl MinimalDiskService {
     pub async fn create_lvol(&self, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
         debug!(volume_id, lvs_name, size_bytes, thin_provision, "[MINIMAL_DISK] Creating lvol");
 
-        let lvol_name = format!("vol_{}", volume_id);
+        let lvol_name = crate::identity::lvol_name(volume_id);
         let size_mib = (size_bytes + 1048575) / 1048576; // Round up to MiB
 
         debug!(lvol_name = %lvol_name, "[LVOL_CREATE_DEBUG] Lvol name will be");
