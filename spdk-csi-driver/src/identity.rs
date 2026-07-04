@@ -298,6 +298,70 @@ pub fn lvs_name_for_disk(disk_ref: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Naming — the inverse direction. Given a bare lvol name, which volume id
+// minted it and under which shape? The dashboard's disk↔volume join and
+// orphan classification key on this: an lvol whose parsed owner is a live
+// PV is provisioned storage, not an orphan. Strict inverse of the
+// constructors above — a name no constructor could have produced returns
+// None (and is a genuine orphan candidate).
+// ---------------------------------------------------------------------------
+
+/// The lvol-name shape that matched in [`lvol_owner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LvolKind {
+    /// `vol_<id>` — single/primary volume lvol.
+    Primary,
+    /// `vol_<vol>_replica_<i>` or the `_hr` rejoin head.
+    Replica,
+    /// `epoch-<vol>-<seq>` — engine common-epoch snapshot.
+    EpochSnapshot,
+    /// `snap_<vol>_<suffix>` — user (CSI) snapshot.
+    UserSnapshot,
+    /// `temp_pvc_clone_<new_vol>` — transient clone source, named for the
+    /// NEW volume (which may not exist yet mid-provision).
+    CloneSource,
+}
+
+/// Parse the owning volume id out of an lvol name. Longest/most-specific
+/// shape wins; numeric suffixes are required where the constructors mint
+/// them, so `vol_x_replica_zz` is NOT a replica of `x` (it is `Primary`
+/// of the id `x_replica_zz`, exactly as `lvol_name` would mint it).
+pub fn lvol_owner(name: &str) -> Option<(&str, LvolKind)> {
+    fn all_digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    if let Some(rest) = name.strip_prefix("epoch-") {
+        // epoch-<vol>-<seq>: the seq is everything after the LAST '-'
+        let (vol, seq) = rest.rsplit_once('-')?;
+        return (all_digits(seq) && !vol.is_empty()).then_some((vol, LvolKind::EpochSnapshot));
+    }
+    if let Some(rest) = name.strip_prefix("temp_pvc_clone_") {
+        // Checked before `snap_`/`vol_`: contains neither prefix, but keep
+        // the most-specific literal first on principle.
+        return (!rest.is_empty()).then_some((rest, LvolKind::CloneSource));
+    }
+    if let Some(rest) = name.strip_prefix("snap_") {
+        let (vol, suffix) = rest.rsplit_once('_')?;
+        return (all_digits(suffix) && !vol.is_empty()).then_some((vol, LvolKind::UserSnapshot));
+    }
+    if let Some(rest) = name.strip_prefix("vol_") {
+        if rest.is_empty() {
+            return None;
+        }
+        let core = rest.strip_suffix("_hr").unwrap_or(rest);
+        if let Some((vol, idx)) = core.rsplit_once("_replica_") {
+            if all_digits(idx) && !vol.is_empty() {
+                return Some((vol, LvolKind::Replica));
+            }
+        }
+        // Not a replica shape (including a stray `_hr` with no replica
+        // core): the whole remainder is the primary volume id.
+        return Some((rest, LvolKind::Primary));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Role resolution (Phase 1) — the ONE place a bare handle's role comes from.
 // ---------------------------------------------------------------------------
 
@@ -673,6 +737,61 @@ mod tests {
     #[test]
     fn storage_id_strips_a_single_prefix() {
         assert_eq!(storage_id_of_handle("nfs-server-nfs-server-pvc-x"), "nfs-server-pvc-x");
+    }
+
+    // -- lvol_owner: strict inverse of every lvol-name constructor ----------
+
+    #[test]
+    fn lvol_owner_round_trips_every_constructor() {
+        assert_eq!(lvol_owner(&lvol_name(VOL)), Some((VOL, LvolKind::Primary)));
+        assert_eq!(lvol_owner(&replica_lvol_name(VOL, 0)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(lvol_owner(&replica_lvol_name(VOL, 12)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(lvol_owner(&hr_head_lvol_name(VOL, 1)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(
+            lvol_owner(&epoch_snapshot_name(VOL, 135)),
+            Some((VOL, LvolKind::EpochSnapshot))
+        );
+        assert_eq!(
+            lvol_owner(&user_snapshot_name(VOL, 68366263527245013)),
+            Some((VOL, LvolKind::UserSnapshot))
+        );
+        assert_eq!(
+            lvol_owner(&temp_clone_snapshot_name(VOL)),
+            Some((VOL, LvolKind::CloneSource))
+        );
+    }
+
+    /// The seq/suffix positions the constructors mint as numbers must be
+    /// numeric to match — otherwise the name falls through to the less
+    /// specific shape (or none), never to a wrong owner.
+    #[test]
+    fn lvol_owner_rejects_non_minted_shapes() {
+        assert_eq!(lvol_owner("uring_nvme3n1"), None);
+        assert_eq!(lvol_owner("raid_pvc-x"), None);
+        assert_eq!(lvol_owner("epoch-"), None);
+        assert_eq!(lvol_owner("epoch-pvc-x-notdigits"), None);
+        assert_eq!(lvol_owner("snap_pvc-x_beta"), None);
+        assert_eq!(lvol_owner("vol_"), None);
+        // Non-numeric replica index is not a replica; it reads as a primary
+        // lvol of that literal id, exactly as lvol_name would mint it.
+        assert_eq!(
+            lvol_owner("vol_pvc-x_replica_zz"),
+            Some(("pvc-x_replica_zz", LvolKind::Primary))
+        );
+    }
+
+    /// Volume ids are `pvc-<uuid>` — dashes inside the id must not confuse
+    /// the epoch rsplit, and the parse agrees with the strict per-volume
+    /// parsers used by reaping.
+    #[test]
+    fn lvol_owner_agrees_with_strict_parsers() {
+        let epoch = epoch_snapshot_name(VOL, 130);
+        assert_eq!(lvol_owner(&epoch), Some((VOL, LvolKind::EpochSnapshot)));
+        assert_eq!(epoch_seq(VOL, &epoch), Some(130));
+
+        let snap = user_snapshot_name(VOL, 42);
+        assert_eq!(lvol_owner(&snap), Some((VOL, LvolKind::UserSnapshot)));
+        assert_eq!(user_snapshot_ts(VOL, &snap), Some(42));
     }
 
     // -- VolumeRef ----------------------------------------------------------

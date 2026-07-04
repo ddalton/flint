@@ -706,35 +706,165 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
         read_latency: stats.read_latency_us,
         write_latency: stats.write_latency_us,
         brought_online: Utc::now().to_rfc3339(),
-        provisioned_volumes: Vec::new(), // TODO: Get from volume discovery
-        orphaned_spdk_volumes: Vec::new(), // Populated later
+        provisioned_volumes: Vec::new(), // Filled by populate_disk_lvols
+        orphaned_spdk_volumes: Vec::new(), // Filled by populate_disk_lvols
         device_type: disk_info.device_type.clone(),
     }
 }
 
-/// Get all active PV lvol UUIDs from Kubernetes
-async fn get_active_pv_lvol_uuids(kube_client: &Client) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-    use k8s_openapi::api::core::v1::PersistentVolume;
-    
-    let pvs_api: Api<PersistentVolume> = Api::all(kube_client.clone());
-    let pvs = pvs_api.list(&ListParams::default()).await?;
-    
-    let mut active_uuids = std::collections::HashSet::new();
-    
-    for pv in pvs.items {
-        if let Some(csi) = &pv.spec.and_then(|s| s.csi) {
-            if csi.driver == "flint.csi.storage.io" {
-                if let Some(attrs) = &csi.volume_attributes {
-                    if let Some(lvol_uuid) = attrs.get("flint.csi.storage.io/lvol-uuid") {
-                        active_uuids.insert(lvol_uuid.clone());
+/// One lvol classified against the live volume set: provisioned storage
+/// (its name parses to a live PV under the identity contract) or an
+/// orphan. Tagged with the lvstore that hosts it so attribution lands on
+/// the owning DISK.
+enum ClassifiedLvol {
+    Provisioned(ProvisionedVolume),
+    Orphan(OrphanedVolumeInfo),
+}
+
+/// Classify a node's lvols by parsing each name's owner via
+/// identity::lvol_owner. Names are the contract (identity.rs + CI lint)
+/// and survive `_hr` recovery renames that change UUIDs — which is why
+/// this does NOT key on the provision-time UUIDs in PV attributes. The
+/// predecessor allowlist (`flint.csi.storage.io/lvol-uuid`) only existed
+/// on legacy single-replica PVs, so on replica-set clusters every live
+/// replica, user snapshot, and epoch snapshot was reported as an orphaned
+/// "cleanup candidate".
+fn classify_node_lvols(
+    node_name: &str,
+    lvols: &[serde_json::Value],
+    volumes_by_id: &HashMap<&str, &DashboardVolume>,
+) -> Vec<(String, ClassifiedLvol)> {
+    let mut out = Vec::new();
+    for lvol in lvols {
+        let uuid = lvol["uuid"].as_str().unwrap_or("");
+        let alias = lvol
+            .get("aliases")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|a| a.as_str())
+            .unwrap_or(uuid);
+        // Alias shape is `<lvs>/<name>`; without it the lvol can neither be
+        // parsed nor attributed to a disk — skip loudly rather than guess.
+        let Some((lvs, short_name)) = alias.split_once('/') else {
+            println!(
+                "⚠️ [DASHBOARD] {}: lvol {} has no lvs-qualified alias; cannot attribute to a disk",
+                node_name, alias
+            );
+            continue;
+        };
+
+        let size_blocks = lvol["num_blocks"].as_u64().unwrap_or(0);
+        let block_size = lvol["block_size"].as_u64().unwrap_or(512);
+        let size_bytes = size_blocks * block_size;
+
+        let owner = crate::identity::lvol_owner(short_name)
+            .and_then(|(vol_id, kind)| volumes_by_id.get(vol_id).map(|v| (*v, kind)));
+
+        let entry = match owner {
+            Some((volume, kind)) => {
+                use crate::identity::LvolKind;
+                let is_snapshot = lvol["driver_specific"]["lvol"]["snapshot"]
+                    .as_bool()
+                    .unwrap_or(false);
+                // Heads carry the live per-node replica status; snapshot
+                // lvols report what SPDK says they are.
+                let status = match kind {
+                    LvolKind::Primary | LvolKind::Replica => volume
+                        .replica_statuses
+                        .iter()
+                        .find(|r| r.node == node_name)
+                        .map(|r| r.status.clone())
+                        .unwrap_or_else(|| "present".to_string()),
+                    _ if is_snapshot => "read-only".to_string(),
+                    _ => "present".to_string(),
+                };
+                ClassifiedLvol::Provisioned(ProvisionedVolume {
+                    volume_name: volume.name.clone(),
+                    volume_id: volume.id.clone(),
+                    size: size_bytes as i64,
+                    provisioned_at: volume
+                        .pvc_info
+                        .as_ref()
+                        .map(|p| p.creation_timestamp.clone())
+                        .unwrap_or_default(),
+                    replica_type: match kind {
+                        LvolKind::Primary => "primary",
+                        LvolKind::Replica => "replica",
+                        LvolKind::EpochSnapshot => "epoch-snapshot",
+                        LvolKind::UserSnapshot => "user-snapshot",
+                        LvolKind::CloneSource => "clone-source",
                     }
+                    .to_string(),
+                    status,
+                })
+            }
+            None => ClassifiedLvol::Orphan(OrphanedVolumeInfo {
+                spdk_volume_name: alias.to_string(),
+                spdk_volume_uuid: uuid.to_string(),
+                size_blocks,
+                size_gb: size_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                orphaned_since: Utc::now().to_rfc3339(),
+            }),
+        };
+        out.push((lvs.to_string(), entry));
+    }
+    out
+}
+
+/// One lvol sweep per node fills every disk's provisioned_volumes and
+/// orphaned_spdk_volumes. The lvol alias's lvs prefix identifies the disk
+/// (lvs names are minted from node+PCI — identity::lvs_name — so they are
+/// globally unique); the predecessor cloned the node's whole orphan list
+/// onto every disk of that node.
+async fn populate_disk_lvols(
+    state: &AppState,
+    disks: &mut [DashboardDisk],
+    volumes: &[DashboardVolume],
+) {
+    let volumes_by_id: HashMap<&str, &DashboardVolume> =
+        volumes.iter().map(|v| (v.id.as_str(), v)).collect();
+    let disk_by_lvs: HashMap<String, usize> = disks
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (crate::identity::lvs_name(&d.node, &d.pci_addr), i))
+        .collect();
+
+    let node_agents = state.node_agents.read().await.clone();
+    let (mut provisioned, mut orphaned) = (0usize, 0usize);
+    for (node_name, node_url) in node_agents.iter() {
+        let lvols = match fetch_lvols_from_node(node_url, node_name).await {
+            Ok(l) => l,
+            Err(e) => {
+                println!("⚠️ [DASHBOARD] Failed to fetch lvols from {}: {}", node_name, e);
+                continue;
+            }
+        };
+        for (lvs, entry) in classify_node_lvols(node_name, &lvols, &volumes_by_id) {
+            let Some(&idx) = disk_by_lvs.get(&lvs) else {
+                println!(
+                    "⚠️ [DASHBOARD] {}: lvstore {} matches no discovered disk",
+                    node_name, lvs
+                );
+                continue;
+            };
+            match entry {
+                ClassifiedLvol::Provisioned(p) => {
+                    disks[idx].provisioned_volumes.push(p);
+                    provisioned += 1;
+                }
+                ClassifiedLvol::Orphan(o) => {
+                    disks[idx].orphaned_spdk_volumes.push(o);
+                    orphaned += 1;
                 }
             }
         }
     }
-    
-    println!("📋 [DASHBOARD] Found {} active PV lvol UUIDs", active_uuids.len());
-    Ok(active_uuids)
+    println!(
+        "✅ [DASHBOARD] Lvol classification: {} provisioned, {} orphaned across {} disks",
+        provisioned,
+        orphaned,
+        disks.len()
+    );
 }
 
 /// Fetch all lvols from a specific node
@@ -1303,66 +1433,6 @@ async fn verify_lvol_exists(node_url: &str, lvol_uuid: &str) -> Result<bool, Box
 }
 
 /// Detect orphaned lvols across all nodes
-async fn detect_orphaned_lvols(state: &AppState) -> Result<HashMap<String, Vec<OrphanedVolumeInfo>>, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 [DASHBOARD] Detecting orphaned lvols...");
-    
-    // Get active PV lvol UUIDs from Kubernetes
-    let active_uuids = get_active_pv_lvol_uuids(&state.kube_client).await?;
-    
-    let node_agents = state.node_agents.read().await;
-    let mut orphaned_by_node: HashMap<String, Vec<OrphanedVolumeInfo>> = HashMap::new();
-    
-    for (node_name, node_url) in node_agents.iter() {
-        println!("   Checking node: {}", node_name);
-        
-        match fetch_lvols_from_node(node_url, node_name).await {
-            Ok(lvols) => {
-                let mut orphans = Vec::new();
-                
-                for lvol in lvols {
-                    let uuid = lvol["uuid"].as_str().unwrap_or("");
-                    let name = lvol.get("aliases")
-                        .and_then(|a| a.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|a| a.as_str())
-                        .unwrap_or(uuid);
-                    
-                    // Check if this lvol is referenced by any active PV
-                    if !active_uuids.contains(uuid) {
-                        let size_blocks = lvol["num_blocks"].as_u64().unwrap_or(0);
-                        let block_size = lvol["block_size"].as_u64().unwrap_or(512);
-                        let size_bytes = size_blocks * block_size;
-                        let size_gb = size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                        
-                        orphans.push(OrphanedVolumeInfo {
-                            spdk_volume_name: name.to_string(),
-                            spdk_volume_uuid: uuid.to_string(),
-                            size_blocks,
-                            size_gb,
-                            orphaned_since: Utc::now().to_rfc3339(),
-                        });
-                    }
-                }
-                
-                if !orphans.is_empty() {
-                    println!("   ⚠️ Found {} orphaned lvols on {}", orphans.len(), node_name);
-                    orphaned_by_node.insert(node_name.clone(), orphans);
-                } else {
-                    println!("   ✓ No orphaned lvols on {}", node_name);
-                }
-            }
-            Err(e) => {
-                println!("   ⚠️ Failed to fetch lvols from {}: {}", node_name, e);
-            }
-        }
-    }
-    
-    let total_orphans: usize = orphaned_by_node.values().map(|v| v.len()).sum();
-    println!("✅ [DASHBOARD] Orphan detection complete: {} orphaned lvols total", total_orphans);
-    
-    Ok(orphaned_by_node)
-}
-
 /// Filter volumes based on query parameters
 fn filter_volumes(volumes: Vec<DashboardVolume>, query: &DashboardQuery) -> Vec<DashboardVolume> {
     let mut filtered = volumes;
@@ -1437,22 +1507,16 @@ async fn build_dashboard_aggregate(state: &AppState) -> Result<DashboardData, Bo
     // Fetch disks from all node agents in parallel
     let mut dashboard_disks = fetch_all_disks_from_node_agents(state).await?;
 
-    // Detect orphaned lvols and populate disk orphaned_spdk_volumes
-    let orphaned_by_node = detect_orphaned_lvols(state).await?;
-
-    // Add orphaned volumes to their respective disks
-    for disk in dashboard_disks.iter_mut() {
-        if let Some(orphans) = orphaned_by_node.get(&disk.node) {
-            disk.orphaned_spdk_volumes = orphans.clone();
-            println!("   Added {} orphaned lvols to disk on {}", orphans.len(), disk.node);
-        }
-    }
-
     // Consumer raid assembly state (2b): one cheap RPC per node agent.
     let consumer_raids_by_name = fetch_consumer_raids(state).await;
 
     // Fetch managed volumes from Kubernetes PVs
     let dashboard_volumes = fetch_volumes_from_pvs(state, &consumer_raids_by_name).await?;
+
+    // One lvol sweep per node classifies every lvol against the live PV set:
+    // provisioned entries and true orphans land on the disk whose lvstore
+    // hosts them (volumes must be fetched first — they are the live set).
+    populate_disk_lvols(state, &mut dashboard_disks, &dashboard_volumes).await;
 
     // Per-node memory for ALL discovered nodes (filtering happens on read).
     let node_agents = state.node_agents.read().await;
@@ -3498,6 +3562,145 @@ pub fn openapi_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- lvol classification: the disk↔volume join (live shapes: runk
+    //     2026-07-04, the cluster where the predecessor flagged every live
+    //     lvol as an orphaned "cleanup candidate") ---
+
+    /// Real bdev_get_bdevs lvol shape.
+    fn lvol_json(alias: &str, uuid: &str, snapshot: bool) -> serde_json::Value {
+        json!({
+            "name": uuid,
+            "aliases": [alias],
+            "uuid": uuid,
+            "num_blocks": 4194304u64,
+            "block_size": 512,
+            "product_name": "Logical Volume",
+            "driver_specific": { "lvol": { "snapshot": snapshot, "clone": false } }
+        })
+    }
+
+    fn provisioned_of(classified: &[(String, ClassifiedLvol)]) -> Vec<&ProvisionedVolume> {
+        classified
+            .iter()
+            .filter_map(|(_, c)| match c {
+                ClassifiedLvol::Provisioned(p) => Some(p),
+                ClassifiedLvol::Orphan(_) => None,
+            })
+            .collect()
+    }
+
+    fn orphans_of(classified: &[(String, ClassifiedLvol)]) -> Vec<&OrphanedVolumeInfo> {
+        classified
+            .iter()
+            .filter_map(|(_, c)| match c {
+                ClassifiedLvol::Orphan(o) => Some(o),
+                ClassifiedLvol::Provisioned(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn classify_joins_live_lvols_to_their_volume_and_lvstore() {
+        let volumes = vec![create_test_volume(
+            TL_VOL,
+            "Healthy",
+            vec!["runk-aws-1".to_string(), "runk-aws-2".to_string()],
+            false,
+            false,
+        )];
+        let by_id: HashMap<&str, &DashboardVolume> =
+            volumes.iter().map(|v| (v.id.as_str(), v)).collect();
+
+        let lvs = "lvs_runk-aws-1_0000-00-1f-0";
+        let lvols = vec![
+            lvol_json(&format!("{}/vol_{}_replica_0", lvs, TL_VOL), "c871cc84", false),
+            lvol_json(&format!("{}/snap_{}_68366263527245013", lvs, TL_VOL), "058da0da", true),
+            lvol_json(&format!("{}/epoch-{}-130", lvs, TL_VOL), "ee1a8818", true),
+        ];
+
+        let classified = classify_node_lvols("runk-aws-1", &lvols, &by_id);
+        assert!(classified.iter().all(|(l, _)| l == lvs), "lvstore tag drives disk attribution");
+        let provisioned = provisioned_of(&classified);
+        assert_eq!(provisioned.len(), 3, "live-volume lvols must never be orphans");
+        assert!(provisioned.iter().all(|p| p.volume_id == TL_VOL));
+        assert_eq!(provisioned[0].replica_type, "replica");
+        // Head lvols carry the live per-node replica status
+        assert_eq!(provisioned[0].status, "healthy");
+        assert_eq!(provisioned[1].replica_type, "user-snapshot");
+        assert_eq!(provisioned[1].status, "read-only");
+        assert_eq!(provisioned[2].replica_type, "epoch-snapshot");
+        assert_eq!(provisioned[0].size, 4194304 * 512);
+    }
+
+    #[test]
+    fn classify_orphans_only_ownerless_lvols() {
+        let volumes = vec![create_test_volume(
+            "pvc-live",
+            "Healthy",
+            vec!["n1".to_string()],
+            false,
+            false,
+        )];
+        let by_id: HashMap<&str, &DashboardVolume> =
+            volumes.iter().map(|v| (v.id.as_str(), v)).collect();
+
+        let lvols = vec![
+            // Owner parses but the PV is gone → orphan
+            lvol_json("lvs_n1_0000-00-1f-0/vol_pvc-deleted_replica_0", "dead-1", false),
+            // Not a contract shape at all → orphan
+            lvol_json("lvs_n1_0000-00-1f-0/leftover-scratch", "dead-2", false),
+            // Legacy single-replica head of the live volume → provisioned
+            lvol_json("lvs_n1_0000-00-1f-0/vol_pvc-live", "live-1", false),
+        ];
+
+        let classified = classify_node_lvols("n1", &lvols, &by_id);
+        let orphans = orphans_of(&classified);
+        assert_eq!(orphans.len(), 2);
+        // Orphan names keep the lvs-qualified alias (what an operator sees in SPDK)
+        assert!(orphans.iter().any(|o| o.spdk_volume_name.ends_with("vol_pvc-deleted_replica_0")));
+        let provisioned = provisioned_of(&classified);
+        assert_eq!(provisioned.len(), 1);
+        assert_eq!(provisioned[0].replica_type, "primary");
+    }
+
+    #[test]
+    fn classify_handles_hr_heads_and_skips_aliasless_lvols() {
+        let volumes = vec![create_test_volume(
+            "pvc-live",
+            "Healthy",
+            vec!["n1".to_string()],
+            false,
+            true, // rebuilding → per-node status "rebuilding"
+        )];
+        let by_id: HashMap<&str, &DashboardVolume> =
+            volumes.iter().map(|v| (v.id.as_str(), v)).collect();
+
+        let lvols = vec![
+            // Hot-rejoin head: renamed lvol, possibly new uuid — the NAME
+            // still parses to its volume (the whole point of name-keying)
+            lvol_json("lvs_n1_0000-00-1f-0/vol_pvc-live_replica_1_hr", "new-uuid", false),
+            // No alias → cannot attribute; skipped, never misfiled
+            json!({ "uuid": "bare", "num_blocks": 1, "block_size": 512 }),
+        ];
+
+        let classified = classify_node_lvols("n1", &lvols, &by_id);
+        assert_eq!(classified.len(), 1);
+        let provisioned = provisioned_of(&classified);
+        assert_eq!(provisioned[0].replica_type, "replica");
+        assert_eq!(provisioned[0].status, "rebuilding");
+    }
+
+    /// Live pin: the attribution key minted from a disk's node+PCI equals
+    /// the lvs prefix SPDK reports in lvol aliases (runk disk
+    /// runk-aws-1_0000-00-1f.0 hosts lvs_runk-aws-1_0000-00-1f-0).
+    #[test]
+    fn lvs_attribution_key_matches_the_identity_mint() {
+        assert_eq!(
+            crate::identity::lvs_name("runk-aws-1", "0000:00:1f.0"),
+            "lvs_runk-aws-1_0000-00-1f-0"
+        );
+    }
 
     // --- snapshot timeline merge (live-shape corpus: runk 2026-07-04) ---
 
