@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, TrendingUp, TrendingDown, BarChart3, Shield, Settings, X, AlertTriangle, HardDrive, Clock, CheckCircle } from 'lucide-react';
+import { Activity, TrendingUp, TrendingDown, BarChart3 } from 'lucide-react';
+import { memberStateStyle } from '../ui/status';
 import type { RaidMember, ReplicaStatus, RaidStatus, Disk } from '../../hooks/useDashboardData';
 
 // Fields the pre-minimal backend used to send; the current API never does
@@ -34,29 +35,13 @@ interface EnhancedRaidMemberCardProps {
   disks: Disk[];
 }
 
-// Helper functions for styling, to be used in the component
-const getRaidMemberStateColor = (state: string) => {
-  switch (state.toLowerCase()) {
-    case 'online': return 'bg-green-100 text-green-800 border-green-200';
-    case 'degraded': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-    case 'failed': return 'bg-red-100 text-red-800 border-red-200';
-    case 'rebuilding': return 'bg-orange-100 text-orange-800 border-orange-200';
-    case 'spare': return 'bg-blue-100 text-blue-800 border-blue-200';
-    case 'removing': return 'bg-purple-100 text-purple-800 border-purple-200';
-    default: return 'bg-gray-100 text-gray-800 border-gray-200';
-  }
-};
+// Shared status tokens (ui/status.ts) — one rendering per member state.
+const getRaidMemberStateColor = (state: string) => memberStateStyle(state).chip;
 
 const getRaidMemberIcon = (state: string) => {
-  switch (state.toLowerCase()) {
-    case 'online': return <CheckCircle className="w-4 h-4 text-green-600" />;
-    case 'failed': return <X className="w-4 h-4 text-red-600" />;
-    case 'rebuilding': return <Settings className="w-4 h-4 text-orange-600 animate-spin" />;
-    case 'degraded': return <AlertTriangle className="w-4 h-4 text-yellow-600" />;
-    case 'spare': return <Shield className="w-4 h-4 text-blue-600" />;
-    case 'removing': return <Clock className="w-4 h-4 text-purple-600" />;
-    default: return <HardDrive className="w-4 h-4 text-gray-600" />;
-  }
+  const style = memberStateStyle(state);
+  const Icon = style.icon;
+  return <Icon className={`w-4 h-4 ${style.iconClass}`} />;
 };
 
 

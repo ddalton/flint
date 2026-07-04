@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
+import { volumeFilterDisplay } from '../ui/status';
 import { useDiskSetup } from '../../hooks/useDashboardData';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
@@ -104,17 +105,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   // Calculate filtered stats
   const filteredLocalNVMeCount = displayVolumes.filter(v => v.local_nvme).length;
 
-  const getFilterDisplayName = (filter?: VolumeFilter) => {
-    switch (filter) {
-      case 'healthy': return 'healthy';
-      case 'degraded': return 'degraded';
-      case 'failed': return 'failed';
-      case 'faulted': return 'faulted';
-      case 'rebuilding': return 'rebuilding';
-      case 'local-nvme': return 'local NVMe';
-      default: return '';
-    }
-  };
+  const getFilterDisplayName = (filter?: VolumeFilter) => volumeFilterDisplay(filter).short;
 
   return (
     <div className="bg-gray-50 rounded-lg p-6">

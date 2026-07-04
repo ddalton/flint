@@ -3,6 +3,7 @@ import {
   Database, Activity, X, Settings, Zap, Network, Info, AlertTriangle, 
   Cable, Monitor, Shield, HardDrive, Search, ChevronDown
 } from 'lucide-react';
+import { memberStateStyle } from '../ui/status';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
@@ -89,18 +90,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     }
   };
 
-  const getReplicaStatusColor = (status: string) => {
-    switch (status) {
-      case 'healthy': return 'bg-green-100 text-green-800 border-green-200';
-      case 'failed': return 'bg-red-100 text-red-800 border-red-200';
-      case 'rebuilding': return 'bg-orange-100 text-orange-800 border-orange-200';
-      case 'degraded': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-      // Tier-2 sync states (SYNC_STATE_STYLES tokens)
-      case 'stale': return 'bg-amber-100 text-amber-800 border-amber-200';
-      case 'standby': return 'bg-blue-100 text-blue-800 border-blue-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
+  const getReplicaStatusColor = (status: string) => memberStateStyle(status).chip;
 
   const getReplicaIcon = (replica: ReplicaStatus) => {
     if (replica.status === 'failed') return <X className="w-4 h-4 text-red-600" />;

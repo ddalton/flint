@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 import { Filter } from 'lucide-react';
 import { isFreshCluster, uninitializedDiskCount } from './setup/batchSetup';
+import { volumeFilterDisplay } from './ui/status';
 import { parseTab, parseVolumeFilter } from '../routes';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
@@ -163,83 +164,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
     );
   };
 
-  // Enhanced filter display with severity indication
-  const getFilterDisplayInfo = (filter: VolumeFilter) => {
-    switch (filter) {
-      case 'failed':
-        return {
-          name: 'Failed Volumes',
-          severity: 'critical',
-          icon: '🔴',
-          description: 'Volumes that have completely failed',
-          bgColor: 'bg-red-50',
-          borderColor: 'border-red-200'
-        };
-      case 'degraded':
-        return {
-          name: 'Degraded Volumes',
-          severity: 'warning', 
-          icon: '🟡',
-          description: 'Volumes with reduced redundancy',
-          bgColor: 'bg-yellow-50',
-          borderColor: 'border-yellow-200'
-        };
-      case 'faulted':
-        return {
-          name: 'All Faulted Volumes',
-          severity: 'mixed',
-          icon: '⚠️',
-          description: 'Both degraded and failed volumes',
-          bgColor: 'bg-orange-50',
-          borderColor: 'border-orange-200'
-        };
-      case 'rebuilding':
-        return {
-          name: 'Volumes with Rebuilding Replicas',
-          severity: 'recovery',
-          icon: '🔄',
-          description: 'Volumes with replica recovery operations',
-          bgColor: 'bg-orange-50',
-          borderColor: 'border-orange-200'
-        };
-      case 'healthy':
-        return {
-          name: 'Healthy Volumes',
-          severity: 'good',
-          icon: '✅',
-          description: 'All replicas operational',
-          bgColor: 'bg-green-50',
-          borderColor: 'border-green-200'
-        };
-      case 'local-nvme':
-        return {
-          name: 'Local NVMe Volumes',
-          severity: 'performance',
-          icon: '⚡',
-          description: 'High-performance local storage',
-          bgColor: 'bg-blue-50',
-          borderColor: 'border-blue-200'
-        };
-      case 'orphaned':
-        return {
-          name: 'Orphaned Volumes',
-          severity: 'cleanup',
-          icon: '🛡️',
-          description: 'Raw SPDK volumes without Kubernetes backing - cleanup candidates',
-          bgColor: 'bg-amber-50',
-          borderColor: 'border-amber-200'
-        };
-      default:
-        return {
-          name: 'All Volumes',
-          severity: 'info',
-          icon: '📊',
-          description: 'All volumes in the system',
-          bgColor: 'bg-blue-50',
-          borderColor: 'border-blue-200'
-        };
-    }
-  };
+  // One vocabulary for filter naming/coloring across all views (status.ts).
+  const filterInfo = volumeFilterDisplay(volumeFilter);
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -327,16 +253,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
         {/* Enhanced filter indication */}
         {volumeFilter !== 'all' && (
           <div className="mb-6">
-            <div className={`p-4 rounded-lg border-2 ${getFilterDisplayInfo(volumeFilter).bgColor} ${getFilterDisplayInfo(volumeFilter).borderColor}`}>
+            <div className={`p-4 rounded-lg border-2 ${filterInfo.bgColor} ${filterInfo.borderColor}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <span className="text-2xl">{getFilterDisplayInfo(volumeFilter).icon}</span>
+                  <span className="text-2xl">{filterInfo.icon}</span>
                   <div>
                     <h3 className="font-semibold text-lg">
-                      {getFilterDisplayInfo(volumeFilter).name}
+                      {filterInfo.name}
                     </h3>
                     <p className="text-sm text-gray-600">
-                      {getFilterDisplayInfo(volumeFilter).description}
+                      {filterInfo.description}
                     </p>
                   </div>
                 </div>
@@ -372,7 +298,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
               {volumeFilter !== 'all' && (
                 <span className="px-3 py-1 text-sm bg-indigo-100 text-indigo-800 rounded-full font-medium ml-4">
-                  Active: {getFilterDisplayInfo(volumeFilter).name}
+                  Active: {filterInfo.name}
                 </span>
               )}
             </div>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { memberStateStyle, UNKNOWN_MEMBER_STATE } from '../ui/status';
 import { 
   Plus, 
   Trash2, 
@@ -7,8 +8,6 @@ import {
   X, 
   Wifi, 
   WifiOff, 
-  CheckCircle, 
-  AlertTriangle,
   HardDrive,
   Network,
   RefreshCw,
@@ -261,12 +260,10 @@ const RemoteStorageTab: React.FC = () => {
 
   const getStatusIcon = (status: string, connected: boolean) => {
     if (!connected) return <WifiOff className="w-4 h-4 text-gray-500" />;
-    switch (status) {
-      case 'healthy': return <CheckCircle className="w-4 h-4 text-green-500" />;
-      case 'degraded': return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
-      case 'failed': return <X className="w-4 h-4 text-red-500" />;
-      default: return <Wifi className="w-4 h-4 text-blue-500" />;
-    }
+    const style = memberStateStyle(status);
+    if (style === UNKNOWN_MEMBER_STATE) return <Wifi className="w-4 h-4 text-blue-500" />;
+    const Icon = style.icon;
+    return <Icon className={`w-4 h-4 ${style.iconClass}`} />;
   };
 
   const togglePasswordVisibility = (targetId: string) => {

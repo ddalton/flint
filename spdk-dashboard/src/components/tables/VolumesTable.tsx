@@ -4,7 +4,8 @@ import { apiFetch } from '../../api/client';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
-import { isReplicaRecovering } from '../../hooks/useDashboardData';
+import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboardData';
+import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
 import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
 
@@ -103,37 +104,13 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   const filteredVolumes = useMemo(() => {
     let result = combinedVolumes;
 
-    // Apply volume filter first
+    // Apply volume filter first — the shared predicate (status/recovery
+    // semantics identical to the stat cards), plus the table-only
+    // 'orphaned' case for raw SPDK rows.
     if (activeFilter && activeFilter !== 'all') {
-      switch (activeFilter) {
-        case 'healthy':
-          result = result.filter(v => v.state === 'Healthy');
-          break;
-        case 'degraded':
-          result = result.filter(v => v.state === 'Degraded');
-          break;
-        case 'failed':
-          result = result.filter(v => v.state === 'Failed');
-          break;
-        case 'faulted':
-          result = result.filter(v => v.state === 'Degraded' || v.state === 'Failed');
-          break;
-        case 'rebuilding':
-          result = result.filter(v => 
-            v.replica_statuses.some(replica => 
-              replica.status === 'rebuilding' || 
-              replica.rebuild_progress !== null ||
-              replica.is_new_replica
-            )
-          );
-          break;
-        case 'local-nvme':
-          result = result.filter(v => v.local_nvme);
-          break;
-        case 'orphaned':
-          result = result.filter(v => (v as ExtendedVolume).isRaw);
-          break;
-      }
+      result = activeFilter === 'orphaned'
+        ? result.filter(v => v.isRaw)
+        : filterVolumesByType(result, activeFilter);
     }
 
     // Apply disk filter if present
@@ -162,49 +139,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     setCurrentPage(1);
   }, [activeFilter, diskFilter, pageSize]);
 
-  const getFilterDisplayName = (filter: VolumeFilter) => {
-    switch (filter) {
-      case 'healthy': return 'Healthy Volumes';
-      case 'degraded': return 'Degraded Volumes';
-      case 'failed': return 'Failed Volumes';
-      case 'faulted': return 'Faulted Volumes (Degraded + Failed)';
-      case 'rebuilding': return 'Volumes with Rebuilding Replicas';
-      case 'local-nvme': return 'Local NVMe Volumes';
-      case 'orphaned': return 'Orphaned Volumes (Raw SPDK)';
-      default: return 'All Volumes';
-    }
-  };
+  const getFilterDisplayName = (filter: VolumeFilter) => volumeFilterDisplay(filter).name;
 
-  const getVolumeStateInfo = (state: string) => {
-    switch (state) {
-      case 'Healthy':
-        return {
-          badge: 'bg-green-100 text-green-800',
-          icon: CheckCircle,
-          priority: 0
-        };
-      case 'Degraded':
-        return {
-          badge: 'bg-yellow-100 text-yellow-800',
-          icon: AlertTriangle,
-          priority: 2,
-          tooltip: 'Volume has reduced redundancy but is still functional'
-        };
-      case 'Failed':
-        return {
-          badge: 'bg-red-100 text-red-800',
-          icon: XCircle,
-          priority: 3,
-          tooltip: 'Volume has completely failed and requires immediate attention'
-        };
-      default:
-        return {
-          badge: 'bg-gray-100 text-gray-800',
-          icon: X,
-          priority: 4
-        };
-    }
-  };
+  const getVolumeStateInfo = volumeStateStyle;
 
 
 

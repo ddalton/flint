@@ -376,8 +376,14 @@ export const useAuth = () => {
   };
 };
 
-// Enhanced utility functions
-export const filterVolumesByType = (volumes: Volume[], filter: VolumeFilter): Volume[] => {
+// THE volume-filter predicate — every filtered view (volumes table, disks
+// table, nodes view) routes through here so a filter always matches the
+// stat card that advertised it. 'rebuilding' uses isReplicaRecovering
+// (Tier-2 sync state first, legacy markers as fallback) exactly like
+// computeStats.volumesWithRebuilding: pre-Phase-3, the views used the
+// legacy markers only, so a stale/standby replica counted on the card but
+// vanished from the filtered table.
+export const filterVolumesByType = <V extends Volume>(volumes: V[], filter: VolumeFilter): V[] => {
   switch (filter) {
     case 'healthy':
       return volumes.filter(v => v.state === 'Healthy');
@@ -388,12 +394,8 @@ export const filterVolumesByType = (volumes: Volume[], filter: VolumeFilter): Vo
     case 'faulted':
       return volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
     case 'rebuilding':
-      return volumes.filter(v => 
-        v.replica_statuses.some(replica => 
-          replica.status === 'rebuilding' || 
-          replica.rebuild_progress !== null ||
-          replica.is_new_replica
-        ) || v.raid_status?.rebuild_info !== undefined
+      return volumes.filter(v =>
+        v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
       );
     case 'local-nvme':
       return volumes.filter(v => v.local_nvme);

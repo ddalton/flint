@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router';
 import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import { NodeDetailView } from './NodeDetailView';
 import type { DashboardData, VolumeFilter } from '../../hooks/useDashboardData';
+import { filterVolumesByType } from '../../hooks/useDashboardData';
+import { volumeFilterDisplay } from '../ui/status';
 import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
 import { useOperations } from '../../contexts/OperationsContext';
 
@@ -51,35 +53,10 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
     setDialogVisible(activeMetricsModal !== null);
   }, [activeMetricsModal, setDialogVisible]);
 
-  // Filter volumes based on the active filter
-  const getFilteredVolumes = () => {
-    if (!activeFilter || activeFilter === 'all') {
-      return data.volumes;
-    }
-
-    switch (activeFilter) {
-      case 'healthy':
-        return data.volumes.filter(v => v.state === 'Healthy');
-      case 'degraded':
-        return data.volumes.filter(v => v.state === 'Degraded');
-      case 'failed':
-        return data.volumes.filter(v => v.state === 'Failed');
-      case 'faulted':
-        return data.volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
-      case 'rebuilding':
-        return data.volumes.filter(v => 
-          v.replica_statuses.some(replica => 
-            replica.status === 'rebuilding' || 
-            replica.rebuild_progress !== null ||
-            replica.is_new_replica
-          )
-        );
-      case 'local-nvme':
-        return data.volumes.filter(v => v.local_nvme);
-      default:
-        return data.volumes;
-    }
-  };
+  // Filter volumes via the shared predicate (same semantics as the stat
+  // cards and the volumes table).
+  const getFilteredVolumes = () =>
+    activeFilter ? filterVolumesByType(data.volumes, activeFilter) : data.volumes;
 
   // Get nodes that match search criteria
   // NOTE: We always show ALL nodes in the nodes view, regardless of volume filters
@@ -213,17 +190,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
     setSearchTerm('');
   };
 
-  const getFilterDisplayName = (filter: VolumeFilter) => {
-    switch (filter) {
-      case 'healthy': return 'Healthy Volumes';
-      case 'degraded': return 'Degraded Volumes';
-      case 'failed': return 'Failed Volumes';
-      case 'faulted': return 'Faulted Volumes (Degraded + Failed)';
-      case 'rebuilding': return 'Volumes with Rebuilding Replicas';
-      case 'local-nvme': return 'Local NVMe Volumes';
-      default: return 'All Volumes';
-    }
-  };
+  const getFilterDisplayName = (filter: VolumeFilter) => volumeFilterDisplay(filter).name;
 
   const getNodeFilterDescription = (filter: VolumeFilter) => {
     switch (filter) {

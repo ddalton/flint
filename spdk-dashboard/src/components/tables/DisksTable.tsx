@@ -5,6 +5,7 @@ import {
   Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
 } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
+import { filterVolumesByType } from '../../hooks/useDashboardData';
 
 interface DisksTableProps {
   disks: Disk[];
@@ -87,26 +88,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
           if (!actualVolume) return false;
           
-          switch (volumeFilter) {
-            case 'healthy':
-              return actualVolume.state === 'Healthy';
-            case 'degraded':
-              return actualVolume.state === 'Degraded';
-            case 'failed':
-              return actualVolume.state === 'Failed';
-            case 'faulted':
-              return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
-            case 'rebuilding':
-              return actualVolume.replica_statuses.some(replica => 
-                replica.status === 'rebuilding' || 
-                replica.rebuild_progress !== null ||
-                replica.is_new_replica
-              );
-            case 'local-nvme':
-              return actualVolume.local_nvme;
-            default:
-              return true;
-          }
+          // Shared predicate — a disk qualifies when its volume passes the
+          // same filter the stat cards/tables use.
+          return filterVolumesByType([actualVolume], volumeFilter).length > 0;
         });
       });
     }

@@ -1,4 +1,5 @@
 import React from 'react';
+import { volumeStateStyle } from '../ui/status';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 import { Database, CheckCircle, AlertTriangle, XCircle, Settings } from 'lucide-react';
 import type { Volume } from '../../hooks/useDashboardData';
@@ -22,14 +23,7 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
     )
   ).length;
 
-  const getStateColor = (status: string) => {
-    switch (status) {
-      case 'Healthy': return '#10b981';
-      case 'Degraded': return '#f59e0b';
-      case 'Failed': return '#ef4444';
-      default: return '#6b7280';
-    }
-  };
+  const getStateColor = (status: string) => volumeStateStyle(status).hex;
 
   const data = Object.entries(statusCounts).map(([status, count]) => ({
     name: status,

@@ -1,9 +1,21 @@
+import {
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  HardDrive,
+  Settings,
+  Shield,
+  X,
+  XCircle,
+  type LucideIcon,
+} from 'lucide-react';
 import type { SyncState } from '../../hooks/useDashboardData';
 
-// Semantic style tokens for replica sync states — the design-system seed.
-// One source for label + color so the Volumes table, RAID topology, and node
-// detail render the same state identically (Phase 3 migrates the volume/disk
-// status switches here too).
+// Semantic style tokens — ONE source for every status label/color/icon so
+// the same state renders identically in every view (the pre-Phase-3
+// baseline had three hand-rolled copies that had already drifted apart).
+// Sections: replica sync states (Tier-2), volume states, raid-member /
+// legacy replica states, and volume-filter display.
 export interface SyncStateStyle {
   label: string;
   chip: string;
@@ -39,3 +51,220 @@ export const SYNC_STATE_STYLES: Record<SyncDisplayState, SyncStateStyle> = {
     description: 'Hot rejoin in flight',
   },
 };
+
+// --- Volume states (backend DashboardVolume.state) ---------------------
+
+export interface VolumeStateStyle {
+  badge: string; // unbordered pill (tables)
+  chip: string; // bordered pill
+  hex: string; // chart series color
+  icon: LucideIcon;
+  // Sort weight: views listing mixed states put the most broken first.
+  priority: number;
+  tooltip?: string;
+}
+
+export const VOLUME_STATE_STYLES: Record<'Healthy' | 'Degraded' | 'Failed', VolumeStateStyle> = {
+  Healthy: {
+    badge: 'bg-green-100 text-green-800',
+    chip: 'bg-green-100 text-green-800 border-green-200',
+    hex: '#10b981',
+    icon: CheckCircle,
+    priority: 0,
+  },
+  Degraded: {
+    badge: 'bg-yellow-100 text-yellow-800',
+    chip: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    hex: '#f59e0b',
+    icon: AlertTriangle,
+    priority: 2,
+    tooltip: 'Volume has reduced redundancy but is still functional',
+  },
+  Failed: {
+    badge: 'bg-red-100 text-red-800',
+    chip: 'bg-red-100 text-red-800 border-red-200',
+    hex: '#ef4444',
+    icon: XCircle,
+    priority: 3,
+    tooltip: 'Volume has completely failed and requires immediate attention',
+  },
+};
+
+export const UNKNOWN_VOLUME_STATE: VolumeStateStyle = {
+  badge: 'bg-gray-100 text-gray-800',
+  chip: 'bg-gray-100 text-gray-800 border-gray-200',
+  hex: '#6b7280',
+  icon: X,
+  priority: 4,
+};
+
+export function volumeStateStyle(state: string): VolumeStateStyle {
+  return VOLUME_STATE_STYLES[state as keyof typeof VOLUME_STATE_STYLES] ?? UNKNOWN_VOLUME_STATE;
+}
+
+// --- Raid-member / legacy replica states --------------------------------
+// Lowercase keys: SPDK member states (online/degraded/failed/rebuilding/
+// spare/removing), the legacy replica statuses, and the Tier-2 sync states
+// (whose chips reuse SYNC_STATE_STYLES so both renderings can never drift).
+
+export interface MemberStateStyle {
+  chip: string;
+  icon: LucideIcon;
+  iconClass: string;
+}
+
+const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
+  online: {
+    chip: 'bg-green-100 text-green-800 border-green-200',
+    icon: CheckCircle,
+    iconClass: 'text-green-600',
+  },
+  healthy: {
+    chip: 'bg-green-100 text-green-800 border-green-200',
+    icon: CheckCircle,
+    iconClass: 'text-green-600',
+  },
+  degraded: {
+    chip: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    icon: AlertTriangle,
+    iconClass: 'text-yellow-600',
+  },
+  failed: {
+    chip: 'bg-red-100 text-red-800 border-red-200',
+    icon: X,
+    iconClass: 'text-red-600',
+  },
+  rebuilding: {
+    chip: 'bg-orange-100 text-orange-800 border-orange-200',
+    icon: Settings,
+    // The spin predates "motion with meaning" — Phase 4 removes it in favor
+    // of the data-bound sync indicator.
+    iconClass: 'text-orange-600 animate-spin motion-reduce:animate-none',
+  },
+  spare: {
+    chip: 'bg-blue-100 text-blue-800 border-blue-200',
+    icon: Shield,
+    iconClass: 'text-blue-600',
+  },
+  removing: {
+    chip: 'bg-purple-100 text-purple-800 border-purple-200',
+    icon: Clock,
+    iconClass: 'text-purple-600',
+  },
+  stale: {
+    chip: SYNC_STATE_STYLES.stale.chip,
+    icon: AlertTriangle,
+    iconClass: 'text-amber-600',
+  },
+  standby: {
+    chip: SYNC_STATE_STYLES.standby.chip,
+    icon: Clock,
+    iconClass: 'text-blue-600',
+  },
+};
+
+export const UNKNOWN_MEMBER_STATE: MemberStateStyle = {
+  chip: 'bg-gray-100 text-gray-800 border-gray-200',
+  icon: HardDrive,
+  iconClass: 'text-gray-600',
+};
+
+export function memberStateStyle(state: string): MemberStateStyle {
+  return MEMBER_STATE_STYLES[state.toLowerCase()] ?? UNKNOWN_MEMBER_STATE;
+}
+
+// --- Volume-filter display ----------------------------------------------
+// One vocabulary for the filter cards, banners, and per-view captions
+// (Dashboard, VolumesTable, and NodeDetailView each had their own copy with
+// diverging names).
+
+export interface VolumeFilterDisplay {
+  name: string;
+  // Inline lowercase form ("3 degraded volumes on this node"); empty for
+  // 'all' so unfiltered captions read naturally.
+  short: string;
+  severity: string;
+  icon: string;
+  description: string;
+  bgColor: string;
+  borderColor: string;
+}
+
+export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
+  all: {
+    name: 'All Volumes',
+    short: '',
+    severity: 'info',
+    icon: '📊',
+    description: 'All volumes in the system',
+    bgColor: 'bg-blue-50',
+    borderColor: 'border-blue-200',
+  },
+  healthy: {
+    name: 'Healthy Volumes',
+    short: 'healthy',
+    severity: 'good',
+    icon: '✅',
+    description: 'All replicas operational',
+    bgColor: 'bg-green-50',
+    borderColor: 'border-green-200',
+  },
+  degraded: {
+    name: 'Degraded Volumes',
+    short: 'degraded',
+    severity: 'warning',
+    icon: '🟡',
+    description: 'Volumes with reduced redundancy',
+    bgColor: 'bg-yellow-50',
+    borderColor: 'border-yellow-200',
+  },
+  failed: {
+    name: 'Failed Volumes',
+    short: 'failed',
+    severity: 'critical',
+    icon: '🔴',
+    description: 'Volumes that have completely failed',
+    bgColor: 'bg-red-50',
+    borderColor: 'border-red-200',
+  },
+  faulted: {
+    name: 'Faulted Volumes (Degraded + Failed)',
+    short: 'faulted',
+    severity: 'mixed',
+    icon: '⚠️',
+    description: 'Both degraded and failed volumes',
+    bgColor: 'bg-orange-50',
+    borderColor: 'border-orange-200',
+  },
+  rebuilding: {
+    name: 'Volumes with Recovering Replicas',
+    short: 'recovering',
+    severity: 'recovery',
+    icon: '🔄',
+    description: 'Volumes with replica recovery activity (catch-up, standby, or legacy rebuild)',
+    bgColor: 'bg-orange-50',
+    borderColor: 'border-orange-200',
+  },
+  'local-nvme': {
+    name: 'Local NVMe Volumes',
+    short: 'local NVMe',
+    severity: 'performance',
+    icon: '⚡',
+    description: 'High-performance local storage',
+    bgColor: 'bg-blue-50',
+    borderColor: 'border-blue-200',
+  },
+  orphaned: {
+    name: 'Orphaned Volumes (Raw SPDK)',
+    short: 'orphaned',
+    severity: 'cleanup',
+    icon: '🛡️',
+    description: 'Raw SPDK volumes without Kubernetes backing - cleanup candidates',
+    bgColor: 'bg-amber-50',
+    borderColor: 'border-amber-200',
+  },
+};
+
+export function volumeFilterDisplay(filter: string | null | undefined): VolumeFilterDisplay {
+  return VOLUME_FILTER_DISPLAY[filter ?? 'all'] ?? VOLUME_FILTER_DISPLAY.all;
+}
