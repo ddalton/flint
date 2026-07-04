@@ -125,10 +125,17 @@ healthCheck:
   # Changed from 8081 to 9081 to avoid conflicts with nginx ingress controllers
   nodeAgentPort: 9081
 
-# SPDK Controller Operator configuration
-# The operator manages SPDK custom resources (SpdkVolume, SpdkDisk, etc.)
+# SPDK Controller Operator configuration — DEFAULT OFF (audit L4
+# verification, 2026-07-04): the legacy replacement-rebuild flow this pod
+# was named for is unreachable (module never invoked by the shipped
+# binary, dedicated bin target not built), and the pod as deployed only
+# ran the standard driver against a misconfigured SPDK socket URL,
+# logging connection errors every tick while REBUILD_ENABLED was read by
+# dead code. Replica healing is owned by the Tier-1/2 orchestrators in
+# the controller (FLINT_CATCHUP / FLINT_HOT_REJOIN). Re-enable only if
+# you know exactly why.
 spdkOperator:
-  enabled: true
+  enabled: false
   healthCheckInterval: 30
   rebuildEnabled: true
 

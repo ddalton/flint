@@ -242,6 +242,16 @@ bug class caught at audit time instead of live:
   sweep-illegible. Pinned in identity.rs test
   `replacement_lvol_shape_is_misclassified_today` (the tripwire to update
   when fixed).
+  **VERIFIED UNREACHABLE (2026-07-04):** no production code path invokes
+  `controller_operator` (only comments reference it); its dedicated bin
+  target is commented out of Cargo.toml; the deployed
+  `spdk-controller-operator` pod ran the standard driver with a
+  URL-shaped `SPDK_RPC_URL` handed to a Unix-socket client — every SPDK
+  call fails, so even the module's loops could never act (observed live
+  on runk: connection errors every monitor tick). The chart now defaults
+  `spdkOperator.enabled: false`. The tripwire test stays as the guard if
+  the flow is ever revived — revival requires making the mint
+  identity-legible first.
 - **L5 — two parsers for one fact**: ControllerPublish/NodeStage read
   `originalVolumeId` (error if absent) while NodeUnstage strips the
   prefix. Same information; unify on the prefix parse (context stays as
