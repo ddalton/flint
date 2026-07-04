@@ -1,6 +1,9 @@
 # Identity unification — one typed volume identity at every boundary
 
-**Status:** PLANNED (2026-07-04). Not started.
+**Status:** Phase 0 COMPLETE (2026-07-04) — `src/identity.rs` (canonical
+vocabulary, delegating parsers, live-shape tests) +
+`identity-unification-phase0-audit.md` (eleven role signals, full RPC×role
+matrix, ~25-site inventory, latent findings L1–L6). Phases 1–4 not started.
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage

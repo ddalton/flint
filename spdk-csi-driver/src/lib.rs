@@ -1,4 +1,5 @@
 // Minimal State SPDK CSI Driver - Library Modules
+pub mod identity;  // Canonical volume identity: VolumeRef + naming + parsers (identity-unification Phase 0)
 pub mod spdk_native;
 pub mod nvmeof_utils;
 pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)
