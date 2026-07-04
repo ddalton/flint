@@ -345,9 +345,20 @@ Status (2026-07-03): DONE in six commits (789cf4c test infra, ae1f9f6
 router, ed57bfa status tokens, 0257d36 strictness, bf197f8 nginx/
 Dockerfile, 3c77e02 CI); code-validated by the new gate (60 tests,
 0 lint errors, tsc clean under noUncheckedIndexedAccess, build OK,
-both freshness halves green). Not yet live-rolled — needs a
-`phase3.0` frontend image (frontend-only; no backend changes) and a
-deep-link smoke test on runj.
+both freshness halves green). LIVE-VALIDATED on runj 2026-07-04
+(frontend-only image `phase3.0`, digest 4a7f4d75…, built on a
+transient spot builder and rolled surgically — backend stays 1.4.0):
+11/11 browser checks through the real nginx + backend — deep link
+`/volumes?filter=degraded` survives the auth gate with URL intact and
+lands on the filtered Volumes tab; tabs are real links with the filter
+riding the href across tab switches; unknown paths bounce to the
+landing entry; opening a volume detail writes `?volume=` and the modal
+deep link reopens after a full reload + re-login (in-memory token is
+by design); `/events` by path serves the 2c panels; zero page errors.
+The image's own nginx.conf serves these routes today only via the
+chart ConfigMap copy still mounted from the 1.4.0 install — identical
+`try_files` semantics; the single-source config takes over at the
+next chart release.
 
 - [DONE] Vitest + RTL + MSW: fixtures typed against the GENERATED
   OpenAPI schemas (a drifted fixture is a compile error), MSW at the
