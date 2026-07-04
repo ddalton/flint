@@ -194,7 +194,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <VolumeStatusChart volumes={data.volumes} />
             <DiskStatusChart disks={data.disks} />
             <div className="lg:col-span-2">
-              <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks}/>
+              <EnhancedRaidTopologyChart volumes={data.volumes} disks={data.disks} nodeNames={data.nodes} nodeInfo={data.node_info}/>
             </div>
           </div>
         );

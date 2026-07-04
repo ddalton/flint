@@ -2,22 +2,30 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Database, Activity, Zap, Network, AlertTriangle, Shield, Settings, Search, ChevronDown
 } from 'lucide-react';
-import type { Volume, Disk } from '../../hooks/useDashboardData';
+import type { Volume, Disk, NodeInfo } from '../../hooks/useDashboardData';
 import { VolumeTopologyGraph } from './topology/VolumeTopologyGraph';
+import { ClusterTopologyGraph } from './topology/ClusterTopologyGraph';
 import { raidLevelDisplayName } from './topology/buildTopology';
 
-// The volume topology page: searchable volume picker + the data-path graph
-// (topology/VolumeTopologyGraph) + a one-line status chip summary. Every
-// detail that used to be stacked inline — member cards, replica cards, NQN
-// dumps, rebuild banners, RAID/NVMe-oF explainers — lives in the graph's
-// details drawer now (select a node/edge, or "About this topology").
+// The topology page at two altitudes: the cluster view (node cards +
+// replica-placement links) and the volume drill-down (searchable picker +
+// data-path graph + status chip summary). Cluster drawer volume rows hand
+// off into the volume view. Every detail that used to be stacked inline —
+// member cards, replica cards, NQN dumps, rebuild banners, RAID/NVMe-oF
+// explainers — lives in the graphs' details drawers (select a node/edge,
+// or "About this topology").
 
 interface EnhancedRaidTopologyChartProps {
   volumes: Volume[];
   disks: Disk[];
+  nodeNames: string[];
+  nodeInfo?: Record<string, NodeInfo>;
 }
 
-export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps> = ({ volumes, disks }) => {
+type TopologyAltitude = 'cluster' | 'volume';
+
+export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps> = ({ volumes, disks, nodeNames, nodeInfo }) => {
+  const [view, setView] = useState<TopologyAltitude>('volume');
   const [selectedVolume, setSelectedVolume] = useState(volumes[0]?.id || '');
   const [searchTerm, setSearchTerm] = useState('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -64,35 +72,57 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     }, 0);
   };
 
+  // Cluster drawer → volume drill-down handoff.
+  const openVolume = (volumeId: string) => {
+    setSelectedVolume(volumeId);
+    setView('volume');
+  };
+
   // Fall back to the first volume when the picked one disappears (deleted
-  // between refreshes, or the list arrived after mount).
+  // between refreshes, or the list arrived after mount). May be undefined
+  // (fresh cluster) — the cluster view still renders.
   const selectedVolumeInfo = volumes.find(v => v.id === selectedVolume) ?? volumes[0];
 
-  if (!selectedVolumeInfo) {
-    return (
-      <div className="bg-white rounded-lg shadow-lg p-6">
-        <div className="flex items-center mb-4">
-          <Activity className="w-6 h-6 text-blue-600 mr-2" />
-          <h3 className="text-lg font-semibold">Volume Topology</h3>
-        </div>
-        <p className="text-sm text-gray-500">No volumes to display yet.</p>
-      </div>
-    );
-  }
-
-  const raidStatus = selectedVolumeInfo.raid_status;
-  const hasNvmeof = selectedVolumeInfo.nvmeof_enabled ||
-                    (selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0) ||
-                    selectedVolumeInfo.access_method === 'nvmeof';
+  const raidStatus = selectedVolumeInfo?.raid_status;
+  const hasNvmeof = !!selectedVolumeInfo &&
+                    (selectedVolumeInfo.nvmeof_enabled ||
+                     (selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0) ||
+                     selectedVolumeInfo.access_method === 'nvmeof');
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center">
           <Activity className="w-6 h-6 text-blue-600 mr-2" />
-          <h3 className="text-lg font-semibold">Volume Topology</h3>
+          <h3 className="text-lg font-semibold">
+            {view === 'cluster' ? 'Cluster Topology' : 'Volume Topology'}
+          </h3>
         </div>
         <div className="flex items-center gap-4">
+          {/* Altitude toggle: cluster map vs per-volume data path */}
+          <div
+            role="tablist"
+            aria-label="Topology altitude"
+            className="flex overflow-hidden rounded-md border border-gray-300"
+          >
+            {(['cluster', 'volume'] as const).map(mode => (
+              <button
+                key={mode}
+                role="tab"
+                aria-selected={view === mode}
+                onClick={() => setView(mode)}
+                className={`px-3 py-2 text-sm font-medium capitalize transition-colors ${
+                  view === mode
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
+          {view === 'volume' && selectedVolumeInfo && (
+          <>
           {/* Searchable Volume Dropdown */}
           <div className="relative" ref={dropdownRef}>
             <button
@@ -222,9 +252,23 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
               </div>
             )}
           </div>
+          </>
+          )}
         </div>
       </div>
 
+      {view === 'cluster' ? (
+        <ClusterTopologyGraph
+          volumes={volumes}
+          disks={disks}
+          nodeNames={nodeNames}
+          nodeInfo={nodeInfo}
+          onOpenVolume={openVolume}
+        />
+      ) : !selectedVolumeInfo ? (
+        <p className="text-sm text-gray-500">No volumes to display yet.</p>
+      ) : (
+        <>
       {/* Missing live metrics: honest empty-state note, graph still renders
           from replica statuses. */}
       {!raidStatus && (
@@ -291,6 +335,8 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           </span>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
-import { Database, HardDrive, Monitor, Network, Zap } from 'lucide-react';
+import { Database, HardDrive, Monitor, Network, Zap, type LucideIcon } from 'lucide-react';
 import { MemberStateChip } from '../../ui/Chip';
 import { SyncStateIndicator } from '../../ui/SyncStateIndicator';
 import { ProgressBar } from '../../ui/ProgressBar';
@@ -43,9 +43,18 @@ function NodeCard({
   );
 }
 
-// Grafana-node-graph-style ring: one arc segment per RAID member, colored by
-// its state, with a 2px surface gap between segments (mark-spec spacer).
-export function StatusRing({ hexes, size = 44 }: { hexes: string[]; size?: number }) {
+// Grafana-node-graph-style ring: one arc segment per constituent (RAID
+// member, disk, …), colored by its state, with a 2px surface gap between
+// segments (mark-spec spacer).
+export function StatusRing({
+  hexes,
+  size = 44,
+  icon: Icon = Database,
+}: {
+  hexes: string[];
+  size?: number;
+  icon?: LucideIcon;
+}) {
   const stroke = 5;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
@@ -70,7 +79,7 @@ export function StatusRing({ hexes, size = 44 }: { hexes: string[]; size?: numbe
           />
         ))}
       </svg>
-      <Database className="absolute inset-0 m-auto h-4 w-4 text-blue-600" aria-hidden="true" />
+      <Icon className="absolute inset-0 m-auto h-4 w-4 text-blue-600" aria-hidden="true" />
     </div>
   );
 }
