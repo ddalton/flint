@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay } from '../ui/status';
+import { ProgressBar } from '../ui/ProgressBar';
 import { useDiskSetup } from '../../hooks/useDashboardData';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
@@ -356,12 +357,12 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       <td className="px-4 py-4">
                         <div className="text-sm">
                           <div className="flex items-center gap-2 mb-1">
-                            <div className="w-20 bg-gray-200 rounded-full h-2">
-                              <div 
-                                className="bg-blue-500 h-2 rounded-full" 
-                                style={{ width: `${(disk.allocated_space / disk.capacity) * 100}%` }}
-                              />
-                            </div>
+                            <ProgressBar
+                              value={(disk.allocated_space / disk.capacity) * 100}
+                              label={`${disk.id} allocation`}
+                              valueText={`${Math.round((disk.allocated_space / disk.capacity) * 100)}% allocated`}
+                              className="w-20"
+                            />
                             <span className="text-xs text-gray-600">
                               {Math.round((disk.allocated_space / disk.capacity) * 100)}%
                             </span>

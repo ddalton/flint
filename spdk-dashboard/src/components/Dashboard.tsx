@@ -8,7 +8,7 @@ import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } fro
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
-import { TabSkeleton } from './ui/Skeleton';
+import { Skeleton, TabSkeleton } from './ui/Skeleton';
 
 // Tab contents are code-split (Phase 4): first paint ships only the shell;
 // each tab's chunk — and the reactflow/recharts vendors — load on demand.
@@ -128,8 +128,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   if (loading && data.volumes.length === 0) {
     return (
-      <div className="flex justify-center items-center h-screen">
-        <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600"></div>
+      <div className="min-h-screen bg-gray-50 p-8" role="status" aria-label="Loading dashboard">
+        <div className="max-w-screen-2xl mx-auto space-y-6">
+          <Skeleton className="h-12 w-72" />
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
+          <Skeleton className="h-96 w-full" />
+        </div>
       </div>
     );
   }

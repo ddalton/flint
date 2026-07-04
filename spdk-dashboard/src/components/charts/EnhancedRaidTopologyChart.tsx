@@ -4,6 +4,7 @@ import {
   Cable, Monitor, Shield, HardDrive, Search, ChevronDown
 } from 'lucide-react';
 import { memberStateStyle } from '../ui/status';
+import { ProgressBar } from '../ui/ProgressBar';
 import { NVMFTooltip } from '../ui/NVMFTooltip';
 import { VolumeAccessTooltip } from '../ui/VolumeAccessTooltip';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
@@ -94,7 +95,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
 
   const getReplicaIcon = (replica: ReplicaStatus) => {
     if (replica.status === 'failed') return <X className="w-4 h-4 text-red-600" />;
-    if (replica.status === 'rebuilding') return <Settings className="w-4 h-4 text-orange-600 animate-spin" />;
+    if (replica.status === 'rebuilding') return <Settings className="w-4 h-4 text-rebuilding-600" />;
     if (replica.status === 'stale') return <AlertTriangle className="w-4 h-4 text-amber-600" />;
     if (replica.is_local) return <Zap className="w-4 h-4 text-blue-600" />;
     return <Network className="w-4 h-4 text-purple-600" />;
@@ -610,7 +611,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           
           {raidStatus?.rebuild_info && (
             <span className="px-4 py-2 rounded-full text-sm font-medium bg-orange-100 text-orange-800 flex items-center gap-1">
-              <Settings className="w-4 h-4 animate-spin" />
+              <Settings className="w-4 h-4" />
               RAID Rebuild in Progress ({raidStatus.rebuild_info.progress_percentage.toFixed(1)}%)
             </span>
           )}
@@ -620,7 +621,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
         {raidStatus?.rebuild_info && (
           <div className="mt-6 p-4 bg-orange-50 rounded-lg border border-orange-200">
             <h5 className="font-medium text-orange-800 mb-2 flex items-center gap-2">
-              <Settings className="w-5 h-5 animate-spin" />
+              <Settings className="w-5 h-5" />
               Active RAID Rebuild Operation
             </h5>
             <div className="text-sm">
@@ -632,12 +633,13 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                   {raidStatus.rebuild_info.progress_percentage.toFixed(1)}%
                 </span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-3 mb-2">
-                <div 
-                  className="bg-orange-500 h-3 rounded-full transition-all duration-300" 
-                  style={{ width: `${raidStatus.rebuild_info.progress_percentage}%` }}
-                />
-              </div>
+              <ProgressBar
+                value={raidStatus.rebuild_info.progress_percentage}
+                label="RAID rebuild progress"
+                valueText={`${raidStatus.rebuild_info.progress_percentage.toFixed(1)}%`}
+                tone="warn"
+                className="w-full mb-2"
+              />
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-gray-600">
                 <div>
                   <strong>State:</strong> {raidStatus.rebuild_info.state}

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Activity, AlertTriangle, Timer, Zap } from 'lucide-react';
 import { WINDOW_TARGET_MS } from '../../hooks/useEvents';
+import { ProgressBar } from '../ui/ProgressBar';
 import type { EngineEvent, EventCategory, HotRejoinWindow } from '../../hooks/useEvents';
 
 // The after-the-fact surfaces for what the live sync indicator cannot show —
@@ -31,7 +32,6 @@ const formatMiB = (bytes: number | null | undefined) =>
 
 function WindowRow({ w, showVolume }: { w: HotRejoinWindow; showVolume: boolean }) {
   const overTarget = w.window_ms > WINDOW_TARGET_MS;
-  const pct = Math.min(100, (w.window_ms / WINDOW_TARGET_MS) * 100);
   const estimator = formatMiB(w.estimator_bytes);
   return (
     <tr className="hover:bg-gray-50">
@@ -44,19 +44,13 @@ function WindowRow({ w, showVolume }: { w: HotRejoinWindow; showVolume: boolean 
       <td className="px-4 py-3 whitespace-nowrap text-sm">{w.node}</td>
       <td className="px-4 py-3 whitespace-nowrap">
         <div className="flex items-center gap-2">
-          <div
-            className="w-24 bg-gray-200 rounded-full h-2"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={WINDOW_TARGET_MS}
-            aria-valuenow={Math.min(w.window_ms, WINDOW_TARGET_MS)}
-            aria-valuetext={`${w.window_ms}ms of ${WINDOW_TARGET_MS}ms target`}
-          >
-            <div
-              className={`h-2 rounded-full ${overTarget ? 'bg-amber-500' : 'bg-green-500'}`}
-              style={{ width: `${pct}%` }}
-            />
-          </div>
+          <ProgressBar
+            value={Math.min(w.window_ms, WINDOW_TARGET_MS)}
+            max={WINDOW_TARGET_MS}
+            label="hot-rejoin window"
+            valueText={`${w.window_ms}ms of ${WINDOW_TARGET_MS}ms target`}
+            tone={overTarget ? 'warn' : 'ok'}
+          />
           <span className={`text-sm font-medium tabular-nums ${overTarget ? 'text-amber-700' : 'text-green-700'}`}>
             {w.window_ms}ms
           </span>

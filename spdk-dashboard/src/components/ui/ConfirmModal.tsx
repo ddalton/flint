@@ -25,7 +25,7 @@ export function ConfirmModal({
   confirmLabel: string;
   // When set, the confirm button stays disabled until this is typed back.
   confirmPhrase?: string;
-  phraseHelp?: string;
+  phraseHelp?: ReactNode;
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;

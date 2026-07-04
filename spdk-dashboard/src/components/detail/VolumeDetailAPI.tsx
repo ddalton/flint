@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import type { ConsumerRaid, ReplicaStatus, Volume, SpdkVolumeDetails } from '../../hooks/useDashboardData';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
+import { Skeleton } from '../ui/Skeleton';
+import { ProgressBar } from '../ui/ProgressBar';
 import { useEvents } from '../../hooks/useEvents';
 import { EventTimelinePanel, HotRejoinWindowsPanel } from '../events/EventPanels';
 
@@ -441,7 +443,10 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
     if (spdkLoading) {
       return (
         <div className="flex items-center justify-center py-12">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <div className="w-full space-y-3" role="status" aria-label="Loading volume details">
+            <Skeleton className="h-6 w-48" />
+            <Skeleton className="h-32 w-full" />
+          </div>
           <span className="ml-3 text-gray-600">Loading SPDK details...</span>
         </div>
       );
@@ -592,12 +597,12 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
               <span className="text-sm font-medium text-gray-700">LVS Space Usage</span>
               <span className="text-sm text-gray-500">{(spdkData.lvs_utilization_pct || 0).toFixed(1)}% used</span>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-3">
-              <div
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-3 rounded-full"
-                style={{ width: `${Math.min(spdkData.lvs_utilization_pct || 0, 100)}%` }}
-              />
-            </div>
+            <ProgressBar
+              value={Math.min(spdkData.lvs_utilization_pct || 0, 100)}
+              label="LVS space usage"
+              valueText={`${(spdkData.lvs_utilization_pct || 0).toFixed(1)}% used`}
+              className="w-full"
+            />
           </div>
 
           {/* Cluster Information */}

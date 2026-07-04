@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
+import { ConfirmModal } from '../ui/ConfirmModal';
+import { ProgressBar } from '../ui/ProgressBar';
 
 interface DisksTableProps {
   disks: Disk[];
@@ -55,7 +57,6 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     volume: OrphanedVolumeInfo;
     diskNode: string;
   } | null>(null);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteSuccess, setDeleteSuccess] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -260,14 +261,13 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   // Delete orphaned volume handlers
   const handleDeleteOrphanedVolume = (volume: OrphanedVolumeInfo, diskNode: string) => {
     setVolumeToDelete({ volume, diskNode });
-    setDeleteConfirmText('');
     setDeleteSuccess(false);
     setDeleteError(null);
     setShowDeleteDialog(true);
   };
 
   const confirmDeleteOrphanedVolume = async () => {
-    if (!volumeToDelete || deleteConfirmText !== 'DELETE') {
+    if (!volumeToDelete) {
       return;
     }
 
@@ -301,7 +301,6 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         setTimeout(() => {
           setShowDeleteDialog(false);
           setVolumeToDelete(null);
-          setDeleteConfirmText('');
           setDeleteSuccess(false);
           window.location.reload(); // Refresh to update disk list
         }, 2000);
@@ -320,7 +319,6 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   const cancelDeleteOrphanedVolume = () => {
     setShowDeleteDialog(false);
     setVolumeToDelete(null);
-    setDeleteConfirmText('');
     setDeleteSuccess(false);
     setDeleteError(null);
   };
@@ -728,17 +726,13 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space.toFixed(2)}GB</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center gap-2">
-                        <div className="w-20 bg-gray-200 rounded-full h-2">
-                          <div 
-                            className={`h-2 rounded-full ${
-                              utilization < 25 ? 'bg-green-500' :
-                              utilization < 75 ? 'bg-yellow-500' :
-                              utilization < 95 ? 'bg-orange-500' :
-                              'bg-red-500'
-                            }`}
-                            style={{ width: `${utilization}%` }}
-                          />
-                        </div>
+                        <ProgressBar
+                          value={utilization}
+                          label={`${disk.id} utilization`}
+                          valueText={`${utilization}% used`}
+                          tone={utilization < 75 ? 'ok' : utilization < 95 ? 'warn' : 'danger'}
+                          className="w-20"
+                        />
                         <span className="text-xs text-gray-600 min-w-[3rem]">{utilization}%</span>
                       </div>
                     </td>
@@ -977,127 +971,68 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         </div>
       )}
 
-      {/* Delete Orphaned Volume Confirmation Dialog */}
-      {showDeleteDialog && volumeToDelete && (
+      {/* Delete Orphaned Volume Confirmation Dialog (kit ConfirmModal); the
+          success/error result phases keep their own lightweight overlay. */}
+      {showDeleteDialog && volumeToDelete && (deleteSuccess || deleteError ? (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
-            <div className="p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                Delete Orphaned SPDK Volume
-              </h3>
-              
-              {/* Success Message */}
-              {deleteSuccess && (
-                <div className="mb-4 bg-green-50 border border-green-200 rounded p-4">
-                  <div className="flex items-center">
-                    <svg className="w-5 h-5 text-green-500 mr-2" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                    </svg>
-                    <span className="text-green-800 font-medium">Successfully deleted!</span>
-                  </div>
-                  <p className="text-green-700 text-sm mt-2">
-                    Volume '{volumeToDelete.volume.spdk_volume_name}' ({volumeToDelete.volume.size_gb.toFixed(2)}GB) has been permanently deleted.
-                    Page will refresh automatically...
-                  </p>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6" role="alertdialog" aria-modal="true" aria-label="Deletion result">
+            {deleteSuccess ? (
+              <div className="bg-healthy-50 border border-healthy-200 rounded p-4">
+                <div className="flex items-center gap-2">
+                  <CheckCircle aria-hidden="true" className="w-5 h-5 text-healthy-500" />
+                  <span className="text-healthy-800 font-medium">Successfully deleted!</span>
                 </div>
-              )}
-
-              {/* Error Message */}
-              {deleteError && (
-                <div className="mb-4 bg-red-50 border border-red-200 rounded p-4">
-                  <div className="flex items-center">
-                    <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
-                    <span className="text-red-800 font-medium">Deletion Failed</span>
+                <p className="text-healthy-700 text-sm mt-2">
+                  Volume '{volumeToDelete.volume.spdk_volume_name}' ({volumeToDelete.volume.size_gb.toFixed(2)}GB) has been permanently deleted.
+                  Page will refresh automatically...
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="bg-failed-50 border border-failed-200 rounded p-4">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle aria-hidden="true" className="w-5 h-5 text-failed-500" />
+                    <span className="text-failed-800 font-medium">Deletion Failed</span>
                   </div>
-                  <p className="text-red-700 text-sm mt-2">
-                    {deleteError}
-                  </p>
+                  <p className="text-failed-700 text-sm mt-2">{deleteError}</p>
                 </div>
-              )}
-              
-              {!deleteSuccess && !deleteError && (
-                <div className="mb-4">
-                  <div className="bg-red-50 border border-red-200 rounded p-3 mb-4">
-                    <div className="flex items-center">
-                      <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
-                      <span className="text-red-800 font-medium">Warning: Permanent Deletion</span>
-                    </div>
-                    <p className="text-red-700 text-sm mt-1">
-                      This will permanently delete the SPDK logical volume and free up storage space. 
-                      This action cannot be undone.
-                    </p>
-                  </div>
-                </div>
-              )}
-              
-              {!deleteSuccess && !deleteError && (
-                <>
-                  <div className="space-y-2 text-sm mb-4">
-                    <div><strong>Volume:</strong> {volumeToDelete.volume.spdk_volume_name}</div>
-                    <div><strong>UUID:</strong> {volumeToDelete.volume.spdk_volume_uuid}</div>
-                    <div><strong>Node:</strong> {volumeToDelete.diskNode}</div>
-                    <div><strong>Size:</strong> {volumeToDelete.volume.size_gb.toFixed(2)}GB</div>
-                    <div><strong>Status:</strong> <span className="text-orange-600">Orphaned (no Kubernetes tracking)</span></div>
-                  </div>
-
-                  <div className="mb-4">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Type <code className="bg-gray-100 px-1 rounded">DELETE</code> to confirm:
-                    </label>
-                    <input
-                      type="text"
-                      value={deleteConfirmText}
-                      onChange={(e) => setDeleteConfirmText(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
-                      placeholder="Type DELETE to confirm"
-                      autoFocus
-                      disabled={isDeleting}
-                    />
-                  </div>
-
-                  <div className="flex justify-end space-x-3">
-                    <button
-                      onClick={cancelDeleteOrphanedVolume}
-                      disabled={isDeleting}
-                      className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500 disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={confirmDeleteOrphanedVolume}
-                      disabled={deleteConfirmText !== 'DELETE' || isDeleting}
-                      className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-                    >
-                      {isDeleting ? (
-                        <>
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                          Deleting...
-                        </>
-                      ) : (
-                        <>
-                          <Trash2 className="w-4 h-4 mr-2" />
-                          Delete Volume
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </>
-              )}
-              
-              {deleteError && (
-                <div className="flex justify-end">
+                <div className="flex justify-end mt-4">
                   <button
                     onClick={cancelDeleteOrphanedVolume}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
                   >
                     Close
                   </button>
                 </div>
-              )}
-            </div>
+              </>
+            )}
           </div>
         </div>
-      )}
+      ) : (
+        <ConfirmModal
+          title="Delete Orphaned SPDK Volume"
+          subtitle={`${volumeToDelete.volume.spdk_volume_name} on ${volumeToDelete.diskNode}`}
+          danger={
+            <>
+              <strong>Permanent deletion.</strong> The SPDK logical volume is
+              destroyed and its space freed. This cannot be undone.
+            </>
+          }
+          confirmLabel={isDeleting ? 'Deleting…' : 'Delete Volume'}
+          confirmPhrase="DELETE"
+          busy={isDeleting}
+          onConfirm={confirmDeleteOrphanedVolume}
+          onCancel={cancelDeleteOrphanedVolume}
+        >
+          <div className="space-y-2 text-sm mb-4 bg-gray-50 rounded-lg p-4">
+            <div><strong>Volume:</strong> {volumeToDelete.volume.spdk_volume_name}</div>
+            <div><strong>UUID:</strong> {volumeToDelete.volume.spdk_volume_uuid}</div>
+            <div><strong>Node:</strong> {volumeToDelete.diskNode}</div>
+            <div><strong>Size:</strong> {volumeToDelete.volume.size_gb.toFixed(2)}GB</div>
+            <div><strong>Status:</strong> <span className="text-stale-600">Orphaned (no Kubernetes tracking)</span></div>
+          </div>
+        </ConfirmModal>
+      ))}
     </div>
   );
 };

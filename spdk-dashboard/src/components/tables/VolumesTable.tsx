@@ -7,6 +7,7 @@ import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboa
 import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
 import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
+import { ConfirmModal } from '../ui/ConfirmModal';
 
 // The detail modal is its own chunk — most sessions never open it.
 const VolumeDetailAPI = lazy(() =>
@@ -58,7 +59,6 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   // Delete dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [volumeToDelete, setVolumeToDelete] = useState<RawSpdkVolume | null>(null);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
@@ -151,20 +151,18 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   // Handle raw volume deletion - open dialog
   const handleDeleteRaw = (rawVolume: RawSpdkVolume) => {
     setVolumeToDelete(rawVolume);
-    setDeleteConfirmText('');
     setShowDeleteDialog(true);
   };
 
   // Confirm and execute deletion
   const confirmDeleteRaw = async () => {
-    if (!volumeToDelete || deleteConfirmText !== 'DELETE') return;
-    
+    if (!volumeToDelete) return;
+
     setIsDeleting(true);
-    
+
     // Close dialog immediately - deletion is asynchronous
     setShowDeleteDialog(false);
     setVolumeToDelete(null);
-    setDeleteConfirmText('');
     
     try {
       const response = await apiFetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
@@ -189,7 +187,6 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   const cancelDeleteRaw = () => {
     setShowDeleteDialog(false);
     setVolumeToDelete(null);
-    setDeleteConfirmText('');
     setIsDeleting(false);
   };
 
@@ -579,112 +576,52 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
         </Suspense>
       )}
 
-      {/* Delete Orphaned Volume Confirmation Dialog */}
+      {/* Delete Orphaned Volume Confirmation Dialog (kit ConfirmModal) */}
       {showDeleteDialog && volumeToDelete && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
-            <div className="p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <AlertTriangle className="w-8 h-8 text-red-600" />
-                <h3 className="text-lg font-bold text-gray-900">Delete Orphaned SPDK Volume</h3>
-              </div>
-              
-              <div className="mb-6">
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
-                  <div className="flex items-center">
-                    <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
-                    <span className="text-red-800 font-medium">Warning: Permanent Deletion</span>
-                  </div>
-                  <p className="text-red-700 text-sm mt-1">
-                    This will permanently delete the SPDK logical volume and free up storage space. 
-                    This action cannot be undone.
-                  </p>
-                </div>
-                
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                  <div className="flex items-center">
-                    <Info className="w-5 h-5 text-blue-500 mr-2" />
-                    <span className="text-blue-800 font-medium">Deletion Process</span>
-                  </div>
-                  <div className="text-blue-700 text-sm mt-1 space-y-1">
-                    <p>• Volume entry will be removed from the list earlier than actual space reclamation</p>
-                    <p>• Storage space reclamation happens in the background</p>
-                    <p>• Large volumes may take several minutes to fully reclaim space</p>
-                    <p>• LVS free space will update once reclamation completes</p>
-                  </div>
-                </div>
-                
-                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
-                  <div className="flex justify-between">
-                    <span className="font-medium">Volume:</span>
-                    <span className="font-mono">{volumeToDelete.name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">UUID:</span>
-                    <span className="font-mono text-xs">{volumeToDelete.uuid}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Node:</span>
-                    <span>{volumeToDelete.node}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Size:</span>
-                    <span>{volumeToDelete.size_gb.toFixed(1)}GB</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">LVS:</span>
-                    <span className="font-mono text-xs">{volumeToDelete.lvs_name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Status:</span>
-                    <span className="text-amber-600">Orphaned (no Kubernetes tracking)</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  To confirm deletion, type <code className="bg-gray-100 px-1 rounded font-mono">DELETE</code>:
-                </label>
-                <input
-                  type="text"
-                  value={deleteConfirmText}
-                  onChange={(e) => setDeleteConfirmText(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
-                  placeholder="Type DELETE to confirm"
-                  autoFocus
-                />
-              </div>
-
-              <div className="flex gap-3 justify-end">
-                <button
-                  onClick={cancelDeleteRaw}
-                  disabled={isDeleting}
-                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={confirmDeleteRaw}
-                  disabled={deleteConfirmText !== 'DELETE' || isDeleting}
-                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                >
-                  {isDeleting ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      Deleting...
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-4 h-4" />
-                      Delete Volume
-                    </>
-                  )}
-                </button>
-              </div>
+        <ConfirmModal
+          title="Delete Orphaned SPDK Volume"
+          subtitle={`${volumeToDelete.name} on ${volumeToDelete.node}`}
+          danger={
+            <>
+              <strong>Permanent deletion.</strong> The SPDK logical volume is
+              destroyed; space reclamation runs in the background (large
+              volumes can take minutes — LVS free space updates when it
+              completes).
+            </>
+          }
+          confirmLabel={isDeleting ? 'Deleting…' : 'Delete Volume'}
+          confirmPhrase="DELETE"
+          busy={isDeleting}
+          onConfirm={confirmDeleteRaw}
+          onCancel={cancelDeleteRaw}
+        >
+          <div className="bg-gray-50 rounded-lg p-4 space-y-2 mb-4 text-sm">
+            <div className="flex justify-between">
+              <span className="font-medium">Volume:</span>
+              <span className="font-mono">{volumeToDelete.name}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-medium">UUID:</span>
+              <span className="font-mono text-xs">{volumeToDelete.uuid}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-medium">Node:</span>
+              <span>{volumeToDelete.node}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-medium">Size:</span>
+              <span>{volumeToDelete.size_gb.toFixed(1)}GB</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-medium">LVS:</span>
+              <span className="font-mono text-xs">{volumeToDelete.lvs_name}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-medium">Status:</span>
+              <span className="text-stale-600">Orphaned (no Kubernetes tracking)</span>
             </div>
           </div>
-        </div>
+        </ConfirmModal>
       )}
     </div>
   );

@@ -137,9 +137,9 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
   rebuilding: {
     chip: 'bg-orange-100 text-orange-800 border-orange-200',
     icon: Settings,
-    // The spin predates "motion with meaning" — Phase 4 removes it in favor
-    // of the data-bound sync indicator.
-    iconClass: 'text-orange-600 animate-spin motion-reduce:animate-none',
+    // Motion with meaning: the gear itself is static — real progress renders
+    // through the data-bound sync indicator / ProgressBar.
+    iconClass: 'text-rebuilding-600',
   },
   spare: {
     chip: 'bg-blue-100 text-blue-800 border-blue-200',

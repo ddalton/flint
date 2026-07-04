@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
-  AlertTriangle, CheckCircle, XCircle, Loader2, Play, RotateCcw, MinusCircle, Clock
+  CheckCircle, XCircle, Loader2, RotateCcw, MinusCircle, Clock
 } from 'lucide-react';
 import type { BatchDisk, BatchItem } from './batchSetup';
 import { TYPE_TO_CONFIRM_THRESHOLD, confirmPhrase } from './batchSetup';
+import { ConfirmModal } from '../ui/ConfirmModal';
+import { ProgressBar } from '../ui/ProgressBar';
 
 export interface ExcludedDisk {
   disk: BatchDisk;
@@ -28,113 +30,77 @@ interface BulkConfirmModalProps {
 export const BulkConfirmModal: React.FC<BulkConfirmModalProps> = ({
   disks, excluded, onConfirm, onCancel
 }) => {
-  const [confirmText, setConfirmText] = useState('');
   const needsTypedConfirm = disks.length > TYPE_TO_CONFIRM_THRESHOLD;
   const phrase = confirmPhrase(disks.length);
-  const confirmEnabled = !needsTypedConfirm || confirmText.trim() === phrase;
   const totalBytes = disks.reduce((sum, disk) => sum + disk.sizeBytes, 0);
   const nodeCount = new Set(disks.map(disk => disk.node)).size;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 max-w-3xl w-full mx-4 max-h-[85vh] flex flex-col">
-        <div className="flex items-center gap-3 mb-4">
-          <AlertTriangle className="w-8 h-8 text-red-600" />
-          <div>
-            <h3 className="text-lg font-bold text-gray-900">
-              Initialize {disks.length} disk{disks.length !== 1 ? 's' : ''} for SPDK
-            </h3>
-            <p className="text-sm text-gray-600">
-              {nodeCount} node{nodeCount !== 1 ? 's' : ''} · {formatCapacity(totalBytes)} total capacity
-            </p>
-          </div>
-        </div>
-
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg mb-4">
-          <p className="text-sm text-red-800">
-            <strong>All data on the disks below will be destroyed.</strong> Each disk gets a
-            new logical volume store; existing partitions and filesystems are wiped.
-          </p>
-        </div>
-
-        <div className="overflow-y-auto border border-gray-200 rounded-lg mb-4 flex-1 min-h-0">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Node</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Device</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">PCI</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Serial</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+    <ConfirmModal
+      title={`Initialize ${disks.length} disk${disks.length !== 1 ? 's' : ''} for SPDK`}
+      subtitle={`${nodeCount} node${nodeCount !== 1 ? 's' : ''} · ${formatCapacity(totalBytes)} total capacity`}
+      danger={
+        <>
+          <strong>All data on the disks below will be destroyed.</strong> Each
+          disk gets a new logical volume store; existing partitions and
+          filesystems are wiped.
+        </>
+      }
+      confirmLabel={`Initialize ${disks.length} disk${disks.length !== 1 ? 's' : ''}`}
+      confirmPhrase={needsTypedConfirm ? phrase : undefined}
+      phraseHelp={
+        needsTypedConfirm ? (
+          <>This is a large batch. To confirm, type:{' '}
+            <span className="font-mono font-bold">{phrase}</span></>
+        ) : undefined
+      }
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    >
+      <div className="overflow-y-auto border border-gray-200 rounded-lg mb-4 flex-1 min-h-0">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="bg-gray-50 sticky top-0">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Node</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Device</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">PCI</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Serial</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {disks.map(disk => (
+              <tr key={disk.key}>
+                <td className="px-3 py-1.5">{disk.node}</td>
+                <td className="px-3 py-1.5 font-mono">{disk.device}</td>
+                <td className="px-3 py-1.5 font-mono text-xs">{disk.pci}</td>
+                <td className="px-3 py-1.5 font-mono text-xs">{disk.serial || '—'}</td>
+                <td className="px-3 py-1.5">{formatCapacity(disk.sizeBytes)}</td>
+                <td className="px-3 py-1.5 text-gray-500 truncate max-w-[16rem]" title={disk.model}>
+                  {disk.model}
+                </td>
               </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {disks.map(disk => (
-                <tr key={disk.key}>
-                  <td className="px-3 py-1.5">{disk.node}</td>
-                  <td className="px-3 py-1.5 font-mono">{disk.device}</td>
-                  <td className="px-3 py-1.5 font-mono text-xs">{disk.pci}</td>
-                  <td className="px-3 py-1.5 font-mono text-xs">{disk.serial || '—'}</td>
-                  <td className="px-3 py-1.5">{formatCapacity(disk.sizeBytes)}</td>
-                  <td className="px-3 py-1.5 text-gray-500 truncate max-w-[16rem]" title={disk.model}>
-                    {disk.model}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {excluded.length > 0 && (
-          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg mb-4 text-sm text-amber-800">
-            <p className="font-medium mb-1">
-              {excluded.length} selected disk{excluded.length !== 1 ? 's' : ''} will NOT be initialized:
-            </p>
-            <ul className="space-y-0.5">
-              {excluded.map(({ disk, reason }) => (
-                <li key={disk.key} className="truncate">
-                  <span className="font-mono">{disk.node}:{disk.device}</span> — {reason}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {needsTypedConfirm && (
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              This is a large batch. To confirm, type:{' '}
-              <span className="font-mono font-bold">{phrase}</span>
-            </label>
-            <input
-              type="text"
-              value={confirmText}
-              onChange={(e) => setConfirmText(e.target.value)}
-              placeholder={phrase}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
-            />
-          </div>
-        )}
-
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={!confirmEnabled}
-            className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            <Play className="w-4 h-4" />
-            Initialize {disks.length} disk{disks.length !== 1 ? 's' : ''}
-          </button>
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
-    </div>
+
+      {excluded.length > 0 && (
+        <div className="p-3 bg-stale-50 border border-stale-200 rounded-lg mb-4 text-sm text-stale-800">
+          <p className="font-medium mb-1">
+            {excluded.length} selected disk{excluded.length !== 1 ? 's' : ''} will NOT be initialized:
+          </p>
+          <ul className="space-y-0.5">
+            {excluded.map(({ disk, reason }) => (
+              <li key={disk.key} className="truncate">
+                <span className="font-mono">{disk.node}:{disk.device}</span> — {reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </ConfirmModal>
   );
 };
 
@@ -218,12 +184,13 @@ export const BatchProgressPanel: React.FC<BatchProgressPanelProps> = ({
         </div>
       </div>
 
-      <div className="w-full bg-gray-200 rounded-full h-2 mb-4">
-        <div
-          className={`h-2 rounded-full transition-all ${counts.failed > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+      <ProgressBar
+        value={pct}
+        label="batch progress"
+        valueText={`${counts.ok + counts.failed + counts.skipped} of ${items.length} disks done`}
+        tone={counts.failed > 0 ? 'warn' : 'ok'}
+        className="w-full mb-4"
+      />
 
       <div className="space-y-3 max-h-96 overflow-y-auto">
         {nodeOrder.map(node => {

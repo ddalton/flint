@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, TrendingUp, TrendingDown, BarChart3 } from 'lucide-react';
 import { memberStateStyle } from '../ui/status';
+import { ProgressBar } from '../ui/ProgressBar';
 import type { RaidMember, ReplicaStatus, RaidStatus, Disk } from '../../hooks/useDashboardData';
 
 // Fields the pre-minimal backend used to send; the current API never does
@@ -258,12 +259,13 @@ const EnhancedRaidMemberCard: React.FC<EnhancedRaidMemberCardProps> = ({ member,
               <span>Rebuild Progress:</span>
               <span>{raidStatus.rebuild_info.progress_percentage.toFixed(1)}%</span>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
-              <div
-                className="bg-orange-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${raidStatus.rebuild_info.progress_percentage}%` }}
-              />
-            </div>
+            <ProgressBar
+              value={raidStatus.rebuild_info.progress_percentage}
+              label="member rebuild progress"
+              valueText={`${raidStatus.rebuild_info.progress_percentage.toFixed(1)}%`}
+              tone="warn"
+              className="w-full"
+            />
             {raidStatus.rebuild_info.estimated_time_remaining && (
               <div className="text-xs text-orange-600 mt-1">
                 ETA: {raidStatus.rebuild_info.estimated_time_remaining}
