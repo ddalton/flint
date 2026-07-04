@@ -38,6 +38,8 @@ access modes immutable); DeleteVolume invalidates as hygiene.
 | NodeStage | connect + assemble raid (`raid_<staging handle>`) | no-op (clients mount at publish) | block stage; raid keys on the BACKING handle; records resolve to the user PV |
 | NodePublish | bind-mount staged device | NFS mount from publish context | n/a |
 | NodeUnstage | disconnect + raid teardown (full handle), ublk id (storage id) | unmount-only — never SPDK teardown | block unstage |
+| ControllerExpand | grow lvols/replicas, then node expansion | **REFUSED loudly** (audit L1: server-side expansion not yet supported; never half-apply) | REFUSED (driver-managed, never provisioner-resized) |
+| NodeExpand | nvme resize + fs grow on the staged device | no-op success — the consumer holds an NFS mount, nothing to grow node-side (audit L3) | block path |
 | NodeUnpublish | bounded unmount; an INCONCLUSIVE mountpoint probe (timeout = dead-NFS signature) means ASSUME MOUNTED and lazy-unmount | ← same rule (this is where dead client mounts drain) | ← |
 | NodeGetVolumeStats | fs stats + raid health, all fs syscalls BOUNDED (5 s, spawn_blocking); timeout ⇒ condition abnormal, never a hung RPC | ← | ← |
 

@@ -1995,6 +1995,29 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             }));
         }
 
+        // Identity contract, audit L1: a shared (RWX/ROX) user handle has
+        // no block-expand path here — growing the lvols alone half-applies
+        // the operation (capacity reported, fs under the server's backing
+        // attachment untouched) and the client-side NodeExpand can never
+        // finish it. Refuse loudly instead. Failure default Block keeps
+        // today's RWO behavior when the PV is unreadable.
+        let vref = match self.driver.role_resolver.volume_ref(&volume_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                println!(
+                    "⚠️ [CONTROLLER] Could not read PV access modes ({}); assuming RWO expand semantics",
+                    e.reason
+                );
+                e.default_block()
+            }
+        };
+        if let Some(reason) = spdk_csi_driver::identity::expand_refusal(&vref) {
+            println!("📏 [CONTROLLER] Refusing expansion of {}: {}", volume_id, reason);
+            return Err(tonic::Status::failed_precondition(format!(
+                "Volume {}: {}", volume_id, reason
+            )));
+        }
+
         let volume_info = self.driver.get_volume_info(&volume_id).await
             .map_err(|e| tonic::Status::failed_precondition(format!(
                 "Volume {} metadata not found: {}", volume_id, e
@@ -3849,7 +3872,25 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         let block_device = String::from_utf8_lossy(&findmnt_output.stdout).trim().to_string();
         println!("   Block device: {}", block_device);
-        
+
+        // Identity contract, audit L3: an RWX/ROX client publishes an NFS
+        // mount — no node-side block device exists and there is nothing to
+        // grow here (the fs belongs to the server's backing attachment).
+        // Succeed as a no-op; the resize path below would otherwise run
+        // blkid/nvme-resize against a `host:/export` string, fail, and
+        // leave kubelet retrying the expansion forever.
+        let fstype_probe = std::process::Command::new("findmnt")
+            .args(&["-n", "-o", "FSTYPE", &req.volume_path])
+            .output()
+            .map_err(|e| tonic::Status::internal(format!("Failed to detect mount fstype: {}", e)))?;
+        let mount_fstype = String::from_utf8_lossy(&fstype_probe.stdout).trim().to_string();
+        if spdk_csi_driver::mount_util::fstype_is_nfs(&mount_fstype) {
+            println!("   NFS client mount ({}) — node-side expansion is a no-op by contract", mount_fstype);
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeExpandVolumeResponse {
+                capacity_bytes: target_bytes,
+            }));
+        }
+
         // Detect filesystem type
         let blkid_output = std::process::Command::new("blkid")
             .args(&["-o", "value", "-s", "TYPE", &block_device])

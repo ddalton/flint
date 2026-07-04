@@ -112,6 +112,16 @@ pub fn mountpoint_probe_says_unmount(exit_code: Option<i32>) -> bool {
     !matches!(exit_code, Some(1))
 }
 
+/// Is this findmnt FSTYPE an NFS client mount? Audit finding L3: a
+/// shared (RWX/ROX) volume publishes as an NFS mount on the consumer —
+/// there is no node-side block device, so NodeExpand must be a clean
+/// no-op (the nvme-resize path would otherwise chew on a `host:/export`
+/// source string, error out, and leave kubelet retrying the resize
+/// forever). Covers `nfs`, `nfs4`, and any future `nfs*` flavor.
+pub fn fstype_is_nfs(fstype: &str) -> bool {
+    fstype.trim().to_ascii_lowercase().starts_with("nfs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +136,18 @@ mod tests {
         assert!(mountpoint_probe_says_unmount(Some(124)), "probe TIMED OUT (dead NFS) → unmount");
         assert!(mountpoint_probe_says_unmount(Some(32)), "probe errored → unmount");
         assert!(mountpoint_probe_says_unmount(None), "killed by signal / spawn error → unmount");
+    }
+
+    /// L3 arm gate: only NFS-flavored fstypes take the NodeExpand no-op;
+    /// block filesystems keep the resize path.
+    #[test]
+    fn fstype_nfs_detection() {
+        assert!(fstype_is_nfs("nfs"));
+        assert!(fstype_is_nfs("nfs4"));
+        assert!(fstype_is_nfs(" nfs4\n"));
+        assert!(!fstype_is_nfs("ext4"));
+        assert!(!fstype_is_nfs("xfs"));
+        assert!(!fstype_is_nfs(""));
     }
 
     #[test]

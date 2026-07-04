@@ -145,6 +145,29 @@ impl VolumeRef {
     }
 }
 
+/// Audit finding L1: ControllerExpand arrives on the user handle. For a
+/// shared (RWX/ROX) volume the filesystem lives under the NFS server's
+/// backing attachment — the block-expand path here would grow the lvols
+/// while the fs stays small (a half-applied operation the resizer then
+/// retries forever via the dead-end client-side NodeExpand, L3). Refuse
+/// loudly until server-side expansion exists. Backing handles are
+/// driver-managed and never provisioner-resized — refused likewise.
+/// Returns the refusal reason, or None when the block expand path is
+/// correct (RWO).
+pub fn expand_refusal(vref: &VolumeRef) -> Option<&'static str> {
+    match vref {
+        VolumeRef::Block { .. } => None,
+        VolumeRef::NfsShared { .. } => Some(
+            "shared (RWX/ROX) NFS volume — expansion is not yet supported: \
+             the filesystem lives under the NFS server's backing attachment \
+             and a client-side expand cannot apply",
+        ),
+        VolumeRef::NfsBacking { .. } => Some(
+            "NFS backing volume — driver-managed, never provisioner-resized",
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Naming — every derived name is minted here (or delegated to its current
 // owner until Phase 1 moves the body). Grep-lint target: `format!("vol_`,
@@ -800,6 +823,20 @@ mod tests {
     }
 
     // -- role resolution ------------------------------------------------
+
+    /// L1 contract cell: expansion is a Block-only path today. Shared
+    /// user handles and backing handles refuse loudly instead of
+    /// half-applying (lvols grown, fs untouched, resizer looping on the
+    /// L3 dead end).
+    #[test]
+    fn expand_refusal_matches_the_matrix() {
+        assert!(expand_refusal(&VolumeRef::Block { storage_id: VOL.into() }).is_none());
+        assert!(expand_refusal(&VolumeRef::NfsShared { storage_id: VOL.into(), read_only: false })
+            .is_some());
+        assert!(expand_refusal(&VolumeRef::NfsShared { storage_id: VOL.into(), read_only: true })
+            .is_some());
+        assert!(expand_refusal(&VolumeRef::NfsBacking { storage_id: VOL.into() }).is_some());
+    }
 
     /// The pure mapping must reproduce the shipped c879bc3/d7490de
     /// predicate cell-for-cell: shared ⇔ RWM || ROM present.
