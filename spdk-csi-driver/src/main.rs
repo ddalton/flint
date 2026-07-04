@@ -1587,12 +1587,28 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 }
             };
             
-            // Check if NFS pod already exists
-            let pod_exists = spdk_csi_driver::rwx_nfs::nfs_pod_exists(
+            // Check if NFS pod already exists. A Terminating pod is NOT
+            // reusable (drill A′): wait bounded for it to exit so the
+            // deterministic name frees up, then create fresh.
+            let pod_exists = match spdk_csi_driver::rwx_nfs::nfs_pod_liveness(
                 self.driver.kube_client.clone(),
                 &volume_id
-            ).await?;
-            
+            ).await? {
+                spdk_csi_driver::rwx_nfs::NfsPodLiveness::Present => true,
+                spdk_csi_driver::rwx_nfs::NfsPodLiveness::Absent => false,
+                spdk_csi_driver::rwx_nfs::NfsPodLiveness::Terminating => {
+                    println!("⏳ [RWX] Existing NFS server pod is Terminating — waiting for it to exit before recreating");
+                    if !spdk_csi_driver::rwx_nfs::wait_for_nfs_pod_gone(
+                        self.driver.kube_client.clone(),
+                        &volume_id,
+                        90,
+                    ).await {
+                        println!("⚠️ [RWX] NFS server pod still Terminating after 90s — creation will conflict; letting the CO retry");
+                    }
+                    false
+                }
+            };
+
             if !pod_exists {
                 println!("🚀 [NFS] Creating NFS server pod for volume: {}", volume_id);
                 

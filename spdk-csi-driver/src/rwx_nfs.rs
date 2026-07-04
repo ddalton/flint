@@ -538,27 +538,75 @@ pub async fn create_nfs_server_pod(
 }
 
 /// Check if NFS server pod exists for a volume
-pub async fn nfs_pod_exists(
+/// Liveness of the volume's NFS server pod for the publish-time ensure
+/// flow. `Terminating` (deletionTimestamp set — phase still reads
+/// Running while the pod drains) MUST be distinguished from `Present`:
+/// ControllerPublish once raced a graceful server delete, "reused" the
+/// Terminating pod, and returned a Service IP whose backend vanished
+/// seconds later — the client then hangs mounting a backendless Service
+/// and nothing recreates the server (identity Phase-3 drill A′,
+/// 2026-07-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NfsPodLiveness {
+    Absent,
+    Terminating,
+    Present,
+}
+
+pub async fn nfs_pod_liveness(
     kube_client: Client,
     volume_id: &str,
-) -> Result<bool, Status> {
+) -> Result<NfsPodLiveness, Status> {
     // SAFETY: Early return if NFS disabled
     let config = match NfsConfig::from_env() {
         Some(c) => c,
-        None => return Ok(false),  // NFS disabled, pod doesn't exist
+        None => return Ok(NfsPodLiveness::Absent),  // NFS disabled, pod doesn't exist
     };
-    
+
     let pod_name = format!("flint-nfs-{}", volume_id);
     let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
-    
+
     match pods_api.get(&pod_name).await {
-        Ok(_) => Ok(true),
-        Err(e) if e.to_string().contains("NotFound") => Ok(false),
+        Ok(pod) => {
+            if pod.metadata.deletion_timestamp.is_some() {
+                Ok(NfsPodLiveness::Terminating)
+            } else {
+                Ok(NfsPodLiveness::Present)
+            }
+        }
+        Err(e) if e.to_string().contains("NotFound") => Ok(NfsPodLiveness::Absent),
         Err(e) => {
             eprintln!("⚠️  [NFS] Error checking pod existence: {}", e);
             Err(Status::internal(format!("Failed to check NFS pod: {}", e)))
         }
     }
+}
+
+/// Bounded wait for a Terminating NFS server pod to fully exit so the
+/// deterministic pod name frees up for recreation. Returns true when the
+/// pod is gone; false when it is still draining at the deadline (the
+/// caller's create will then 409 and the CO retries the publish — a
+/// bounded, honest failure instead of binding clients to a dying pod).
+pub async fn wait_for_nfs_pod_gone(
+    kube_client: Client,
+    volume_id: &str,
+    deadline_secs: u64,
+) -> bool {
+    let config = match NfsConfig::from_env() {
+        Some(c) => c,
+        None => return true,
+    };
+    let pod_name = format!("flint-nfs-{}", volume_id);
+    let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
+    let attempts = deadline_secs.div_ceil(2).max(1);
+    for _ in 0..attempts {
+        match pods_api.get(&pod_name).await {
+            Err(e) if e.to_string().contains("NotFound") => return true,
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    false
 }
 
 /// Wait for NFS server pod to become ready and return (node_name, service_endpoint)
@@ -590,6 +638,13 @@ pub async fn wait_for_nfs_pod_ready(
     for attempt in 1..=60 {
         match pods_api.get(&pod_name).await {
             Ok(pod) => {
+                // A draining pod still reports phase Running — never hand
+                // its endpoint to a new client (drill A′ race).
+                if pod.metadata.deletion_timestamp.is_some() {
+                    eprintln!("⏳ [NFS] Pod {} is Terminating — not treating as ready (attempt {})", pod_name, attempt);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
                 if let Some(status) = &pod.status {
                     // Check if pod is running and has IP
                     if let (Some(phase), Some(pod_ip)) = (&status.phase, &status.pod_ip) {
