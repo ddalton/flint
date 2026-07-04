@@ -96,9 +96,37 @@ pub async fn bounded_sync(deadline_secs: u64) -> bool {
     }
 }
 
+/// Verdict for a `timeout N mountpoint -q <path>` probe during teardown:
+/// does the path need an unmount attempt?
+///
+/// Exit 0 = is a mountpoint → yes. Exit 1 = cleanly NOT a mountpoint →
+/// no. ANYTHING else — 124 (`timeout` fired: mountpoint(1) blocked, the
+/// signature of a dead hard NFS mount), killed-by-signal (`None`), or a
+/// spawn failure mapped to `None` by the caller — means UNKNOWN, and
+/// unknown MUST be treated as mounted: skipping the unmount on a live
+/// dead mount returns success to kubelet, which then EBUSY-loops on the
+/// pod directory forever and degrades the whole node (identity Phase-3
+/// drill A finding, 2026-07-04). The `umount -l` this triggers is
+/// non-blocking and fails harmlessly on a genuinely unmounted path.
+pub fn mountpoint_probe_says_unmount(exit_code: Option<i32>) -> bool {
+    !matches!(exit_code, Some(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drill-A truth table: only a clean "not a mountpoint" (exit 1)
+    /// skips the unmount. Timeout 124 was previously read as "not
+    /// mounted" — the exact misread that stranded a dead NFS mount.
+    #[test]
+    fn mountpoint_probe_truth_table() {
+        assert!(mountpoint_probe_says_unmount(Some(0)), "mountpoint → unmount");
+        assert!(!mountpoint_probe_says_unmount(Some(1)), "clean not-a-mountpoint → skip");
+        assert!(mountpoint_probe_says_unmount(Some(124)), "probe TIMED OUT (dead NFS) → unmount");
+        assert!(mountpoint_probe_says_unmount(Some(32)), "probe errored → unmount");
+        assert!(mountpoint_probe_says_unmount(None), "killed by signal / spawn error → unmount");
+    }
 
     #[test]
     fn argv_escalates_and_targets() {

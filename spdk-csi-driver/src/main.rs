@@ -3444,12 +3444,21 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
                 Err(e) => {
                     println!("⚠️ [DEBUG] Step 2b: mountpoint command failed: {}", e);
-                    println!("⚠️ [DEBUG] Assuming NOT mounted to continue cleanup");
+                    println!("⚠️ [DEBUG] Probe inconclusive — will assume mounted (dead-mount safe)");
                     Err(e)
                 }
             };
-            let is_mounted = mount_check.map(|s| s.success()).unwrap_or(false);
-            println!("🔍 [DEBUG] Step 2c: Target path is mounted: {}", is_mounted);
+            // Drill-A fix (2026-07-04): only a clean exit 1 means "not a
+            // mountpoint". A timed-out probe (exit 124) is the signature of
+            // a DEAD hard NFS mount — the one case the lazy unmount below
+            // exists for. Reading it as "not mounted" returned success to
+            // kubelet with the mount still present; kubelet then EBUSY-
+            // looped on the pod dir forever and the node stopped admitting
+            // pods.
+            let is_mounted = spdk_csi_driver::mount_util::mountpoint_probe_says_unmount(
+                mount_check.as_ref().ok().and_then(|s| s.code()),
+            );
+            println!("🔍 [DEBUG] Step 2c: Treating target path as mounted: {}", is_mounted);
             
             if is_mounted {
                 println!("🔍 [DEBUG] Step 3: Path is mounted, attempting unmount...");
@@ -3505,14 +3514,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
 
-                // Verify unmount
-                let verify_mount = std::process::Command::new("mountpoint")
+                // Verify unmount — bounded: an unbounded mountpoint(1) here
+                // blocks the whole RPC if the umount failed and the mount is
+                // still dead (same drill-A family as Step 2c).
+                let verify_mount = std::process::Command::new("timeout")
+                    .arg("5")
+                    .arg("mountpoint")
                     .arg("-q")
                     .arg(&target_path)
                     .status();
-                let still_mounted = verify_mount.map(|s| s.success()).unwrap_or(false);
+                let still_mounted = spdk_csi_driver::mount_util::mountpoint_probe_says_unmount(
+                    verify_mount.as_ref().ok().and_then(|s| s.code()),
+                );
                 if still_mounted {
-                    println!("⚠️ [NODE] WARNING: Path still shows as mounted after umount!");
+                    println!("⚠️ [NODE] WARNING: Path still shows as mounted (or probe inconclusive) after umount!");
                 } else {
                     println!("✅ [NODE] Verified: Target path is no longer mounted");
                 }
