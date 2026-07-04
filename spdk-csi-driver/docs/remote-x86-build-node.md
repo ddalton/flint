@@ -176,6 +176,17 @@ EOF
 > shared cluster, delete the pod when not building
 > (`kubectl delete pod docker-build-proxy`).
 
+## Cordon the builder during kuttl gate runs
+
+`kubectl cordon <builder-node>` before running the release gate and
+uncordon (or tear down) after. The builder's NVMe is the docker
+scratch — there is no LVS on the node — and the `ephemeral-inline`
+test provisions node-locally at publish time: an ephemeral pod the
+scheduler places on the builder fails with `No LVS available on this
+node` (observed on the v1.5.0 gate: 7/8 + that one false failure).
+PVC-based tests are immune — the controller places their replicas on
+LVS-bearing nodes and consumers assemble remotely.
+
 ## Building (each session)
 
 ```sh

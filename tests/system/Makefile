@@ -61,22 +61,22 @@ test-single: check-kubeconfig check-kuttl ## Run a single test (usage: make test
 		exit 1; \
 	fi
 	@echo "Running test: $(TEST)..."
-	kubectl kuttl test --test $(TEST)
+	kubectl kuttl test --config kuttl-testsuite.yaml --test $(TEST)
 
 test-rwo: check-kubeconfig check-kuttl ## Run RWO PVC migration test
-	kubectl kuttl test --test rwo-pvc-migration
+	kubectl kuttl test --config kuttl-testsuite.yaml --test rwo-pvc-migration
 
 test-multi-replica: check-kubeconfig check-kuttl ## Run multi-replica test
-	kubectl kuttl test --test multi-replica
+	kubectl kuttl test --config kuttl-testsuite.yaml --test multi-replica
 
 test-expand: check-kubeconfig check-kuttl ## Run volume expansion test
-	kubectl kuttl test --test volume-expansion
+	kubectl kuttl test --config kuttl-testsuite.yaml --test volume-expansion
 
 test-clean-shutdown: check-kubeconfig check-kuttl ## Run clean shutdown test (runs in isolation)
 	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
 
 test-snapshot: check-kubeconfig check-kuttl ## Run snapshot restore test
-	kubectl kuttl test --test snapshot-restore
+	kubectl kuttl test --config kuttl-testsuite.yaml --test snapshot-restore
 
 clean: ## Clean up test namespaces (kuttl-test-*)
 	@echo "Cleaning up test namespaces..."

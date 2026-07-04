@@ -545,3 +545,44 @@ copy was poll-quantization-bound, not media-bound. Planned evolution:
 tighten in-window poll cadence, then time-based admission (estimator
 converts bytes → predicted ms via measured copy rate). The dashboard
 Windows panel (Phase 2) is where that measured rate becomes visible.
+
+## v1.5.0 RELEASED (2026-07-04) — the dashboard release ships
+
+Chart `flint-csi-driver-chart:1.5.0` pushed with `flint-driver:1.5.0`,
+`spdk-tgt:1.5.0` (digest promotion of 1.4.0 — docker/ inputs
+unchanged) and `spdk-dashboard-frontend:1.5.0`; aliases 1.5/1/latest
+on all three. runj fully rolled including the node DS; the DS roll
+rode over two live writers with zero restarts and every leg back
+in_sync ("admitted at reassembly after fenced final delta"). The
+dashboard deployment now runs the image's own nginx.conf — the chart
+ConfigMap mount was dropped in the same rollout.
+
+**The release checks earned their keep — P1 found and fixed.** The
+delete-endpoint live check (expect 409 on a disk with lvols) instead
+returned 200 no-op and DELETED the LVS under r3-e2e's third leg:
+`count_lvols_in_lvs` matched `driver_specific.lvol.lvol_store_name`,
+a field SPDK's bdev_get_bdevs does not emit, so live lvol counts were
+always 0 — the dashboard disk table's lvol column included — and the
+delete guard could never fire (the unit tests' fixtures had encoded
+the same wrong field name). No acked data was lost: r3-e2e ran
+Degraded on 2/3 legs; the disk was re-initialized through the agent
+and the full Tier-2 chain rebuilt the leg (catch-up → standby →
+fenced-delta admission at restage, after a writer bounce — catch-up's
+hygiene guard rightly refuses while the volume's own consumer raid is
+assembled on the replica node, an operator-bounce case). FIXED
+9bf5674: the counter matches `lvol_store_uuid` + the `<lvs>/<name>`
+alias, and delete_blobstore re-counts against fresh SPDK state
+immediately before the destructive RPC; regression tests use the live
+v26.05 JSON shape. Re-verified live: disks report real lvol counts
+(14/14/3) and the delete on a populated disk returns the agent's 409.
+
+Gate: kuttl 8/8 + clean-shutdown PASS on the release digests (first
+run 7/8 — ephemeral-inline schedules node-locally and landed on the
+LVS-less builder node; the builder is now cordoned during gate runs,
+runbook updated).
+
+Small items now tracked: the dashboard delete proxy wraps the agent's
+409 + refusal message as a generic 502 "Node agent returned: 409
+Conflict" — pass the agent's status and body through so the UI shows
+WHY the delete was refused (next backend pass); tests/system Makefile
+single-test targets ran kuttl without --config (fixed).
