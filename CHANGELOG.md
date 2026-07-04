@@ -12,7 +12,17 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **RWX teardown ordering.** `DeleteVolume` tore down the backing
+  volume's NVMe-oF targets immediately after *issuing* the NFS server
+  pod delete — while the pod, the volume's consumer, was still
+  flushing its dirty ext4 journal through those targets. The kernel
+  initiator then reconnect-looped against the vanished subsystem with
+  the journal pinned in D-state, leaving the pod unkillable until
+  `ctrl_loss_tmo` (~10 minutes). Deletion now waits (bounded, 90 s)
+  for the pod object to be removed — kubelet's signal that the volume
+  was unmounted and flushed — before target teardown proceeds.
 
 ## [1.5.0] - 2026-07-03
 

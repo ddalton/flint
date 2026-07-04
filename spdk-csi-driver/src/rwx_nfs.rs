@@ -677,9 +677,11 @@ pub async fn delete_nfs_server_pod(
     
     // Delete Pod
     let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), &config.namespace);
+    let mut pod_was_present = false;
     match pods_api.delete(&pod_name, &DeleteParams::default()).await {
         Ok(_) => {
-            eprintln!("✅ [NFS] Pod deleted: {}", pod_name);
+            pod_was_present = true;
+            eprintln!("✅ [NFS] Pod delete issued: {}", pod_name);
         }
         Err(e) if e.to_string().contains("NotFound") => {
             eprintln!("ℹ️  [NFS] Pod already deleted: {}", pod_name);
@@ -688,7 +690,42 @@ pub async fn delete_nfs_server_pod(
             eprintln!("⚠️  [NFS] Failed to delete pod: {}", e);
         }
     }
-    
+
+    // ORDERING: the NFS server pod is this volume's consumer — its dying
+    // flush (dirty ext4 journal on the backing raid) goes through the
+    // NVMe-oF target our caller tears down as soon as we return. Tearing
+    // the target down first strands the kernel initiator in a reconnect
+    // loop against a vanished subsystem with the journal pinned in
+    // D-state; the pod then cannot be killed until ctrl_loss_tmo expires
+    // (~10 minutes — observed live on the v1.5.0 gate teardown). Kubelet
+    // removes the Pod object only after container shutdown and volume
+    // unmount, i.e. after dirty data is flushed — so wait (bounded) for
+    // the object to go away before letting target teardown proceed.
+    if pod_was_present {
+        let mut pod_gone = false;
+        for _ in 0..45 {
+            match pods_api.get(&pod_name).await {
+                Err(e) if e.to_string().contains("NotFound") => {
+                    pod_gone = true;
+                    break;
+                }
+                Ok(_) => {}
+                // Transient API error: keep waiting, the deadline bounds us.
+                Err(e) => eprintln!("⚠️  [NFS] Pod termination poll error: {}", e),
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
+        if pod_gone {
+            eprintln!("✅ [NFS] Pod terminated (volume flushed and unmounted): {}", pod_name);
+        } else {
+            eprintln!(
+                "⚠️  [NFS] Pod {} still terminating after 90s — proceeding with volume \
+                 teardown; its initiator may reconnect-loop until ctrl_loss_tmo",
+                pod_name
+            );
+        }
+    }
+
     // Delete PVC
     let pvc_api: Api<PersistentVolumeClaim> = Api::namespaced(kube_client.clone(), &config.namespace);
     match pvc_api.delete(&pvc_name, &DeleteParams::default()).await {
