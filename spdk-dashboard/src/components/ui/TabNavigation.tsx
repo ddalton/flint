@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { Monitor, Database, HardDrive, Server, Settings, Camera, Cloud, Activity } from 'lucide-react';
+import { Monitor, Database, HardDrive, Server, Settings, Camera, Activity } from 'lucide-react';
 import { searchForTab, type TabId } from '../../routes';
 
 interface Tab {
@@ -23,7 +23,6 @@ const tabs: Tab[] = [
   { id: 'events', name: 'Events', icon: Activity },
   { id: 'snapshots', name: 'Snapshots', icon: Camera },
   { id: 'disk-setup', name: 'Disk Setup', icon: Settings },
-  { id: 'remote-storage', name: 'Remote Storage', icon: Cloud },
   { id: 'nodes', name: 'Nodes', icon: Server }
 ];
 

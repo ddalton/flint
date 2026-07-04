@@ -89,7 +89,9 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       const treeContentType = treeResponse.headers.get("content-type") || '';
       if (treeResponse.ok && treeContentType.indexOf("application/json") !== -1) {
         const treeData = await treeResponse.json();
-        setSnapshotTree(enhanceTreeWithStorageAnalytics(treeData));
+        // The tree arrives with real storage_analytics (computed backend-side
+        // from SPDK bdev consumption) — no client-side synthesis.
+        setSnapshotTree(treeData);
       } else {
         throw new Error(
           treeResponse.ok ? 'Snapshot tree: non-JSON response' : `Snapshot tree unavailable (HTTP ${treeResponse.status})`
@@ -153,62 +155,10 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         snapshot_type: snap.snapshot_type || 'Bdev', // Default type if not provided
         parent_snapshot_id: relationships.get(snapshotId)?.parent,
         child_snapshot_ids: relationships.get(snapshotId)?.children || [],
-        // Add mock storage consumption if not provided by backend
-        storage_consumption: snap.storage_consumption || {
-          consumed_bytes: snap.size_bytes * 0.3, // Mock 30% consumption
-          cluster_size: 4194304,
-          allocated_clusters: Math.ceil(snap.size_bytes * 0.3 / 4194304),
-          actual_storage_overhead: snap.size_bytes * 0.1
-        },
         // Ensure replica_bdev_details is always an array
         replica_bdev_details: snap.replica_bdev_details || []
       };
     });
-  };
-
-  // Tree nodes as sent by /api/snapshots/tree — analytics may be absent
-  // (this enhancer synthesizes them; see the honesty note in the
-  // improvement plan about the estimated values).
-  type BackendTreeNode = Omit<SnapshotTreeNode, 'storage_analytics'> & {
-    storage_analytics?: SnapshotTreeNode['storage_analytics'];
-  };
-
-  // Transform tree data to include storage analytics
-  const enhanceTreeWithStorageAnalytics = (
-    backendTree: Record<string, BackendTreeNode>
-  ): Record<string, SnapshotTreeNode> => {
-    const enhanced: Record<string, SnapshotTreeNode> = {};
-
-    Object.entries(backendTree).forEach(([volumeId, volumeData]) => {
-      // Calculate storage analytics from chain data
-      const chainSnapshots = volumeData.snapshot_chain?.snapshots || [];
-      const totalSnapshotConsumption = chainSnapshots.reduce(
-        (sum, snap) => sum + (snap.storage_info?.consumed_bytes || 0),
-        0
-      );
-      
-      const volumeSize = volumeData.volume_size || 0;
-      const actualDataSize = volumeSize * 0.7; // Mock 70% actual data usage
-      
-      enhanced[volumeId] = {
-        ...volumeData,
-        storage_analytics: volumeData.storage_analytics || {
-          total_volume_size: volumeSize,
-          actual_data_size: actualDataSize,
-          total_snapshot_overhead: totalSnapshotConsumption,
-          snapshot_efficiency_ratio: totalSnapshotConsumption / volumeSize,
-          storage_breakdown: {
-            active_volume_consumption: actualDataSize,
-            snapshot_consumption: totalSnapshotConsumption,
-            metadata_overhead: volumeSize * 0.01,
-            free_space_in_volume: volumeSize - actualDataSize - totalSnapshotConsumption
-          },
-          recommendations: []
-        }
-      };
-    });
-    
-    return enhanced;
   };
 
   // Filter and search logic

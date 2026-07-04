@@ -9,19 +9,8 @@ export interface SnapshotDetails {
   snapshot_type: string;
   clone_source_snapshot_id?: string;
   replica_bdev_details: ReplicaBdevDetails[];
-  // Enhanced storage information
-  storage_consumption?: SnapshotStorageInfo;
   parent_snapshot_id?: string;
   child_snapshot_ids?: string[];
-}
-
-export interface SnapshotStorageInfo {
-  consumed_bytes: number;
-  cluster_size: number;
-  allocated_clusters: number;
-  compression_ratio?: number;
-  deduplication_savings?: number;
-  actual_storage_overhead: number; // Storage used beyond the logical volume size
 }
 
 export interface ReplicaBdevDetails {

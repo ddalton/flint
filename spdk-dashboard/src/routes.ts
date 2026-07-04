@@ -17,7 +17,6 @@ export const TAB_IDS = [
   'events',
   'snapshots',
   'disk-setup',
-  'remote-storage',
   'nodes',
 ] as const;
 

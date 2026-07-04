@@ -30,7 +30,6 @@ const EnhancedSnapshotsTab = lazy(() =>
   import('./snapshots/EnhancedSnapshotsTab').then(m => ({ default: m.EnhancedSnapshotsTab })));
 const EventsTab = lazy(() =>
   import('./events/EventsTab').then(m => ({ default: m.EventsTab })));
-const RemoteStorageTab = lazy(() => import('./storage/RemoteStorageTab'));
 
 interface DashboardProps {
   data: DashboardData;
@@ -231,9 +230,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       case 'disk-setup':
         return <DiskSetupTab onboarding={onboardingLanding} />;
-
-      case 'remote-storage':
-        return <RemoteStorageTab />;
 
       case 'nodes':
         return (

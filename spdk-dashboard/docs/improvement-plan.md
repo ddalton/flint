@@ -396,16 +396,22 @@ next chart release.
   (spec⇔backend via the dashboard-openapi bin, cargo + protoc),
   path-scoped.
 
-**Honesty debts found during Phase 3, deliberately left for a product
-decision (they need features or removal, not types):**
-- The snapshots tab FABRICATES storage analytics when the backend
-  omits them: "mock 30% consumption", "70% actual data usage", and the
-  derived efficiency/breakdown numbers in the storage view are
-  invented client-side (EnhancedSnapshotsTab enhancers — now typed and
-  labeled, still synthesizing).
-- The entire Remote Storage tab's actions (connect/disconnect/save/
-  discover) are setTimeout mocks that report success without doing
-  anything. Either back it with real endpoints or remove the tab.
+**Honesty debts found during Phase 3 — RESOLVED 2026-07-04 (owner
+decision: remove dead code):**
+- Remote Storage tab REMOVED outright: the backend has no
+  remote-storage routes at all; every action was a setTimeout mock
+  reporting success. Old /remote-storage deep links bounce to the
+  landing entry like any unknown path. If real NVMe-oF/iSCSI target
+  management ever lands backend-side, the tab returns with it.
+- Snapshot analytics investigation split the debt in two: the TREE
+  endpoint's storage_analytics/storage_info are REAL (computed
+  backend-side from SPDK bdev consumption, with honest
+  data-unavailable recommendations) — the storage view renders those
+  and stays. The client-side fabrication fallbacks ("mock 30%
+  consumption" on list snapshots — for a field the backend never
+  sends — and the "70% actual data" tree fallback for a field the
+  backend always sends) are deleted, along with the now-unused
+  storage_consumption field and the identity tree enhancer.
 
 ## Design system & UX quality (cross-cutting principle)
 
