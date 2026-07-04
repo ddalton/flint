@@ -8,8 +8,13 @@ sites converted onto identity.rs + the cached `RoleResolver`
 (ControllerUnpublish/NodeUnstage classify through it; backing parses
 unified on the handle with `IDENTITY-DIVERGENCE` transitional assertions;
 DeleteVolume enforces the backing-refusal matrix cell + cache hygiene).
-Publish-side context signals stay until Phase 2's role hint (see audit
-§3 Phase-1 status). Phases 2–4 not started; Phase 3 needs a fresh cluster.
+Phase 2: CreateVolume stamps the canonical role
+(`flint.csi.storage.io/role`) into every volume_context (all four create
+paths); ControllerPublish/NodeStage seed the role caches from it
+(hint ≡ resolver by test-pinned construction), with a transitional
+publish-side divergence assertion. Legacy publish branch signals remain
+until the assertion is proven silent live (Phase 3). Phases 3–4 not
+started; Phase 3 needs a fresh cluster.
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage

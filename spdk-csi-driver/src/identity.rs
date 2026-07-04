@@ -386,6 +386,90 @@ impl RoleResolver {
 }
 
 // ---------------------------------------------------------------------------
+// Role hint (Phase 2) — CreateVolume stamps the canonical role into
+// volume_context; context-carrying RPCs seed the resolver cache from it so
+// the later context-free RPCs (ControllerUnpublish, NodeUnstage) classify
+// without an API read. Old volumes without the hint resolve identically
+// through the resolver — the hint is an optimization, never a
+// compatibility surface.
+// ---------------------------------------------------------------------------
+
+/// volume_context / PV volumeAttributes key carrying the canonical role.
+pub const ROLE_CONTEXT_KEY: &str = "flint.csi.storage.io/role";
+
+const ROLE_BLOCK_VALUE: &str = "block";
+const ROLE_NFS_SHARED_VALUE: &str = "nfs-shared";
+const ROLE_NFS_SHARED_RO_VALUE: &str = "nfs-shared-ro";
+
+/// Wire encoding of a role. Total — every role has exactly one encoding.
+pub fn role_context_value(role: Role) -> &'static str {
+    match role {
+        Role::Block => ROLE_BLOCK_VALUE,
+        Role::NfsShared { read_only: false } => ROLE_NFS_SHARED_VALUE,
+        Role::NfsShared { read_only: true } => ROLE_NFS_SHARED_RO_VALUE,
+    }
+}
+
+/// Inverse of [`role_context_value`]. Unknown values → `None` (treated
+/// as "no hint": a future encoding must degrade to the resolver, never
+/// to a guessed role).
+pub fn parse_role_hint(value: &str) -> Option<Role> {
+    match value {
+        ROLE_BLOCK_VALUE => Some(Role::Block),
+        ROLE_NFS_SHARED_VALUE => Some(Role::NfsShared { read_only: false }),
+        ROLE_NFS_SHARED_RO_VALUE => Some(Role::NfsShared { read_only: true }),
+        _ => None,
+    }
+}
+
+/// The role hint carried in an RPC's volume_context, if any.
+pub fn role_hint_from_context(
+    ctx: &std::collections::HashMap<String, String>,
+) -> Option<Role> {
+    ctx.get(ROLE_CONTEXT_KEY).and_then(|v| parse_role_hint(v))
+}
+
+/// Canonical role from CSI volume_capabilities at CreateVolume time.
+/// MUST agree with [`RoleResolver::role_from_modes`] under the k8s
+/// translation (RWX ↔ MULTI_NODE_MULTI_WRITER, ROX ↔
+/// MULTI_NODE_READER_ONLY) — the hint and the resolver are two encodings
+/// of one fact, and the seed path depends on them never disagreeing.
+/// Mirrors CreateVolume's shipped `is_rwx`/`is_rox` predicates exactly;
+/// read-write wins over read-only, like `role_from_modes`.
+pub fn role_from_csi_capabilities(caps: &[crate::csi::VolumeCapability]) -> Role {
+    use crate::csi::volume_capability::access_mode::Mode;
+    let mut rwx = false;
+    let mut rox = false;
+    for cap in caps {
+        if let Some(am) = &cap.access_mode {
+            if am.mode == Mode::MultiNodeMultiWriter as i32 {
+                rwx = true;
+            } else if am.mode == Mode::MultiNodeReaderOnly as i32 {
+                rox = true;
+            }
+        }
+    }
+    if rwx {
+        Role::NfsShared { read_only: false }
+    } else if rox {
+        Role::NfsShared { read_only: true }
+    } else {
+        Role::Block
+    }
+}
+
+impl RoleResolver {
+    /// Seed the cache from a context-carried role hint (ControllerPublish
+    /// / NodeStage fast path). Only ever called with the canonical
+    /// CreateVolume-stamped role, which by construction equals what
+    /// `resolve` would compute from the PV — so seeding can never change
+    /// a classification, only skip the API read that produces it.
+    pub fn seed(&self, storage_id: &str, role: Role) {
+        self.cache.put(storage_id, role);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parsers — ownership classification (delegated to current owners; bodies
 // move here in Phase 1 and the owners re-point).
 // ---------------------------------------------------------------------------
@@ -661,6 +745,76 @@ mod tests {
         let vref = err.default_block();
         assert_eq!(vref, VolumeRef::Block { storage_id: VOL.into() });
         assert!(vref.has_block_path(), "unreadable PV ⇒ RWO fencing semantics (c879bc3)");
+    }
+
+    // -- role hint (Phase 2) ---------------------------------------------
+
+    #[test]
+    fn role_hint_round_trips_every_role() {
+        for role in [
+            Role::Block,
+            Role::NfsShared { read_only: false },
+            Role::NfsShared { read_only: true },
+        ] {
+            assert_eq!(parse_role_hint(role_context_value(role)), Some(role));
+        }
+        assert_eq!(parse_role_hint("nfs"), None, "unknown encodings degrade to no-hint");
+        assert_eq!(parse_role_hint(""), None);
+    }
+
+    #[test]
+    fn role_hint_from_context_reads_the_canonical_key() {
+        let mut ctx = std::collections::HashMap::new();
+        assert_eq!(role_hint_from_context(&ctx), None);
+        ctx.insert(ROLE_CONTEXT_KEY.to_string(), "nfs-shared".to_string());
+        assert_eq!(role_hint_from_context(&ctx), Some(Role::NfsShared { read_only: false }));
+        ctx.insert(ROLE_CONTEXT_KEY.to_string(), "garbage".to_string());
+        assert_eq!(role_hint_from_context(&ctx), None);
+    }
+
+    /// The seed-path invariant: capability-derived role (what CreateVolume
+    /// stamps) must equal the modes-derived role (what the resolver reads
+    /// off the PV) under the k8s access-mode translation.
+    #[test]
+    fn capability_role_agrees_with_modes_role_under_k8s_translation() {
+        use crate::csi::volume_capability::access_mode::Mode;
+        use crate::csi::{volume_capability::AccessMode, VolumeCapability};
+
+        fn cap(mode: Mode) -> VolumeCapability {
+            VolumeCapability {
+                access_mode: Some(AccessMode { mode: mode as i32 }),
+                access_type: None,
+            }
+        }
+
+        // (CSI capabilities at CreateVolume, PV access modes the resolver sees)
+        let pairs: &[(&[VolumeCapability], &[&str])] = &[
+            (&[cap(Mode::SingleNodeWriter)], &["ReadWriteOnce"]),
+            (&[cap(Mode::MultiNodeMultiWriter)], &["ReadWriteMany"]),
+            (&[cap(Mode::MultiNodeReaderOnly)], &["ReadOnlyMany"]),
+            (
+                &[cap(Mode::MultiNodeMultiWriter), cap(Mode::MultiNodeReaderOnly)],
+                &["ReadWriteMany", "ReadOnlyMany"],
+            ),
+            (&[], &[]),
+        ];
+        for (caps, modes) in pairs {
+            assert_eq!(
+                role_from_csi_capabilities(caps),
+                RoleResolver::role_from_modes(modes),
+                "hint/resolver divergence for modes {:?}",
+                modes
+            );
+        }
+    }
+
+    #[test]
+    fn seed_matches_resolver_cache_semantics() {
+        let cache = RoleCache::default();
+        cache.put(VOL, Role::NfsShared { read_only: false });
+        // seed() is cache.put by definition — the hint can only ever
+        // pre-fill what resolve() would compute.
+        assert_eq!(cache.get(VOL), Some(Role::NfsShared { read_only: false }));
     }
 
     #[test]

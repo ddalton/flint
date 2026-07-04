@@ -981,6 +981,17 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             return Ok(tonic::Response::new(response));
         }
 
+        // Canonical role (identity Phase 2): derived from the CSI access
+        // capabilities — by construction equal to what the resolver reads
+        // off the PV's access modes later. Stamped into every returned
+        // volume_context so context-carrying RPCs seed the role cache
+        // without a PV read. Old volumes without the stamp resolve
+        // identically through the resolver.
+        let canonical_role =
+            spdk_csi_driver::identity::role_from_csi_capabilities(&req.volume_capabilities);
+        let role_value =
+            spdk_csi_driver::identity::role_context_value(canonical_role).to_string();
+
         // Check nfsEmptyDir FIRST — in emptyDir mode all volumes (including clones/snapshots)
         // are backed by ephemeral emptyDir, so we skip SPDK entirely
         let nfs_empty_dir_early = req.parameters.get("nfsEmptyDir")
@@ -1000,11 +1011,25 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     match source_type {
                         Type::Snapshot(snapshot) => {
                             println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
-                            return self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await;
+                            let mut resp = self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await?;
+                            if let Some(vol) = resp.get_mut().volume.as_mut() {
+                                vol.volume_context.insert(
+                                    spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
+                                    role_value.clone(),
+                                );
+                            }
+                            return Ok(resp);
                         }
                         Type::Volume(volume_source) => {
                             println!("🔄 [CONTROLLER] Creating volume from PVC (clone): {}", volume_source.volume_id);
-                            return self.create_volume_from_volume(&volume_id, &volume_source.volume_id, size_bytes).await;
+                            let mut resp = self.create_volume_from_volume(&volume_id, &volume_source.volume_id, size_bytes).await?;
+                            if let Some(vol) = resp.get_mut().volume.as_mut() {
+                                vol.volume_context.insert(
+                                    spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
+                                    role_value.clone(),
+                                );
+                            }
+                            return Ok(resp);
                         }
                     }
                 }
@@ -1037,6 +1062,14 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             volume_context.insert("nfs.flint.io/enabled".to_string(), "true".to_string());
             volume_context.insert("nfs.flint.io/backend".to_string(), "emptydir".to_string());
             volume_context.insert("size".to_string(), format!("{}Gi", size_bytes / (1024 * 1024 * 1024)));
+            // NOTE: for emptyDir volumes the canonical role can be Block
+            // (RWO PVC) while the SERVING path is NFS — a pre-existing
+            // backend quirk, which is why the publish-side divergence
+            // assertion is scoped to non-emptydir volumes.
+            volume_context.insert(
+                spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
+                role_value.clone(),
+            );
 
             // Echo back content_source if this was a clone/snapshot request
             // The provisioner requires this in the response to confirm the clone was handled
@@ -1118,7 +1151,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     "size".to_string(),
                     format!("{}Gi", size_bytes / (1024 * 1024 * 1024)),
                 );
-                
+
+                // Canonical role hint (identity Phase 2)
+                volume_context.insert(
+                    spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
+                    role_value.clone(),
+                );
+
                 // Add replica count
                 volume_context.insert(
                     "flint.csi.storage.io/replica-count".to_string(),
@@ -1498,6 +1537,25 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .get("nfs.flint.io/backend")
             .map(|v| v == "emptydir")
             .unwrap_or(false);
+
+        // Identity Phase 2: seed the role cache from the CreateVolume-stamped
+        // hint (the later context-free RPCs then classify without a PV read)
+        // and transitionally assert it against the legacy publish signals.
+        // Scoped to bare handles (a backing PV inherits the USER volume's
+        // hint) and non-emptydir volumes (emptydir serves Block roles over
+        // NFS by design — see CreateVolume).
+        if let Some(hint) = spdk_csi_driver::identity::role_hint_from_context(&req.volume_context) {
+            self.driver.role_resolver.seed(&actual_volume_id, hint);
+            if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_none() && !is_emptydir_nfs {
+                let hint_shared = matches!(hint, spdk_csi_driver::identity::Role::NfsShared { .. });
+                if hint_shared != (is_rwx || is_rox) {
+                    eprintln!(
+                        "🚨 [IDENTITY-DIVERGENCE] ControllerPublish {}: role hint {:?} vs legacy signals rwx={} rox={}",
+                        volume_id, hint, is_rwx, is_rox
+                    );
+                }
+            }
+        }
 
         // NFS path: RWX, ROX, or emptyDir-backed volumes
         if is_rox || is_rwx || is_emptydir_nfs {
@@ -2045,6 +2103,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
             None => volume_id.clone(),
         };
+
+        // Identity Phase 2: warm the node-side role cache from the stamped
+        // hint — NodeUnstage (context-free) then classifies without a PV
+        // read, which matters most during teardown storms. A backing PV's
+        // context inherits the USER volume's hint, so the seed is correct
+        // for either handle shape.
+        if let Some(hint) = spdk_csi_driver::identity::role_hint_from_context(&volume_context) {
+            self.driver.role_resolver.seed(&actual_volume_id, hint);
+        }
         
         eprintln!("📦 [NODE_STAGE] Volume ID: {}", actual_volume_id);
         eprintln!("📦 [NODE_STAGE] Staging path: {}", staging_target_path);

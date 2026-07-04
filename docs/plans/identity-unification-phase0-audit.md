@@ -114,6 +114,26 @@ impossible-on-real-inputs or contract-mandated):
 - `replica_sync.rs:857/929` unchanged — that module owns the canonical
   body `storage_id_of_handle` delegates to (bodies migrate in Phase 4).
 
+### Phase-2 status (2026-07-04): SHIPPED
+
+CreateVolume stamps `flint.csi.storage.io/role` =
+`block|nfs-shared|nfs-shared-ro` into every returned volume_context
+(main path, emptydir path, both clone paths; pNFS excluded per #11).
+The value is derived from CSI capabilities via
+`role_from_csi_capabilities`, test-pinned to agree with the resolver's
+`role_from_modes` under the k8s access-mode translation — so a seeded
+cache entry can never differ from what the resolver would have
+computed. ControllerPublish and NodeStage seed their process-local role
+caches from the hint (NodeStage warms the node cache for the
+context-free NodeUnstage — the RPC that matters during teardown
+storms). ControllerPublish carries a transitional `IDENTITY-DIVERGENCE`
+assertion comparing the hint with the legacy publish signals, scoped to
+bare handles and non-emptydir volumes (an emptydir RWO volume serves a
+Block role over NFS by design; a backing PV inherits the USER volume's
+hint through rwx_nfs's attr copy — both documented in-code). Branch
+decisions still ride the legacy signals; retiring them is Phase 3+
+work, gated on the assertion staying silent on a live cluster.
+
 ## 4. Naming inventory
 
 Mints outside the canonical owners, to be re-pointed in Phase 1 and linted
