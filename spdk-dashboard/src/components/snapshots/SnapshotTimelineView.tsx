@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useLayoutEffect, useCallback } from 'react';
+import React, { useMemo, useState, useLayoutEffect, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   GitBranch, Database, Search, Camera, Layers, Trash2, Loader2,
@@ -119,18 +119,21 @@ export const SnapshotTimelineView: React.FC<{
   const { data, isLoading, error } = useSnapshotTimeline(isValidVolume ? selectedVolume : null);
   const queryClient = useQueryClient();
 
-  const containerRef = useRef<HTMLDivElement>(null);
+  // Callback-ref + effect-on-element: the container div only mounts once
+  // data arrives, so a mount-time effect on a plain ref would observe null
+  // and the chart would stay at the fallback width forever.
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(900);
   useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    if (!containerEl) return;
+    if (containerEl.clientWidth) setWidth(containerEl.clientWidth);
     const observer = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width;
       if (w) setWidth(w);
     });
-    observer.observe(el);
+    observer.observe(containerEl);
     return () => observer.disconnect();
-  }, []);
+  }, [containerEl]);
 
   const [selection, setSelection] = useState<Selection | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
@@ -303,7 +306,7 @@ export const SnapshotTimelineView: React.FC<{
               </div>
             </div>
 
-            <div ref={containerRef} className="relative select-none">
+            <div ref={setContainerEl} className="relative select-none">
               <svg
                 width={width}
                 height={SVG_H}

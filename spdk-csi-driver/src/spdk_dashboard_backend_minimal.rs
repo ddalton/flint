@@ -2559,7 +2559,12 @@ fn build_snapshot_timeline(
             name: e.vs_name.clone().unwrap_or_else(|| e.handle.clone()),
             spdk_name: Some(e.handle),
             created_at: e.created_at,
-            size_bytes: e.size_bytes.or(spdk_entry.and_then(|s| s.size_bytes)),
+            // The driver reports restoreSize 0 on multi-replica snapshots —
+            // a zero CR size is "unknown", not an answer; SPDK's is real.
+            size_bytes: e
+                .size_bytes
+                .filter(|&s| s > 0)
+                .or(spdk_entry.and_then(|s| s.size_bytes)),
             ready: e.ready,
             nodes: spdk_entry.map(|s| s.nodes.clone()).unwrap_or_default(),
             vs_namespace: e.vs_namespace,
@@ -3535,6 +3540,11 @@ mod tests {
             format!("snap_{}_99999999999", TL_VOL),
             SpdkSnapAgg { nodes: vec!["runk-aws-1".into()], size_bytes: Some(2147483648) },
         );
+        // Backs the zero-restoreSize CR (snap-demo-4).
+        spdk.insert(
+            format!("snap_{}_55555555555", TL_VOL),
+            SpdkSnapAgg { nodes: vec!["runk-aws-1".into(), "runk-aws-2".into()], size_bytes: Some(2147483648) },
+        );
         // Foreign volume's snapshot must never leak in.
         spdk.insert(
             "snap_pvc-ffffffff-0000-0000-0000-000000000000_1".to_string(),
@@ -3567,6 +3577,17 @@ mod tests {
                 ready: false,
                 size_bytes: None,
             },
+            // Live 2r-volume quirk: the driver stamps restoreSize 0 — the
+            // SPDK size must win over a zero CR size.
+            VscEntry {
+                vsc_name: "snapcontent-zerosize".into(),
+                vs_namespace: Some("default".into()),
+                vs_name: Some("snap-demo-4".into()),
+                handle: format!("snap_{}_55555555555", TL_VOL),
+                created_at: nanos_to_rfc3339(1783199990000000000),
+                ready: true,
+                size_bytes: Some(0),
+            },
         ];
 
         let resp = build_snapshot_timeline(TL_VOL, Some(&record), vsc, &tl_spdk());
@@ -3576,12 +3597,15 @@ mod tests {
         assert_eq!(resp.replicas.len(), 2);
         assert_eq!(resp.replicas[1].sync_state, "stale");
 
-        // 2 user (CR) + 2 epochs (annotation) + 1 orphan; straggler epoch counted, not plotted.
-        assert_eq!(resp.events.len(), 5);
+        // 3 user (CR) + 2 epochs (annotation) + 1 orphan; straggler epoch counted, not plotted.
+        assert_eq!(resp.events.len(), 6);
         assert_eq!(resp.untracked_epochs, 1);
 
         let user: Vec<_> = resp.events.iter().filter(|e| e.kind == "user").collect();
-        assert_eq!(user.len(), 3);
+        assert_eq!(user.len(), 4);
+        // Zero CR restoreSize is "unknown" — SPDK's real size must win.
+        let zerosize = user.iter().find(|e| e.name == "snap-demo-4").unwrap();
+        assert_eq!(zerosize.size_bytes, Some(2147483648));
         let demo1 = user.iter().find(|e| e.name == "snap-demo-1").unwrap();
         // Real CR time (nanos), not a list-time stamp; both replicas hold it.
         assert_eq!(demo1.created_at.as_deref(), Some("2026-07-04T21:17:04+00:00"));
@@ -3623,8 +3647,8 @@ mod tests {
         let resp = build_snapshot_timeline(TL_VOL, None, Vec::new(), &tl_spdk());
         assert!(resp.replicas.is_empty());
         assert_eq!(resp.current_epoch, None);
-        // Both user-shaped snapshots are orphans; both epochs are untracked.
-        assert_eq!(resp.events.len(), 2);
+        // All three user-shaped snapshots are orphans; both epochs are untracked.
+        assert_eq!(resp.events.len(), 3);
         assert!(resp.events.iter().all(|e| e.orphan && e.created_at.is_none()));
         assert_eq!(resp.untracked_epochs, 2);
     }

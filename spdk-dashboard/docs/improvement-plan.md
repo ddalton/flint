@@ -586,3 +586,54 @@ Small items now tracked: the dashboard delete proxy wraps the agent's
 Conflict" — pass the agent's status and body through so the UI shows
 WHY the delete was refused (next backend pass); tests/system Makefile
 single-test targets ran kuttl without --config (fixed).
+
+## Snapshot timeline redesign (2026-07-04, commit 61bb80b)
+
+The Snapshots tab's "Topology View" was replaced by a real per-volume
+**Snapshot Timeline**. The old view was structurally dead: it plotted
+`creation_time` that the node agent stamps with `Utc::now()` on every
+list call (SPDK lvols store no creation time — the `snapshot_service.rs`
+TODO), and it grouped by `replica_bdev_details`, a field `/api/snapshots`
+never populates — so it always rendered its empty state ("0 Replica
+Snapshots" in the header chips was the same bug). Verified live on runk
+against a 2-replica volume with 3 user snapshots + 6 retained epochs
+before the rewrite.
+
+**Honest data, not new pixels.** `GET /api/snapshots/timeline?volume=`
+merges three sources that each carry REAL times or none at all:
+
+| source | contributes | why trustworthy |
+|---|---|---|
+| VolumeSnapshotContent CRs | user snapshots: name, ns, readiness, **status.creationTime** | `status.snapshotHandle` IS the SPDK lvol name (join key); creationTime is the CSI cut time |
+| PV `replica-sync-state` annotation | epochs with **EpochEntry.recorded_at**, current epoch, per-replica sync | the engine's own retained-window record |
+| SPDK node fan-out | which nodes hold each snapshot's copies | live bdev truth |
+
+Orphans (SPDK `snap_*` with no CR) are listed time-less and are never
+plotted at a fabricated position; epoch stragglers outside the retained
+window are counted (`untracked_epochs`), not drawn. Unit tests pin the
+merge with live-shape fixtures (runk annotation + VSC nanos stamp).
+
+**Design** (adapted from production timeline idioms — Honeycomb markers,
+Grafana annotations, Elastic APM deployment lines, GitHub's density
+strip, map cluster markers): two lanes with different encodings — user
+snapshots as violet diamond flag markers with oversized hit targets and
++N cluster chips on collision; engine epochs as a blue bucketed density
+ribbon (overlap impossible by construction, O(buckets) at any epoch
+count). Absolute wall-clock ticks; green "now" pulse anchors the right
+edge; hover = read-only crosshair; **click pins a popover** that holds
+metadata and the actions — never buttons in hover-only tooltips.
+
+**User-snapshot delete (admin)**: `DELETE /api/volumesnapshots/{ns}/{name}`
+deletes the **VolumeSnapshot CR** (driver-guarded, 409 on foreign
+drivers) so the snapshot-controller retires content + SPDK copies per
+deletionPolicy — the legacy SPDK-direct route (`DELETE /api/snapshots/{id}`,
+still present, still UI-unwired) would silently orphan the CR. RBAC:
+`volumesnapshots` verbs gained `delete` (chart + live runk ClusterRole).
+Geometry (domain/ticks/buckets/clusters) lives in `timelineLayout.ts`,
+pure and unit-tested. Suites: 579 Rust / 89 vitest.
+
+Follow-up candidates: SnapshotDetailModal's disabled Delete stub should
+either wire the CR path (needs the VSC join there too) or be dropped;
+brush-to-zoom context strip (focus+context) once volumes carry hours of
+history; `/api/snapshots` still double-counts per node in the header
+chips.
