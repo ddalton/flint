@@ -1,0 +1,548 @@
+import React, { useMemo, useRef, useState, useLayoutEffect, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  GitBranch, Database, Search, Camera, Layers, Trash2, Loader2,
+} from 'lucide-react';
+import { getRole } from '../../api/client';
+import {
+  useSnapshotTimeline, deleteVolumeSnapshot,
+  type TimelineEvent,
+} from '../../hooks/useSnapshotTimeline';
+import {
+  computeDomain, timeTicks, bucketEpochs, clusterMarkers, relTime,
+  type TimeDomain,
+} from './timelineLayout';
+import { ConfirmModal } from '../ui/ConfirmModal';
+
+// Design (adapted from production observability idioms):
+// - Two lanes, not one: sparse human events (user VolumeSnapshots, diamond
+//   flag markers — Elastic APM's icon-capped annotation line) ride above a
+//   bucketed density ribbon of machine events (engine epochs — the GitHub
+//   contribution strip rotated to 1-D). Dense periodic data and sparse
+//   important data get different encodings, never the same marker.
+// - "Now" anchors the right edge with a pulse (Datadog live-tail idiom);
+//   axis labels are absolute wall-clock, relative phrasing only in popovers.
+// - Hover shows a read-only crosshair+tooltip; CLICK pins a popover that
+//   holds the actions (Honeycomb marker windows, Grafana's delete-in-
+//   annotation-tooltip). Buttons never live in hover-only surfaces.
+// - Colliding user markers merge into a "+N" chip (map cluster-marker
+//   pattern) instead of overdrawing.
+
+const LANE_USER_Y = 40;
+const LANE_EPOCH_TOP = 78;
+const LANE_EPOCH_H = 22;
+const AXIS_Y = 122;
+const SVG_H = 148;
+
+const USER_COLOR = '#7c3aed'; // violet-600: user snapshots never read as "error"
+const USER_COLOR_SOFT = '#a78bfa';
+const EPOCH_COLOR = '#3b82f6'; // blue-500 ramp for the density ribbon
+const ORPHAN_COLOR = '#9ca3af';
+
+interface Selection {
+  events: TimelineEvent[];
+  x: number;
+}
+
+const eventTimeMs = (e: TimelineEvent): number =>
+  e.created_at ? new Date(e.created_at).getTime() : NaN;
+
+const fmtSize = (bytes?: number | null) =>
+  bytes == null ? '—' : `${(bytes / 1024 ** 3).toFixed(1)}GiB`;
+
+const fmtAbs = (t: number) => new Date(t).toLocaleTimeString();
+
+/** One diamond flag marker (or a +N cluster chip) on the user lane. */
+const UserMarker: React.FC<{
+  x: number;
+  events: TimelineEvent[];
+  selected: boolean;
+  onSelect: () => void;
+}> = ({ x, events, selected, onSelect }) => {
+  const single = events.length === 1 ? events[0] ?? null : null;
+  const color = single?.orphan ? ORPHAN_COLOR : USER_COLOR;
+  const label = single ? `User snapshot ${single.name}` : `${events.length} user snapshots`;
+  return (
+    <g
+      role="button"
+      tabIndex={0}
+      aria-label={label}
+      className="cursor-pointer focus:outline-none"
+      onClick={(ev) => {
+        ev.stopPropagation();
+        onSelect();
+      }}
+      onKeyDown={(ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          onSelect();
+        }
+      }}
+    >
+      {/* Oversized invisible hit target — nobody should have to hit a 2px stem. */}
+      <rect x={x - 12} y={LANE_USER_Y - 14} width={24} height={AXIS_Y - LANE_USER_Y + 14} fill="transparent" />
+      <line x1={x} y1={LANE_USER_Y} x2={x} y2={AXIS_Y} stroke={color} strokeWidth={selected ? 2 : 1.5} strokeOpacity={0.55} />
+      {single ? (
+        <rect
+          x={-6.5}
+          y={-6.5}
+          width={13}
+          height={13}
+          rx={2}
+          transform={`translate(${x}, ${LANE_USER_Y}) rotate(45)`}
+          fill={single.ready && !single.orphan ? color : '#ffffff'}
+          stroke={color}
+          strokeWidth={2}
+          strokeDasharray={single.orphan ? '3,2' : undefined}
+        />
+      ) : (
+        <>
+          <circle cx={x} cy={LANE_USER_Y} r={11} fill={USER_COLOR} />
+          <text x={x} y={LANE_USER_Y + 4} textAnchor="middle" fill="#fff" fontSize={11} fontWeight={700}>
+            +{events.length}
+          </text>
+        </>
+      )}
+      {selected && (
+        <circle cx={x} cy={LANE_USER_Y} r={events.length > 1 ? 14 : 12} fill="none" stroke={USER_COLOR_SOFT} strokeWidth={2} />
+      )}
+    </g>
+  );
+};
+
+export const SnapshotTimelineView: React.FC<{
+  selectedVolume: string;
+  onVolumeChange: (volumeId: string) => void;
+  availableVolumes: string[];
+}> = ({ selectedVolume, onVolumeChange, availableVolumes }) => {
+  const isValidVolume = availableVolumes.includes(selectedVolume);
+  const { data, isLoading, error } = useSnapshotTimeline(isValidVolume ? selectedVolume : null);
+  const queryClient = useQueryClient();
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(900);
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w) setWidth(w);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [hoverX, setHoverX] = useState<number | null>(null);
+  const [confirming, setConfirming] = useState<TimelineEvent | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const isAdmin = getRole() === 'admin';
+
+  const nowMs = data ? new Date(data.now).getTime() : Date.now();
+  const events = useMemo(() => data?.events ?? [], [data]);
+  const userEvents = useMemo(() => events.filter((e) => e.kind === 'user'), [events]);
+  const epochEvents = useMemo(() => events.filter((e) => e.kind === 'epoch'), [events]);
+  const datelessOrphans = useMemo(() => userEvents.filter((e) => !e.created_at), [userEvents]);
+
+  const domain: TimeDomain | null = useMemo(
+    () => computeDomain(events.map(eventTimeMs), nowMs),
+    [events, nowMs]
+  );
+
+  const userClusters = useMemo(() => {
+    if (!domain) return [];
+    return clusterMarkers(
+      userEvents.filter((e) => e.created_at).map((e) => ({ timeMs: eventTimeMs(e), item: e })),
+      domain,
+      width
+    );
+  }, [userEvents, domain, width]);
+
+  const epochBuckets = useMemo(() => {
+    if (!domain) return [];
+    return bucketEpochs(
+      epochEvents.filter((e) => e.created_at).map((e) => ({ timeMs: eventTimeMs(e), item: e })),
+      domain,
+      width
+    );
+  }, [epochEvents, domain, width]);
+
+  const maxBucket = Math.max(1, ...epochBuckets.map((b) => b.count));
+  const ticks = useMemo(() => (domain ? timeTicks(domain, width) : []), [domain, width]);
+
+  const onMouseMove = useCallback((ev: React.MouseEvent<SVGSVGElement>) => {
+    const rect = ev.currentTarget.getBoundingClientRect();
+    setHoverX(ev.clientX - rect.left);
+  }, []);
+
+  const closePopover = useCallback(() => {
+    setSelection(null);
+    setDeleteError(null);
+  }, []);
+
+  const runDelete = async (event: TimelineEvent) => {
+    if (!event.vs_namespace || !event.vs_name) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteVolumeSnapshot(event.vs_namespace, event.vs_name);
+      setConfirming(null);
+      closePopover();
+      await queryClient.invalidateQueries({ queryKey: ['snapshot-timeline'] });
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+      setConfirming(null);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const selectedEvent = selection?.events.length === 1 ? selection.events[0] : null;
+  const popoverLeft = selection ? Math.min(Math.max(selection.x, 150), Math.max(width - 150, 150)) : 0;
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+        <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
+          <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <GitBranch className="w-5 h-5 text-blue-600" />
+            Snapshot Timeline
+          </h3>
+          <div className="relative flex items-center gap-2">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input
+              id="volume-search"
+              type="text"
+              list="volume-list"
+              value={selectedVolume === 'all' ? '' : selectedVolume}
+              onChange={(e) => onVolumeChange(e.target.value === '' ? 'all' : e.target.value)}
+              placeholder="Search for a volume..."
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <datalist id="volume-list">
+              {availableVolumes.map((volume) => (
+                <option key={volume} value={volume} />
+              ))}
+            </datalist>
+          </div>
+        </div>
+
+        {!isValidVolume ? (
+          <div className="text-center py-12">
+            <Database className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">
+              {selectedVolume === 'all' ? 'Please Select a Volume' : 'Volume Not Found'}
+            </h3>
+            <p className="text-gray-500">
+              {selectedVolume === 'all'
+                ? 'Start typing in the search box to find and select a volume.'
+                : `No volume matching "${selectedVolume}" was found. Please select one from the list.`}
+            </p>
+          </div>
+        ) : isLoading ? (
+          <div className="flex items-center justify-center py-12 text-gray-500 gap-2">
+            <Loader2 className="w-5 h-5 animate-spin" /> Loading timeline…
+          </div>
+        ) : error ? (
+          <div className="text-center py-12 text-sm text-failed-600">
+            Could not load the timeline: {error instanceof Error ? error.message : String(error)}
+          </div>
+        ) : !domain ? (
+          <div className="text-center py-12">
+            <Camera className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No Snapshot History Yet</h3>
+            <p className="text-gray-500">
+              No user snapshots or engine epochs are recorded for this volume.
+            </p>
+          </div>
+        ) : (
+          <>
+            {/* Legend + live state chips */}
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2 text-xs text-gray-600">
+              <div className="flex items-center gap-4">
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="inline-block w-2.5 h-2.5 rotate-45 rounded-[2px]"
+                    style={{ backgroundColor: USER_COLOR }}
+                  />
+                  User snapshots · {userEvents.length}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="inline-block w-2.5 h-3.5 rounded-[2px]"
+                    style={{ backgroundColor: EPOCH_COLOR, opacity: 0.7 }}
+                  />
+                  Engine epochs · {epochEvents.length}
+                  {(data?.untracked_epochs ?? 0) > 0 && (
+                    <span className="text-gray-400">(+{data?.untracked_epochs} rotating)</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {data?.current_epoch && (
+                  <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full font-mono">
+                    epoch #{data.current_epoch.split('-').pop()}
+                  </span>
+                )}
+                {(data?.replicas ?? []).map((r) => (
+                  <span
+                    key={r.node}
+                    title={`${r.node}: ${r.sync_state}${r.last_epoch ? ` (last epoch ${r.last_epoch.split('-').pop()})` : ''}`}
+                    className={`px-2 py-0.5 rounded-full ${
+                      r.sync_state === 'in_sync'
+                        ? 'bg-green-50 text-green-700'
+                        : r.sync_state === 'standby'
+                          ? 'bg-yellow-50 text-yellow-700'
+                          : 'bg-red-50 text-red-700'
+                    }`}
+                  >
+                    {r.node} · {r.sync_state}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div ref={containerRef} className="relative select-none">
+              <svg
+                width={width}
+                height={SVG_H}
+                className="block"
+                onMouseMove={onMouseMove}
+                onMouseLeave={() => setHoverX(null)}
+                onClick={closePopover}
+                data-testid="timeline-svg"
+              >
+                {/* lane labels */}
+                <text x={0} y={LANE_USER_Y - 18} fontSize={10} fill="#6b7280" fontWeight={600}>
+                  USER SNAPSHOTS
+                </text>
+                <text x={0} y={LANE_EPOCH_TOP - 6} fontSize={10} fill="#6b7280" fontWeight={600}>
+                  ENGINE EPOCHS
+                </text>
+
+                {/* epoch lane backdrop + density cells */}
+                <rect x={0} y={LANE_EPOCH_TOP} width={width} height={LANE_EPOCH_H} rx={4} fill="#f3f4f6" />
+                {epochBuckets.map((b) => (
+                  <g key={`eb-${b.x}`}>
+                    <rect
+                      x={b.x}
+                      y={LANE_EPOCH_TOP + 2}
+                      width={b.widthPx}
+                      height={LANE_EPOCH_H - 4}
+                      rx={2}
+                      fill={EPOCH_COLOR}
+                      fillOpacity={0.3 + 0.7 * (b.count / maxBucket)}
+                    >
+                      <title>
+                        {b.count === 1 && b.items[0]
+                          ? `${b.items[0].name} · ${b.items[0].created_at ? fmtAbs(eventTimeMs(b.items[0])) : ''}`
+                          : `${b.count} epochs`}
+                      </title>
+                    </rect>
+                  </g>
+                ))}
+
+                {/* axis */}
+                <line x1={0} y1={AXIS_Y} x2={width} y2={AXIS_Y} stroke="#d1d5db" strokeWidth={1} />
+                {ticks.map((t) => (
+                  <g key={`tick-${t.x}`}>
+                    <line x1={t.x} y1={AXIS_Y} x2={t.x} y2={AXIS_Y + 4} stroke="#9ca3af" strokeWidth={1} />
+                    <text x={t.x} y={AXIS_Y + 16} textAnchor="middle" fontSize={10} fill="#6b7280">
+                      {t.label}
+                    </text>
+                  </g>
+                ))}
+
+                {/* now anchor: hairline + pulse at the right edge */}
+                <line x1={width - 1} y1={LANE_USER_Y - 12} x2={width - 1} y2={AXIS_Y} stroke="#10b981" strokeWidth={1} strokeDasharray="2,3" />
+                <circle cx={width - 1} cy={AXIS_Y} r={3.5} fill="#10b981">
+                  <animate attributeName="r" values="3;5;3" dur="2s" repeatCount="indefinite" />
+                  <animate attributeName="fill-opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
+                </circle>
+                <text x={width - 8} y={LANE_USER_Y - 18} textAnchor="end" fontSize={10} fill="#10b981" fontWeight={600}>
+                  now
+                </text>
+
+                {/* crosshair (read-only hover) */}
+                {hoverX !== null && !selection && (
+                  <g pointerEvents="none">
+                    <line x1={hoverX} y1={LANE_USER_Y - 12} x2={hoverX} y2={AXIS_Y} stroke="#9ca3af" strokeWidth={1} strokeDasharray="3,3" />
+                    <rect x={Math.min(hoverX + 4, width - 64)} y={AXIS_Y - 18} width={60} height={15} rx={3} fill="#374151" />
+                    <text x={Math.min(hoverX + 34, width - 34)} y={AXIS_Y - 7} textAnchor="middle" fontSize={9.5} fill="#fff">
+                      {fmtAbs(domain.min + ((domain.max - domain.min) * hoverX) / width)}
+                    </text>
+                  </g>
+                )}
+
+                {/* user snapshot markers (drawn last: they own the pointer) */}
+                {userClusters.map((c) => (
+                  <UserMarker
+                    key={`uc-${c.x}`}
+                    x={c.x}
+                    events={c.items}
+                    selected={selection?.events === c.items}
+                    onSelect={() => {
+                      setDeleteError(null);
+                      setSelection({ events: c.items, x: c.x });
+                    }}
+                  />
+                ))}
+              </svg>
+
+              {/* Pinned popover: metadata + actions (click-committed surface) */}
+              {selection && (
+                <div
+                  className="absolute z-20 w-[300px] bg-white border border-gray-200 rounded-lg shadow-xl p-3 text-sm"
+                  style={{ left: popoverLeft, top: 8, transform: 'translateX(-50%)' }}
+                  role="dialog"
+                  aria-label="Snapshot details"
+                >
+                  {selection.events.length > 1 && !selectedEvent ? (
+                    <>
+                      <p className="font-semibold text-gray-900 mb-2">
+                        {selection.events.length} snapshots here
+                      </p>
+                      <ul className="space-y-1">
+                        {selection.events.map((e) => (
+                          <li key={e.id}>
+                            <button
+                              className="w-full text-left px-2 py-1 rounded hover:bg-violet-50 text-violet-700 font-mono text-xs"
+                              onClick={() => setSelection({ events: [e], x: selection.x })}
+                            >
+                              {e.name}
+                              {e.created_at && (
+                                <span className="text-gray-400 ml-2">{relTime(eventTimeMs(e), nowMs)}</span>
+                              )}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : selectedEvent ? (
+                    <>
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <p className="font-semibold text-gray-900 break-all">{selectedEvent.name}</p>
+                        <span
+                          className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                            selectedEvent.orphan
+                              ? 'bg-gray-100 text-gray-600'
+                              : 'bg-violet-100 text-violet-700'
+                          }`}
+                        >
+                          {selectedEvent.orphan ? 'orphan' : 'user'}
+                        </span>
+                      </div>
+                      <dl className="space-y-1 text-xs text-gray-600">
+                        <div className="flex justify-between gap-2">
+                          <dt>Created</dt>
+                          <dd className="text-right">
+                            {selectedEvent.created_at
+                              ? `${fmtAbs(eventTimeMs(selectedEvent))} · ${relTime(eventTimeMs(selectedEvent), nowMs)}`
+                              : 'unknown (no CR)'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Size</dt>
+                          <dd>{fmtSize(selectedEvent.size_bytes)}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Ready</dt>
+                          <dd>{selectedEvent.ready ? '✓ yes' : 'no'}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Replicas on</dt>
+                          <dd className="text-right">
+                            {selectedEvent.nodes.length ? selectedEvent.nodes.join(', ') : '—'}
+                          </dd>
+                        </div>
+                        {selectedEvent.vs_namespace && (
+                          <div className="flex justify-between gap-2">
+                            <dt>Namespace</dt>
+                            <dd>{selectedEvent.vs_namespace}</dd>
+                          </div>
+                        )}
+                        {selectedEvent.spdk_name && (
+                          <div className="pt-1 border-t border-gray-100 font-mono text-[10px] text-gray-400 break-all">
+                            {selectedEvent.spdk_name}
+                          </div>
+                        )}
+                      </dl>
+                      {deleteError && (
+                        <p className="mt-2 text-xs text-failed-600">{deleteError}</p>
+                      )}
+                      <div className="mt-3 flex justify-end gap-2">
+                        <button
+                          onClick={closePopover}
+                          className="px-2.5 py-1 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50"
+                        >
+                          Close
+                        </button>
+                        {!selectedEvent.orphan && selectedEvent.vs_name && (
+                          <button
+                            onClick={() => setConfirming(selectedEvent)}
+                            disabled={!isAdmin}
+                            title={isAdmin ? undefined : 'Admin login required'}
+                            className="px-2.5 py-1 text-xs rounded bg-failed-600 text-white hover:bg-failed-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" /> Delete
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              )}
+            </div>
+
+            {datelessOrphans.length > 0 && (
+              <p className="mt-2 text-xs text-gray-400">
+                {datelessOrphans.length} orphaned SPDK snapshot
+                {datelessOrphans.length > 1 ? 's' : ''} (no VolumeSnapshot CR, creation time
+                unknown) not plotted — shown in List View.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {confirming && (
+        <ConfirmModal
+          title="Delete user snapshot"
+          subtitle={`VolumeSnapshot ${confirming.vs_namespace}/${confirming.vs_name}`}
+          danger={
+            <>
+              Deletes the VolumeSnapshot CR — the snapshot controller then removes the
+              snapshot content and its SPDK copies on{' '}
+              {confirming.nodes.length ? confirming.nodes.join(', ') : 'all replicas'} per the
+              class deletionPolicy. Restores from this snapshot become impossible.
+            </>
+          }
+          confirmLabel={deleting ? 'Deleting…' : 'Delete snapshot'}
+          busy={deleting}
+          onConfirm={() => runDelete(confirming)}
+          onCancel={() => setConfirming(null)}
+        />
+      )}
+
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <Layers className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0" />
+          <div>
+            <h4 className="font-medium text-blue-900 mb-2">About the Snapshot Timeline</h4>
+            <div className="text-sm text-blue-800 space-y-2">
+              <p>
+                <strong>User snapshots</strong> (violet diamonds) are your VolumeSnapshots, plotted
+                at their real creation time from the Kubernetes CR. Click one to inspect it or
+                delete it (admin). <strong>Engine epochs</strong> (blue ribbon) are the automatic
+                consistency points the replica-rebuild engine cuts and rotates; their density shows
+                scheduler cadence. Timestamps come from the CR and the PV sync record — never
+                fabricated. The green pulse is “now”.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};

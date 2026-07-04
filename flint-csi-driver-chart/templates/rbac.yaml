@@ -70,7 +70,10 @@ rules:
     verbs: ["update", "patch"]
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    # delete: the dashboard backend (same ServiceAccount) removes USER
+    # snapshots through their VolumeSnapshot CR — the only path that keeps
+    # Kubernetes and SPDK in agreement (snapshot timeline delete action).
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots/status"]
     verbs: ["update", "patch"]

@@ -198,3 +198,61 @@ export function makeNodeDiskStatus(
     ...overrides,
   };
 }
+
+// Snapshot timeline fixture — the runk 2026-07-04 fixture volume shape:
+// three user VolumeSnapshots (real CR times) over a six-epoch retained
+// window, two in-sync replicas. Times are relative to `now` so domain
+// math stays realistic no matter when the test runs.
+export function makeSnapshotTimeline(
+  overrides: Partial<Schemas['SnapshotTimelineResponse']> = {}
+): Schemas['SnapshotTimelineResponse'] {
+  const volume = 'pvc-93edc114-bec7-43a0-8273-5812c2c52d13';
+  const now = Date.now();
+  const at = (secsAgo: number) => new Date(now - secsAgo * 1000).toISOString();
+  const epoch = (seq: number, secsAgo: number): Schemas['SnapshotTimelineEvent'] => ({
+    id: `epoch-${volume}-${seq}`,
+    kind: 'epoch',
+    name: `epoch-${volume}-${seq}`,
+    spdk_name: `epoch-${volume}-${seq}`,
+    created_at: at(secsAgo),
+    size_bytes: 2147483648,
+    ready: true,
+    nodes: ['runk-aws-1', 'runk-aws-2'],
+    epoch_seq: seq,
+    orphan: false,
+  });
+  const user = (
+    n: number,
+    secsAgo: number,
+    extra: Partial<Schemas['SnapshotTimelineEvent']> = {}
+  ): Schemas['SnapshotTimelineEvent'] => ({
+    id: `snapcontent-${n}`,
+    kind: 'user',
+    name: `snap-demo-${n}`,
+    spdk_name: `snap_${volume}_6836626352724501${n}`,
+    created_at: at(secsAgo),
+    size_bytes: 2147483648,
+    ready: true,
+    nodes: ['runk-aws-1', 'runk-aws-2'],
+    vs_namespace: 'default',
+    vs_name: `snap-demo-${n}`,
+    vsc_name: `snapcontent-${n}`,
+    orphan: false,
+    ...extra,
+  });
+  return {
+    volume_id: volume,
+    now: new Date(now).toISOString(),
+    current_epoch: `epoch-${volume}-9`,
+    replicas: [
+      { node: 'runk-aws-1', sync_state: 'in_sync', last_epoch: `epoch-${volume}-9` },
+      { node: 'runk-aws-2', sync_state: 'in_sync', last_epoch: `epoch-${volume}-9` },
+    ],
+    events: [
+      epoch(4, 310), epoch(5, 250), epoch(6, 190), epoch(7, 130), epoch(8, 70), epoch(9, 10),
+      user(1, 280), user(2, 160), user(3, 45),
+    ],
+    untracked_epochs: 1,
+    ...overrides,
+  };
+}

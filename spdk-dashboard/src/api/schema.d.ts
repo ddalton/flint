@@ -212,6 +212,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/snapshots/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["snapshots_timeline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/volumes": {
         parameters: {
             query?: never;
@@ -223,6 +239,22 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/volumesnapshots/{namespace}/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["volumesnapshot_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -409,6 +441,13 @@ export interface components {
         };
         DeleteDiskRequest: {
             pci_address: string;
+        };
+        DeleteVolumeSnapshotResponse: {
+            content?: string | null;
+            error?: string | null;
+            name: string;
+            namespace: string;
+            success: boolean;
         };
         /**
          * @description Outcome of deleting a disk's LVS (the inverse of setup/initialize).
@@ -658,10 +697,61 @@ export interface components {
          * @enum {string}
          */
         Role: "viewer" | "admin";
+        SnapshotTimelineEvent: {
+            /** @description RFC3339. None only for orphans (no CR, and SPDK stores no time). */
+            created_at?: string | null;
+            /** Format: int64 */
+            epoch_seq?: number | null;
+            /**
+             * @description Stable identity: VolumeSnapshotContent name for user snapshots,
+             *     epoch snapshot name for epochs, SPDK lvol name for orphans.
+             */
+            id: string;
+            /** @description "user" (VolumeSnapshot-backed) or "epoch" (engine-cut). */
+            kind: string;
+            /** @description Display name: the VolumeSnapshot name, or the epoch/lvol name. */
+            name: string;
+            /** @description Nodes whose SPDK currently holds a copy of this snapshot. */
+            nodes: string[];
+            /**
+             * @description SPDK-side user snapshot with no VolumeSnapshot CR behind it
+             *     (Retain-policy leftovers). Not deletable through the CR path.
+             */
+            orphan: boolean;
+            ready: boolean;
+            /** Format: int64 */
+            size_bytes?: number | null;
+            /** @description SPDK lvol snapshot name (the CSI snapshot handle), when known. */
+            spdk_name?: string | null;
+            vs_name?: string | null;
+            vs_namespace?: string | null;
+            vsc_name?: string | null;
+        };
+        SnapshotTimelineResponse: {
+            current_epoch?: string | null;
+            /** @description Chronological (unknown-time orphans last). */
+            events: components["schemas"]["SnapshotTimelineEvent"][];
+            /** @description Server time at response build — the frontend's "now" anchor. */
+            now: string;
+            replicas: components["schemas"]["TimelineReplica"][];
+            /**
+             * Format: int64
+             * @description SPDK epoch snapshots not (or no longer) in the PV's retained-epoch
+             *     record — mid-rotation stragglers. Counted, never plotted at a
+             *     fabricated position.
+             */
+            untracked_epochs: number;
+            volume_id: string;
+        };
         SpdkValidationStatus: {
             has_spdk_backing: boolean;
             validation_message?: string | null;
             validation_severity: string;
+        };
+        TimelineReplica: {
+            last_epoch?: string | null;
+            node: string;
+            sync_state: string;
         };
         UninitializedDisksResponse: {
             count: number;
@@ -1245,6 +1335,37 @@ export interface operations {
             };
         };
     };
+    snapshots_timeline: {
+        parameters: {
+            query: {
+                volume: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-volume snapshot timeline: user VolumeSnapshots (real CR creation times) merged with engine epochs (PV-annotation recorded_at) and SPDK per-node presence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotTimelineResponse"];
+                };
+            };
+            /** @description Missing/expired token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     volumes: {
         parameters: {
             query?: {
@@ -1286,6 +1407,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    volumesnapshot_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description VolumeSnapshot namespace */
+                namespace: string;
+                /** @description VolumeSnapshot name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description VolumeSnapshot CR deleted; snapshot-controller retires the content/SPDK data per deletionPolicy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteVolumeSnapshotResponse"];
+                };
+            };
+            /** @description Missing/expired token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Viewer token on a destructive route */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description No such VolumeSnapshot */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteVolumeSnapshotResponse"];
+                };
+            };
+            /** @description Refused: snapshot belongs to a different CSI driver */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteVolumeSnapshotResponse"];
+                };
+            };
+            /** @description Kubernetes API failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteVolumeSnapshotResponse"];
                 };
             };
         };

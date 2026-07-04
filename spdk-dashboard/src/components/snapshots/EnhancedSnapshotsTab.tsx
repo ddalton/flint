@@ -9,7 +9,7 @@ import {
 import { SnapshotsListView } from './SnapshotsListView';
 import { EnhancedSnapshotsTreeView } from './EnhancedSnapshotsTreeView';
 import { SnapshotStorageView } from './SnapshotStorageView';
-import { SnapshotsTopologyView } from './SnapshotsTopologyView';
+import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import { useOperations } from '../../contexts/OperationsContext';
 import { TabSkeleton } from '../ui/Skeleton';
@@ -278,11 +278,9 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             formatSize={formatSize}
           />
         );
-      case 'topology':
+      case 'timeline':
         return (
-          <SnapshotsTopologyView
-            snapshots={snapshots}
-            formatSize={formatSize}
+          <SnapshotTimelineView
             selectedVolume={topologyVolume}
             onVolumeChange={setTopologyVolume}
             availableVolumes={availableVolumes}
@@ -430,15 +428,15 @@ export const EnhancedSnapshotsTab: React.FC = () => {
                   Tree View
                 </button>
                 <button
-                  onClick={() => setActiveView('topology')}
+                  onClick={() => setActiveView('timeline')}
                   className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
-                    activeView === 'topology'
+                    activeView === 'timeline'
                       ? 'bg-blue-600 text-white'
                       : 'bg-white text-gray-700 hover:bg-gray-50'
                   }`}
                 >
                   <TrendingUp className="w-4 h-4 mr-2 inline" />
-                  Topology View
+                  Timeline
                 </button>
               </div>
 

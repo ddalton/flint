@@ -5,7 +5,12 @@
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import type { components } from '../api/schema';
-import { makeDashboardData, makeEventsResponse, makeNodeDiskStatus } from './fixtures';
+import {
+  makeDashboardData,
+  makeEventsResponse,
+  makeNodeDiskStatus,
+  makeSnapshotTimeline,
+} from './fixtures';
 
 type Schemas = components['schemas'];
 
@@ -37,6 +42,24 @@ export const handlers = [
       return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
     return HttpResponse.json(makeEventsResponse());
+  }),
+
+  http.get('/api/snapshots/timeline', ({ request }) => {
+    if (request.headers.get('authorization') !== `Bearer ${TEST_TOKEN}`) {
+      return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
+    }
+    return HttpResponse.json(makeSnapshotTimeline());
+  }),
+
+  http.delete('/api/volumesnapshots/:namespace/:name', ({ request, params }) => {
+    if (request.headers.get('authorization') !== `Bearer ${TEST_TOKEN}`) {
+      return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
+    }
+    return HttpResponse.json({
+      success: true,
+      namespace: String(params.namespace),
+      name: String(params.name),
+    });
   }),
 
   http.get('/api/nodes/:node/disks/status', ({ params }) => {

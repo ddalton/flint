@@ -2434,6 +2434,524 @@ async fn delete_snapshot_by_id(
     })))
 }
 
+// --- Snapshot timeline: user VolumeSnapshots + engine epochs, real times ---
+//
+// The flat /api/snapshots endpoint reports SPDK's view only, and SPDK lvols
+// carry no creation time (the node agent stamps "now" on every list). Real
+// times live in Kubernetes: VolumeSnapshotContent.status.creationTime for
+// user snapshots (status.snapshotHandle IS the SPDK lvol name — the join
+// key), and the PV replica-sync-state annotation's EpochEntry.recorded_at
+// for engine epochs. This endpoint merges the three sources per volume.
+
+/// The CSI driver name VolumeSnapshotContents are matched against — only
+/// flint-owned snapshot objects appear in the timeline or may be deleted.
+const TIMELINE_CSI_DRIVER: &str = "flint.csi.storage.io";
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct TimelineQuery {
+    volume: String,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct SnapshotTimelineEvent {
+    /// Stable identity: VolumeSnapshotContent name for user snapshots,
+    /// epoch snapshot name for epochs, SPDK lvol name for orphans.
+    id: String,
+    /// "user" (VolumeSnapshot-backed) or "epoch" (engine-cut).
+    kind: String,
+    /// Display name: the VolumeSnapshot name, or the epoch/lvol name.
+    name: String,
+    /// SPDK lvol snapshot name (the CSI snapshot handle), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spdk_name: Option<String>,
+    /// RFC3339. None only for orphans (no CR, and SPDK stores no time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    ready: bool,
+    /// Nodes whose SPDK currently holds a copy of this snapshot.
+    nodes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vs_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vs_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vsc_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch_seq: Option<u64>,
+    /// SPDK-side user snapshot with no VolumeSnapshot CR behind it
+    /// (Retain-policy leftovers). Not deletable through the CR path.
+    orphan: bool,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct TimelineReplica {
+    node: String,
+    sync_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_epoch: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct SnapshotTimelineResponse {
+    volume_id: String,
+    /// Server time at response build — the frontend's "now" anchor.
+    now: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_epoch: Option<String>,
+    replicas: Vec<TimelineReplica>,
+    /// Chronological (unknown-time orphans last).
+    events: Vec<SnapshotTimelineEvent>,
+    /// SPDK epoch snapshots not (or no longer) in the PV's retained-epoch
+    /// record — mid-rotation stragglers. Counted, never plotted at a
+    /// fabricated position.
+    untracked_epochs: u64,
+}
+
+/// One VolumeSnapshotContent projected to what the timeline needs.
+#[derive(Debug, Clone, PartialEq)]
+struct VscEntry {
+    vsc_name: String,
+    vs_namespace: Option<String>,
+    vs_name: Option<String>,
+    /// status.snapshotHandle == the SPDK lvol snapshot name.
+    handle: String,
+    created_at: Option<String>,
+    ready: bool,
+    size_bytes: Option<u64>,
+}
+
+/// Per-lvol-name aggregate of the SPDK fan-out.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SpdkSnapAgg {
+    nodes: Vec<String>,
+    size_bytes: Option<u64>,
+}
+
+fn nanos_to_rfc3339(nanos: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(
+        nanos.div_euclid(1_000_000_000),
+        nanos.rem_euclid(1_000_000_000) as u32,
+    )
+    .map(|t| t.to_rfc3339())
+}
+
+/// Pure merge of the three sources (unit-tested; the handler only gathers).
+fn build_snapshot_timeline(
+    volume_id: &str,
+    record: Option<&crate::replica_sync::VolumeSyncRecord>,
+    vsc_entries: Vec<VscEntry>,
+    spdk: &HashMap<String, SpdkSnapAgg>,
+) -> SnapshotTimelineResponse {
+    let mut events: Vec<SnapshotTimelineEvent> = Vec::new();
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // User snapshots: the CR is authoritative (name, real creation time,
+    // readiness); SPDK contributes which nodes hold copies.
+    for e in vsc_entries {
+        let spdk_entry = spdk.get(&e.handle);
+        claimed.insert(e.handle.clone());
+        events.push(SnapshotTimelineEvent {
+            id: e.vsc_name.clone(),
+            kind: "user".to_string(),
+            name: e.vs_name.clone().unwrap_or_else(|| e.handle.clone()),
+            spdk_name: Some(e.handle),
+            created_at: e.created_at,
+            size_bytes: e.size_bytes.or(spdk_entry.and_then(|s| s.size_bytes)),
+            ready: e.ready,
+            nodes: spdk_entry.map(|s| s.nodes.clone()).unwrap_or_default(),
+            vs_namespace: e.vs_namespace,
+            vs_name: e.vs_name,
+            vsc_name: Some(e.vsc_name),
+            epoch_seq: None,
+            orphan: false,
+        });
+    }
+
+    // Epochs: the PV annotation is authoritative — recorded_at is the real
+    // cut time and the retained window is the truth of what still exists.
+    let mut annotated: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    if let Some(rec) = record {
+        for entry in &rec.epochs {
+            annotated.insert(entry.name.as_str());
+            let spdk_entry = spdk.get(&entry.name);
+            events.push(SnapshotTimelineEvent {
+                id: entry.name.clone(),
+                kind: "epoch".to_string(),
+                name: entry.name.clone(),
+                spdk_name: Some(entry.name.clone()),
+                created_at: Some(entry.recorded_at.clone()),
+                size_bytes: spdk_entry.and_then(|s| s.size_bytes),
+                ready: true,
+                nodes: spdk_entry.map(|s| s.nodes.clone()).unwrap_or_default(),
+                vs_namespace: None,
+                vs_name: None,
+                vsc_name: None,
+                epoch_seq: crate::identity::epoch_seq(volume_id, &entry.name),
+                orphan: false,
+            });
+        }
+    }
+
+    // SPDK leftovers: user-shaped names with no CR are orphans (shown,
+    // time unknown, not CR-deletable); epoch-shaped names outside the
+    // annotation are counted but never plotted at a made-up time.
+    let mut untracked_epochs = 0u64;
+    for (name, agg) in spdk {
+        if claimed.contains(name) {
+            continue;
+        }
+        match crate::identity::snapshot_owner(name).as_deref() {
+            Some(owner) if owner == volume_id => {}
+            _ => continue,
+        }
+        if crate::identity::epoch_seq(volume_id, name).is_some() {
+            if !annotated.contains(name.as_str()) {
+                untracked_epochs += 1;
+            }
+        } else {
+            events.push(SnapshotTimelineEvent {
+                id: name.clone(),
+                kind: "user".to_string(),
+                name: name.clone(),
+                spdk_name: Some(name.clone()),
+                created_at: None,
+                size_bytes: agg.size_bytes,
+                ready: true,
+                nodes: agg.nodes.clone(),
+                vs_namespace: None,
+                vs_name: None,
+                vsc_name: None,
+                epoch_seq: None,
+                orphan: true,
+            });
+        }
+    }
+
+    // Chronological; unknown-time orphans sort last.
+    events.sort_by(|a, b| match (&a.created_at, &b.created_at) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.id.cmp(&b.id),
+    });
+
+    let replicas = record
+        .map(|rec| {
+            rec.replicas
+                .iter()
+                .map(|r| TimelineReplica {
+                    node: r.node_name.clone(),
+                    sync_state: r.sync_state.as_str().to_string(),
+                    last_epoch: r.last_epoch.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    SnapshotTimelineResponse {
+        volume_id: volume_id.to_string(),
+        now: Utc::now().to_rfc3339(),
+        current_epoch: record.and_then(|r| r.current_epoch.clone()),
+        replicas,
+        events,
+        untracked_epochs,
+    }
+}
+
+/// List flint-owned VolumeSnapshotContents whose handle belongs to `volume_id`.
+async fn list_flint_snapshot_contents(
+    kube_client: &Client,
+    volume_id: &str,
+) -> Result<Vec<VscEntry>, kube::Error> {
+    use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "snapshot.storage.k8s.io",
+        "v1",
+        "VolumeSnapshotContent",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(kube_client.clone(), &ar);
+    let list = api.list(&ListParams::default()).await?;
+    Ok(list
+        .items
+        .into_iter()
+        .filter_map(|obj| {
+            let data = &obj.data;
+            if data["spec"]["driver"].as_str() != Some(TIMELINE_CSI_DRIVER) {
+                return None;
+            }
+            let handle = data["status"]["snapshotHandle"].as_str()?.to_string();
+            if crate::identity::snapshot_owner(&handle).as_deref() != Some(volume_id) {
+                return None;
+            }
+            // v1 VolumeSnapshotContent creationTime is int64 nanos; tolerate
+            // a string form too, then fall back to the object's own stamp
+            // (later than the cut, but real).
+            let created_at = data["status"]["creationTime"]
+                .as_i64()
+                .and_then(nanos_to_rfc3339)
+                .or_else(|| data["status"]["creationTime"].as_str().map(String::from))
+                .or_else(|| {
+                    // jiff::Timestamp's Display is RFC3339.
+                    obj.metadata
+                        .creation_timestamp
+                        .as_ref()
+                        .map(|t| t.0.to_string())
+                });
+            Some(VscEntry {
+                vsc_name: obj.metadata.name.clone().unwrap_or_default(),
+                vs_namespace: data["spec"]["volumeSnapshotRef"]["namespace"]
+                    .as_str()
+                    .map(String::from),
+                vs_name: data["spec"]["volumeSnapshotRef"]["name"]
+                    .as_str()
+                    .map(String::from),
+                handle,
+                created_at,
+                ready: data["status"]["readyToUse"].as_bool().unwrap_or(false),
+                size_bytes: data["status"]["restoreSize"].as_u64(),
+            })
+        })
+        .collect())
+}
+
+/// Fan out to node agents and aggregate this volume's SPDK snapshots by name.
+async fn collect_spdk_snapshots(state: &AppState, volume_id: &str) -> HashMap<String, SpdkSnapAgg> {
+    let agents: Vec<(String, String)> = state
+        .node_agents
+        .read()
+        .await
+        .iter()
+        .map(|(n, u)| (n.clone(), u.clone()))
+        .collect();
+
+    let fetches = agents.into_iter().map(|(node, url)| async move {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(format!("{}/api/snapshots/list", url))
+            .send()
+            .await
+            .ok()?;
+        let data: serde_json::Value = resp.json().await.ok()?;
+        Some((node, data["snapshots"].as_array().cloned().unwrap_or_default()))
+    });
+
+    let mut agg: HashMap<String, SpdkSnapAgg> = HashMap::new();
+    for fetched in futures::future::join_all(fetches).await.into_iter().flatten() {
+        let (node, snaps) = fetched;
+        for snap in snaps {
+            let Some(name) = snap["snapshot_name"].as_str() else {
+                continue;
+            };
+            if crate::identity::snapshot_owner(name).as_deref() != Some(volume_id) {
+                continue;
+            }
+            let entry = agg.entry(name.to_string()).or_default();
+            entry.nodes.push(node.clone());
+            if entry.size_bytes.is_none() {
+                entry.size_bytes = snap["size_bytes"].as_u64();
+            }
+        }
+    }
+    for entry in agg.values_mut() {
+        entry.nodes.sort();
+    }
+    agg
+}
+
+/// Handle GET /api/snapshots/timeline?volume= — the merged snapshot timeline.
+async fn get_snapshot_timeline(
+    query: TimelineQuery,
+    state: AppState,
+) -> Result<impl Reply, warp::Rejection> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    let volume_id = query.volume;
+    println!("🕒 [DASHBOARD] Building snapshot timeline for {}", volume_id);
+
+    let pvs_api: Api<PersistentVolume> = Api::all(state.kube_client.clone());
+    let record = match pvs_api.get_opt(&volume_id).await {
+        Ok(Some(pv)) => pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(crate::replica_sync::SYNC_STATE_ANNOTATION))
+            .and_then(
+                |s| match crate::replica_sync::VolumeSyncRecord::from_annotation(s) {
+                    Ok(rec) => Some(rec),
+                    Err(e) => {
+                        println!(
+                            "⚠️ [TIMELINE] {}: unparseable replica-sync-state annotation: {}",
+                            volume_id, e
+                        );
+                        None
+                    }
+                },
+            ),
+        Ok(None) => None,
+        Err(e) => {
+            println!("⚠️ [TIMELINE] PV {} read failed: {}", volume_id, e);
+            None
+        }
+    };
+
+    let vsc_entries = match list_flint_snapshot_contents(&state.kube_client, &volume_id).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            // Snapshot CRDs may simply not be installed; the epoch lane and
+            // SPDK view still stand on their own.
+            println!("⚠️ [TIMELINE] VolumeSnapshotContent list failed: {}", e);
+            Vec::new()
+        }
+    };
+
+    let spdk = collect_spdk_snapshots(&state, &volume_id).await;
+    let response = build_snapshot_timeline(&volume_id, record.as_ref(), vsc_entries, &spdk);
+    println!(
+        "✅ [TIMELINE] {}: {} events ({} untracked epochs)",
+        volume_id,
+        response.events.len(),
+        response.untracked_epochs
+    );
+    Ok(warp::reply::json(&response))
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct DeleteVolumeSnapshotResponse {
+    success: bool,
+    namespace: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Handle DELETE /api/volumesnapshots/{namespace}/{name} — delete a USER
+/// snapshot by deleting its VolumeSnapshot CR (the snapshot-controller and
+/// csi-snapshotter then retire the content + SPDK lvol per deletionPolicy).
+/// Deleting the lvol directly (the legacy /api/snapshots/{id} route) would
+/// orphan the CR; this is the correct path for CR-backed snapshots.
+async fn delete_volume_snapshot(
+    namespace: String,
+    name: String,
+    state: AppState,
+) -> Result<impl Reply, warp::Rejection> {
+    use kube::api::{ApiResource, DeleteParams, DynamicObject, GroupVersionKind};
+    println!(
+        "🗑️ [DASHBOARD] Deleting VolumeSnapshot {}/{}",
+        namespace, name
+    );
+
+    let vs_ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "snapshot.storage.k8s.io",
+        "v1",
+        "VolumeSnapshot",
+    ));
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(state.kube_client.clone(), &namespace, &vs_ar);
+
+    let reply = |status: warp::http::StatusCode, body: DeleteVolumeSnapshotResponse| {
+        Ok::<_, warp::Rejection>(warp::reply::with_status(warp::reply::json(&body), status))
+    };
+    let failure = |error: String| DeleteVolumeSnapshotResponse {
+        success: false,
+        namespace: namespace.clone(),
+        name: name.clone(),
+        content: None,
+        error: Some(error),
+    };
+
+    let vs = match api.get_opt(&name).await {
+        Ok(Some(vs)) => vs,
+        Ok(None) => {
+            return reply(
+                warp::http::StatusCode::NOT_FOUND,
+                failure("VolumeSnapshot not found".to_string()),
+            )
+        }
+        Err(e) => {
+            return reply(
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                failure(format!("VolumeSnapshot get failed: {}", e)),
+            )
+        }
+    };
+
+    // Driver guard: never delete another CSI driver's snapshot. Bound
+    // snapshots resolve through their content; unbound ones through the
+    // class. Indeterminate → refuse.
+    let content_name = vs.data["status"]["boundVolumeSnapshotContentName"]
+        .as_str()
+        .map(String::from);
+    let driver = if let Some(ref content) = content_name {
+        let vsc_ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "snapshot.storage.k8s.io",
+            "v1",
+            "VolumeSnapshotContent",
+        ));
+        let vsc_api: Api<DynamicObject> = Api::all_with(state.kube_client.clone(), &vsc_ar);
+        vsc_api
+            .get_opt(content)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|vsc| vsc.data["spec"]["driver"].as_str().map(String::from))
+    } else {
+        match vs.data["spec"]["volumeSnapshotClassName"].as_str() {
+            Some(class) => {
+                let class_ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+                    "snapshot.storage.k8s.io",
+                    "v1",
+                    "VolumeSnapshotClass",
+                ));
+                let class_api: Api<DynamicObject> =
+                    Api::all_with(state.kube_client.clone(), &class_ar);
+                class_api
+                    .get_opt(class)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|cl| cl.data["driver"].as_str().map(String::from))
+            }
+            None => None,
+        }
+    };
+    if driver.as_deref() != Some(TIMELINE_CSI_DRIVER) {
+        return reply(
+            warp::http::StatusCode::CONFLICT,
+            failure(format!(
+                "refused: snapshot driver is {:?}, not {}",
+                driver, TIMELINE_CSI_DRIVER
+            )),
+        );
+    }
+
+    match api.delete(&name, &DeleteParams::default()).await {
+        Ok(_) => {
+            println!("✅ [DASHBOARD] VolumeSnapshot {}/{} deleted", namespace, name);
+            reply(
+                warp::http::StatusCode::OK,
+                DeleteVolumeSnapshotResponse {
+                    success: true,
+                    namespace,
+                    name,
+                    content: content_name,
+                    error: None,
+                },
+            )
+        }
+        Err(e) => reply(
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            failure(format!("delete failed: {}", e)),
+        ),
+    }
+}
+
 /// Setup all HTTP routes for the minimal dashboard backend.
 ///
 /// Every /api route except /api/login requires a bearer token; destructive
@@ -2651,6 +3169,28 @@ pub fn setup_minimal_dashboard_routes(
         .and(state_filter.clone())
         .and_then(delete_snapshot_by_id);
 
+    let snapshots_timeline = warp::path("api")
+        .and(warp::path("snapshots"))
+        .and(warp::path("timeline"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(warp::query::<TimelineQuery>())
+        .and(state_filter.clone())
+        .and_then(get_snapshot_timeline);
+
+    // User-snapshot deletion goes through the VolumeSnapshot CR — the only
+    // path that keeps Kubernetes and SPDK in agreement.
+    let volumesnapshot_delete = warp::path("api")
+        .and(warp::path("volumesnapshots"))
+        .and(warp::path::param::<String>())
+        .and(warp::path::param::<String>())
+        .and(warp::path::end())
+        .and(warp::delete())
+        .and(admin.clone())
+        .and(state_filter.clone())
+        .and_then(delete_volume_snapshot);
+
     // Orphaned volume deletion route
     let orphan_delete = warp::path("api")
         .and(warp::path("orphans"))
@@ -2678,7 +3218,9 @@ pub fn setup_minimal_dashboard_routes(
         .or(refresh_route)
         .or(snapshots_list)
         .or(snapshots_tree)
+        .or(snapshots_timeline)
         .or(snapshot_delete)
+        .or(volumesnapshot_delete)
         .or(orphan_delete)
         .recover(crate::dashboard_auth::handle_rejection)
 }
@@ -2808,6 +3350,28 @@ mod api_doc {
             (status = 401, description = "Missing/expired token", body = ApiError)))]
     fn snapshots() {}
 
+    #[utoipa::path(get, path = "/api/snapshots/timeline", tag = "snapshots",
+        params(TimelineQuery),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Per-volume snapshot timeline: user VolumeSnapshots (real CR creation times) merged with engine epochs (PV-annotation recorded_at) and SPDK per-node presence", body = SnapshotTimelineResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError)))]
+    fn snapshots_timeline() {}
+
+    #[utoipa::path(delete, path = "/api/volumesnapshots/{namespace}/{name}", tag = "snapshots",
+        params(
+            ("namespace" = String, Path, description = "VolumeSnapshot namespace"),
+            ("name" = String, Path, description = "VolumeSnapshot name")),
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "VolumeSnapshot CR deleted; snapshot-controller retires the content/SPDK data per deletionPolicy", body = DeleteVolumeSnapshotResponse),
+            (status = 404, description = "No such VolumeSnapshot", body = DeleteVolumeSnapshotResponse),
+            (status = 409, description = "Refused: snapshot belongs to a different CSI driver", body = DeleteVolumeSnapshotResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 403, description = "Viewer token on a destructive route", body = ApiError),
+            (status = 500, description = "Kubernetes API failure", body = DeleteVolumeSnapshotResponse)))]
+    fn volumesnapshot_delete() {}
+
     #[utoipa::path(get, path = "/api/nodes/{node}/disks/status", tag = "node-disks",
         params(("node" = String, Path, description = "Kubernetes node name")),
         security(("bearerAuth" = [])),
@@ -2893,7 +3457,8 @@ mod api_doc {
         modifiers(&SecurityAddon),
         paths(
             healthz, login, dashboard, overview, volumes, disks, events, refresh,
-            snapshots, node_disk_status, node_disks_uninitialized, node_disks_setup,
+            snapshots, snapshots_timeline, volumesnapshot_delete,
+            node_disk_status, node_disks_uninitialized, node_disks_setup,
             node_disks_initialize, node_disks_reset, node_disks_delete,
         ),
         components(schemas(
@@ -2904,6 +3469,8 @@ mod api_doc {
             OrphanedVolumeInfo, ConsumerRaid, ConsumerRaidMember, NodeInfo,
             DashboardOverview, VolumesResponse, DisksResponse, EventsResponse,
             RefreshResponse, ApiError, DashboardEvent, WindowStep, HotRejoinWindow,
+            SnapshotTimelineResponse, SnapshotTimelineEvent, TimelineReplica,
+            DeleteVolumeSnapshotResponse,
             DiskSetupRequest, DiskSetupResponse, DeleteDiskRequest, DiskDeleteResponse,
             NodeDiskStatus, NodeDiskListing,
             NodeDisksStatusResponse, UninitializedDisksResponse, NodeAgentError,
@@ -2926,6 +3493,151 @@ pub fn openapi_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- snapshot timeline merge (live-shape corpus: runk 2026-07-04) ---
+
+    const TL_VOL: &str = "pvc-93edc114-bec7-43a0-8273-5812c2c52d13";
+
+    /// Real replica-sync-state annotation shape from the runk fixture volume
+    /// (trimmed to two epochs / two replicas, field-for-field faithful).
+    fn tl_annotation() -> String {
+        format!(
+            r#"{{"current_epoch":"epoch-{v}-9",
+                "epochs":[
+                  {{"name":"epoch-{v}-8","recorded_at":"2026-07-04T21:23:51Z"}},
+                  {{"name":"epoch-{v}-9","recorded_at":"2026-07-04T21:24:51Z"}}],
+                "replicas":[
+                  {{"node_name":"runk-aws-1","node_uid":"178db387","lvol_uuid":"c871cc84","sync_state":"in_sync","last_epoch":"epoch-{v}-9"}},
+                  {{"node_name":"runk-aws-2","node_uid":"2c45d4eb","lvol_uuid":"daed5e18","sync_state":"stale","last_epoch":"epoch-{v}-8"}}]}}"#,
+            v = TL_VOL
+        )
+    }
+
+    fn tl_spdk() -> HashMap<String, SpdkSnapAgg> {
+        let mut spdk = HashMap::new();
+        // User snapshot present on both replicas (handle == VSC snapshotHandle).
+        spdk.insert(
+            format!("snap_{}_68366263527245013", TL_VOL),
+            SpdkSnapAgg { nodes: vec!["runk-aws-1".into(), "runk-aws-2".into()], size_bytes: Some(2147483648) },
+        );
+        // Current epoch, present on both.
+        spdk.insert(
+            format!("epoch-{}-9", TL_VOL),
+            SpdkSnapAgg { nodes: vec!["runk-aws-1".into(), "runk-aws-2".into()], size_bytes: Some(2147483648) },
+        );
+        // Mid-rotation epoch straggler: on one node only, NOT in the annotation.
+        spdk.insert(
+            format!("epoch-{}-3", TL_VOL),
+            SpdkSnapAgg { nodes: vec!["runk-aws-2".into()], size_bytes: Some(2147483648) },
+        );
+        // CR-less user-shaped leftover (Retain-policy orphan).
+        spdk.insert(
+            format!("snap_{}_99999999999", TL_VOL),
+            SpdkSnapAgg { nodes: vec!["runk-aws-1".into()], size_bytes: Some(2147483648) },
+        );
+        // Foreign volume's snapshot must never leak in.
+        spdk.insert(
+            "snap_pvc-ffffffff-0000-0000-0000-000000000000_1".to_string(),
+            SpdkSnapAgg { nodes: vec!["runk-aws-3".into()], size_bytes: Some(1) },
+        );
+        spdk
+    }
+
+    #[test]
+    fn timeline_merges_cr_annotation_and_spdk_sources() {
+        let record = crate::replica_sync::VolumeSyncRecord::from_annotation(&tl_annotation())
+            .expect("live-shape annotation parses");
+        let vsc = vec![
+            VscEntry {
+                vsc_name: "snapcontent-62c2ee8e".into(),
+                vs_namespace: Some("default".into()),
+                vs_name: Some("snap-demo-1".into()),
+                handle: format!("snap_{}_68366263527245013", TL_VOL),
+                created_at: nanos_to_rfc3339(1783199824000000000),
+                ready: true,
+                size_bytes: Some(2147483648),
+            },
+            // Still-provisioning snapshot: no SPDK view yet, CR time only.
+            VscEntry {
+                vsc_name: "snapcontent-pending".into(),
+                vs_namespace: Some("default".into()),
+                vs_name: Some("snap-demo-2".into()),
+                handle: format!("snap_{}_62060056664648443", TL_VOL),
+                created_at: nanos_to_rfc3339(1783199912000000000),
+                ready: false,
+                size_bytes: None,
+            },
+        ];
+
+        let resp = build_snapshot_timeline(TL_VOL, Some(&record), vsc, &tl_spdk());
+
+        // Replica + epoch header state comes straight from the annotation.
+        assert_eq!(resp.current_epoch.as_deref(), Some(format!("epoch-{}-9", TL_VOL).as_str()));
+        assert_eq!(resp.replicas.len(), 2);
+        assert_eq!(resp.replicas[1].sync_state, "stale");
+
+        // 2 user (CR) + 2 epochs (annotation) + 1 orphan; straggler epoch counted, not plotted.
+        assert_eq!(resp.events.len(), 5);
+        assert_eq!(resp.untracked_epochs, 1);
+
+        let user: Vec<_> = resp.events.iter().filter(|e| e.kind == "user").collect();
+        assert_eq!(user.len(), 3);
+        let demo1 = user.iter().find(|e| e.name == "snap-demo-1").unwrap();
+        // Real CR time (nanos), not a list-time stamp; both replicas hold it.
+        assert_eq!(demo1.created_at.as_deref(), Some("2026-07-04T21:17:04+00:00"));
+        assert_eq!(demo1.nodes, vec!["runk-aws-1", "runk-aws-2"]);
+        assert!(!demo1.orphan);
+        let pending = user.iter().find(|e| e.name == "snap-demo-2").unwrap();
+        assert!(!pending.ready);
+        assert!(pending.nodes.is_empty());
+        let orphan = user.iter().find(|e| e.orphan).unwrap();
+        assert_eq!(orphan.created_at, None);
+        assert_eq!(orphan.name, format!("snap_{}_99999999999", TL_VOL));
+
+        let epochs: Vec<_> = resp.events.iter().filter(|e| e.kind == "epoch").collect();
+        assert_eq!(epochs.len(), 2);
+        let e9 = epochs.iter().find(|e| e.epoch_seq == Some(9)).unwrap();
+        assert_eq!(e9.created_at.as_deref(), Some("2026-07-04T21:24:51Z"));
+        assert_eq!(e9.nodes.len(), 2);
+        // Rotated-out-of-SPDK epoch still listed (annotation is the truth of
+        // the retained window) with no holding nodes.
+        let e8 = epochs.iter().find(|e| e.epoch_seq == Some(8)).unwrap();
+        assert!(e8.nodes.is_empty());
+
+        // Chronological, unknown-time orphan last.
+        let times: Vec<_> = resp.events.iter().map(|e| e.created_at.clone()).collect();
+        assert_eq!(times.last().unwrap(), &None);
+        let known: Vec<_> = times.iter().flatten().cloned().collect();
+        let mut sorted = known.clone();
+        sorted.sort();
+        assert_eq!(known, sorted);
+
+        // The foreign volume's snapshot never appears.
+        assert!(!resp.events.iter().any(|e| e.name.contains("ffffffff")));
+    }
+
+    #[test]
+    fn timeline_stands_without_annotation_or_crs() {
+        // Single-replica volume (no annotation) with CRD-less cluster: the
+        // SPDK view alone still yields an honest (if time-less) answer.
+        let resp = build_snapshot_timeline(TL_VOL, None, Vec::new(), &tl_spdk());
+        assert!(resp.replicas.is_empty());
+        assert_eq!(resp.current_epoch, None);
+        // Both user-shaped snapshots are orphans; both epochs are untracked.
+        assert_eq!(resp.events.len(), 2);
+        assert!(resp.events.iter().all(|e| e.orphan && e.created_at.is_none()));
+        assert_eq!(resp.untracked_epochs, 2);
+    }
+
+    #[test]
+    fn nanos_round_trip_matches_live_vsc_stamp() {
+        // Live VSC creationTime from runk: 1783199824000000000 == 21:17:04Z.
+        assert_eq!(
+            nanos_to_rfc3339(1783199824000000000).as_deref(),
+            Some("2026-07-04T21:17:04+00:00")
+        );
+        assert_eq!(nanos_to_rfc3339(0).as_deref(), Some("1970-01-01T00:00:00+00:00"));
+    }
 
     /// Test basic latency calculation with valid values
     #[test]

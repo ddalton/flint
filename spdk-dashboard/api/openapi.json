@@ -837,6 +837,51 @@
         ]
       }
     },
+    "/api/snapshots/timeline": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "snapshots_timeline",
+        "parameters": [
+          {
+            "name": "volume",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-volume snapshot timeline: user VolumeSnapshots (real CR creation times) merged with engine epochs (PV-annotation recorded_at) and SPDK per-node presence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotTimelineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/volumes": {
       "get": {
         "tags": [
@@ -920,6 +965,101 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/volumesnapshots/{namespace}/{name}": {
+      "delete": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "volumesnapshot_delete",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "VolumeSnapshot namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "VolumeSnapshot name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "VolumeSnapshot CR deleted; snapshot-controller retires the content/SPDK data per deletionPolicy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteVolumeSnapshotResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Viewer token on a destructive route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such VolumeSnapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteVolumeSnapshotResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused: snapshot belongs to a different CSI driver",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteVolumeSnapshotResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Kubernetes API failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteVolumeSnapshotResponse"
                 }
               }
             }
@@ -1566,6 +1706,37 @@
         "properties": {
           "pci_address": {
             "type": "string"
+          }
+        }
+      },
+      "DeleteVolumeSnapshotResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "namespace",
+          "name"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
           }
         }
       },
@@ -2414,6 +2585,137 @@
           "admin"
         ]
       },
+      "SnapshotTimelineEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "ready",
+          "nodes",
+          "orphan"
+        ],
+        "properties": {
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC3339. None only for orphans (no CR, and SPDK stores no time)."
+          },
+          "epoch_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identity: VolumeSnapshotContent name for user snapshots,\nepoch snapshot name for epochs, SPDK lvol name for orphans."
+          },
+          "kind": {
+            "type": "string",
+            "description": "\"user\" (VolumeSnapshot-backed) or \"epoch\" (engine-cut)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name: the VolumeSnapshot name, or the epoch/lvol name."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nodes whose SPDK currently holds a copy of this snapshot."
+          },
+          "orphan": {
+            "type": "boolean",
+            "description": "SPDK-side user snapshot with no VolumeSnapshot CR behind it\n(Retain-policy leftovers). Not deletable through the CR path."
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "spdk_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SPDK lvol snapshot name (the CSI snapshot handle), when known."
+          },
+          "vs_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vs_namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vsc_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SnapshotTimelineResponse": {
+        "type": "object",
+        "required": [
+          "volume_id",
+          "now",
+          "replicas",
+          "events",
+          "untracked_epochs"
+        ],
+        "properties": {
+          "current_epoch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotTimelineEvent"
+            },
+            "description": "Chronological (unknown-time orphans last)."
+          },
+          "now": {
+            "type": "string",
+            "description": "Server time at response build — the frontend's \"now\" anchor."
+          },
+          "replicas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineReplica"
+            }
+          },
+          "untracked_epochs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SPDK epoch snapshots not (or no longer) in the PV's retained-epoch\nrecord — mid-rotation stragglers. Counted, never plotted at a\nfabricated position.",
+            "minimum": 0
+          },
+          "volume_id": {
+            "type": "string"
+          }
+        }
+      },
       "SpdkValidationStatus": {
         "type": "object",
         "required": [
@@ -2431,6 +2733,27 @@
             ]
           },
           "validation_severity": {
+            "type": "string"
+          }
+        }
+      },
+      "TimelineReplica": {
+        "type": "object",
+        "required": [
+          "node",
+          "sync_state"
+        ],
+        "properties": {
+          "last_epoch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": "string"
+          },
+          "sync_state": {
             "type": "string"
           }
         }
