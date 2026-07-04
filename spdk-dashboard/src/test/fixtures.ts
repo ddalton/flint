@@ -1,0 +1,200 @@
+// Typed test fixtures. Every builder returns the GENERATED wire type from
+// api/openapi.json, so a fixture that drifts from the backend contract is a
+// compile error, not a quietly-lying test. Values are modeled on real runj
+// payloads (the hr-e2e drill volume and its HotRejoinSucceeded window).
+import type { components } from '../api/schema';
+
+type Schemas = components['schemas'];
+
+export function makeSyncInfo(
+  overrides: Partial<Schemas['ReplicaSyncInfo']> = {}
+): Schemas['ReplicaSyncInfo'] {
+  return {
+    sync_state: 'in_sync',
+    last_epoch: 'epoch-hr-e2e-1261',
+    epoch_lag: 0,
+    since: '2026-07-02T22:36:53Z',
+    reason: null,
+    hot_rejoin: null,
+    ...overrides,
+  };
+}
+
+export function makeReplica(
+  overrides: Partial<Schemas['DashboardReplicaStatus']> = {}
+): Schemas['DashboardReplicaStatus'] {
+  return {
+    node: 'runj-aws-1',
+    status: 'active',
+    access_method: 'nvmeof',
+    is_local: false,
+    raid_member_state: 'online',
+    raid_member_slot: 0,
+    rebuild_progress: null,
+    rebuild_target: null,
+    is_new_replica: false,
+    last_io_timestamp: null,
+    nvmf_target: null,
+    sync: makeSyncInfo(),
+    ...overrides,
+  };
+}
+
+export function makeVolume(
+  overrides: Partial<Schemas['DashboardVolume']> = {}
+): Schemas['DashboardVolume'] {
+  return {
+    id: 'pvc-6ff1cf70-hr-e2e',
+    name: 'hr-e2e',
+    state: 'Healthy',
+    size: '2Gi',
+    replicas: 2,
+    active_replicas: 2,
+    access_method: 'nvmeof',
+    local_nvme: false,
+    nvmeof_enabled: true,
+    nvmeof_targets: [],
+    nodes: ['runj-aws-1', 'runj-aws-2'],
+    transport_type: 'tcp',
+    target_port: 4420,
+    current_epoch: 'epoch-hr-e2e-1261',
+    consumer_raids: [],
+    replica_statuses: [
+      makeReplica(),
+      makeReplica({ node: 'runj-aws-2', raid_member_slot: 1 }),
+    ],
+    spdk_validation_status: {
+      has_spdk_backing: true,
+      validation_severity: 'info',
+      validation_message: null,
+    },
+    raid_status: null,
+    rebuild_progress: null,
+    pvc_info: null,
+    ublk_device: null,
+    ...overrides,
+  };
+}
+
+export function makeDisk(
+  overrides: Partial<Schemas['DashboardDisk']> = {}
+): Schemas['DashboardDisk'] {
+  return {
+    id: 'runj-aws-1:0000:00:1f.0',
+    node: 'runj-aws-1',
+    pci_addr: '0000:00:1f.0',
+    model: 'Amazon EC2 NVMe Instance Storage',
+    device_type: 'nvme',
+    capacity: 118111600640,
+    capacity_gb: 110,
+    allocated_space: 4,
+    free_space: 106,
+    free_space_display: '106GB',
+    healthy: true,
+    blobstore_initialized: true,
+    is_system_disk: false,
+    lvol_count: 2,
+    brought_online: '2026-06-30T10:00:00Z',
+    provisioned_volumes: [],
+    orphaned_spdk_volumes: [],
+    read_iops: 0,
+    write_iops: 0,
+    read_latency: 0,
+    write_latency: 0,
+    ...overrides,
+  };
+}
+
+export function makeDashboardData(
+  overrides: Partial<Schemas['DashboardData']> = {}
+): Schemas['DashboardData'] {
+  return {
+    volumes: [makeVolume()],
+    raw_volumes: [],
+    disks: [makeDisk(), makeDisk({ id: 'runj-aws-2:0000:00:1f.0', node: 'runj-aws-2' })],
+    nodes: ['runj-aws-1', 'runj-aws-2', 'runj-aws-3'],
+    node_info: {},
+    ...overrides,
+  };
+}
+
+// The verbatim shape of the 7b-4 drill window: 1730 ms, inline fenced-delta
+// path, 26 MiB estimator.
+export function makeWindow(
+  overrides: Partial<Schemas['HotRejoinWindow']> = {}
+): Schemas['HotRejoinWindow'] {
+  return {
+    volume: 'pvc-6ff1cf70-hr-e2e',
+    node: 'runj-aws-2',
+    raid: 'raid_pvc-6ff1cf70-hr-e2e',
+    epoch: 'epoch-hr-e2e-1262',
+    path: 'inline',
+    window_ms: 1730,
+    estimator_bytes: 27262976,
+    steps: [
+      { name: 'quiesce', ms: 102 },
+      { name: 'fenced_delta_copy', ms: 1416 },
+      { name: 'flip', ms: 88 },
+      { name: 'unquiesce', ms: 124 },
+    ],
+    timestamp: '2026-07-01T23:05:12Z',
+    ...overrides,
+  };
+}
+
+export function makeEvent(
+  overrides: Partial<Schemas['DashboardEvent']> = {}
+): Schemas['DashboardEvent'] {
+  return {
+    category: 'hot_rejoin',
+    reason: 'HotRejoinSucceeded',
+    event_type: 'Normal',
+    message: 'hot rejoin window 1730 ms (inline)',
+    volume: 'pvc-6ff1cf70-hr-e2e',
+    reporting_instance: 'flint-csi-controller',
+    timestamp: '2026-07-01T23:05:12Z',
+    ...overrides,
+  };
+}
+
+export function makeEventsResponse(
+  overrides: Partial<Schemas['EventsResponse']> = {}
+): Schemas['EventsResponse'] {
+  return {
+    events: [makeEvent()],
+    windows: [makeWindow()],
+    ...overrides,
+  };
+}
+
+export function makeNodeDiskStatus(
+  overrides: Partial<Schemas['NodeDiskStatus']> = {}
+): Schemas['NodeDiskStatus'] {
+  return {
+    pci_address: '0000:00:1f.0',
+    device_name: 'nvme1n1',
+    device_id: '0xcd00',
+    vendor_id: '0x1d0f',
+    subsystem_device_id: '0xcd00',
+    subsystem_vendor_id: '0x1d0f',
+    model: 'Amazon EC2 NVMe Instance Storage',
+    serial: 'AWS62A1E921C0E5378D8',
+    firmware_version: '0',
+    namespace_id: 1,
+    numa_node: 0,
+    size_bytes: 118111600640,
+    free_space: 0,
+    blobstore_initialized: false,
+    is_system_disk: false,
+    mounted_partitions: [],
+    healthy: true,
+    driver: 'nvme',
+    driver_ready: true,
+    spdk_ready: false,
+    error_count: 0,
+    temperature: null,
+    filesystem_type: null,
+    discovered_at: '2026-07-01T00:00:00Z',
+    ...overrides,
+  };
+}

@@ -299,8 +299,8 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
 // frontend shape: harden array fields against partial payloads and apply
 // the documented narrowings (SyncState/severity unions, ublk shape) — the
 // three `as` casts below are those narrowings, asserted once at this
-// boundary.
-const transformBackendData = (backendData: Schemas['DashboardData']): DashboardData => {
+// boundary. Exported for tests: this IS the wire boundary.
+export const transformBackendData = (backendData: Schemas['DashboardData']): DashboardData => {
   return {
     volumes: (backendData.volumes || []).map(vol => ({
       ...vol,
