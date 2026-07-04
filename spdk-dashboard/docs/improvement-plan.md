@@ -341,17 +341,60 @@ its step timings — without kubectl.
 
 ## Phase 3 — Structure and safety net (interleave with 1–2)
 
-- Break up the four 800+ line components as they're touched; extract
-  the three duplicated status-color/case switches into one
-  `status.ts` module.
-- react-router: URL state for tab, selected volume/node/snapshot —
-  deep-linkable, refresh-safe.
-- Vitest + React Testing Library + MSW; first tests ride the Phase 1
-  seams (query hooks, mutation invalidation) and Phase 2 features.
-- Eliminate the 33 `: any`s; enable `noUncheckedIndexedAccess`.
-- Single Dockerfile (delete the node-18 variant); one nginx.conf
-  source of truth.
-- CI: typecheck + lint + test + build + generated-types freshness.
+Status (2026-07-03): DONE in six commits (789cf4c test infra, ae1f9f6
+router, ed57bfa status tokens, 0257d36 strictness, bf197f8 nginx/
+Dockerfile, 3c77e02 CI); code-validated by the new gate (60 tests,
+0 lint errors, tsc clean under noUncheckedIndexedAccess, build OK,
+both freshness halves green). Not yet live-rolled — needs a
+`phase3.0` frontend image (frontend-only; no backend changes) and a
+deep-link smoke test on runj.
+
+- [DONE] Vitest + RTL + MSW: fixtures typed against the GENERATED
+  OpenAPI schemas (a drifted fixture is a compile error), MSW at the
+  fetch layer with unhandled-request=error. Suites: the committed form
+  of the 2d batch-engine simulation, api/client session boundary,
+  useDashboardData (last-known-good on failure, transform hardening,
+  adaptive-poll input), 2a indicator ARIA contract, 2c panels, routes,
+  Dashboard shell integration. The dead pre-Phase-0 playwright scratch
+  harness (verify-disk-setup.mjs) is deleted.
+- [DONE] react-router URL state: tab = path segment; cross-tab filters
+  (?filter/?disk/?replicas) and modal selections (?volume/?snapshot) =
+  search params, with detail params scoped to their home tab
+  (routes.ts). Landing (Decision 2) now fires ONLY on the bare "/"
+  entry — deep links are never hijacked. Tabs are real <Link>s.
+- [DONE] status.ts is THE status vocabulary: volume states, member/
+  replica states (Tier-2 chips aliased from SYNC_STATE_STYLES), and
+  the filter display copy that existed in four diverging versions.
+  Bonus correctness fix: the filter PREDICATE is unified too —
+  filterVolumesByType is Tier-2-aware and shared, so the 'rebuilding'
+  card count and the filtered views can no longer disagree about a
+  stale/standby replica.
+- [DONE] Zero `: any`; noUncheckedIndexedAccess ON. En route,
+  NodeMetricsAPI (700 lines) was DELETED: its endpoints
+  (/api/nodes/{n}/metrics, /raid) never existed in the backend — every
+  production render of the "SPDK Metrics" modal was its embedded mock
+  payload, the exact Decision-1 failure mode. NodeDetailView (real
+  aggregate data) remains the node surface.
+- [DONE] One nginx.conf: the chart's stale ConfigMap copy (pre-Phase-0,
+  no gzip/security headers — and it was what production actually
+  served) is removed; the image's nginx.conf is the single source from
+  the next chart release. Dockerfile.frontend: node 18 → 22 (the
+  second Dockerfile variant was already gone).
+- [DONE] CI (repo's first workflows): dashboard-ci (lint/test/build +
+  schema.d.ts⇔spec freshness, node 22) and dashboard-api-spec
+  (spec⇔backend via the dashboard-openapi bin, cargo + protoc),
+  path-scoped.
+
+**Honesty debts found during Phase 3, deliberately left for a product
+decision (they need features or removal, not types):**
+- The snapshots tab FABRICATES storage analytics when the backend
+  omits them: "mock 30% consumption", "70% actual data usage", and the
+  derived efficiency/breakdown numbers in the storage view are
+  invented client-side (EnhancedSnapshotsTab enhancers — now typed and
+  labeled, still synthesizing).
+- The entire Remote Storage tab's actions (connect/disconnect/save/
+  discover) are setTimeout mocks that report success without doing
+  anything. Either back it with real endpoints or remove the tab.
 
 ## Design system & UX quality (cross-cutting principle)
 
