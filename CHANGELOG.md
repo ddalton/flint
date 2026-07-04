@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **RWX client unpublish tore down the NFS server's live export.**
+  `ControllerUnpublishVolume` treated every departing non-home node
+  as a remote block consumer and removed the volume-level NVMe-oF
+  target — but RWX/ROX consumers are NFS clients with no block path,
+  and that target is the NFS server's backing export. One client
+  finishing was enough to strand the server's initiator in a
+  reconnect loop with its journal pinned (unkillable server pod
+  until `ctrl_loss_tmo`). Unpublish now classifies shared volumes by
+  PV access modes (the ControllerUnpublish side of the 1.4.0
+  NodeUnstage fix) and leaves their target alone; `DeleteVolume`
+  owns its teardown. RWO fencing semantics are unchanged, including
+  when the PV is unreadable.
 - **RWX teardown ordering.** `DeleteVolume` tore down the backing
   volume's NVMe-oF targets immediately after *issuing* the NFS server
   pod delete — while the pod, the volume's consumer, was still

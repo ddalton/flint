@@ -1678,16 +1678,44 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         // If node_id is specified and volume is remote, we need to cleanup
         if !node_id.is_empty() {
-            if volume_info.node_name != node_id {
+            // SHARED-VOLUME CLASSIFICATION — the ControllerUnpublish side of
+            // the d7490de access-modes fix. RWX/ROX consumers are NFS
+            // *clients*: they never had a block path, and the volume-level
+            // NVMe-oF target is the NFS server's live backing export.
+            // Removing it when a client departs strands the server's kernel
+            // initiator in a reconnect loop against a vanished subsystem
+            // with its dirty journal pinned in D-state — the server pod is
+            // then unkillable until ctrl_loss_tmo (~10 min; observed live
+            // on the v1.5.0 gate teardown). Shared volumes keep their
+            // target: DeleteVolume owns its teardown, ordered after the
+            // server pod exits.
+            let shared = match self.driver.pv_access_modes(&volume_id).await {
+                Ok(modes) => modes
+                    .iter()
+                    .any(|m| m == "ReadWriteMany" || m == "ReadOnlyMany"),
+                Err(e) => {
+                    println!(
+                        "⚠️ [CONTROLLER] Could not read PV access modes ({}); assuming RWO fencing semantics",
+                        e
+                    );
+                    false
+                }
+            };
+            if shared {
+                println!(
+                    "📡 [CONTROLLER] Shared (RWX/ROX) volume — departing node {} is an NFS client; leaving the backing NVMe-oF target alone",
+                    node_id
+                );
+            } else if volume_info.node_name != node_id {
                 println!("🧹 [CONTROLLER] Volume is remote - cleaning up NVMe-oF connections");
-                
+
                 let nqn = format!("nqn.2024-11.com.flint:volume:{}", volume_id);
-                
+
                 // Disconnect from NVMe-oF target on the node where pod was running
                 // Note: We need to create a temporary driver instance for the target node
                 // For now, we'll use the controller's node_id since this is a cleanup operation
                 println!("🔌 [CONTROLLER] Note: NVMe disconnection handled by NodeUnpublish on node {}", node_id);
-                
+
                 // Remove the NVMe-oF target from the storage node
                 if let Err(e) = self.driver.remove_nvmeof_target(&volume_info.node_name, &nqn).await {
                     println!("⚠️ [CONTROLLER] Failed to remove NVMe-oF target (continuing): {}", e);
