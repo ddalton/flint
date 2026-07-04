@@ -1,0 +1,45 @@
+# Dashboard gate (improvement-plan Phase 3): lint + tests + typecheck/build
+# + the frontend half of the generated-types freshness check (schema.d.ts
+# must match the committed api/openapi.json). The backend half — the spec
+# matching the Rust code — is dashboard-api-spec.yml, which needs cargo.
+name: dashboard-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spdk-dashboard/**'
+      - '.github/workflows/dashboard-ci.yml'
+  pull_request:
+    paths:
+      - 'spdk-dashboard/**'
+      - '.github/workflows/dashboard-ci.yml'
+
+defaults:
+  run:
+    working-directory: spdk-dashboard
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: spdk-dashboard/package-lock.json
+      - run: npm ci
+      - name: lint
+        run: npm run lint
+      - name: tests
+        run: npm test
+      - name: typecheck + build
+        run: npm run build
+      - name: generated types fresh (src/api/schema.d.ts ⇔ api/openapi.json)
+        run: |
+          npx --no-install openapi-typescript api/openapi.json -o /tmp/schema.d.ts >/dev/null
+          diff -u src/api/schema.d.ts /tmp/schema.d.ts || {
+            echo "STALE: src/api/schema.d.ts does not match api/openapi.json — run 'npm run gen:api'" >&2
+            exit 1
+          }

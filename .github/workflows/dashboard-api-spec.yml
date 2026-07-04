@@ -1,0 +1,39 @@
+# The backend half of the generated-types freshness gate: the committed
+# spdk-dashboard/api/openapi.json must match what the backend code emits
+# (the dashboard-openapi bin). Split from dashboard-ci.yml because it needs
+# a full cargo build of the driver crate — path-scoped so it only runs when
+# the Rust side or the committed spec changes.
+name: dashboard-api-spec
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spdk-csi-driver/**'
+      - 'spdk-dashboard/api/**'
+      - '.github/workflows/dashboard-api-spec.yml'
+  pull_request:
+    paths:
+      - 'spdk-csi-driver/**'
+      - 'spdk-dashboard/api/**'
+      - '.github/workflows/dashboard-api-spec.yml'
+
+jobs:
+  spec-fresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install protoc (tonic-build)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spdk-csi-driver
+      - name: spec fresh (api/openapi.json ⇔ backend code)
+        run: |
+          (cd spdk-csi-driver && cargo run -q --bin dashboard-openapi) > /tmp/openapi.json
+          diff -u spdk-dashboard/api/openapi.json /tmp/openapi.json || {
+            echo "STALE: api/openapi.json does not match the backend — regenerate with" >&2
+            echo "  (cd spdk-csi-driver && cargo run -q --bin dashboard-openapi) > spdk-dashboard/api/openapi.json" >&2
+            exit 1
+          }
