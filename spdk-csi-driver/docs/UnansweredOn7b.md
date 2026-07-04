@@ -1629,3 +1629,38 @@ run surfaced that stale pin too (nfs pods spawning 1.3.0 under a 1.4.0
 control plane). Trove's chart pin bumped to 1.4.0 (uncommitted,
 applies at next backend restart). Annotated tag `v1.4.0` created
 locally; push to origin pending a valid GitHub credential.
+
+## Post-1.5.0: the RWX teardown wedge — two fixes, live-validated (2026-07-04)
+
+Both v1.5.0 gate runs left NFS backing pods wedged in Terminating for
+~10 minutes (KillContainer DeadlineExceeded; sync pinned in D-state on
+jbd2_log_wait_commit; initiator reconnect-looping "Connect Invalid
+Data Parameter" until ctrl_loss_tmo). Live validation of the first fix
+exposed the true root cause as a PAIR of teardowns:
+
+1. **ControllerUnpublish killed the live export (the trigger).** When
+   an RWX/ROX *client* departed, the remote-consumer fencing branch
+   removed the volume-level NVMe-oF target — the NFS server's live
+   backing export (clients speak NFS; they never had a block path).
+   The d7490de access-modes classification now applies on the
+   ControllerUnpublish side too: shared volumes keep their target;
+   RWO fencing is unchanged (c879bc3).
+2. **DeleteVolume raced the server's dying flush (defense in depth).**
+   delete_nfs_server_pod issued the pod delete and returned; lvol +
+   target teardown ran under the flush. It now waits (bounded 90 s)
+   for the Pod object to vanish — kubelet's flushed-and-unmounted
+   signal — before teardown proceeds (567c582).
+
+Validated on runj with the controller at 1.5.1-dev (digest 5b6180f5…,
+rest of the cluster on released 1.5.0): rwx-single-replica +
+rox-multi-pod PASS with teardown fully drained before the test runner
+returned (previously wedged 10 min); controller logs show the
+classification ("Shared (RWX/ROX) volume — departing node … leaving
+the backing NVMe-oF target alone" ×4) and the ordered wait ("Pod
+terminated (volume flushed and unmounted)" ×2); no D-state on the
+consumer node. Benign residue: the node's initiator controllers for
+deleted volumes linger in "connecting" until NodeUnstage/ctrl_loss_tmo
+reaps them — kubelet's detach sequence runs unstage after DeleteVolume;
+candidate polish is a DeleteVolume wait on VolumeAttachment removal.
+Both fixes ride the next release; the release gate's rwx/rox teardown
+is the standing regression check.
