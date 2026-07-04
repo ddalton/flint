@@ -413,6 +413,25 @@ decision: remove dead code):**
   backend always sends) are deleted, along with the now-unused
   storage_consumption field and the identity tree enhancer.
 
+Removal LIVE-VALIDATED on runj 2026-07-04 (image `phase4.1`, digest
+11c1f642…): Remote Storage gone from the nav (7 tabs), stale
+/remote-storage deep links bounce home, snapshots tab serves the
+backend's real analytics (its own "estimated volume size" honesty
+note visible in recommendations), zero page errors. Same builder
+session ran the FIRST live end-to-end bulk init (Step 0 of the
+builder recipe, scripts/bulk-init-drill.mjs, 8/8): group-scoped
+select on the pristine scratch NVMe → ConfirmModal manifest → confirm
+→ agent initialize_blobstore → per-disk ok → blobstore_initialized
+verified via the agent — the last untested hop of the 2d flow is
+closed. New finding from the hand-back: the node agent returns 404
+for /disks/delete — the UI's "Delete SPDK Disk" button calls an
+endpoint the agent does not implement (it fails honestly, but either
+implement agent-side delete or drop the button; tracked for the next
+backend pass). Two data-labeling quirks noted for later: tree entries
+for epoch snapshots show volume-unknown (source_volume_id not
+resolved to a PV), and the drill disk hand-back needed an spdk-tgt
+bounce because delete is unimplemented.
+
 ## Design system & UX quality (cross-cutting principle)
 
 Goal (owner directive, 2026-07-02): the whole UI should be **consistent,

@@ -56,17 +56,22 @@ try {
   await page.waitForSelector('nav a', { timeout: 15000 });
   await page.waitForTimeout(6000); // let all node agents answer
 
-  // 1. Find the target disk card: inside the TARGET_NODE group, the card
-  //    that names TARGET_PCI. It must be eligible (checkbox present).
-  const checkbox = page
-    .locator(`text=${TARGET_PCI}`)
-    .locator('xpath=ancestor::*[.//input[@type="checkbox"]][1]//input[@type="checkbox"]')
-    .first();
-  check('target disk card found and selectable', (await checkbox.count()) === 1);
+  // 1. The target node's group header must report exactly ONE uninitialized
+  //    disk (the pristine scratch). PCI strings repeat across nodes, so all
+  //    selection goes through the node-scoped group controls — never a bare
+  //    text match.
+  const groupHeader = page
+    .locator('div.px-6.py-3.bg-gray-50')
+    .filter({ hasText: TARGET_NODE });
+  check('target node group present', (await groupHeader.count()) === 1);
+  check(
+    'group reports exactly 1 uninitialized disk',
+    (await groupHeader.getByText(/1 uninitialized \//).count()) === 1
+  );
   await page.screenshot({ path: `${OUT}/1-before.png`, fullPage: true });
 
-  // 2. Select exactly that disk.
-  await checkbox.check();
+  // 2. Group-scoped select: can only pick uninitialized disks of this node.
+  await groupHeader.getByText('Select uninitialized (1)').click();
   await page.waitForTimeout(500);
   const initButton = page.getByRole('button', { name: /^Initialize 1 disk$/ });
   check('Initialize 1 disk button appears', (await initButton.count()) === 1);
