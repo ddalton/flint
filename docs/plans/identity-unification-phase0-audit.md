@@ -114,6 +114,61 @@ impossible-on-real-inputs or contract-mandated):
 - `replica_sync.rs:857/929` unchanged — that module owns the canonical
   body `storage_id_of_handle` delegates to (bodies migrate in Phase 4).
 
+### Phase-3 status (2026-07-04): LIVE-VALIDATED on cluster `runk`
+
+Fresh all-spot cluster (trove project 28, 4× i4i.large incl. CP —
+SPDK-eligibility keys off the CP type). Build `identity-p3.0` = Phases
+0–2 @169521b; `p3.1`/`p3.2` add the fix-as-found batch below. Results:
+
+- Upgrade ride-through: a 1.5.0-created, hint-less RWO volume survived
+  every roll (1.5.0→p3.0→p3.1→p3.2), old data intact, writes landing;
+  final teardown clean through the unified path.
+- Full kuttl gate (8 standard + clean-shutdown): PASS. rwx-single-replica
+  + rox-multi-pod re-run individually: PASS with zero
+  Terminating/lingering flint-nfs pods after each.
+- Drill C (server bounce, staged clients): clients resume without
+  remount over the stable Service. FINDING (recorded, open): a BARE
+  server-pod delete has no re-creator — recreation belongs to cutover or
+  the next client publish; pod-only death strands clients until then.
+- Drills A/A′ (server killed, then client teardown) found THREE
+  pre-existing P1/P2s, all fixed + re-validated live:
+  - **F1 (e67563b)** NodeUnpublish read a timed-out `mountpoint -q`
+    (exit 124 — the dead-hard-NFS signature) as "not mounted", skipped
+    the lazy unmount, returned success; kubelet EBUSY-looped forever and
+    the node stopped admitting pods. Fix: only clean exit 1 skips;
+    verdict helper + truth-table test in mount_util. Validated: A′
+    drained in 39 s unassisted ("Treating target path as mounted: true"
+    → "Lazy unmount succeeded").
+  - **F2 (a78c79c)** NodeGetVolumeStats ran blocking Path::exists +
+    statvfs on the runtime; each kubelet poll against a dead mount
+    pinned a worker in D-state until the liveness probe starved —
+    crash-looping every node with a dead client mount (audit L2 made
+    real) and killing the co-located node agent (remote attaches EIO).
+    Fix: spawn_blocking + 5 s timeout, timeout ⇒ condition ABNORMAL.
+    Validated: two dead mounts held for 20+ min at zero restarts.
+  - **F3 (7e75419)** ControllerPublish raced a Terminating server pod:
+    `nfs_pod_exists` counted it present, the ready-wait accepted it
+    (draining pods still report phase Running), publish bound the new
+    client to a Service whose backend vanished. Fix: tri-state
+    `nfs_pod_liveness`; Terminating ⇒ bounded wait-for-gone then create
+    fresh; ready-wait rejects deletionTimestamp. Validated: revival
+    publish created a fresh server in ~10 s.
+- Drill B (PVC delete during client churn, 4 live clients): full drain —
+  pods/PVC/server-pod/PV all to zero; log shows the 567c582 ordering
+  (server pod flushed and terminated before storage teardown).
+- Drill D (RWO consumer beside the NFS server on one node): departure
+  from the lvol node classified local/no-op; departure from the server
+  node took the FENCING branch and removed exactly the RWO volume's
+  target while the server kept serving — Block vs NfsShared branch
+  separation proven side by side.
+- `IDENTITY-DIVERGENCE` sweep: **zero lines** on the controller and all
+  five node plugins across the entire campaign. The transitional
+  assertions have earned removal (fold into Phase 4 with the lint).
+- Kernel-semantics note (not a bug): a writer caught mid-write on a dead
+  hard mount is unkillable (D-state) until the server returns; with F1/F2
+  the node now stays healthy and the pod drains the moment I/O resolves
+  (or immediately after force-delete, via the orphan-cleanup path).
+
 ### Phase-2 status (2026-07-04): SHIPPED
 
 CreateVolume stamps `flint.csi.storage.io/role` =

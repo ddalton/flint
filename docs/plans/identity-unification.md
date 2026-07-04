@@ -12,9 +12,15 @@ Phase 2: CreateVolume stamps the canonical role
 (`flint.csi.storage.io/role`) into every volume_context (all four create
 paths); ControllerPublish/NodeStage seed the role caches from it
 (hint ≡ resolver by test-pinned construction), with a transitional
-publish-side divergence assertion. Legacy publish branch signals remain
-until the assertion is proven silent live (Phase 3). Phases 3–4 not
-started; Phase 3 needs a fresh cluster.
+publish-side divergence assertion. Phase 3: LIVE-VALIDATED
+2026-07-04 on cluster `runk` (all-spot, fresh) — full gate + rwx/rox
+teardown regressions + upgrade ride-through + drills A/A′/B/C/D all
+PASS; divergence assertions SILENT throughout (0 lines, all pods);
+three pre-existing dead-NFS-mount P1/P2s found by drill A and fixed
+(e67563b, a78c79c, 7e75419 — see the audit doc's Phase-3 section).
+Remaining: Phase 4 (lint + parser-body moves + assertion removal, no
+cluster needed); open finding: no NFS-server-pod liveness reconciler
+(bare pod death waits for the next publish/cutover).
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage
