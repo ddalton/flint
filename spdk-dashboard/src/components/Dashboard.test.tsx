@@ -51,14 +51,14 @@ const fresh = () =>
   );
 
 describe('Dashboard URL state', () => {
-  it('activates the tab named by the path', () => {
+  it('activates the tab named by the path', async () => {
     renderAt('/volumes', provisioned());
     expect(screen.getByRole('link', { name: /Volumes/ })).toHaveAttribute(
       'aria-current',
       'page'
     );
-    // The managed fixture volume is listed.
-    expect(screen.getByText('hr-e2e')).toBeInTheDocument();
+    // The managed fixture volume is listed (tab content is a lazy chunk).
+    expect(await screen.findByText('hr-e2e')).toBeInTheDocument();
   });
 
   it('applies the volume filter from ?filter=', () => {

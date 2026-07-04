@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 import { Filter } from 'lucide-react';
 import { isFreshCluster, uninitializedDiskCount } from './setup/batchSetup';
@@ -8,16 +8,29 @@ import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } fro
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { TabNavigation } from './ui/TabNavigation';
-import { VolumeStatusChart } from './charts/VolumeStatusChart';
-import { DiskStatusChart } from './charts/DiskStatusChart';
-import { EnhancedRaidTopologyChart } from './charts/EnhancedRaidTopologyChart';
-import { VolumesTable } from './tables/VolumesTable';
-import { DisksTable } from './tables/DisksTable';
-import { FilteredNodesView } from './nodes/FilteredNodesView';
-import { DiskSetupTab } from './setup/DiskSetupTab';
-import { EnhancedSnapshotsTab } from './snapshots/EnhancedSnapshotsTab';
-import { EventsTab } from './events/EventsTab';
-import RemoteStorageTab from './storage/RemoteStorageTab';
+import { TabSkeleton } from './ui/Skeleton';
+
+// Tab contents are code-split (Phase 4): first paint ships only the shell;
+// each tab's chunk — and the reactflow/recharts vendors — load on demand.
+const VolumeStatusChart = lazy(() =>
+  import('./charts/VolumeStatusChart').then(m => ({ default: m.VolumeStatusChart })));
+const DiskStatusChart = lazy(() =>
+  import('./charts/DiskStatusChart').then(m => ({ default: m.DiskStatusChart })));
+const EnhancedRaidTopologyChart = lazy(() =>
+  import('./charts/EnhancedRaidTopologyChart').then(m => ({ default: m.EnhancedRaidTopologyChart })));
+const VolumesTable = lazy(() =>
+  import('./tables/VolumesTable').then(m => ({ default: m.VolumesTable })));
+const DisksTable = lazy(() =>
+  import('./tables/DisksTable').then(m => ({ default: m.DisksTable })));
+const FilteredNodesView = lazy(() =>
+  import('./nodes/FilteredNodesView').then(m => ({ default: m.FilteredNodesView })));
+const DiskSetupTab = lazy(() =>
+  import('./setup/DiskSetupTab').then(m => ({ default: m.DiskSetupTab })));
+const EnhancedSnapshotsTab = lazy(() =>
+  import('./snapshots/EnhancedSnapshotsTab').then(m => ({ default: m.EnhancedSnapshotsTab })));
+const EventsTab = lazy(() =>
+  import('./events/EventsTab').then(m => ({ default: m.EventsTab })));
+const RemoteStorageTab = lazy(() => import('./storage/RemoteStorageTab'));
 
 interface DashboardProps {
   data: DashboardData;
@@ -330,7 +343,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
           
           <div className="p-6">
-            {renderTabContent()}
+            <Suspense fallback={<TabSkeleton />}>
+              {renderTabContent()}
+            </Suspense>
           </div>
         </div>
 

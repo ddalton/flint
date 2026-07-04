@@ -5,6 +5,18 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep the graph/chart vendors out of the entry chunk; they load
+        // with the tabs that use them (Phase 4 code-split).
+        manualChunks: {
+          'vendor-reactflow': ['reactflow'],
+          'vendor-recharts': ['recharts'],
+        },
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],

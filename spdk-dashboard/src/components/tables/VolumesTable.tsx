@@ -1,13 +1,16 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
-import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
 import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
 import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
+
+// The detail modal is its own chunk — most sessions never open it.
+const VolumeDetailAPI = lazy(() =>
+  import('../detail/VolumeDetailAPI').then(m => ({ default: m.VolumeDetailAPI })));
 
 interface VolumesTableProps {
   volumes: Volume[];
@@ -565,6 +568,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
       {/* Volume Detail Modal — volumeData re-derives from live query data */}
       {selectedVolumeDetail && (
+        <Suspense fallback={null}>
         <VolumeDetailAPI
           key={selectedVolumeDetail.id}
           volumeId={selectedVolumeDetail.id}
@@ -572,6 +576,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           volumeData={selectedVolumeDetail}
           onClose={() => setSelectedVolumeId(null)}
         />
+        </Suspense>
       )}
 
       {/* Delete Orphaned Volume Confirmation Dialog */}
