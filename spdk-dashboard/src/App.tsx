@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { Navigate, Route, Routes } from 'react-router';
 import { Database } from 'lucide-react';
 import { Dashboard } from './components/Dashboard';
 import { useAuth, useDashboardData } from './hooks/useDashboardData';
@@ -118,27 +119,36 @@ const App: React.FC = () => {
   };
   
   if (!isAuthenticated) {
+    // The URL is left untouched while logging in, so a deep link
+    // (/volumes?filter=degraded) survives the auth gate.
     return <LoginPage onLogin={handleLogin} />;
   }
-  
+
+  const dashboard = (
+    <Dashboard
+      data={dashboardHook.data}
+      loading={dashboardHook.loading}
+      stats={dashboardHook.stats}
+      autoRefresh={autoRefresh}
+      onAutoRefreshChange={setAutoRefresh}
+      onRefresh={handleRefresh}
+      onLogout={handleLogout}
+      usingMockData={dashboardHook.usingMockData}
+      connectionError={dashboardHook.connectionError}
+      showNodesWithDisksOnly={showNodesWithDisksOnly}
+      onShowNodesWithDisksOnlyChange={setShowNodesWithDisksOnly}
+    />
+  );
+
   return (
-    <OperationsProvider 
+    <OperationsProvider
       autoRefresh={autoRefresh}
       onAutoRefreshChange={setAutoRefresh}
     >
-      <Dashboard
-        data={dashboardHook.data}
-        loading={dashboardHook.loading}
-        stats={dashboardHook.stats}
-        autoRefresh={autoRefresh}
-        onAutoRefreshChange={setAutoRefresh}
-        onRefresh={handleRefresh}
-        onLogout={handleLogout}
-        usingMockData={dashboardHook.usingMockData}
-        connectionError={dashboardHook.connectionError}
-        showNodesWithDisksOnly={showNodesWithDisksOnly}
-        onShowNodesWithDisksOnlyChange={setShowNodesWithDisksOnly}
-      />
+      <Routes>
+        <Route path="/:tab?" element={dashboard} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </OperationsProvider>
   );
 };

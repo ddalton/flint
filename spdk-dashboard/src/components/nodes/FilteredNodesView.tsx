@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'react-router';
 import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import { NodeDetailView } from './NodeDetailView';
 import type { DashboardData, VolumeFilter } from '../../hooks/useDashboardData';
@@ -32,8 +33,18 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // State for active metrics modal
-  const [activeMetricsModal, setActiveMetricsModal] = useState<string | null>(null);
+  // The node metrics modal lives in the URL (?node=) — refresh-safe and
+  // deep-linkable, matching the volume detail modal.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeMetricsModal = searchParams.get('node');
+  const setActiveMetricsModal = (node: string | null) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (node) next.set('node', node);
+      else next.delete('node');
+      return next;
+    });
+  };
   const { setDialogVisible } = useOperations();
 
   useEffect(() => {

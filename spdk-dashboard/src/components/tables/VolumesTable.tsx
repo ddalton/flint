@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
 import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
 import { VolumeDetailAPI } from '../detail/VolumeDetailAPI';
@@ -30,10 +31,20 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   onReplicaClick,
   onRefresh
 }) => {
-  // Selection is by id: the detail modal derives its volume from the live
-  // query data each render, so it tracks a drill at the polling cadence
-  // instead of freezing a snapshot taken at click time.
-  const [selectedVolumeId, setSelectedVolumeId] = useState<string | null>(null);
+  // Selection is by id in the URL (?volume=) — the detail modal derives its
+  // volume from the live query data each render, so it tracks a drill at the
+  // polling cadence instead of freezing a snapshot taken at click time, and
+  // the open modal survives refresh / can be pasted as a link.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedVolumeId = searchParams.get('volume');
+  const setSelectedVolumeId = (id: string | null) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (id) next.set('volume', id);
+      else next.delete('volume');
+      return next;
+    });
+  };
   const { setDialogVisible } = useOperations();
 
   // Pagination state

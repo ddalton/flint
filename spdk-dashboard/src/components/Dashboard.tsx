@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Navigate, useNavigate, useParams, useSearchParams } from 'react-router';
 import { Filter } from 'lucide-react';
 import { isFreshCluster, uninitializedDiskCount } from './setup/batchSetup';
+import { parseTab, parseVolumeFilter } from '../routes';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
@@ -55,28 +57,60 @@ export const Dashboard: React.FC<DashboardProps> = ({
   showNodesWithDisksOnly = false,
   onShowNodesWithDisksOnlyChange
 }) => {
-  const [activeTab, setActiveTab] = useState('overview');
-  const [volumeFilter, setVolumeFilter] = useState<VolumeFilter>('all');
-  const [diskFilter, setDiskFilter] = useState<DiskFilter>(null);
-  const [volumeReplicaFilter, setVolumeReplicaFilter] = useState<VolumeReplicaFilter>(null);
+  // URL state (Phase 3): the tab is the path segment, filters are search
+  // params — a pasted link reproduces the exact view, and refresh loses
+  // nothing.
+  const { tab: tabSegment } = useParams();
+  const activeTab = parseTab(tabSegment);
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const volumeFilter: VolumeFilter = parseVolumeFilter(searchParams.get('filter'));
+  const diskFilter: DiskFilter = searchParams.get('disk');
+  const volumeReplicaFilter: VolumeReplicaFilter = searchParams.get('replicas');
+
+  const setFilterParams = (
+    updates: Record<string, string | null>,
+    options: { tab?: string } = {}
+  ) => {
+    const next = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null || value === 'all') next.delete(key);
+      else next.set(key, value);
+    }
+    const qs = next.toString();
+    if (options.tab !== undefined) {
+      navigate(`/${options.tab}${qs ? `?${qs}` : ''}`);
+    } else {
+      setSearchParams(next);
+    }
+  };
 
   // State-aware landing (plan Decision 2): decided once, from the first
-  // real data. A fresh cluster (zero initialized lvstores) lands on Disk
-  // Setup with onboarding; a provisioned cluster stays on Overview so an
-  // operator arriving mid-incident is never dropped into a wizard.
+  // real data, and ONLY on the bare "/" entry point — an explicit deep link
+  // (/overview, /volumes?...) is a user choice and is never hijacked. A
+  // fresh cluster (zero initialized lvstores) lands on Disk Setup with
+  // onboarding; a provisioned cluster stays on Overview so an operator
+  // arriving mid-incident is never dropped into a wizard.
   const [onboardingLanding, setOnboardingLanding] = useState(false);
   const landingDecided = useRef(false);
+  const bareEntry = tabSegment === undefined;
   useEffect(() => {
-    if (landingDecided.current || loading || connectionError) return;
+    if (landingDecided.current || loading || connectionError || !bareEntry) return;
     landingDecided.current = true;
     if (data.nodes.length > 0 && isFreshCluster(data.disks)) {
-      setActiveTab('disk-setup');
       setOnboardingLanding(true);
+      navigate('/disk-setup', { replace: true });
     }
-  }, [loading, connectionError, data.nodes, data.disks]);
+  }, [loading, connectionError, data.nodes, data.disks, bareEntry, navigate]);
 
   // Persistent nav nudge while any node still has uninitialized disks
   const uninitializedDisks = uninitializedDiskCount(data.disks);
+
+  // Unknown path segment: back to the landing entry point.
+  if (activeTab === null) {
+    return <Navigate to="/" replace />;
+  }
 
   if (loading && data.volumes.length === 0) {
     return (
@@ -87,52 +121,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
   }
 
   const handleFilterClick = (filter: VolumeFilter) => {
-    // If the same filter is clicked, clear it (toggle behavior)
-    if (volumeFilter === filter) {
-      setVolumeFilter('all');
-    } else {
-      setVolumeFilter(filter);
-      // Automatically switch to volumes tab when a filter is applied
-      if (filter !== 'all') {
-        setActiveTab('volumes');
-      }
-    }
-    // Clear other filters when changing volume filter
-    setDiskFilter(null);
-    setVolumeReplicaFilter(null);
+    // Clicking the active filter clears it; applying a filter jumps to the
+    // Volumes tab. Either way the other filters reset.
+    const toggled = volumeFilter === filter ? 'all' : filter;
+    setFilterParams(
+      { filter: toggled, disk: null, replicas: null },
+      toggled !== 'all' ? { tab: 'volumes' } : {}
+    );
   };
 
   const handleClearFilter = () => {
-    setVolumeFilter('all');
+    setFilterParams({ filter: null });
   };
 
   const handleClearDiskFilter = () => {
-    setDiskFilter(null);
+    setFilterParams({ disk: null });
   };
 
   const handleClearVolumeReplicaFilter = () => {
-    setVolumeReplicaFilter(null);
+    setFilterParams({ replicas: null });
   };
 
   const handleDiskClick = (diskId: string) => {
-    // Set disk filter and switch to volumes tab
-    setDiskFilter(diskId);
-    setActiveTab('volumes');
-    // Clear volume replica filter when clicking on disk
-    setVolumeReplicaFilter(null);
+    // Filter volumes down to one disk, over on the Volumes tab.
+    setFilterParams({ disk: diskId, replicas: null }, { tab: 'volumes' });
   };
 
   const handleReplicaClick = (volumeId: string) => {
-    // Set volume replica filter and switch to disks tab
-    setVolumeReplicaFilter(volumeId);
-    setActiveTab('disks');
-    // Clear other filters when showing volume replicas
-    setDiskFilter(null);
-  };
-
-  // Don't reset filter when changing tabs - keep it persistent across all tabs
-  const handleTabChange = (tabId: string) => {
-    setActiveTab(tabId);
+    // Show one volume's replica disks, over on the Disks tab.
+    setFilterParams({ replicas: volumeId, disk: null }, { tab: 'disks' });
   };
 
   // Get volumes that are on the selected disk
@@ -331,7 +348,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </div>
                   )}
                   <button
-                    onClick={() => setVolumeFilter('all')}
+                    onClick={handleClearFilter}
                     className="px-4 py-2 bg-white border border-gray-300 rounded-md hover:bg-gray-50 text-sm font-medium"
                   >
                     Clear Filter
@@ -361,7 +378,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
             {volumeFilter !== 'all' && (
               <button
-                onClick={() => setVolumeFilter('all')}
+                onClick={handleClearFilter}
                 className="px-4 py-2 bg-white text-indigo-600 rounded-lg shadow-sm hover:shadow-md transition-shadow font-medium text-sm"
               >
                 Clear filter
@@ -382,7 +399,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="bg-gray-50 border-b border-gray-200">
             <TabNavigation
               activeTab={activeTab}
-              onTabChange={handleTabChange}
               badges={{ 'disk-setup': uninitializedDisks }}
             />
           </div>

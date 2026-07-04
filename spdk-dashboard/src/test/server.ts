@@ -5,7 +5,7 @@
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import type { components } from '../api/schema';
-import { makeDashboardData, makeEventsResponse } from './fixtures';
+import { makeDashboardData, makeEventsResponse, makeNodeDiskStatus } from './fixtures';
 
 type Schemas = components['schemas'];
 
@@ -37,6 +37,15 @@ export const handlers = [
       return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
     return HttpResponse.json(makeEventsResponse());
+  }),
+
+  http.get('/api/nodes/:node/disks/status', ({ params }) => {
+    const response: Schemas['NodeDisksStatusResponse'] = {
+      node: String(params.node),
+      disks: [makeNodeDiskStatus()],
+      last_updated: '2026-07-01T00:00:00Z',
+    };
+    return HttpResponse.json(response);
   }),
 ];
 

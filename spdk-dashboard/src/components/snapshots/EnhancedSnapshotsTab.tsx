@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
 import { 
   Camera, RefreshCw, Search, Filter, ChevronDown, FileText, 
@@ -28,14 +29,30 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<SnapshotTypeFilter>('all');
   const [volumeFilter, setVolumeFilter] = useState<string>('all');
-  const [selectedSnapshot, setSelectedSnapshot] = useState<SnapshotDetails | null>(null);
+  // Selection is by id in the URL (?snapshot=) — the modal re-derives its
+  // snapshot from the fetched list each render, so an open detail survives
+  // refresh and can be pasted as a link.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedSnapshotId = searchParams.get('snapshot');
+  const setSelectedSnapshot = (snap: SnapshotDetails | null) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (snap) next.set('snapshot', snap.snapshot_id);
+      else next.delete('snapshot');
+      return next;
+    });
+  };
+  const selectedSnapshot = useMemo(
+    () => snapshots.find(snap => snap.snapshot_id === selectedSnapshotId) ?? null,
+    [snapshots, selectedSnapshotId]
+  );
   const [expandedVolumes, setExpandedVolumes] = useState<Set<string>>(new Set());
   const [showFilters, setShowFilters] = useState(false);
   const { setDialogVisible } = useOperations();
 
   useEffect(() => {
-    setDialogVisible(selectedSnapshot !== null);
-  }, [selectedSnapshot, setDialogVisible]);
+    setDialogVisible(selectedSnapshotId !== null);
+  }, [selectedSnapshotId, setDialogVisible]);
 
   // Get unique volumes for filter dropdown
   const availableVolumes = useMemo(() => {
@@ -571,7 +588,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Snapshot Detail Modal */}
+      {/* Snapshot Detail Modal — re-derived from the fetched list so a
+          deep-linked id waits for data instead of crashing */}
       {selectedSnapshot && (
         <SnapshotDetailModal
           snapshot={selectedSnapshot}

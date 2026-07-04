@@ -1,18 +1,19 @@
 import React from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { Monitor, Database, HardDrive, Server, Settings, Camera, Cloud, Activity } from 'lucide-react';
+import { searchForTab, type TabId } from '../../routes';
 
 interface Tab {
-  id: string;
+  id: TabId;
   name: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
 interface TabNavigationProps {
-  activeTab: string;
-  onTabChange: (tabId: string) => void;
+  activeTab: TabId;
   // Optional per-tab attention counts (e.g. uninitialized disks on
   // Disk Setup) — rendered as an amber pill after the tab name.
-  badges?: Record<string, number | undefined>;
+  badges?: Partial<Record<TabId, number | undefined>>;
 }
 
 const tabs: Tab[] = [
@@ -20,22 +21,27 @@ const tabs: Tab[] = [
   { id: 'volumes', name: 'Volumes', icon: Database },
   { id: 'disks', name: 'Disks', icon: HardDrive },
   { id: 'events', name: 'Events', icon: Activity },
-  { id: 'snapshots', name: 'Snapshots', icon: Camera }, // New snapshots tab
+  { id: 'snapshots', name: 'Snapshots', icon: Camera },
   { id: 'disk-setup', name: 'Disk Setup', icon: Settings },
   { id: 'remote-storage', name: 'Remote Storage', icon: Cloud },
   { id: 'nodes', name: 'Nodes', icon: Server }
 ];
 
-export const TabNavigation: React.FC<TabNavigationProps> = ({ activeTab, onTabChange, badges }) => {
+// Tabs are real links (deep-linkable, middle-clickable). Filter params
+// persist across tabs; detail params (open modals) stay with their home tab
+// — searchForTab implements that scoping.
+export const TabNavigation: React.FC<TabNavigationProps> = ({ activeTab, badges }) => {
+  const [searchParams] = useSearchParams();
   return (
     <div className="border-b border-gray-200">
       <nav className="-mb-px flex space-x-8 px-6">
         {tabs.map((tab) => {
           const badge = badges?.[tab.id];
           return (
-            <button
+            <Link
               key={tab.id}
-              onClick={() => onTabChange(tab.id)}
+              to={`/${tab.id}${searchForTab(searchParams, tab.id)}`}
+              aria-current={activeTab === tab.id ? 'page' : undefined}
               className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-blue-500 text-blue-600'
@@ -49,7 +55,7 @@ export const TabNavigation: React.FC<TabNavigationProps> = ({ activeTab, onTabCh
                   {badge}
                 </span>
               )}
-            </button>
+            </Link>
           );
         })}
       </nav>
