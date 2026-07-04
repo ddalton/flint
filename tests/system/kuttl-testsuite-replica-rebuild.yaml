@@ -1,0 +1,18 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+metadata:
+  name: flint-csi-replica-rebuild-test
+# Configuration for the incremental-replica-rebuild test.
+# MUST run in isolation (parallel: 1, its own suite): the test kills the
+# spdk-tgt on one storage node, which degrades every volume with a leg or
+# consumer on that node. Never point this suite at a cluster carrying live
+# volumes outside the test.
+testDirs:
+  - tests-replica-rebuild/
+# Per-step timeout: the heal cycle (stale -> catch-up -> hot rejoin) is
+# minutes at the 30s drill epoch cadence; the wait step polls with its own
+# internal deadline below this.
+timeout: 600
+parallel: 1
+suppress:
+  - events

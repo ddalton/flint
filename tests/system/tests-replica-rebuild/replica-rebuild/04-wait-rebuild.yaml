@@ -1,0 +1,43 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 540
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      TARGET=$(kubectl -n $NAMESPACE get configmap rebuild-test-state -o jsonpath='{.data.target}')
+      PV=$(kubectl -n $NAMESPACE get configmap rebuild-test-state -o jsonpath='{.data.pv}')
+      echo "=== waiting for incremental rebuild of the replica on $TARGET (pv $PV) ==="
+
+      # Expected sequence: stale -> (ReplicaCatchupStarted | ReplicaFullBuildStarted)
+      # -> standby -> hot rejoin -> in_sync. End-to-end is dominated by the
+      # 60s detection/orchestrator ticks and the 30s epoch cadence; live
+      # drills converge in ~2-4 min.
+      LAST=""
+      DEADLINE=$(( $(date +%s) + 480 ))
+      while [ $(date +%s) -lt $DEADLINE ]; do
+        ST=$(kubectl get pv $PV -o json 2>/dev/null \
+          | jq -r --arg t "$TARGET" \
+            '.metadata.annotations["flint.csi.storage.io/replica-sync-state"]
+             | fromjson | .replicas[] | select(.node_name == $t)
+             | .sync_state + (if .hot_rejoin then "+marker" else "" end)' 2>/dev/null \
+          || echo transient-read-error)
+        if [ "$ST" != "$LAST" ]; then echo "  $(date -u +%T) $TARGET: $ST"; LAST=$ST; fi
+        if [ "$ST" = "in_sync" ]; then
+          echo "OK: replica on $TARGET is in_sync again"
+          echo "=== admission evidence ==="
+          kubectl get events --field-selector involvedObject.name=$PV --sort-by=.lastTimestamp \
+            | grep -E "ReplicaStale|ReplicaCatchupStarted|ReplicaFullBuildStarted|ReplicaStandby|HotRejoinSucceeded|HotRejoinLocalized|ReplicaAdmitted" || true
+          if kubectl get events --field-selector involvedObject.name=$PV \
+              | grep -qE "HotRejoinSucceeded|ReplicaAdmitted"; then
+            echo "OK: raid re-admission event present"
+            exit 0
+          fi
+          echo "ERROR: replica is in_sync but no HotRejoinSucceeded/ReplicaAdmitted event was found"
+          exit 1
+        fi
+        sleep 10
+      done
+      echo "ERROR: replica on $TARGET did not return to in_sync within the deadline"
+      kubectl get events --field-selector involvedObject.name=$PV --sort-by=.lastTimestamp | tail -20
+      exit 1

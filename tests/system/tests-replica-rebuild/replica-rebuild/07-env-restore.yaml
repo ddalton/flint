@@ -1,0 +1,38 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 240
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      NS=flint-system
+      DEPLOY=flint-csi-controller
+      CONTAINER=$(kubectl -n $NS get deploy $DEPLOY \
+        -o jsonpath='{.spec.template.spec.containers[*].name}' \
+        | tr ' ' '\n' | grep '^flint' | head -n1)
+      if [ -z "$CONTAINER" ]; then
+        echo "ERROR: no flint driver container found in deploy/$DEPLOY"
+        exit 1
+      fi
+
+      MODIFIED=$(kubectl -n $NAMESPACE get configmap rebuild-test-envprev -o jsonpath='{.data.modified}')
+      if [ "$MODIFIED" != "true" ]; then
+        echo "controller env was not modified by this test; nothing to restore"
+        exit 0
+      fi
+
+      echo "=== restoring controller env to its pre-test state ==="
+      ARGS=""
+      for KEY in FLINT_EPOCH_SCHEDULER FLINT_CATCHUP FLINT_HOT_REJOIN FLINT_EPOCH_INTERVAL_SECS; do
+        PREV=$(kubectl -n $NAMESPACE get configmap rebuild-test-envprev -o jsonpath="{.data.$KEY}")
+        if [ "$PREV" = "ABSENT" ]; then
+          ARGS="$ARGS ${KEY}-"
+        else
+          ARGS="$ARGS ${KEY}=${PREV}"
+        fi
+      done
+      echo "restore: $ARGS"
+      # shellcheck disable=SC2086
+      kubectl -n $NS set env deploy/$DEPLOY -c $CONTAINER $ARGS
+      kubectl -n $NS rollout status deploy/$DEPLOY --timeout=180s
+      echo "OK: controller env restored"

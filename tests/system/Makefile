@@ -44,12 +44,15 @@ install: ## Install kuttl (requires kubectl krew)
 	kubectl krew install kuttl
 	@echo "✅ Kuttl installed successfully"
 
-test: check-kubeconfig check-kuttl ## Run all tests (standard tests in parallel, clean-shutdown separately)
+test: check-kubeconfig check-kuttl ## Run all tests (standard tests in parallel, clean-shutdown + replica-rebuild separately)
 	@echo "Running standard CSI driver tests..."
 	kubectl kuttl test --config kuttl-testsuite.yaml
 	@echo ""
 	@echo "Running clean-shutdown test (must run in isolation)..."
 	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+	@echo ""
+	@echo "Running incremental-replica-rebuild test (must run in isolation)..."
+	kubectl kuttl test --config kuttl-testsuite-replica-rebuild.yaml
 
 test-verbose: check-kubeconfig check-kuttl ## Run all tests with verbose output
 	@echo "Running all CSI driver tests (verbose)..."
@@ -74,6 +77,9 @@ test-expand: check-kubeconfig check-kuttl ## Run volume expansion test
 
 test-clean-shutdown: check-kubeconfig check-kuttl ## Run clean shutdown test (runs in isolation)
 	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+
+test-replica-rebuild: check-kubeconfig check-kuttl ## Run incremental replica rebuild test (runs in isolation)
+	kubectl kuttl test --config kuttl-testsuite-replica-rebuild.yaml
 
 test-snapshot: check-kubeconfig check-kuttl ## Run snapshot restore test
 	kubectl kuttl test --config kuttl-testsuite.yaml --test snapshot-restore

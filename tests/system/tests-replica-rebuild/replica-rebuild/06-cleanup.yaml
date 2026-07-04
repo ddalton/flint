@@ -1,0 +1,15 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+# kuttl >= 0.15 deletes via the TestStep `delete` list; the legacy
+# `$patch: delete` manifest form is silently ignored by newer kuttl
+# (it re-applies the object and warns "unknown field").
+delete:
+  - apiVersion: v1
+    kind: Pod
+    name: rebuild-writer
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: rebuild-pvc
+  - apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    name: flint-rebuild-2r

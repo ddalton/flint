@@ -1,0 +1,40 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 120
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      echo "=== verifying workload was undisturbed and data is intact ==="
+
+      RESTARTS=$(kubectl -n $NAMESPACE get pod rebuild-writer \
+        -o jsonpath='{.status.containerStatuses[0].restartCount}')
+      if [ "$RESTARTS" != "0" ]; then
+        echo "ERROR: writer restarted $RESTARTS times — the surviving leg did not carry the raid"
+        exit 1
+      fi
+      echo "OK: writer container never restarted"
+
+      echo "--- bulk checksum ---"
+      kubectl -n $NAMESPACE exec rebuild-writer -- md5sum -c /data/checksum
+
+      echo "--- ledger contiguity (no acked-write loss) ---"
+      GAPS=$(kubectl -n $NAMESPACE exec rebuild-writer -- \
+        awk 'NR>1 && $1 != prev+1 {print "GAP", prev, "->", $1} {prev=$1}' /data/ledger)
+      if [ -n "$GAPS" ]; then
+        echo "ERROR: ledger has gaps:"
+        echo "$GAPS"
+        exit 1
+      fi
+      SEQ1=$(kubectl -n $NAMESPACE exec rebuild-writer -- tail -n 1 /data/ledger | cut -d' ' -f1)
+      echo "OK: ledger contiguous through seq $SEQ1"
+
+      echo "--- writer still making progress ---"
+      sleep 3
+      SEQ2=$(kubectl -n $NAMESPACE exec rebuild-writer -- tail -n 1 /data/ledger | cut -d' ' -f1)
+      if [ "$SEQ2" -le "$SEQ1" ]; then
+        echo "ERROR: writer stopped appending (seq stuck at $SEQ1)"
+        exit 1
+      fi
+      echo "OK: writer advancing ($SEQ1 -> $SEQ2)"
+      echo "PASS: incremental replica rebuild validated"

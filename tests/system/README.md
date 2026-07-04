@@ -62,13 +62,20 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 
 ## Running Tests
 
-There are two KUTTL suites plus a standalone clean-shutdown test:
+There are two KUTTL suites plus two standalone isolated tests:
 
 | Suite | Config | Tests | StorageClass | Backend |
 |-------|--------|-------|--------------|---------|
 | SPDK (standard) | `kuttl-testsuite.yaml` | 8 | `flint` (`nfsEmptyDir: false`) | SPDK blobstore |
 | NFS-only | `kuttl-testsuite-nfs-only.yaml` | 4 | `flint-nfs` (`nfsEmptyDir: true`) | emptyDir + NFS |
 | Clean shutdown | `kuttl-testsuite-clean-shutdown.yaml` | 1 | `flint` | SPDK blobstore |
+| Replica rebuild | `kuttl-testsuite-replica-rebuild.yaml` | 1 | created in-test (`numReplicas: 2`) | SPDK blobstore |
+
+The replica-rebuild test kills a replica leg's spdk-tgt under active writes
+and asserts the incremental heal pipeline (stale → catch-up → hot rejoin →
+in_sync) with zero acked-write loss — see
+`tests-replica-rebuild/replica-rebuild/README.md` for requirements and
+isolation rules.
 
 ### Pre-requisites
 

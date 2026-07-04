@@ -1,0 +1,59 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 240
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      PV=$(kubectl -n $NAMESPACE get pvc rebuild-pvc -o jsonpath='{.spec.volumeName}')
+      CONSUMER=$(kubectl -n $NAMESPACE get pod rebuild-writer -o jsonpath='{.spec.nodeName}')
+      echo "PV=$PV consumer=$CONSUMER"
+
+      sync_state() {
+        kubectl get pv $PV -o json \
+          | jq -r '.metadata.annotations["flint.csi.storage.io/replica-sync-state"]'
+      }
+
+      # Give the writer a moment to seed and the scheduler a first epoch cut.
+      sleep 5
+
+      # Pick a replica node that is NOT the consumer: killing the consumer
+      # node's spdk-tgt would sever the volume's own data path, which is a
+      # different (collapse) scenario — this test wants a degraded-but-serving
+      # raid with an incremental rebuild behind it.
+      TARGET=$(sync_state | jq -r --arg c "$CONSUMER" \
+        '.replicas[] | select(.node_name != $c) | .node_name' | head -n1)
+      if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then
+        echo "ERROR: no non-consumer replica found — the test needs >= 2 workers with flint storage"
+        sync_state | jq .
+        exit 1
+      fi
+      echo "target replica node: $TARGET"
+      kubectl -n $NAMESPACE create configmap rebuild-test-state \
+        --from-literal=target="$TARGET" --from-literal=pv="$PV"
+
+      NODEPOD=$(kubectl -n flint-system get pods -l app=flint-csi-node \
+        --field-selector spec.nodeName=$TARGET -o name | head -n1)
+      if [ -z "$NODEPOD" ]; then
+        echo "ERROR: no flint-csi-node pod on $TARGET"
+        exit 1
+      fi
+
+      echo "=== killing spdk-tgt on $TARGET ($NODEPOD) ==="
+      kubectl -n flint-system exec $NODEPOD -c spdk-tgt -- kill 1
+
+      echo "=== waiting for the replica on $TARGET to be marked stale ==="
+      DEADLINE=$(( $(date +%s) + 150 ))
+      while [ $(date +%s) -lt $DEADLINE ]; do
+        ST=$(sync_state | jq -r --arg t "$TARGET" \
+          '.replicas[] | select(.node_name == $t) | .sync_state' 2>/dev/null \
+          || echo transient-read-error)
+        echo "  $(date -u +%T) $TARGET: $ST"
+        if [ "$ST" = "stale" ] || [ "$ST" = "standby" ]; then
+          echo "OK: replica on $TARGET left in_sync (state=$ST)"
+          exit 0
+        fi
+        sleep 5
+      done
+      echo "ERROR: replica on $TARGET was never marked stale (detection is a ~60s monitor tick)"
+      exit 1

@@ -1,0 +1,68 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 240
+commands:
+  - script: |
+      #!/bin/bash
+      set -e
+      NS=flint-system
+      DEPLOY=flint-csi-controller
+      # The driver container name differs between chart versions/roles
+      # (flint-csi-controller in the controller deployment, flint-csi-driver
+      # in the node DS) — resolve it, never hardcode it.
+      CONTAINER=$(kubectl -n $NS get deploy $DEPLOY \
+        -o jsonpath='{.spec.template.spec.containers[*].name}' \
+        | tr ' ' '\n' | grep '^flint' | head -n1)
+      if [ -z "$CONTAINER" ]; then
+        echo "ERROR: no flint driver container found in deploy/$DEPLOY"
+        exit 1
+      fi
+      echo "driver container: $CONTAINER"
+
+      echo "=== Ensuring Tier-1/Tier-2 orchestrators are enabled for the test ==="
+      get_env() {
+        kubectl -n $NS get deploy $DEPLOY -o json \
+          | jq -r --arg c "$CONTAINER" --arg k "$1" \
+            '.spec.template.spec.containers[] | select(.name==$c) | .env // [] | .[] | select(.name==$k) | .value // empty'
+      }
+
+      PREV_SCHED=$(get_env FLINT_EPOCH_SCHEDULER);   PREV_SCHED=${PREV_SCHED:-ABSENT}
+      PREV_CATCH=$(get_env FLINT_CATCHUP);           PREV_CATCH=${PREV_CATCH:-ABSENT}
+      PREV_HR=$(get_env FLINT_HOT_REJOIN);           PREV_HR=${PREV_HR:-ABSENT}
+      PREV_IVAL=$(get_env FLINT_EPOCH_INTERVAL_SECS); PREV_IVAL=${PREV_IVAL:-ABSENT}
+
+      CHANGES=""
+      [ "$PREV_SCHED" != "enabled" ] && CHANGES="$CHANGES FLINT_EPOCH_SCHEDULER=enabled"
+      [ "$PREV_CATCH" != "enabled" ] && CHANGES="$CHANGES FLINT_CATCHUP=enabled"
+      [ "$PREV_HR" != "enabled" ]    && CHANGES="$CHANGES FLINT_HOT_REJOIN=enabled"
+      # A long epoch interval makes convergence (lag <= max_lag) exceed the
+      # suite timeout; pin to 30s unless already <= 60.
+      if [ "$PREV_IVAL" = "ABSENT" ] || [ "$PREV_IVAL" -gt 60 ] 2>/dev/null; then
+        CHANGES="$CHANGES FLINT_EPOCH_INTERVAL_SECS=30"
+      fi
+
+      # Record what was there before, so 07-env-restore puts it back exactly.
+      kubectl -n $NAMESPACE create configmap rebuild-test-envprev \
+        --from-literal=FLINT_EPOCH_SCHEDULER="$PREV_SCHED" \
+        --from-literal=FLINT_CATCHUP="$PREV_CATCH" \
+        --from-literal=FLINT_HOT_REJOIN="$PREV_HR" \
+        --from-literal=FLINT_EPOCH_INTERVAL_SECS="$PREV_IVAL" \
+        --from-literal=modified="$([ -n "$CHANGES" ] && echo true || echo false)"
+
+      if [ -n "$CHANGES" ]; then
+        echo "Applying controller env: $CHANGES"
+        # shellcheck disable=SC2086
+        kubectl -n $NS set env deploy/$DEPLOY -c $CONTAINER $CHANGES
+        kubectl -n $NS rollout status deploy/$DEPLOY --timeout=180s
+        # Verify the change actually landed (kubectl set env silently no-ops
+        # on a container-name mismatch — never trust it blind).
+        for CHECK in FLINT_EPOCH_SCHEDULER FLINT_CATCHUP FLINT_HOT_REJOIN; do
+          if [ "$(get_env $CHECK)" != "enabled" ]; then
+            echo "ERROR: $CHECK did not land on container $CONTAINER"
+            exit 1
+          fi
+        done
+      else
+        echo "Orchestrator env already suitable; leaving the controller untouched"
+      fi
+      echo "OK: env ready"
