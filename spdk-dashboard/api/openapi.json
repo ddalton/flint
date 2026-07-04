@@ -303,6 +303,92 @@
         }
       }
     },
+    "/api/nodes/{node}/disks/delete": {
+      "post": {
+        "tags": [
+          "node-disks"
+        ],
+        "operationId": "node_disks_delete",
+        "parameters": [
+          {
+            "name": "node",
+            "in": "path",
+            "description": "Kubernetes node name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteDiskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "LVS deleted (or no-op on an uninitialized disk)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiskDeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Viewer token on a destructive route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused: logical volumes still exist on the LVS",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiskDeleteResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Agent unreachable or SPDK error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiskDeleteResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/nodes/{node}/disks/initialize": {
       "post": {
         "tags": [
@@ -1469,6 +1555,45 @@
               "object",
               "null"
             ]
+          }
+        }
+      },
+      "DeleteDiskRequest": {
+        "type": "object",
+        "required": [
+          "pci_address"
+        ],
+        "properties": {
+          "pci_address": {
+            "type": "string"
+          }
+        }
+      },
+      "DiskDeleteResponse": {
+        "type": "object",
+        "description": "Outcome of deleting a disk's LVS (the inverse of setup/initialize).\nA refusal while lvols still exist comes back as 409 with the reason in\n`error`; deleting an uninitialized disk is a successful no-op.",
+        "required": [
+          "success",
+          "completed_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
           }
         }
       },

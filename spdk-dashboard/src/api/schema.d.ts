@@ -68,6 +68,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/nodes/{node}/disks/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["node_disks_delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/nodes/{node}/disks/initialize": {
         parameters: {
             query?: never;
@@ -390,6 +406,20 @@ export interface components {
             target_port: number;
             transport_type: string;
             ublk_device?: Record<string, never> | null;
+        };
+        DeleteDiskRequest: {
+            pci_address: string;
+        };
+        /**
+         * @description Outcome of deleting a disk's LVS (the inverse of setup/initialize).
+         *     A refusal while lvols still exist comes back as 409 with the reason in
+         *     `error`; deleting an uninitialized disk is a successful no-op.
+         */
+        DiskDeleteResponse: {
+            completed_at: string;
+            error?: string | null;
+            message?: string | null;
+            success: boolean;
         };
         DiskSetupRequest: {
             backup_data?: boolean | null;
@@ -817,6 +847,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    node_disks_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kubernetes node name */
+                node: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteDiskRequest"];
+            };
+        };
+        responses: {
+            /** @description LVS deleted (or no-op on an uninitialized disk) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskDeleteResponse"];
+                };
+            };
+            /** @description Missing/expired token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Viewer token on a destructive route */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Refused: logical volumes still exist on the LVS */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskDeleteResponse"];
+                };
+            };
+            /** @description Agent unreachable or SPDK error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskDeleteResponse"];
                 };
             };
         };

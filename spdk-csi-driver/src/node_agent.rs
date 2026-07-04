@@ -334,6 +334,15 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_reset_disks);
 
+        // POST /api/disks/delete - Delete the LVS from a disk (inverse of
+        // initialize; refuses while lvols exist). The dashboard's
+        // "Delete SPDK Disk" action proxies here.
+        let delete_disk = warp::path!("api" / "disks" / "delete")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_delete_disk);
+
         // POST /api/memory_disks/create - Create a memory (malloc) disk
         let create_memory_disk = warp::path!("api" / "memory_disks" / "create")
             .and(warp::post())
@@ -463,6 +472,7 @@ impl NodeAgent {
             .or(setup_disks)
             .or(initialize_disks)
             .or(reset_disks)
+            .or(delete_disk)
             .or(create_memory_disk)
             .or(delete_memory_disk)
             .or(create_lvol)
@@ -818,6 +828,48 @@ impl NodeAgent {
         };
 
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::NOT_IMPLEMENTED))
+    }
+
+    /// Handle POST /api/disks/delete - remove the LVS from a disk, returning
+    /// it to the uninitialized pool. Refusals (lvols still present) come back
+    /// as 409 with success:false so the UI shows the real reason.
+    async fn handle_delete_disk(
+        request: DeleteDiskRequest,
+        node_agent: Arc<NodeAgent>
+    ) -> Result<impl Reply, Rejection> {
+        debug!(pci_address = %request.pci_address, "[HTTP_API] Handling delete disk request");
+
+        match node_agent.disk_service.delete_blobstore(&request.pci_address).await {
+            Ok(lvs_name) => {
+                let message = if lvs_name.is_empty() {
+                    "No LVS present on the disk (nothing to delete)".to_string()
+                } else {
+                    format!("Deleted LVS {}", lvs_name)
+                };
+                let response = DiskDeleteResponse {
+                    success: true,
+                    message: Some(message),
+                    error: None,
+                    completed_at: chrono::Utc::now().to_rfc3339(),
+                };
+                Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let status = if msg.contains("Refusing to delete") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                let response = DiskDeleteResponse {
+                    success: false,
+                    message: None,
+                    error: Some(msg),
+                    completed_at: chrono::Utc::now().to_rfc3339(),
+                };
+                Ok(warp::reply::with_status(warp::reply::json(&response), status))
+            }
+        }
     }
 
     /// Handle POST /api/memory_disks/create - Create a memory (malloc) disk
@@ -3053,6 +3105,24 @@ impl Clone for NodeAgent {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InitializeBlobstoreRequest {
     pub pci_address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeleteDiskRequest {
+    pub pci_address: String,
+}
+
+/// Outcome of deleting a disk's LVS (the inverse of setup/initialize).
+/// A refusal while lvols still exist comes back as 409 with the reason in
+/// `error`; deleting an uninitialized disk is a successful no-op.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct DiskDeleteResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub completed_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

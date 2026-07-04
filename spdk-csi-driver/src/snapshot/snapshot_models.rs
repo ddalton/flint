@@ -105,12 +105,22 @@ pub struct GetSnapshotInfoRequest {
 }
 
 impl SnapshotInfo {
-    /// Extract volume ID from snapshot name
-    /// Format: snap_{volume_id}_{timestamp} -> volume_id
+    /// Extract volume ID from snapshot name.
+    /// CSI snapshots: snap_{volume_id}_{timestamp} -> volume_id
+    /// Tier-1/2 epoch snapshots: epoch-{volume_id}-{seq} -> volume_id
+    /// (volume ids carry '-' themselves, so the epoch form is parsed from
+    /// the right: the trailing segment must be the numeric epoch sequence).
     pub fn volume_id_from_snapshot_name(snapshot_name: &str) -> String {
         if let Some(rest) = snapshot_name.strip_prefix("snap_") {
             if let Some(volume_id) = rest.split('_').next() {
                 return volume_id.to_string();
+            }
+        }
+        if let Some(rest) = snapshot_name.strip_prefix("epoch-") {
+            if let Some((volume_id, seq)) = rest.rsplit_once('-') {
+                if !volume_id.is_empty() && !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()) {
+                    return volume_id.to_string();
+                }
             }
         }
         "unknown".to_string()
@@ -131,6 +141,30 @@ mod tests {
         let snapshot_name = "snap_pvc-abc123_1234567890";
         let volume_id = SnapshotInfo::volume_id_from_snapshot_name(snapshot_name);
         assert_eq!(volume_id, "pvc-abc123");
+    }
+
+    #[test]
+    fn epoch_snapshot_names_resolve_to_their_volume() {
+        // The Tier-1/2 engine's epoch snapshots carry the PV name inline;
+        // pre-fix these all grouped under "unknown" in the dashboard tree.
+        assert_eq!(
+            SnapshotInfo::volume_id_from_snapshot_name(
+                "epoch-pvc-6ff1cf70-8f3e-4c2a-9d1b-2f65c14a8e01-1261"
+            ),
+            "pvc-6ff1cf70-8f3e-4c2a-9d1b-2f65c14a8e01"
+        );
+        // dashes inside the volume id survive; only the trailing numeric
+        // sequence is stripped
+        assert_eq!(SnapshotInfo::volume_id_from_snapshot_name("epoch-r3-e2e-7"), "r3-e2e");
+    }
+
+    #[test]
+    fn non_matching_names_stay_unknown() {
+        assert_eq!(SnapshotInfo::volume_id_from_snapshot_name("epoch-"), "unknown");
+        assert_eq!(SnapshotInfo::volume_id_from_snapshot_name("epoch-noseq"), "unknown");
+        // trailing segment must be numeric — a pv name alone is not enough
+        assert_eq!(SnapshotInfo::volume_id_from_snapshot_name("epoch-pvc-abc-x1"), "unknown");
+        assert_eq!(SnapshotInfo::volume_id_from_snapshot_name("temp_pvc_clone_x"), "unknown");
     }
 
     // Note: is_valid_snapshot_name() function doesn't exist

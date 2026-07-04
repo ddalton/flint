@@ -2158,7 +2158,16 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
     let mut volumes: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     
     for snapshot in &all_snapshots {
-        let volume_id = snapshot["source_volume_id"].as_str().unwrap_or("unknown").to_string();
+        // Older agents report source_volume_id="unknown" for epoch snapshots
+        // (their lister predates the epoch-<pv>-<seq> convention); re-derive
+        // from the snapshot name with the shared parser so chains group under
+        // their real volume instead of one "unknown" bucket.
+        let mut volume_id = snapshot["source_volume_id"].as_str().unwrap_or("unknown").to_string();
+        if volume_id == "unknown" {
+            volume_id = crate::snapshot::snapshot_models::SnapshotInfo::volume_id_from_snapshot_name(
+                snapshot["snapshot_name"].as_str().unwrap_or(""),
+            );
+        }
         volumes.entry(volume_id).or_insert_with(Vec::new).push(snapshot.clone());
     }
     
@@ -2296,7 +2305,9 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         });
         
         tree_map.insert(volume_id.clone(), json!({
-            "volume_name": format!("volume-{}", volume_id),
+            // The id IS the PV name (pvc-…); prefixing "volume-" just made
+            // labels read worse ("volume-unknown").
+            "volume_name": volume_id.clone(),
             "volume_id": volume_id,
             "volume_size": volume_size,
             "snapshot_chain": snapshot_chain,
@@ -2720,8 +2731,9 @@ mod api_doc {
     use super::*;
     use crate::dashboard_auth::{LoginRequest, LoginResponse};
     use crate::node_agent::{
-        DiskSetupRequest, DiskSetupResponse, NodeAgentError, NodeDiskListing, NodeDiskStatus,
-        NodeDisksStatusResponse, UninitializedDisksResponse,
+        DeleteDiskRequest, DiskDeleteResponse, DiskSetupRequest, DiskSetupResponse,
+        NodeAgentError, NodeDiskListing, NodeDiskStatus, NodeDisksStatusResponse,
+        UninitializedDisksResponse,
     };
 
     // The real handlers are warp filter chains the #[utoipa::path] macro
@@ -2846,6 +2858,18 @@ mod api_doc {
             (status = 403, description = "Viewer token on a destructive route", body = ApiError)))]
     fn node_disks_reset() {}
 
+    #[utoipa::path(post, path = "/api/nodes/{node}/disks/delete", tag = "node-disks",
+        params(("node" = String, Path, description = "Kubernetes node name")),
+        request_body = DeleteDiskRequest,
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "LVS deleted (or no-op on an uninitialized disk)", body = DiskDeleteResponse),
+            (status = 409, description = "Refused: logical volumes still exist on the LVS", body = DiskDeleteResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 403, description = "Viewer token on a destructive route", body = ApiError),
+            (status = 500, description = "Agent unreachable or SPDK error", body = DiskDeleteResponse)))]
+    fn node_disks_delete() {}
+
     struct SecurityAddon;
 
     impl utoipa::Modify for SecurityAddon {
@@ -2870,7 +2894,7 @@ mod api_doc {
         paths(
             healthz, login, dashboard, overview, volumes, disks, events, refresh,
             snapshots, node_disk_status, node_disks_uninitialized, node_disks_setup,
-            node_disks_initialize, node_disks_reset,
+            node_disks_initialize, node_disks_reset, node_disks_delete,
         ),
         components(schemas(
             LoginRequest, LoginResponse, crate::dashboard_auth::Role,
@@ -2880,7 +2904,8 @@ mod api_doc {
             OrphanedVolumeInfo, ConsumerRaid, ConsumerRaidMember, NodeInfo,
             DashboardOverview, VolumesResponse, DisksResponse, EventsResponse,
             RefreshResponse, ApiError, DashboardEvent, WindowStep, HotRejoinWindow,
-            DiskSetupRequest, DiskSetupResponse, NodeDiskStatus, NodeDiskListing,
+            DiskSetupRequest, DiskSetupResponse, DeleteDiskRequest, DiskDeleteResponse,
+            NodeDiskStatus, NodeDiskListing,
             NodeDisksStatusResponse, UninitializedDisksResponse, NodeAgentError,
         )),
     )]

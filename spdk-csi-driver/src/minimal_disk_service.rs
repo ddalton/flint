@@ -202,6 +202,62 @@ impl MinimalDiskService {
         Ok(lvs_name)
     }
 
+    /// Delete the LVS from a disk by PCI address, returning the disk to the
+    /// uninitialized pool (the inverse of initialize_blobstore; the
+    /// dashboard's "Delete SPDK Disk" action). This is a provisioning
+    /// operation, NOT a data-destruction shortcut: it REFUSES while any
+    /// lvol still lives on the store — replicas are never deleted through
+    /// this path. Idempotent on an uninitialized disk.
+    pub async fn delete_blobstore(&self, pci_address: &str) -> Result<String, MinimalStateError> {
+        debug!(pci_address, "[MINIMAL_DISK] Deleting blobstore on disk");
+
+        let disk_found = self.discover_local_disks_fast().await?
+            .into_iter()
+            .find(|d| d.pci_address == pci_address)
+            .ok_or_else(|| MinimalStateError::DiskNotFound {
+                node: self.node_name.clone(),
+                pci: pci_address.to_string(),
+            })?;
+
+        if !disk_found.blobstore_initialized {
+            info!(pci_address, "[MINIMAL_DISK] No LVS on disk — delete is a no-op");
+            return Ok(String::new());
+        }
+
+        if disk_found.lvol_count > 0 {
+            return Err(MinimalStateError::SpdkRpcError {
+                message: format!(
+                    "Refusing to delete LVS {}: {} logical volume(s) still exist on it",
+                    disk_found.lvs_name.as_deref().unwrap_or("<unnamed>"),
+                    disk_found.lvol_count
+                ),
+            });
+        }
+
+        let lvs_name = disk_found.lvs_name.clone().ok_or_else(|| MinimalStateError::SpdkRpcError {
+            message: format!("Disk {} reports an initialized blobstore but no LVS name", pci_address),
+        })?;
+
+        let delete_lvs_params = json!({
+            "method": "bdev_lvol_delete_lvstore",
+            "params": { "lvs_name": lvs_name }
+        });
+
+        let response = self.call_spdk_rpc(&delete_lvs_params).await
+            .map_err(|e| MinimalStateError::SpdkRpcError {
+                message: format!("Failed to delete LVS: {}", e),
+            })?;
+
+        if let Some(error) = response.get("error") {
+            return Err(MinimalStateError::SpdkRpcError {
+                message: format!("SPDK LVS deletion failed: {}", error),
+            });
+        }
+
+        info!(lvs_name = %lvs_name, pci_address, "[MINIMAL_DISK] Successfully deleted LVS");
+        Ok(lvs_name)
+    }
+
     /// Create logical volume on a disk
     pub async fn create_lvol(&self, lvs_name: &str, volume_id: &str, size_bytes: u64, thin_provision: bool) -> Result<String, MinimalStateError> {
         debug!(volume_id, lvs_name, size_bytes, thin_provision, "[MINIMAL_DISK] Creating lvol");
